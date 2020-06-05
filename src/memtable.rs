@@ -4,9 +4,10 @@ use std::u64;
 
 use raft::eraftpb::Entry;
 
-use tikv_util::collections::HashMap;
-
-use super::{Error, Result};
+use crate::{
+    util::{slices_in_range, HashMap},
+    Result,
+};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 
@@ -291,7 +292,7 @@ impl MemTable {
         if cache_offset < end_pos {
             if start_pos >= cache_offset {
                 // All needed entries are in cache.
-                let (first, second) = tikv_util::slices_in_range(
+                let (first, second) = slices_in_range(
                     &self.entries_cache,
                     start_pos - cache_offset,
                     end_pos - cache_offset,
@@ -302,22 +303,20 @@ impl MemTable {
             } else {
                 // Partial needed entries are in cache.
                 let (first, second) =
-                    tikv_util::slices_in_range(&self.entries_cache, 0, end_pos - cache_offset);
+                    slices_in_range(&self.entries_cache, 0, end_pos - cache_offset);
                 let fetch_count = (first.len() + second.len()) as u64;
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
 
                 // Entries that not in cache should return their indices.
-                let (first, second) =
-                    tikv_util::slices_in_range(&self.entries_index, start_pos, cache_offset);
+                let (first, second) = slices_in_range(&self.entries_index, start_pos, cache_offset);
                 vec_idx.extend_from_slice(first);
                 vec_idx.extend_from_slice(second);
                 Ok(fetch_count)
             }
         } else {
             // All needed entries are not in cache
-            let (first, second) =
-                tikv_util::slices_in_range(&self.entries_index, start_pos, end_pos);
+            let (first, second) = slices_in_range(&self.entries_index, start_pos, end_pos);
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
             Ok(0)
@@ -330,8 +329,7 @@ impl MemTable {
         }
 
         // Fetch all entries in cache
-        let (first, second) =
-            tikv_util::slices_in_range(&self.entries_cache, 0, self.entries_cache.len());
+        let (first, second) = slices_in_range(&self.entries_cache, 0, self.entries_cache.len());
         vec.extend_from_slice(first);
         vec.extend_from_slice(second);
 
@@ -339,7 +337,7 @@ impl MemTable {
         let first_index = self.entries_index.front().unwrap().index;
         let cache_first_index = self.entries_cache.front().unwrap().get_index();
         if first_index < cache_first_index {
-            let (first, second) = tikv_util::slices_in_range(
+            let (first, second) = slices_in_range(
                 &self.entries_index,
                 0,
                 (cache_first_index - first_index) as usize,
@@ -454,7 +452,7 @@ impl MemTable {
 
     fn count_limit(&self, start_idx: usize, end_idx: usize, max_size: usize) -> usize {
         assert!(start_idx < end_idx);
-        let (first, second) = tikv_util::slices_in_range(&self.entries_index, start_idx, end_idx);
+        let (first, second) = slices_in_range(&self.entries_index, start_idx, end_idx);
 
         let mut count = 0;
         let mut total_size = 0;

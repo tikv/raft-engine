@@ -7,24 +7,24 @@ extern crate serde_derive;
 #[macro_use]
 extern crate quick_error;
 #[macro_use]
-extern crate tikv_util;
-#[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate prometheus;
 
-use protobuf;
-use std::error;
 use std::io::Error as IoError;
-use std::num;
-use tikv_util::codec;
+use std::{error, num};
 
-pub mod config;
-pub mod engine;
-pub mod log_batch;
-pub mod memtable;
-pub mod metrics;
-pub mod pipe_log;
+#[macro_export]
+macro_rules! box_err {
+    ($e:expr) => ({
+        use std::error::Error;
+        let e: Box<dyn Error + Sync + Send> = format!("[{}:{}]: {}", file!(), line!(),  $e).into();
+        e.into()
+    });
+    ($f:tt, $($arg:expr),+) => ({
+        box_err!(format!($f, $($arg),+))
+    });
+}
 
 quick_error! {
     #[derive(Debug)]
@@ -65,6 +65,15 @@ quick_error! {
         }
     }
 }
+
+pub mod codec;
+pub mod config;
+pub mod engine;
+pub mod log_batch;
+pub mod memtable;
+pub mod metrics;
+pub mod pipe_log;
+pub mod util;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 

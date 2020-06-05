@@ -10,8 +10,7 @@ use protobuf;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
-use tikv_util::collections::{HashMap, HashSet};
-use tikv_util::time::{duration_to_sec, SlowTimer};
+use crate::util::{duration_to_sec, HashMap, HashSet};
 
 use super::config::Config;
 use super::log_batch::{Command, LogBatch, LogItemType, OpType};
@@ -408,9 +407,8 @@ impl RaftEngine {
     }
 
     pub fn write(&self, log_batch: LogBatch, sync: bool) -> Result<()> {
-        let t = SlowTimer::new();
-        let write_res = self.pipe_log.append_log_batch(&log_batch, sync);
-        match write_res {
+        let t = Instant::now();
+        match self.pipe_log.append_log_batch(&log_batch, sync) {
             Ok(file_num) => {
                 self.post_append_to_file(log_batch, file_num);
                 let dur = t.elapsed();

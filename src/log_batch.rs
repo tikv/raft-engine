@@ -14,7 +14,7 @@ use protobuf;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
-use tikv_util::codec::number::{self, NumberEncoder};
+use crate::codec::{self, NumberEncoder};
 
 use super::memtable::EntryIndex;
 use super::{Error, Result};
@@ -119,8 +119,8 @@ impl Entries {
         file_num: u64,
         fstart: *const u8,
     ) -> Result<Entries> {
-        let region_id = number::decode_var_u64(buf)?;
-        let mut count = number::decode_var_u64(buf)? as usize;
+        let region_id = codec::decode_var_u64(buf)?;
+        let mut count = codec::decode_var_u64(buf)? as usize;
         let mut entries = Vec::with_capacity(count);
         let mut entries_index = Vec::with_capacity(count);
         loop {
@@ -128,7 +128,7 @@ impl Entries {
                 break;
             }
 
-            let len = number::decode_var_u64(buf)? as usize;
+            let len = codec::decode_var_u64(buf)? as usize;
             let mut e = Entry::new();
             e.merge_from_bytes(&buf[..len])?;
             let mut entry_index = EntryIndex::default();
@@ -196,9 +196,9 @@ impl Command {
     }
 
     pub fn from_bytes(buf: &mut SliceReader<'_>) -> Result<Command> {
-        let command_type = number::read_u8(buf)?;
+        let command_type = codec::read_u8(buf)?;
         if command_type == CMD_CLEAN {
-            let region_id = number::decode_var_u64(buf)?;
+            let region_id = codec::decode_var_u64(buf)?;
             Ok(Command::Clean { region_id })
         } else {
             panic!("Unsupported command type: {:?}", command_type)
@@ -243,13 +243,13 @@ impl KeyValue {
 
     pub fn from_bytes(buf: &mut SliceReader<'_>) -> Result<KeyValue> {
         let op_type = OpType::from_bytes(buf)?;
-        let region_id = number::decode_var_u64(buf)?;
-        let k_len = number::decode_var_u64(buf)? as usize;
+        let region_id = codec::decode_var_u64(buf)?;
+        let k_len = codec::decode_var_u64(buf)? as usize;
         let key = &buf[..k_len];
         buf.consume(k_len);
         match op_type {
             OpType::Put => {
-                let v_len = number::decode_var_u64(buf)? as usize;
+                let v_len = codec::decode_var_u64(buf)? as usize;
                 let value = &buf[..v_len];
                 buf.consume(v_len);
                 Ok(KeyValue::new(OpType::Put, region_id, key, Some(value)))
@@ -434,7 +434,7 @@ impl LogBatch {
         }
 
         // Header 8 bytes = 7 bytes len + 1 byte type
-        let header = number::decode_u64(buf)? as usize;
+        let header = codec::decode_u64(buf)? as usize;
         let batch_len = header >> 8;
         let batch_type = BatchCompressionType::from_byte(header as u8);
         if batch_len < BATCH_MIN_SIZE || buf.len() < batch_len {
@@ -444,7 +444,7 @@ impl LogBatch {
         // verify checksum
         let offset = batch_len - 4;
         let mut s = &buf[offset..offset + 4];
-        let old_checksum = number::decode_u32_le(&mut s)?;
+        let old_checksum = codec::decode_u32_le(&mut s)?;
         let new_checksum = crc32c(&buf[..offset]);
         if old_checksum != new_checksum {
             return Err(Error::CheckSumError);
@@ -452,7 +452,7 @@ impl LogBatch {
 
         match batch_type {
             BatchCompressionType::None => {
-                let mut items_count = number::decode_var_u64(buf)? as usize;
+                let mut items_count = codec::decode_var_u64(buf)? as usize;
                 if items_count == 0 || buf.is_empty() {
                     panic!("Empty log event is not supported");
                 }
@@ -480,7 +480,7 @@ impl LogBatch {
 
                 let reader = &mut decompressed.as_slice();
 
-                let mut items_count = number::decode_var_u64(reader)? as usize;
+                let mut items_count = codec::decode_var_u64(reader)? as usize;
                 if items_count == 0 || reader.is_empty() {
                     panic!("Empty log event is not supported");
                 }

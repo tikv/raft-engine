@@ -11,8 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::Result;
-use tikv_util::config::ReadableSize;
+use crate::{util::ReadableSize, Result};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -95,7 +94,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tikv_util::config::ReadableSize;
 
     #[test]
     fn test_config_validate() {
