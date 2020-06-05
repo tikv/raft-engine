@@ -18,14 +18,12 @@ errno = "0.2.4"
 libc = "0.2"
 tempfile = "3.0"
 lazy_static = "1.3"
+fxhash = "0.2"
 
 [dependencies.prometheus]
 version = "0.4.2"
 default-features = false
 features = ["nightly", "push", "process"]
-
-[dependencies.tikv_util]
-git = "https://github.com/tikv/tikv"
 
 [dependencies.prometheus-static-metric]
 version = "0.1.4"
