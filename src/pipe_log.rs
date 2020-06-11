@@ -172,7 +172,6 @@ impl PipeLog {
                 manager.active_log_fd = fd;
                 manager.active_log_size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) as usize };
                 manager.active_log_capacity = manager.active_log_size;
-                manager.last_sync_size = manager.active_log_size;
             }
             current_file += 1;
         }
@@ -503,11 +502,6 @@ impl PipeLog {
         manager.active_log_capacity
     }
 
-    pub fn last_sync_size(&self) -> usize {
-        let manager = self.log_manager.read().unwrap();
-        manager.last_sync_size
-    }
-
     pub fn active_file_num(&self) -> u64 {
         let manager = self.log_manager.read().unwrap();
         manager.active_file_num
@@ -693,10 +687,6 @@ mod tests {
         );
         assert_eq!(
             pipe_log.active_log_capacity(),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
-        );
-        assert_eq!(
-            pipe_log.last_sync_size(),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
     }
