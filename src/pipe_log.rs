@@ -492,12 +492,14 @@ impl PipeLog {
         }
     }
 
-    pub fn active_log_size(&self) -> usize {
+    #[cfg(test)]
+    fn active_log_size(&self) -> usize {
         let manager = self.log_manager.read().unwrap();
         manager.active_log_size
     }
 
-    pub fn active_log_capacity(&self) -> usize {
+    #[cfg(test)]
+    fn active_log_capacity(&self) -> usize {
         let manager = self.log_manager.read().unwrap();
         manager.active_log_capacity
     }
