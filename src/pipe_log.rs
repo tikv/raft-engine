@@ -170,6 +170,9 @@ impl PipeLog {
             manager.all_files.push_back(fd);
             if current_file == manager.active_file_num {
                 manager.active_log_fd = fd;
+                manager.active_log_size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) as usize };
+                manager.active_log_capacity = manager.active_log_size;
+                manager.last_sync_size = manager.active_log_size;
             }
             current_file += 1;
         }
@@ -453,6 +456,9 @@ impl PipeLog {
     pub fn truncate_active_log(&self, offset: usize) -> Result<()> {
         {
             let manager = self.log_manager.read().unwrap();
+            if manager.active_log_size <= offset {
+                return Ok(());
+            }
             let truncate_res =
                 unsafe { libc::ftruncate(manager.active_log_fd, offset as libc::off_t) };
             if truncate_res != 0 {
@@ -484,6 +490,16 @@ impl PipeLog {
     pub fn active_log_size(&self) -> usize {
         let manager = self.log_manager.read().unwrap();
         manager.active_log_size
+    }
+
+    pub fn active_log_capacity(&self) -> usize {
+        let manager = self.log_manager.read().unwrap();
+        manager.active_log_capacity
+    }
+
+    pub fn last_sync_size(&self) -> usize {
+        let manager = self.log_manager.read().unwrap();
+        manager.last_sync_size
     }
 
     pub fn active_file_num(&self) -> u64 {
@@ -573,11 +589,11 @@ mod tests {
 
     #[test]
     fn test_file_name() {
-        let file_name: &str = "0000000123.log";
+        let file_name: &str = "0000000000000123.raftlog";
         assert_eq!(extract_file_num(file_name).unwrap(), 123);
         assert_eq!(generate_file_name(123), file_name);
 
-        let invalid_file_name: &str = "0000abc123.log";
+        let invalid_file_name: &str = "000000000000abc123.log";
         assert!(extract_file_num(invalid_file_name).is_err());
     }
 
@@ -649,7 +665,7 @@ mod tests {
         );
         assert!(pipe_log
             .truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len())
-            .is_err());
+            .is_ok());
 
         // read next file
         let mut header: Vec<u8> = vec![];
@@ -666,6 +682,14 @@ mod tests {
         assert_eq!(pipe_log.active_file_num(), 3);
         assert_eq!(
             pipe_log.active_log_size(),
+            FILE_MAGIC_HEADER.len() + VERSION.len()
+        );
+        assert_eq!(
+            pipe_log.active_log_capacity(),
+            FILE_MAGIC_HEADER.len() + VERSION.len()
+        );
+        assert_eq!(
+            pipe_log.last_sync_size(),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
     }
