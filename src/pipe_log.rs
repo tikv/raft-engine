@@ -456,7 +456,13 @@ impl PipeLog {
     pub fn truncate_active_log(&self, offset: usize) -> Result<()> {
         {
             let manager = self.log_manager.read().unwrap();
-            if manager.active_log_size <= offset {
+            assert!(
+                manager.active_log_size >= offset,
+                "attempt to truncate_active_log({}), but active_log_size is {}",
+                offset,
+                manager.active_log_size
+            );
+            if manager.active_log_size == offset {
                 return Ok(());
             }
             let truncate_res =
@@ -663,9 +669,10 @@ mod tests {
             pipe_log.active_log_size(),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
-        assert!(pipe_log
-            .truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len())
-            .is_ok());
+        let trunc_big_offset = std::panic::catch_unwind(|| {
+            pipe_log.truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len())
+        });
+        assert!(trunc_big_offset.is_err());
 
         // read next file
         let mut header: Vec<u8> = vec![];
