@@ -6,7 +6,6 @@ use std::sync::RwLock;
 use std::time::Instant;
 use std::u64;
 
-use protobuf;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
@@ -17,7 +16,7 @@ use super::log_batch::{Command, LogBatch, LogItemType, OpType};
 use super::memtable::MemTable;
 use super::metrics::*;
 use super::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
-use super::Result;
+use super::{RaftEngine, RaftState, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -38,7 +37,7 @@ impl From<i32> for RecoveryMode {
     }
 }
 
-pub struct RaftEngine {
+pub struct FileEngine {
     cfg: Config,
 
     // Multiple slots
@@ -49,14 +48,21 @@ pub struct RaftEngine {
     pipe_log: PipeLog,
 }
 
-impl fmt::Debug for RaftEngine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RaftEngine dir: {}", self.cfg.dir)
+impl Clone for FileEngine {
+    fn clone(&self) -> FileEngine {
+        // FIXME: implement real clone.
+        FileEngine::new(self.cfg.clone())
     }
 }
 
-impl RaftEngine {
-    pub fn new(cfg: Config) -> RaftEngine {
+impl fmt::Debug for FileEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FileEngine dir: {}", self.cfg.dir)
+    }
+}
+
+impl FileEngine {
+    pub fn new(cfg: Config) -> FileEngine {
         let pipe_log = PipeLog::open(
             &cfg.dir,
             cfg.bytes_per_sync.0 as usize,
@@ -67,7 +73,7 @@ impl RaftEngine {
         for _ in 0..SLOTS_COUNT {
             memtables.push(RwLock::new(HashMap::default()));
         }
-        let mut engine = RaftEngine {
+        let mut engine = FileEngine {
             cfg,
             memtables,
             pipe_log,
@@ -564,7 +570,7 @@ impl RaftEngine {
         end: u64,
         max_size: Option<usize>,
         vec: &mut Vec<Entry>,
-    ) -> Result<u64> {
+    ) -> Result<usize> {
         let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
             .read()
             .unwrap();
@@ -573,7 +579,7 @@ impl RaftEngine {
             let mut entries_idx = Vec::with_capacity((end - begin) as usize);
             match memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx) {
                 Ok(num) => {
-                    let count = num + entries_idx.len() as u64;
+                    let count = num + entries_idx.len();
                     // Read remain entries from file if there are.
                     if !entries_idx.is_empty() {
                         READ_ENTRY_FROM_PIPE_FILE.inc_by(entries_idx.len() as f64);
@@ -588,11 +594,11 @@ impl RaftEngine {
                         vec.push(e);
                     }
                     vec.extend(entries.into_iter());
-                    return Ok(count);
+                    Ok(count)
                 }
                 Err(e) => {
                     error!("Fetch entries from memtable failed, err {:?}", e);
-                    return Err(e);
+                    Err(e)
                 }
             }
         } else {
@@ -681,5 +687,72 @@ impl RaftEngine {
                 }
             }
         }
+    }
+}
+
+impl RaftEngine for FileEngine {
+    type RecoveryMode = RecoveryMode;
+    type WriteBatch = LogBatch;
+
+    fn write_batch(&self, _capacity: usize) -> Self::WriteBatch {
+        LogBatch::default()
+    }
+
+    fn recover(&mut self, recovery_mode: Self::RecoveryMode) -> Result<()> {
+        self.recover(recovery_mode)
+    }
+
+    fn sync(&self) -> Result<()> {
+        self.sync()
+    }
+
+    fn compact_to(&self, raft_group_id: u64, index: u64) -> Result<()> {
+        self.compact_to(raft_group_id, index);
+        Ok(())
+    }
+
+    fn get_raft_state(&self, _raft_group_id: u64) -> Result<RaftState> {
+        // FIXME: implement it.
+        unimplemented!();
+    }
+
+    fn get_entry(&self, raft_group_id: u64, index: u64) -> Result<Option<Entry>> {
+        self.get_entry(raft_group_id, index)
+    }
+
+    fn fetch_entries_to(
+        &self,
+        raft_group_id: u64,
+        begin: u64,
+        end: u64,
+        max_size: Option<usize>,
+        to: &mut Vec<Entry>,
+    ) -> Result<usize> {
+        self.fetch_entries_to(raft_group_id, begin, end, max_size, to)
+    }
+
+    fn consume_write_batch(&self, batch: &mut Self::WriteBatch, sync: bool) -> Result<()> {
+        self.write(std::mem::take(batch), false)?;
+        if sync {
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    fn clean(&self, raft_group_id: u64, _: &RaftState, batch: &mut LogBatch) -> Result<()> {
+        batch.clean_region(raft_group_id);
+        Ok(())
+    }
+
+    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize> {
+        let log_batch = LogBatch::with_capacity(1);
+        let len = entries.len();
+        log_batch.add_entries(raft_group_id, std::mem::take(entries));
+        self.write(log_batch, false).map(|_| len)
+    }
+
+    fn put_raft_state(&mut self, _raft_group_id: u64, _state: &RaftState) -> Result<()> {
+        // FIXME: implement it.
+        unimplemented!();
     }
 }

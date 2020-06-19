@@ -1,4 +1,5 @@
 #![feature(ptr_offset_from)]
+#![allow(clippy::missing_safety_doc)]
 
 #[macro_use]
 extern crate log;
@@ -10,9 +11,6 @@ extern crate quick_error;
 extern crate lazy_static;
 #[macro_use]
 extern crate prometheus;
-
-use std::io::Error as IoError;
-use std::{error, num};
 
 #[macro_export]
 macro_rules! box_err {
@@ -26,57 +24,77 @@ macro_rules! box_err {
     });
 }
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum Error {
-        Other(err: Box<dyn error::Error + Send + Sync>) {
-            from()
-            cause(err.as_ref())
-            description(err.description())
-        }
-        Io(err: IoError) {
-            from()
-            cause(err)
-            description(err.description())
-        }
-        Codec(err: codec::Error) {
-            from()
-            cause(err)
-            description(err.description())
-            display("Codec {}", err)
-        }
-        Protobuf(err: protobuf::ProtobufError) {
-            from()
-            cause(err)
-            description(err.description())
-            display("protobuf error {:?}", err)
-        }
-        ParseError(err: num::ParseIntError) {
-            from()
-            cause(err)
-            description(err.description())
-            display("Parse int error {:?}", err)
-        }
-        CheckSumError {
-            description("checksum is not correct")
-        }
-        TooShort {
-            description("content too short")
-        }
-    }
-}
-
 pub mod codec;
 pub mod config;
 pub mod engine;
+mod errors;
 pub mod log_batch;
 pub mod memtable;
 pub mod metrics;
 pub mod pipe_log;
 pub mod util;
 
-pub type Result<T> = ::std::result::Result<T, Error>;
-
 pub use self::config::Config;
-pub use self::engine::{RaftEngine, RecoveryMode};
+pub use self::engine::FileEngine;
+pub use self::errors::{Error, Result};
 pub use self::log_batch::LogBatch;
+
+use raft::eraftpb::{Entry, HardState};
+
+#[derive(Clone)]
+pub struct RaftState {
+    pub last_index: u64,
+    pub hard_state: HardState,
+}
+
+pub trait RaftEngine: Clone + Sync + Send + 'static {
+    type RecoveryMode;
+    type WriteBatch: WriteBatch;
+
+    fn write_batch(&self, capacity: usize) -> Self::WriteBatch;
+
+    /// Recover the Raft engine.
+    fn recover(&mut self, recovery_mode: Self::RecoveryMode) -> Result<()>;
+
+    /// Synchronize the Raft engine.
+    fn sync(&self) -> Result<()>;
+
+    // FIXME: compact only memtable or not?
+    /// Compact Raft logs for `raft_group_id` to `index`.
+    fn compact_to(&self, raft_group_id: u64, index: u64) -> Result<()>;
+
+    fn get_raft_state(&self, raft_group_id: u64) -> Result<RaftState>;
+
+    fn get_entry(&self, raft_group_id: u64, index: u64) -> Result<Option<Entry>>;
+
+    /// Return total size of fetched entries.
+    fn fetch_entries_to(
+        &self,
+        raft_group_id: u64,
+        begin: u64,
+        end: u64,
+        max_size: Option<usize>,
+        to: &mut Vec<Entry>,
+    ) -> Result<usize>;
+
+    /// Consume the write batch by moving the content into the engine itself.
+    fn consume_write_batch(&self, batch: &mut Self::WriteBatch, sync: bool) -> Result<()>;
+
+    fn clean(
+        &self,
+        raft_group_id: u64,
+        state: &RaftState,
+        batch: &mut Self::WriteBatch,
+    ) -> Result<()>;
+
+    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize>;
+    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftState) -> Result<()>;
+}
+
+pub trait WriteBatch: Send {
+    /// Append Raft logs for `raft_group_id`.
+    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize>;
+    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftState) -> Result<()>;
+    fn is_empty(&self) -> bool;
+    fn size(&self) -> usize;
+}

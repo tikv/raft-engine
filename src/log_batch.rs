@@ -1,23 +1,21 @@
-use compress::lz4;
 use std::cell::RefCell;
 use std::io::BufRead;
 use std::mem;
 use std::u64;
+
+use crate::codec::{self, NumberEncoder};
+use crate::memtable::EntryIndex;
+use crate::{Error, RaftState, Result, WriteBatch};
 
 // crc32c implement Castagnoli Polynomial algorithm
 // which also is used in iSCSI and SCTP. It is 50x
 // faster than crc as we test.
 use byteorder::BigEndian;
 use byteorder::{ReadBytesExt, WriteBytesExt};
+use compress::lz4;
 use crc32c::crc32c;
-use protobuf;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
-
-use crate::codec::{self, NumberEncoder};
-
-use super::memtable::EntryIndex;
-use super::{Error, Result};
 
 const BATCH_MIN_SIZE: usize = 12; // 8 bytes total length + 4 checksum
 
@@ -447,7 +445,7 @@ impl LogBatch {
         let old_checksum = codec::decode_u32_le(&mut s)?;
         let new_checksum = crc32c(&buf[..offset]);
         if old_checksum != new_checksum {
-            return Err(Error::CheckSumError);
+            return Err(Error::IncorrectChecksum(old_checksum, new_checksum));
         }
 
         match batch_type {
@@ -539,6 +537,28 @@ impl LogBatch {
         vec.as_mut_slice().write_u64::<BigEndian>(header).unwrap();
 
         Some(vec)
+    }
+}
+
+impl WriteBatch for LogBatch {
+    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize> {
+        let len = entries.len();
+        self.add_entries(raft_group_id, std::mem::take(entries));
+        Ok(len)
+    }
+
+    fn put_raft_state(&mut self, _raft_group_id: u64, _state: &RaftState) -> Result<()> {
+        // FIXME: implement it.
+        unimplemented!();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.borrow().is_empty()
+    }
+
+    fn size(&self) -> usize {
+        // FIXME: implement it.
+        0
     }
 }
 

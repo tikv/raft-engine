@@ -1,5 +1,3 @@
-use errno;
-use libc;
 use std::cmp;
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -11,7 +9,7 @@ use std::u64;
 
 use super::log_batch::{LogBatch, LogItemType};
 use super::metrics::*;
-use super::Result;
+use super::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
@@ -579,7 +577,7 @@ fn generate_file_name(file_num: u64) -> String {
 fn extract_file_num(file_name: &str) -> Result<u64> {
     match file_name[..FILE_NUM_LEN].parse::<u64>() {
         Ok(num) => Ok(num),
-        Err(e) => Err(e.into()),
+        Err(_) => Err(Error::ParseFileName(file_name.to_owned())),
     }
 }
 

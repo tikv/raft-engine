@@ -5,14 +5,13 @@ authors = ["zhangjinpeng1987 <zhangjinpeng@pingcap.com>"]
 edition = "2018"
 
 [dependencies]
-protobuf = "~2.0"
+protobuf = "2"
 quick-error = "1.2.2"
 serde = "1.0"
 serde_derive = "1.0"
 crc32c = "0.4.0"
 log = { version = "0.3", features = ["max_level_trace", "release_max_level_debug"] }
 compress = "0.1.2"
-raft = "0.4"
 byteorder = "1.2"
 errno = "0.2.4"
 libc = "0.2"
@@ -24,6 +23,11 @@ fxhash = "0.2"
 version = "0.4.2"
 default-features = false
 features = ["nightly", "push", "process"]
+
+[dependencies.raft]
+git = "https://github.com/pingcap/raft-rs"
+branch = "master"
+features = ["protobuf-codec"]
 
 [dependencies.prometheus-static-metric]
 version = "0.1.4"
