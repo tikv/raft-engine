@@ -41,17 +41,17 @@ pub use self::log_batch::LogBatch;
 
 use raft::eraftpb::{Entry, HardState};
 
-#[derive(Clone)]
-pub struct RaftState {
+#[derive(Clone, Default)]
+pub struct RaftLogState {
     pub last_index: u64,
     pub hard_state: HardState,
 }
 
 pub trait RaftEngine: Clone + Sync + Send + 'static {
     type RecoveryMode;
-    type WriteBatch: WriteBatch;
+    type LogBatch: RaftLogBatch;
 
-    fn write_batch(&self, capacity: usize) -> Self::WriteBatch;
+    fn log_batch(&self, capacity: usize) -> Self::LogBatch;
 
     /// Recover the Raft engine.
     fn recover(&mut self, recovery_mode: Self::RecoveryMode) -> Result<()>;
@@ -63,7 +63,7 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     /// Compact Raft logs for `raft_group_id` to `index`.
     fn compact_to(&self, raft_group_id: u64, index: u64) -> Result<()>;
 
-    fn get_raft_state(&self, raft_group_id: u64) -> Result<RaftState>;
+    fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLogState>>;
 
     fn get_entry(&self, raft_group_id: u64, index: u64) -> Result<Option<Entry>>;
 
@@ -78,23 +78,29 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     ) -> Result<usize>;
 
     /// Consume the write batch by moving the content into the engine itself.
-    fn consume_write_batch(&self, batch: &mut Self::WriteBatch, sync: bool) -> Result<()>;
+    fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<()>;
+    fn consume_and_shrink(
+        &self,
+        batch: &mut Self::LogBatch,
+        sync: bool,
+        max_capacity: usize,
+        shrink_to: usize,
+    ) -> Result<()>;
 
     fn clean(
         &self,
         raft_group_id: u64,
-        state: &RaftState,
-        batch: &mut Self::WriteBatch,
+        state: &RaftLogState,
+        batch: &mut Self::LogBatch,
     ) -> Result<()>;
 
     fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize>;
-    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftState) -> Result<()>;
+    fn put_raft_state(&mut self, raft_group_id: u64, state: RaftLogState) -> Result<()>;
 }
 
-pub trait WriteBatch: Send {
+pub trait RaftLogBatch: Send {
     /// Append Raft logs for `raft_group_id`.
     fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize>;
-    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftState) -> Result<()>;
+    fn put_raft_state(&mut self, raft_group_id: u64, state: RaftLogState) -> Result<()>;
     fn is_empty(&self) -> bool;
-    fn size(&self) -> usize;
 }

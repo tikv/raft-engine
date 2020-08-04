@@ -16,7 +16,7 @@ use super::log_batch::{Command, LogBatch, LogItemType, OpType};
 use super::memtable::MemTable;
 use super::metrics::*;
 use super::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
-use super::{RaftEngine, RaftState, Result};
+use super::{RaftEngine, RaftLogState, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -692,9 +692,9 @@ impl FileEngine {
 
 impl RaftEngine for FileEngine {
     type RecoveryMode = RecoveryMode;
-    type WriteBatch = LogBatch;
+    type LogBatch = LogBatch;
 
-    fn write_batch(&self, _capacity: usize) -> Self::WriteBatch {
+    fn log_batch(&self, _capacity: usize) -> Self::LogBatch {
         LogBatch::default()
     }
 
@@ -711,7 +711,7 @@ impl RaftEngine for FileEngine {
         Ok(())
     }
 
-    fn get_raft_state(&self, _raft_group_id: u64) -> Result<RaftState> {
+    fn get_raft_state(&self, _raft_group_id: u64) -> Result<Option<RaftLogState>> {
         // FIXME: implement it.
         unimplemented!();
     }
@@ -731,7 +731,7 @@ impl RaftEngine for FileEngine {
         self.fetch_entries_to(raft_group_id, begin, end, max_size, to)
     }
 
-    fn consume_write_batch(&self, batch: &mut Self::WriteBatch, sync: bool) -> Result<()> {
+    fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<()> {
         self.write(std::mem::take(batch), false)?;
         if sync {
             self.sync()?;
@@ -739,7 +739,17 @@ impl RaftEngine for FileEngine {
         Ok(())
     }
 
-    fn clean(&self, raft_group_id: u64, _: &RaftState, batch: &mut LogBatch) -> Result<()> {
+    fn consume_and_shrink(
+        &self,
+        batch: &mut Self::LogBatch,
+        sync: bool,
+        _: usize,
+        _: usize,
+    ) -> Result<()> {
+        self.consume(batch, sync)
+    }
+
+    fn clean(&self, raft_group_id: u64, _: &RaftLogState, batch: &mut LogBatch) -> Result<()> {
         batch.clean_region(raft_group_id);
         Ok(())
     }
@@ -751,7 +761,7 @@ impl RaftEngine for FileEngine {
         self.write(log_batch, false).map(|_| len)
     }
 
-    fn put_raft_state(&mut self, _raft_group_id: u64, _state: &RaftState) -> Result<()> {
+    fn put_raft_state(&mut self, _raft_group_id: u64, _state: RaftLogState) -> Result<()> {
         // FIXME: implement it.
         unimplemented!();
     }
