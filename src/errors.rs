@@ -53,4 +53,16 @@ quick_error! {
     }
 }
 
+impl From<Error> for raft::Error {
+    fn from(err: Error) -> raft::Error {
+        match err {
+            Error::Storage(e) => raft::Error::Store(e),
+            e => {
+                let boxed = Box::new(e) as Box<dyn std::error::Error + Sync + Send>;
+                raft::Error::Store(StorageError::Other(boxed))
+            }
+        }
+    }
+}
+
 pub type Result<T> = ::std::result::Result<T, Error>;

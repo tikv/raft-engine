@@ -5,7 +5,7 @@ use std::u64;
 
 use crate::codec::{self, NumberEncoder};
 use crate::memtable::EntryIndex;
-use crate::{Error, RaftLogBatch, RaftLogState, Result};
+use crate::{Error, RaftLocalState, RaftLogBatch, Result};
 
 // crc32c implement Castagnoli Polynomial algorithm
 // which also is used in iSCSI and SCTP. It is 50x
@@ -541,13 +541,16 @@ impl LogBatch {
 }
 
 impl RaftLogBatch for LogBatch {
-    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize> {
-        let len = entries.len();
-        self.add_entries(raft_group_id, std::mem::take(entries));
-        Ok(len)
+    fn append(&mut self, _raft_group_id: u64, _entries: &[Entry]) -> Result<usize> {
+        // FIXME: implement it.
+        unimplemented!();
     }
 
-    fn put_raft_state(&mut self, _raft_group_id: u64, _state: RaftLogState) -> Result<()> {
+    fn remove(&mut self, _: u64, _: u64, _: u64) -> Result<()> {
+        Ok(())
+    }
+
+    fn put_raft_state(&mut self, _raft_group_id: u64, _state: &RaftLocalState) -> Result<()> {
         // FIXME: implement it.
         unimplemented!();
     }

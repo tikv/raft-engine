@@ -39,13 +39,8 @@ pub use self::engine::FileEngine;
 pub use self::errors::{Error, Result};
 pub use self::log_batch::LogBatch;
 
-use raft::eraftpb::{Entry, HardState};
-
-#[derive(Clone, Default)]
-pub struct RaftLogState {
-    pub last_index: u64,
-    pub hard_state: HardState,
-}
+use kvproto::raft_serverpb::RaftLocalState;
+use raft::eraftpb::Entry;
 
 pub trait RaftEngine: Clone + Sync + Send + 'static {
     type RecoveryMode;
@@ -63,7 +58,7 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     /// Compact Raft logs for `raft_group_id` to `index`.
     fn compact_to(&self, raft_group_id: u64, index: u64) -> Result<()>;
 
-    fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLogState>>;
+    fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>>;
 
     fn get_entry(&self, raft_group_id: u64, index: u64) -> Result<Option<Entry>>;
 
@@ -90,17 +85,31 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     fn clean(
         &self,
         raft_group_id: u64,
-        state: &RaftLogState,
+        state: &RaftLocalState,
         batch: &mut Self::LogBatch,
     ) -> Result<()>;
 
-    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize>;
-    fn put_raft_state(&mut self, raft_group_id: u64, state: RaftLogState) -> Result<()>;
+    /// Append some raft entries and return appended bytes.
+    /// Note: `RaftLocalState` won't be updated in this call.
+    fn append(&self, raft_group_id: u64, entries: &[Entry]) -> Result<usize>;
+
+    /// Remove Raft logs in [`from`, `to`) which will be overwritten later.
+    fn remove(&self, raft_group_id: u64, from: u64, to: u64) -> Result<()>;
+
+    /// Like `remove` but the range could be very large. Return the deleted count.
+    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<usize>;
+
+    fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
 }
 
 pub trait RaftLogBatch: Send {
-    /// Append Raft logs for `raft_group_id`.
-    fn append(&mut self, raft_group_id: u64, entries: &mut Vec<Entry>) -> Result<usize>;
-    fn put_raft_state(&mut self, raft_group_id: u64, state: RaftLogState) -> Result<()>;
+    /// Append some raft entries and return appended bytes.
+    /// Note: `RaftLocalState` won't be updated in this call.
+    fn append(&mut self, raft_group_id: u64, entries: &[Entry]) -> Result<usize>;
+
+    /// Remove Raft logs in [`from`, `to`) which will be overwritten later.
+    fn remove(&mut self, raft_group_id: u64, from: u64, to: u64) -> Result<()>;
+
+    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
     fn is_empty(&self) -> bool;
 }
