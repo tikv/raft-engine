@@ -1,12 +1,12 @@
-use std::cmp;
 use std::collections::VecDeque;
-use std::u64;
+use std::{cmp, u64};
 
-use raft::eraftpb::Entry;
+use protobuf::Message;
+use raft::{eraftpb::Entry, StorageError};
 
 use crate::{
     util::{slices_in_range, HashMap},
-    Result,
+    Error, Result,
 };
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -254,28 +254,26 @@ impl MemTable {
         max_size: Option<usize>,
         vec: &mut Vec<Entry>,
         vec_idx: &mut Vec<EntryIndex>,
-    ) -> Result<u64> {
+    ) -> Result<usize> {
         if end <= begin {
-            return Err(box_err!(
-                "Range error when fetch entries for region {}.",
-                self.region_id
-            ));
+            panic!(
+                "fetch entries_to(begin: {}, end{}) shouldn't happen",
+                begin, end
+            );
         }
 
         if self.entries_index.is_empty() {
-            return Err(box_err!("There is no entry for region {}.", self.region_id));
+            return Err(Error::Storage(StorageError::Unavailable));
         }
 
         let first_index = self.entries_index.front().unwrap().index;
+        if begin < first_index {
+            return Err(Error::Storage(StorageError::Compacted));
+        }
+
         let last_index = self.entries_index.back().unwrap().index;
-        if begin < first_index || end > last_index + 1 {
-            return Err(box_err!(
-                "Wanted entries [{}, {}) out of range [{}, {})",
-                begin,
-                end,
-                first_index,
-                last_index + 1
-            ));
+        if end > last_index + 1 {
+            return Err(Error::Storage(StorageError::Unavailable));
         }
 
         let start_pos = (begin - first_index) as usize;
@@ -297,14 +295,26 @@ impl MemTable {
                     start_pos - cache_offset,
                     end_pos - cache_offset,
                 );
+                let mut fetch_bytes = first.iter().map(|e| e.compute_size() as usize).sum();
+                fetch_bytes += second
+                    .iter()
+                    .map(|e| e.compute_size() as usize)
+                    .sum::<usize>();
+
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
-                Ok((end_pos - start_pos) as u64)
+                Ok(fetch_bytes)
             } else {
                 // Partial needed entries are in cache.
                 let (first, second) =
                     slices_in_range(&self.entries_cache, 0, end_pos - cache_offset);
-                let fetch_count = (first.len() + second.len()) as u64;
+
+                let mut fetch_bytes = first.iter().map(|e| e.compute_size() as usize).sum();
+                fetch_bytes += second
+                    .iter()
+                    .map(|e| e.compute_size() as usize)
+                    .sum::<usize>();
+
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
 
@@ -312,7 +322,7 @@ impl MemTable {
                 let (first, second) = slices_in_range(&self.entries_index, start_pos, cache_offset);
                 vec_idx.extend_from_slice(first);
                 vec_idx.extend_from_slice(second);
-                Ok(fetch_count)
+                Ok(fetch_bytes)
             }
         } else {
             // All needed entries are not in cache
