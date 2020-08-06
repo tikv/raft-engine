@@ -1,21 +1,17 @@
 use std::cell::RefCell;
 use std::io::BufRead;
-use std::mem;
-use std::u64;
+use std::{mem, u64};
 
-use crate::codec::{self, NumberEncoder};
-use crate::memtable::EntryIndex;
-use crate::{Error, RaftLocalState, RaftLogBatch, Result};
-
-// crc32c implement Castagnoli Polynomial algorithm
-// which also is used in iSCSI and SCTP. It is 50x
-// faster than crc as we test.
-use byteorder::BigEndian;
-use byteorder::{ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use compress::lz4;
 use crc32c::crc32c;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
+
+use crate::codec::{self, NumberEncoder};
+use crate::memtable::EntryIndex;
+use crate::util::RAFT_LOG_STATE_KEY;
+use crate::{Error, RaftLocalState, RaftLogBatch, Result};
 
 const BATCH_MIN_SIZE: usize = 12; // 8 bytes total length + 4 checksum
 
@@ -541,18 +537,17 @@ impl LogBatch {
 }
 
 impl RaftLogBatch for LogBatch {
-    fn append(&mut self, _raft_group_id: u64, _entries: &[Entry]) -> Result<usize> {
-        // FIXME: implement it.
-        unimplemented!();
+    fn append(&mut self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()> {
+        self.add_entries(raft_group_id, entries);
+        Ok(())
     }
 
     fn remove(&mut self, _: u64, _: u64, _: u64) -> Result<()> {
         Ok(())
     }
 
-    fn put_raft_state(&mut self, _raft_group_id: u64, _state: &RaftLocalState) -> Result<()> {
-        // FIXME: implement it.
-        unimplemented!();
+    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftLocalState) -> Result<()> {
+        self.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
     }
 
     fn is_empty(&self) -> bool {

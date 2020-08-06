@@ -701,7 +701,7 @@ mod tests {
             memtable
                 .fetch_entries_to(20, 25, None, &mut ents, &mut ents_idx)
                 .unwrap(),
-            5
+            5 * 2,
         );
         assert_eq!(ents.len(), 5);
         assert_eq!(ents[0].get_index(), 20);
@@ -729,7 +729,7 @@ mod tests {
             memtable
                 .fetch_entries_to(10, 25, None, &mut ents, &mut ents_idx)
                 .unwrap(),
-            10
+            10 * 2,
         );
         assert_eq!(ents.len(), 10);
         assert_eq!(ents[0].get_index(), 15);
@@ -753,7 +753,7 @@ mod tests {
                     &mut ents_idx
                 )
                 .unwrap(),
-            5
+            5 * 2,
         );
         assert_eq!(ents.len(), 5);
         assert_eq!(ents[0].get_index(), 15);
@@ -769,7 +769,7 @@ mod tests {
             memtable
                 .fetch_entries_to(20, 25, Some(0), &mut ents, &mut ents_idx)
                 .unwrap(),
-            1
+            1 * 2,
         );
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].get_index(), 20);

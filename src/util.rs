@@ -204,3 +204,5 @@ pub fn duration_to_sec(d: Duration) -> f64 {
     // Most of case, we can't have so large Duration, so here just panic if overflow now.
     d.as_secs() as f64 + (nanos / 1_000_000_000.0)
 }
+
+pub(crate) const RAFT_LOG_STATE_KEY: &[u8] = b"R";

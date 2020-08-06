@@ -43,20 +43,16 @@ use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 
 pub trait RaftEngine: Clone + Sync + Send + 'static {
-    type RecoveryMode;
     type LogBatch: RaftLogBatch;
 
     fn log_batch(&self, capacity: usize) -> Self::LogBatch;
-
-    /// Recover the Raft engine.
-    fn recover(&mut self, recovery_mode: Self::RecoveryMode) -> Result<()>;
 
     /// Synchronize the Raft engine.
     fn sync(&self) -> Result<()>;
 
     // FIXME: compact only memtable or not?
     /// Compact Raft logs for `raft_group_id` to `index`.
-    fn compact_to(&self, raft_group_id: u64, index: u64) -> Result<()>;
+    fn compact_to(&self, raft_group_id: u64, index: u64);
 
     fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>>;
 
@@ -89,9 +85,12 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
         batch: &mut Self::LogBatch,
     ) -> Result<()>;
 
-    /// Append some raft entries and return appended bytes.
     /// Note: `RaftLocalState` won't be updated in this call.
-    fn append(&self, raft_group_id: u64, entries: &[Entry]) -> Result<usize>;
+    fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()>;
+
+    fn append_slice(&self, raft_group_id: u64, entries: &[Entry]) -> Result<()> {
+        self.append(raft_group_id, entries.to_vec())
+    }
 
     /// Remove Raft logs in [`from`, `to`) which will be overwritten later.
     fn remove(&self, raft_group_id: u64, from: u64, to: u64) -> Result<()>;
@@ -100,16 +99,31 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<usize>;
 
     fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
+
+    fn has_internal_entry_cache(&self) -> bool;
+
+    /// Flush current cache stats.
+    fn flush_stats(&self) -> CacheStats;
 }
 
 pub trait RaftLogBatch: Send {
-    /// Append some raft entries and return appended bytes.
     /// Note: `RaftLocalState` won't be updated in this call.
-    fn append(&mut self, raft_group_id: u64, entries: &[Entry]) -> Result<usize>;
+    fn append(&mut self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()>;
+
+    fn append_slice(&mut self, raft_group_id: u64, entries: &[Entry]) -> Result<()> {
+        self.append(raft_group_id, entries.to_vec())
+    }
 
     /// Remove Raft logs in [`from`, `to`) which will be overwritten later.
     fn remove(&mut self, raft_group_id: u64, from: u64, to: u64) -> Result<()>;
 
     fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
     fn is_empty(&self) -> bool;
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct CacheStats {
+    pub hit: usize,
+    pub miss: usize,
+    pub mem_size_change: isize,
 }
