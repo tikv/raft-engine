@@ -198,6 +198,21 @@ pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T]
     }
 }
 
+pub fn vec_deque_search<T, B, F>(v: &VecDeque<T>, target: &B, f: F) -> Option<usize>
+where
+    B: Ord,
+    F: FnMut(&T) -> B + Copy,
+{
+    let (left, right) = v.as_slices();
+    if let Ok(offset) = right.binary_search_by_key(target, f) {
+        return Some(left.len() + offset);
+    }
+    if let Ok(offset) = left.binary_search_by_key(target, f) {
+        return Some(offset);
+    }
+    None
+}
+
 /// Converts Duration to seconds.
 pub fn duration_to_sec(d: Duration) -> f64 {
     let nanos = f64::from(d.subsec_nanos());

@@ -88,20 +88,19 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
         self.append(raft_group_id, entries.to_vec())
     }
 
-    /// Remove Raft logs in [`from`, `to`) which will be overwritten later.
-    fn remove(&self, raft_group_id: u64, from: u64, to: u64) -> Result<()>;
-
-    /// Like `remove` but the range could be very large. Return the deleted count.
-    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<usize>;
-
     fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
 
+    /// Like `cut_logs` but the range could be very large. Return the deleted count.
+    /// Generally, `from` can be passed in `0`.
+    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<usize>;
+
+    /// The `RaftEngine` has a builtin entry cache or not.
     fn has_builtin_entry_cache(&self) -> bool {
         false
     }
 
     /// GC the builtin entry cache.
-    fn gc_entry_cache(&self) {}
+    fn gc_entry_cache(&self, _raft_group_id: u64, _to: u64) {}
 
     /// Flush current cache stats.
     fn flush_stats(&self) -> CacheStats;
@@ -116,9 +115,10 @@ pub trait RaftLogBatch: Send {
     }
 
     /// Remove Raft logs in [`from`, `to`) which will be overwritten later.
-    fn remove(&mut self, raft_group_id: u64, from: u64, to: u64) -> Result<()>;
+    fn cut_logs(&mut self, raft_group_id: u64, from: u64, to: u64);
 
     fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
+
     fn is_empty(&self) -> bool;
 }
 
