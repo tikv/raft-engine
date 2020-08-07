@@ -50,15 +50,11 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     /// Synchronize the Raft engine.
     fn sync(&self) -> Result<()>;
 
-    // FIXME: compact only memtable or not?
-    /// Compact Raft logs for `raft_group_id` to `index`.
-    fn compact_to(&self, raft_group_id: u64, index: u64);
-
     fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>>;
 
     fn get_entry(&self, raft_group_id: u64, index: u64) -> Result<Option<Entry>>;
 
-    /// Return total size of fetched entries.
+    /// Return count of fetched entries.
     fn fetch_entries_to(
         &self,
         raft_group_id: u64,
@@ -100,7 +96,12 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
 
     fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
 
-    fn has_internal_entry_cache(&self) -> bool;
+    fn has_builtin_entry_cache(&self) -> bool {
+        false
+    }
+
+    /// GC the builtin entry cache.
+    fn gc_entry_cache(&self) {}
 
     /// Flush current cache stats.
     fn flush_stats(&self) -> CacheStats;

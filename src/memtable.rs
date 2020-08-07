@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::{cmp, u64};
 
-use protobuf::Message;
 use raft::{eraftpb::Entry, StorageError};
 
 use crate::{
@@ -166,6 +165,8 @@ impl MemTable {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
+    // `idx` can't be greater than `last_idx + 1`.
+    // Returns deleted entries count.
     pub fn compact_to(&mut self, idx: u64) -> u64 {
         if let Some(first_index) = self.entries_index.front().map(|i| i.index) {
             if first_index >= idx {
@@ -173,7 +174,7 @@ impl MemTable {
             }
 
             let last_index = self.entries_index.back().unwrap().index;
-            if idx > last_index {
+            if idx > last_index + 1 {
                 panic!(
                     "compact to index {} is larger than last index {}",
                     idx, last_index
@@ -247,30 +248,23 @@ impl MemTable {
         Some((Some(self.entries_cache[eoffset].clone()), None))
     }
 
-    pub fn fetch_entries_to(
+    pub(crate) fn fetch_entries_to(
         &self,
         begin: u64,
         end: u64,
         max_size: Option<usize>,
         vec: &mut Vec<Entry>,
         vec_idx: &mut Vec<EntryIndex>,
-    ) -> Result<usize> {
-        if end <= begin {
-            panic!(
-                "fetch entries_to(begin: {}, end{}) shouldn't happen",
-                begin, end
-            );
-        }
+    ) -> Result<()> {
+        assert!(end > begin, "fetch_entries_to({}, {})", begin, end);
 
         if self.entries_index.is_empty() {
             return Err(Error::Storage(StorageError::Unavailable));
         }
-
         let first_index = self.entries_index.front().unwrap().index;
         if begin < first_index {
             return Err(Error::Storage(StorageError::Compacted));
         }
-
         let last_index = self.entries_index.back().unwrap().index;
         if end > last_index + 1 {
             return Err(Error::Storage(StorageError::Unavailable));
@@ -290,31 +284,15 @@ impl MemTable {
         if cache_offset < end_pos {
             if start_pos >= cache_offset {
                 // All needed entries are in cache.
-                let (first, second) = slices_in_range(
-                    &self.entries_cache,
-                    start_pos - cache_offset,
-                    end_pos - cache_offset,
-                );
-                let mut fetch_bytes = first.iter().map(|e| e.compute_size() as usize).sum();
-                fetch_bytes += second
-                    .iter()
-                    .map(|e| e.compute_size() as usize)
-                    .sum::<usize>();
-
+                let low = start_pos - cache_offset;
+                let high = end_pos - cache_offset;
+                let (first, second) = slices_in_range(&self.entries_cache, low, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
-                Ok(fetch_bytes)
             } else {
                 // Partial needed entries are in cache.
-                let (first, second) =
-                    slices_in_range(&self.entries_cache, 0, end_pos - cache_offset);
-
-                let mut fetch_bytes = first.iter().map(|e| e.compute_size() as usize).sum();
-                fetch_bytes += second
-                    .iter()
-                    .map(|e| e.compute_size() as usize)
-                    .sum::<usize>();
-
+                let high = end_pos - cache_offset;
+                let (first, second) = slices_in_range(&self.entries_cache, 0, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
 
@@ -322,15 +300,14 @@ impl MemTable {
                 let (first, second) = slices_in_range(&self.entries_index, start_pos, cache_offset);
                 vec_idx.extend_from_slice(first);
                 vec_idx.extend_from_slice(second);
-                Ok(fetch_bytes)
             }
         } else {
             // All needed entries are not in cache
             let (first, second) = slices_in_range(&self.entries_index, start_pos, end_pos);
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
-            Ok(0)
         }
+        Ok(())
     }
 
     pub fn fetch_all(&self, vec: &mut Vec<Entry>, vec_idx: &mut Vec<EntryIndex>) {
@@ -697,12 +674,9 @@ mod tests {
         // All needed entries are in cache.
         ents.clear();
         ents_idx.clear();
-        assert_eq!(
-            memtable
-                .fetch_entries_to(20, 25, None, &mut ents, &mut ents_idx)
-                .unwrap(),
-            5 * 2,
-        );
+        memtable
+            .fetch_entries_to(20, 25, None, &mut ents, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents.len(), 5);
         assert_eq!(ents[0].get_index(), 20);
         assert_eq!(ents[4].get_index(), 24);
@@ -711,12 +685,9 @@ mod tests {
         // All needed entries are not in cache.
         ents.clear();
         ents_idx.clear();
-        assert_eq!(
-            memtable
-                .fetch_entries_to(10, 15, None, &mut ents, &mut ents_idx)
-                .unwrap(),
-            0
-        );
+        memtable
+            .fetch_entries_to(10, 15, None, &mut ents, &mut ents_idx)
+            .unwrap();
         assert!(ents.is_empty());
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
@@ -725,12 +696,9 @@ mod tests {
         // Some needed entries are in cache, the others are not.
         ents.clear();
         ents_idx.clear();
-        assert_eq!(
-            memtable
-                .fetch_entries_to(10, 25, None, &mut ents, &mut ents_idx)
-                .unwrap(),
-            10 * 2,
-        );
+        memtable
+            .fetch_entries_to(10, 25, None, &mut ents, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents.len(), 10);
         assert_eq!(ents[0].get_index(), 15);
         assert_eq!(ents[9].get_index(), 24);
@@ -743,18 +711,10 @@ mod tests {
         // and [10, 15) is not in cache, [15, 20) is in cache.
         ents.clear();
         ents_idx.clear();
-        assert_eq!(
-            memtable
-                .fetch_entries_to(
-                    10,
-                    25,
-                    Some(10), /* max size limitation */
-                    &mut ents,
-                    &mut ents_idx
-                )
-                .unwrap(),
-            5 * 2,
-        );
+        let max_size = Some(10);
+        memtable
+            .fetch_entries_to(10, 25, max_size, &mut ents, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents.len(), 5);
         assert_eq!(ents[0].get_index(), 15);
         assert_eq!(ents[4].get_index(), 19);
@@ -765,12 +725,9 @@ mod tests {
         // Even max size limitation is 0, at least fetch one entry.
         ents.clear();
         ents_idx.clear();
-        assert_eq!(
-            memtable
-                .fetch_entries_to(20, 25, Some(0), &mut ents, &mut ents_idx)
-                .unwrap(),
-            1 * 2,
-        );
+        memtable
+            .fetch_entries_to(20, 25, Some(0), &mut ents, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].get_index(), 20);
         assert!(ents_idx.is_empty());

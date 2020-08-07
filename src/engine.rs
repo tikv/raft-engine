@@ -481,15 +481,14 @@ impl FileEngineInner {
     }
 
     fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
-        let value = self.get(region_id, key)?;
-
-        if value.is_none() {
-            return Ok(None);
+        match self.get(region_id, key)? {
+            Some(value) => {
+                let mut m = M::new();
+                m.merge_from_bytes(&value)?;
+                Ok(Some(m))
+            }
+            None => Ok(None),
         }
-
-        let mut m = M::new();
-        m.merge_from_bytes(value.unwrap().as_slice())?;
-        Ok(Some(m))
     }
 
     fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<Entry>> {
@@ -595,33 +594,19 @@ impl FileEngineInner {
         if let Some(memtable) = memtables.get(&region_id) {
             let mut entries = Vec::with_capacity((end - begin) as usize);
             let mut entries_idx = Vec::with_capacity((end - begin) as usize);
-            match memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx) {
-                Ok(num) => {
-                    let count = num + entries_idx.len();
-                    // Read remain entries from file if there are.
-                    if !entries_idx.is_empty() {
-                        READ_ENTRY_FROM_PIPE_FILE.inc_by(entries_idx.len() as f64);
-                    }
-                    for idx in &entries_idx {
-                        let e = self.read_entry_from_file(
-                            idx.file_num,
-                            idx.offset,
-                            idx.len,
-                            idx.index,
-                        )?;
-                        vec.push(e);
-                    }
-                    vec.extend(entries.into_iter());
-                    Ok(count)
-                }
-                Err(e) => {
-                    error!("Fetch entries from memtable failed, err {:?}", e);
-                    Err(e)
-                }
+            memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
+            let count = entries.len() + entries_idx.len();
+            if !entries_idx.is_empty() {
+                READ_ENTRY_FROM_PIPE_FILE.inc_by(entries_idx.len() as f64);
             }
-        } else {
-            Ok(0)
+            for idx in &entries_idx {
+                let e = self.read_entry_from_file(idx.file_num, idx.offset, idx.len, idx.index)?;
+                vec.push(e);
+            }
+            vec.extend(entries.into_iter());
+            return Ok(count);
         }
+        Ok(0)
     }
 
     fn post_append_to_file(&self, log_batch: LogBatch, file_num: u64) {
@@ -694,10 +679,6 @@ impl RaftEngine for FileEngine {
         self.inner.sync()
     }
 
-    fn compact_to(&self, raft_group_id: u64, index: u64) {
-        self.inner.compact_to(raft_group_id, index);
-    }
-
     fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>> {
         self.inner.get_msg(raft_group_id, RAFT_LOG_STATE_KEY)
     }
@@ -751,17 +732,12 @@ impl RaftEngine for FileEngine {
         Ok(())
     }
 
-    fn gc(&self, _raft_group_id: u64, _from: u64, _to: u64) -> Result<usize> {
-        // FIXME: implement it.
-        unimplemented!();
+    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> Result<usize> {
+        Ok(self.inner.compact_to(raft_group_id, to) as usize)
     }
 
     fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()> {
         self.inner.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
-    }
-
-    fn has_internal_entry_cache(&self) -> bool {
-        true
     }
 
     fn flush_stats(&self) -> CacheStats {
