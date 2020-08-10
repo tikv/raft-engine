@@ -4,7 +4,7 @@ use std::{cmp, u64};
 use raft::{eraftpb::Entry, StorageError};
 
 use crate::{
-    util::{slices_in_range, HashMap},
+    util::{slices_in_range, vec_deque_search, HashMap},
     Error, Result,
 };
 
@@ -63,6 +63,55 @@ pub struct MemTable {
 }
 
 impl MemTable {
+    fn cache_distance(&self) -> usize {
+        if self.entries_cache.is_empty() {
+            return self.entries_index.len();
+        }
+        let distance = self.entries_index.len() - self.entries_cache.len();
+        assert_eq!(
+            self.entries_cache[0].index,
+            self.entries_index[distance].index
+        );
+        distance
+    }
+
+    // Remove all cached entries with index greater than or equal to the given.
+    fn cut_entries_cache(&mut self, index: u64) {
+        if self.entries_cache.is_empty() {
+            return;
+        }
+        let last_index = self.entries_cache.back().unwrap().index;
+        if index > last_index {
+            return;
+        }
+
+        let conflict = vec_deque_search(&self.entries_cache, &index, |e| e.index).unwrap_or(0);
+        let distance = self.cache_distance();
+        for offset in conflict..self.entries_cache.len() {
+            self.cache_size -= self.entries_index[distance + offset].len;
+        }
+
+        self.entries_cache.truncate(conflict);
+    }
+
+    // Remove all entry indexes with index greater than or equal to the given.
+    fn cut_entries_index(&mut self, index: u64) {
+        if self.entries_index.is_empty() {
+            return;
+        }
+        let last_index = self.entries_index.back().unwrap().index;
+        if index > last_index {
+            return;
+        }
+        assert!(self.entries_index[0].index <= index);
+
+        let conflict = vec_deque_search(&self.entries_index, &index, |e| e.index).unwrap();
+        for offset in conflict..self.entries_index.len() {
+            self.total_size -= self.entries_index[offset].len;
+        }
+        self.entries_index.truncate(conflict);
+    }
+
     pub fn new(region_id: u64, cache_limit: u64) -> MemTable {
         MemTable {
             region_id,
@@ -76,67 +125,14 @@ impl MemTable {
     }
 
     pub fn append(&mut self, entries: Vec<Entry>, entries_index: Vec<EntryIndex>) {
+        assert_eq!(entries.len(), entries_index.len());
         if entries.is_empty() {
             return;
         }
-        if entries.len() != entries_index.len() {
-            panic!(
-                "entries len {} not equal to entries_index len {}",
-                entries.len(),
-                entries_index.len()
-            );
-        }
 
-        // `entries_cache` contains the latest N entries, and at lease has one entry
-        // when `entries_index` is not empty.
-        if let Some(cache_last_index) = self.entries_cache.back().map(|e| e.get_index()) {
-            let first_index_to_add = entries[0].get_index();
-
-            // Unlikely to happen
-            if cache_last_index >= first_index_to_add {
-                if first_index_to_add <= self.entries_cache.front().unwrap().get_index() {
-                    // clear all cache
-                    self.entries_cache.clear();
-                    self.cache_size = 0;
-
-                    let first_index = self.entries_index.front().unwrap().index;
-                    if first_index >= first_index_to_add {
-                        // clear all indices
-                        self.entries_index.clear();
-                        self.total_size = 0;
-                    } else {
-                        // truncate tail indices
-                        let left = (first_index_to_add - first_index) as usize;
-                        let delta_size = self
-                            .entries_index
-                            .drain(left..)
-                            .fold(0, |acc, i| acc + i.len);
-                        assert!(self.total_size >= delta_size);
-                        self.total_size -= delta_size;
-                    }
-                } else {
-                    let truncate_count = (cache_last_index - first_index_to_add + 1) as usize;
-
-                    // truncate tail entries from cache
-                    let cache_left = self.entries_cache.len() - truncate_count;
-                    self.entries_cache.truncate(cache_left);
-
-                    // truncate tail entries from indices
-                    let index_left = self.entries_index.len() - truncate_count;
-                    let delta_size = self
-                        .entries_index
-                        .drain(index_left..)
-                        .fold(0, |acc, i| acc + i.len);
-                    self.cache_size -= delta_size;
-                    self.total_size -= delta_size;
-                }
-            } else if cache_last_index + 1 < first_index_to_add {
-                panic!(
-                    "entry cache of region {} contains unexpected hole: {} < {}",
-                    self.region_id, cache_last_index, first_index_to_add
-                );
-            }
-        }
+        let first_index_to_add = entries[0].index;
+        self.cut_entries_cache(first_index_to_add);
+        self.cut_entries_index(first_index_to_add);
 
         let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len);
         self.entries_cache.extend(entries);
@@ -146,9 +142,8 @@ impl MemTable {
 
         // Evict front entries from cache when reaching cache size limitation.
         while self.cache_size > self.cache_limit && self.entries_cache.len() > 1 {
-            let distance = self.entries_index.len() - self.entries_cache.len();
-            let entry = self.entries_cache.pop_front().unwrap();
-            assert_eq!(entry.get_index(), self.entries_index[distance].index);
+            let distance = self.cache_distance();
+            self.entries_cache.pop_front();
             self.cache_size -= self.entries_index[distance].len;
         }
     }
@@ -168,50 +163,37 @@ impl MemTable {
     // `idx` can't be greater than `last_idx + 1`.
     // Returns deleted entries count.
     pub fn compact_to(&mut self, idx: u64) -> u64 {
-        if let Some(first_index) = self.entries_index.front().map(|i| i.index) {
-            if first_index >= idx {
-                return 0;
-            }
+        let first_index = match self.entries_index.front() {
+            Some(e) if e.index < idx => e.index,
+            _ => return 0,
+        };
 
-            let last_index = self.entries_index.back().unwrap().index;
-            if idx > last_index + 1 {
-                panic!(
-                    "compact to index {} is larger than last index {}",
-                    idx, last_index
-                );
-            }
+        let last_index = self.entries_index.back().unwrap().index;
+        assert!(idx <= last_index + 1);
 
-            // Compact entries index.
-            let compact_size = self
-                .entries_index
-                .drain(..(idx - first_index) as usize)
-                .fold(0, |acc, i| acc + i.len);
-            self.total_size -= compact_size;
-            if self.entries_index.len() < SHRINK_CACHE_CAPACITY
-                && self.entries_index.capacity() > SHRINK_CACHE_CAPACITY
+        // Compact entries index.
+        let compact_size = self
+            .entries_index
+            .drain(..(idx - first_index) as usize)
+            .fold(0, |acc, i| acc + i.len);
+        self.total_size -= compact_size;
+
+        // Compact cache when needed. When entries_index is not empty, there are
+        // at lease one entry in cache.
+        let cache_first_index = self.entries_cache.front().unwrap().get_index();
+        if idx > cache_first_index {
+            self.entries_cache
+                .drain(..(idx - cache_first_index) as usize);
+            // All entries are in cache.
+            self.cache_size = self.total_size;
+
+            if self.entries_cache.len() < SHRINK_CACHE_CAPACITY
+                && self.entries_cache.capacity() > SHRINK_CACHE_CAPACITY
             {
-                self.entries_index.shrink_to_fit();
+                self.entries_cache.shrink_to_fit();
             }
-
-            // Compact cache when needed. When entries_index is not empty, there are
-            // at lease one entry in cache.
-            let cache_first_index = self.entries_cache.front().unwrap().get_index();
-            if idx > cache_first_index {
-                self.entries_cache
-                    .drain(..(idx - cache_first_index) as usize);
-                // All entries are in cache.
-                self.cache_size = self.total_size;
-
-                if self.entries_cache.len() < SHRINK_CACHE_CAPACITY
-                    && self.entries_cache.capacity() > SHRINK_CACHE_CAPACITY
-                {
-                    self.entries_cache.shrink_to_fit();
-                }
-            }
-
-            return idx - first_index;
         }
-        0
+        idx - first_index
     }
 
     // If entry exist in cache, return (Entry, None).
@@ -315,23 +297,10 @@ impl MemTable {
             return;
         }
 
-        // Fetch all entries in cache
-        let (first, second) = slices_in_range(&self.entries_cache, 0, self.entries_cache.len());
-        vec.extend_from_slice(first);
-        vec.extend_from_slice(second);
-
-        // Fetch remain entries index
-        let first_index = self.entries_index.front().unwrap().index;
-        let cache_first_index = self.entries_cache.front().unwrap().get_index();
-        if first_index < cache_first_index {
-            let (first, second) = slices_in_range(
-                &self.entries_index,
-                0,
-                (cache_first_index - first_index) as usize,
-            );
-            vec_idx.extend_from_slice(first);
-            vec_idx.extend_from_slice(second);
-        }
+        let begin = self.entries_index.front().unwrap().index;
+        let end = self.entries_index.back().unwrap().index + 1;
+        self.fetch_entries_to(begin, end, None, vec, vec_idx)
+            .unwrap();
     }
 
     pub fn fetch_all_kvs(&self, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {

@@ -554,32 +554,6 @@ impl FileEngineInner {
         Ok(e)
     }
 
-    #[allow(dead_code)]
-    pub fn fetch_all_entries_for_region(&self, region_id: u64) -> Result<Vec<Entry>> {
-        let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-            .read()
-            .unwrap();
-        if let Some(memtable) = memtables.get(&region_id) {
-            let mut entries = vec![];
-            let mut entries_idx = vec![];
-            memtable.fetch_all(&mut entries, &mut entries_idx);
-            if !entries_idx.is_empty() {
-                let mut vec = Vec::with_capacity(entries.len() + entries_idx.len());
-                for idx in &entries_idx {
-                    let e =
-                        self.read_entry_from_file(idx.file_num, idx.offset, idx.len, idx.index)?;
-                    vec.push(e);
-                }
-                vec.extend(entries.into_iter());
-                Ok(vec)
-            } else {
-                Ok(entries)
-            }
-        } else {
-            Ok(vec![])
-        }
-    }
-
     pub fn fetch_entries_to(
         &self,
         region_id: u64,
@@ -728,16 +702,21 @@ impl RaftEngine for FileEngine {
         self.inner.write(batch, false)
     }
 
-    fn remove(&self, _: u64, _: u64, _: u64) -> Result<()> {
-        Ok(())
+    fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()> {
+        self.inner.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
     }
 
     fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> Result<usize> {
-        Ok(self.inner.compact_to(raft_group_id, to) as usize)
+        let entries = self.inner.compact_to(raft_group_id, to) as usize;
+        Ok(entries)
     }
 
-    fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()> {
-        self.inner.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
+    fn has_builtin_entry_cache(&self) -> bool {
+        true
+    }
+
+    fn gc_entry_cache(&self, _raft_group_id: u64, _to: u64) {
+        // It's handled internally.
     }
 
     fn flush_stats(&self) -> CacheStats {
