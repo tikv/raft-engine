@@ -64,15 +64,18 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
         to: &mut Vec<Entry>,
     ) -> Result<usize>;
 
-    /// Consume the write batch by moving the content into the engine itself.
-    fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<()>;
+    /// Consume the write batch by moving the content into the engine itself
+    /// and return written bytes.
+    fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<usize>;
+
+    /// Like `consume` but shrink `batch` if need.
     fn consume_and_shrink(
         &self,
         batch: &mut Self::LogBatch,
         sync: bool,
         max_capacity: usize,
         shrink_to: usize,
-    ) -> Result<()>;
+    ) -> Result<usize>;
 
     fn clean(
         &self,
@@ -81,10 +84,15 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
         batch: &mut Self::LogBatch,
     ) -> Result<()>;
 
+    /// Append some log entries and retrun written bytes.
+    ///
     /// Note: `RaftLocalState` won't be updated in this call.
-    fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()>;
+    fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize>;
 
-    fn append_slice(&self, raft_group_id: u64, entries: &[Entry]) -> Result<()> {
+    /// Append some log entries and retrun written bytes.
+    ///
+    /// Note: `RaftLocalState` won't be updated in this call.
+    fn append_slice(&self, raft_group_id: u64, entries: &[Entry]) -> Result<usize> {
         self.append(raft_group_id, entries.to_vec())
     }
 
@@ -110,6 +118,7 @@ pub trait RaftLogBatch: Send {
     /// Note: `RaftLocalState` won't be updated in this call.
     fn append(&mut self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()>;
 
+    /// Note: `RaftLocalState` won't be updated in this call.
     fn append_slice(&mut self, raft_group_id: u64, entries: &[Entry]) -> Result<()> {
         self.append(raft_group_id, entries.to_vec())
     }

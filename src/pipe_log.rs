@@ -238,8 +238,6 @@ impl PipeLog {
     }
 
     fn append(&self, content: &[u8], sync: bool) -> Result<(u64, u64)> {
-        APPEND_LOG_SIZE_HISTOGRAM.observe(content.len() as f64);
-
         let (active_log_fd, mut active_log_size, last_sync_size, file_num, offset) = {
             let manager = self.log_manager.read().unwrap();
             (
@@ -375,9 +373,15 @@ impl PipeLog {
             .unwrap_or_else(|e| panic!("Write header failed, error {:?}", e));
     }
 
-    pub fn append_log_batch(&self, batch: &LogBatch, sync: bool) -> Result<u64> {
+    pub fn append_log_batch(
+        &self,
+        batch: &LogBatch,
+        sync: bool,
+        file_num: &mut u64,
+    ) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
-            let (file_num, offset) = {
+            let bytes = content.len();
+            let (cur_file_num, offset) = {
                 let _write_lock = self.write_lock.lock().unwrap();
                 self.append(&content, sync)?
             };
@@ -387,14 +391,14 @@ impl PipeLog {
                         .entries
                         .as_mut()
                         .unwrap()
-                        .update_offset_when_needed(file_num, offset),
+                        .update_offset_when_needed(cur_file_num, offset),
                     LogItemType::KV | LogItemType::CMD => {}
                 }
             }
-            Ok(file_num)
-        } else {
-            Ok(0)
+            *file_num = cur_file_num;
+            return Ok(bytes);
         }
+        Ok(0)
     }
 
     pub fn purge_to(&self, file_num: u64) -> Result<()> {
