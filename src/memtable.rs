@@ -3,6 +3,7 @@ use std::{cmp, u64};
 
 use raft::{eraftpb::Entry, StorageError};
 
+use crate::log_batch::CompressionType;
 use crate::{
     util::{slices_in_range, vec_deque_search, HashMap},
     Error, Result,
@@ -10,23 +11,31 @@ use crate::{
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EntryIndex {
     pub index: u64,
 
-    // Entry physical position in file.
+    // Log batch physical position in file.
     pub file_num: u64,
+    pub base_offset: u64,
+    pub compression_type: CompressionType,
+    pub batch_len: u64,
+
+    // Entry position in log batch.
     pub offset: u64,
     pub len: u64,
 }
 
-impl EntryIndex {
-    pub fn new(index: u64, file_num: u64, offset: u64, len: u64) -> EntryIndex {
+impl Default for EntryIndex {
+    fn default() -> EntryIndex {
         EntryIndex {
-            index,
-            file_num,
-            offset,
-            len,
+            index: 0,
+            file_num: 0,
+            base_offset: 0,
+            compression_type: CompressionType::None,
+            batch_len: 0,
+            offset: 0,
+            len: 0,
         }
     }
 }
@@ -141,6 +150,7 @@ impl MemTable {
         self.total_size += delta_size;
 
         // Evict front entries from cache when reaching cache size limitation.
+        // TODO: change entry cache to global.
         while self.cache_size > self.cache_limit && self.entries_cache.len() > 1 {
             let distance = self.cache_distance();
             self.entries_cache.pop_front();

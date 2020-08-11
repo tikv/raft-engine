@@ -10,11 +10,13 @@ use raft::eraftpb::Entry;
 use crate::util::{duration_to_sec, HashMap, HashSet, RAFT_LOG_STATE_KEY};
 
 use crate::config::Config;
-use crate::log_batch::{Command, LogBatch, LogItemType, OpType};
-use crate::memtable::MemTable;
+use crate::log_batch::{
+    self, Command, CompressionType, LogBatch, LogItemType, OpType, CHECKSUM_LEN, HEADER_LEN,
+};
+use crate::memtable::{EntryIndex, MemTable};
 use crate::metrics::*;
 use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
-use crate::{CacheStats, RaftEngine, RaftLocalState, Result};
+use crate::{codec, CacheStats, RaftEngine, RaftLocalState, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -81,7 +83,6 @@ impl FileEngineInner {
 
             // Verify file header
             let mut buf = content.as_slice();
-            let start_ptr: *const u8 = buf.as_ptr();
             if buf.len() < FILE_MAGIC_HEADER.len() || !buf.starts_with(FILE_MAGIC_HEADER) {
                 if current_read_file != active_file_num {
                     panic!("Raft log file {} is corrupted.", current_read_file);
@@ -90,12 +91,13 @@ impl FileEngineInner {
                     break;
                 }
             }
-            buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
 
             // Iterate all LogBatch in one file
+            let start_ptr = buf.as_ptr();
+            buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
             let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
             loop {
-                match unsafe { LogBatch::from_bytes(&mut buf, current_read_file, start_ptr) } {
+                match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
                     Ok(Some(log_batch)) => {
                         self.apply_to_memtable(log_batch, current_read_file);
                         offset = unsafe { buf.as_ptr().offset_from(start_ptr) as u64 };
@@ -110,24 +112,24 @@ impl FileEngineInner {
                             match recovery_mode {
                                 RecoveryMode::TolerateCorruptedTailRecords => {
                                     warn!(
-                                    "Encounter err {:?}, incomplete batch in last log file {}, \
-                                     offset {}, truncate it in TolerateCorruptedTailRecords \
-                                     recovery mode.",
-                                    e,
-                                    current_read_file,
-                                    offset
+                                        "Encounter err {:?}, incomplete batch in last log file {}, \
+                                         offset {}, truncate it in TolerateCorruptedTailRecords \
+                                         recovery mode.",
+                                        e,
+                                        current_read_file,
+                                        offset
                                     );
                                     self.pipe_log.truncate_active_log(offset as usize).unwrap();
                                     break;
                                 }
                                 RecoveryMode::AbsoluteConsistency => {
                                     panic!(
-                                    "Encounter err {:?}, incomplete batch in last log file {}, \
-                                     offset {}, panic in AbsoluteConsistency recovery mode.",
-                                    e,
-                                    current_read_file,
-                                    offset
-                                );
+                                        "Encounter err {:?}, incomplete batch in last log file {}, \
+                                         offset {}, panic in AbsoluteConsistency recovery mode.",
+                                        e,
+                                        current_read_file,
+                                        offset
+                                    );
                                 }
                             }
                         } else {
@@ -257,15 +259,13 @@ impl FileEngineInner {
                     memtable.fetch_all(&mut ents, &mut ents_idx);
                     let mut all_ents = Vec::with_capacity(memtable.entries_count());
                     for i in ents_idx {
-                        let e = self
-                            .read_entry_from_file(i.file_num, i.offset, i.len, i.index)
-                            .unwrap_or_else(|e| {
-                                panic!(
-                                    "Read entry from file {} at offset {} failed \
+                        let e = self.read_entry_from_file(&i).unwrap_or_else(|e| {
+                            panic!(
+                                "Read entry from file {} at offset {} failed \
                                      when rewriting, err {:?}",
-                                    i.file_num, i.offset, e
-                                )
-                            });
+                                i.file_num, i.offset, e
+                            )
+                        });
                         all_ents.push(e);
                     }
                     all_ents.extend(ents.into_iter());
@@ -509,48 +509,45 @@ impl FileEngineInner {
         };
 
         // Read from file
-        let entry = self
-            .read_entry_from_file(
-                entry_idx.file_num,
-                entry_idx.offset,
-                entry_idx.len,
-                entry_idx.index,
+        let entry = self.read_entry_from_file(&entry_idx).unwrap_or_else(|e| {
+            panic!(
+                "Read entry from file for region {} index {} failed, err {:?}",
+                region_id, log_idx, e
             )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Read entry from file for region {} index {} failed, err {:?}",
-                    region_id, log_idx, e
-                )
-            });
+        });
         Ok(Some(entry))
     }
 
-    fn read_entry_from_file(
-        &self,
-        file_num: u64,
-        offset: u64,
-        len: u64,
-        expect_idx: u64,
-    ) -> Result<Entry> {
-        let content = {
-            self.pipe_log
-                .fread(file_num, offset, len)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "Read from file {} in offset {} failed, err {:?}",
-                        file_num, offset, e
-                    )
-                })
+    fn read_entry_from_file(&self, entry_index: &EntryIndex) -> Result<Entry> {
+        let file_num = entry_index.file_num;
+        let base_offset = entry_index.base_offset;
+        let batch_len = entry_index.batch_len;
+        let offset = entry_index.offset;
+        let len = entry_index.len;
+
+        let entry_content = match entry_index.compression_type {
+            CompressionType::None => {
+                let offset = base_offset + offset;
+                self.pipe_log.fread(file_num, offset, len)?
+            }
+            CompressionType::Lz4 => {
+                let read_len = batch_len + 8; // 8 bytes for header.
+                let compressed = self.pipe_log.fread(file_num, base_offset, read_len)?;
+                let mut reader = compressed.as_ref();
+                let header = codec::decode_u64(&mut reader)?;
+                assert_eq!(header >> 8, batch_len);
+
+                log_batch::test_batch_checksum(reader)?;
+                let buf = log_batch::decompress(&reader[..batch_len as usize - CHECKSUM_LEN]);
+                let start = offset as usize - HEADER_LEN;
+                let end = (offset + len) as usize - HEADER_LEN;
+                buf[start..end].to_vec()
+            }
         };
+
         let mut e = Entry::new();
-        e.merge_from_bytes(content.as_slice())?;
-        if e.get_index() != expect_idx {
-            panic!(
-                "Except entry's index is {}, but got {}",
-                expect_idx,
-                e.get_index()
-            );
-        }
+        e.merge_from_bytes(&entry_content)?;
+        assert_eq!(e.get_index(), entry_index.index);
         Ok(e)
     }
 
@@ -574,7 +571,7 @@ impl FileEngineInner {
                 READ_ENTRY_FROM_PIPE_FILE.inc_by(entries_idx.len() as f64);
             }
             for idx in &entries_idx {
-                let e = self.read_entry_from_file(idx.file_num, idx.offset, idx.len, idx.index)?;
+                let e = self.read_entry_from_file(idx)?;
                 vec.push(e);
             }
             vec.extend(entries.into_iter());
@@ -724,6 +721,58 @@ impl RaftEngine for FileEngine {
             hit: self.cache_stats.hit.swap(0, Ordering::SeqCst),
             miss: self.cache_stats.miss.swap(0, Ordering::SeqCst),
             mem_size_change: self.cache_stats.mem_size_change.swap(0, Ordering::SeqCst),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_entry_from_file() {
+        let normal_batch_size = 10;
+        let compressed_batch_size = 5120;
+        for &entry_size in &[normal_batch_size, compressed_batch_size] {
+            let dir = tempfile::Builder::new()
+                .prefix("test_engine")
+                .tempdir()
+                .unwrap();
+
+            let mut cfg = Config::default();
+            cfg.dir = dir.path().to_str().unwrap().to_owned();
+
+            let engine = FileEngine::new(cfg.clone());
+            let mut entry = Entry::new();
+            entry.set_data(vec![b'x'; entry_size]);
+            for i in 10..20 {
+                entry.set_index(i);
+                engine.append(i, vec![entry.clone()]).unwrap();
+                entry.set_index(i + 1);
+                engine.append(i, vec![entry.clone()]).unwrap();
+            }
+
+            for i in 10..20 {
+                // Test get_entry from cache.
+                entry.set_index(i + 1);
+                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
+
+                // Test get_entry from file.
+                entry.set_index(i);
+                assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+            }
+
+            drop(engine);
+
+            // Recover the engine.
+            let engine = FileEngine::new(cfg.clone());
+            for i in 10..20 {
+                entry.set_index(i + 1);
+                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
+
+                entry.set_index(i);
+                assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+            }
         }
     }
 }
