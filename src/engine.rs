@@ -46,6 +46,8 @@ struct FileEngineInner {
 
     // Persistent entries.
     pipe_log: PipeLog,
+
+    cache_stats: Arc<SharedCacheStats>,
 }
 
 impl FileEngineInner {
@@ -173,9 +175,11 @@ impl FileEngineInner {
                     let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
                         .write()
                         .unwrap();
-                    let memtable = memtables
-                        .entry(region_id)
-                        .or_insert_with(|| MemTable::new(region_id, self.cfg.region_size.0 / 2));
+                    let memtable = memtables.entry(region_id).or_insert_with(|| {
+                        let cache_limit = self.cfg.region_size.0 / 2;
+                        let cache_stats = self.cache_stats.clone();
+                        MemTable::new(region_id, cache_limit, cache_stats)
+                    });
                     memtable.append(
                         entries_to_add.entries,
                         entries_to_add.entries_index.into_inner(),
@@ -197,9 +201,11 @@ impl FileEngineInner {
                     let mut memtables = self.memtables[kv.region_id as usize % SLOTS_COUNT]
                         .write()
                         .unwrap();
-                    let memtable = memtables
-                        .entry(kv.region_id)
-                        .or_insert_with(|| MemTable::new(kv.region_id, self.cfg.region_size.0 / 2));
+                    let memtable = memtables.entry(kv.region_id).or_insert_with(|| {
+                        let cache_limit = self.cfg.region_size.0 / 2;
+                        let stats = self.cache_stats.clone();
+                        MemTable::new(kv.region_id, cache_limit, stats)
+                    });
                     match kv.op_type {
                         OpType::Put => {
                             memtable.put(kv.key, kv.value.unwrap(), file_num);
@@ -507,9 +513,9 @@ impl FileEngineInner {
                 .unwrap();
             if let Some(memtable) = memtables.get(&region_id) {
                 match memtable.get_entry(log_idx) {
-                    Some((Some(entry), _)) => return Ok(Some(entry)),
-                    Some((None, Some(idx))) => idx,
-                    Some((None, None)) | None => return Ok(None),
+                    (Some(entry), _) => return Ok(Some(entry)),
+                    (None, Some(idx)) => idx,
+                    (None, None) => return Ok(None),
                 }
             } else {
                 return Ok(None);
@@ -598,16 +604,44 @@ impl FileEngineInner {
 }
 
 #[derive(Default)]
-struct SharedCacheStats {
+pub struct SharedCacheStats {
     hit: AtomicUsize,
     miss: AtomicUsize,
     mem_size_change: AtomicIsize,
 }
 
+impl SharedCacheStats {
+    pub fn sub_mem_change(&self, bytes: u64) {
+        self.mem_size_change
+            .fetch_sub(bytes as isize, Ordering::Relaxed);
+    }
+    pub fn add_mem_change(&self, bytes: u64) {
+        self.mem_size_change
+            .fetch_add(bytes as isize, Ordering::Relaxed);
+    }
+    pub fn hit_cache(&self, count: usize) {
+        self.hit.fetch_add(count, Ordering::Relaxed);
+    }
+    pub fn miss_cache(&self, count: usize) {
+        self.miss.fetch_add(count, Ordering::Relaxed);
+    }
+    pub fn hit_times(&self) -> usize {
+        self.hit.load(Ordering::Relaxed)
+    }
+    pub fn miss_times(&self) -> usize {
+        self.miss.load(Ordering::Relaxed)
+    }
+    #[cfg(test)]
+    pub fn reset(&self) {
+        self.hit.store(0, Ordering::Relaxed);
+        self.miss.store(0, Ordering::Relaxed);
+        self.mem_size_change.store(0, Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone)]
 pub struct FileEngine {
     inner: Arc<FileEngineInner>,
-    cache_stats: Arc<SharedCacheStats>,
 }
 
 impl fmt::Debug for FileEngine {
@@ -634,6 +668,7 @@ impl FileEngine {
             cfg,
             memtables,
             pipe_log,
+            cache_stats,
         };
         let recovery_mode = RecoveryMode::from(engine.cfg.recovery_mode);
         engine
@@ -642,7 +677,6 @@ impl FileEngine {
 
         FileEngine {
             inner: Arc::new(engine),
-            cache_stats,
         }
     }
 }
@@ -725,10 +759,11 @@ impl RaftEngine for FileEngine {
     }
 
     fn flush_stats(&self) -> CacheStats {
+        let inner = &self.inner;
         CacheStats {
-            hit: self.cache_stats.hit.swap(0, Ordering::SeqCst),
-            miss: self.cache_stats.miss.swap(0, Ordering::SeqCst),
-            mem_size_change: self.cache_stats.mem_size_change.swap(0, Ordering::SeqCst),
+            hit: inner.cache_stats.hit.swap(0, Ordering::SeqCst),
+            miss: inner.cache_stats.miss.swap(0, Ordering::SeqCst),
+            mem_size_change: inner.cache_stats.mem_size_change.swap(0, Ordering::SeqCst),
         }
     }
 }

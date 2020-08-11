@@ -1,8 +1,10 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::{cmp, u64};
 
 use raft::{eraftpb::Entry, StorageError};
 
+use crate::engine::SharedCacheStats;
 use crate::log_batch::CompressionType;
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, Result};
@@ -57,16 +59,18 @@ pub struct MemTable {
 
     // latest N entries
     entries_cache: VecDeque<Entry>,
-    cache_size: u64,
-    cache_limit: u64,
 
     // All entries index
     entries_index: VecDeque<EntryIndex>,
-    total_size: u64,
 
     // Region scope key/value pairs
     // key -> (value, file_num)
     kvs: HashMap<Vec<u8>, (Vec<u8>, u64)>,
+
+    total_size: u64,
+    cache_size: u64,
+    cache_limit: u64,
+    cache_stats: Arc<SharedCacheStats>,
 }
 
 impl MemTable {
@@ -75,10 +79,9 @@ impl MemTable {
             return self.entries_index.len();
         }
         let distance = self.entries_index.len() - self.entries_cache.len();
-        assert_eq!(
-            self.entries_cache[0].index,
-            self.entries_index[distance].index
-        );
+        let cache_first = self.entries_cache[0].index;
+        let index_first = self.entries_index[distance].index;
+        assert_eq!(cache_first, index_first);
         distance
     }
 
@@ -102,7 +105,9 @@ impl MemTable {
 
         let distance = self.cache_distance();
         for offset in conflict..self.entries_cache.len() {
-            self.cache_size -= self.entries_index[distance + offset].len;
+            let delta = self.entries_index[distance + offset].len;
+            self.cache_size -= delta;
+            self.cache_stats.sub_mem_change(delta);
         }
 
         self.entries_cache.truncate(conflict);
@@ -128,15 +133,17 @@ impl MemTable {
         self.entries_index.truncate(conflict);
     }
 
-    pub fn new(region_id: u64, cache_limit: u64) -> MemTable {
+    pub fn new(region_id: u64, cache_limit: u64, cache_stats: Arc<SharedCacheStats>) -> MemTable {
         MemTable {
             region_id,
             entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
+            entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
+            kvs: HashMap::default(),
+
+            total_size: 0,
             cache_size: 0,
             cache_limit,
-            entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
-            total_size: 0,
-            kvs: HashMap::default(),
+            cache_stats: cache_stats,
         }
     }
 
@@ -151,17 +158,21 @@ impl MemTable {
         self.cut_entries_index(first_index_to_add);
 
         let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len);
-        self.entries_cache.extend(entries);
         self.entries_index.extend(entries_index);
-        self.cache_size += delta_size;
         self.total_size += delta_size;
+        if self.cache_limit > 0 {
+            self.entries_cache.extend(entries);
+            self.cache_size += delta_size;
+            self.cache_stats.add_mem_change(delta_size);
+        }
 
         // Evict front entries from cache when reaching cache size limitation.
-        // TODO: change entry cache to global.
-        while self.cache_size > self.cache_limit && self.entries_cache.len() > 1 {
+        while self.cache_size > self.cache_limit && !self.entries_cache.is_empty() {
             let distance = self.cache_distance();
-            self.entries_cache.pop_front();
-            self.cache_size -= self.entries_index[distance].len;
+            self.entries_cache.pop_front().unwrap();
+            let delta = self.entries_index[distance].len;
+            self.cache_size -= delta;
+            self.cache_stats.sub_mem_change(delta);
         }
     }
 
@@ -177,92 +188,75 @@ impl MemTable {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
-    // `idx` can't be greater than `last_idx + 1`.
-    // Returns deleted entries count.
+    /// # Panics
+    ///
+    /// This method will panic if `idx` is greater than `last_idx + 1`.
     pub fn compact_to(&mut self, idx: u64) -> u64 {
-        let first_index = match self.entries_index.front() {
+        self.compact_cache_to(idx);
+
+        let first_idx = match self.entries_index.front() {
             Some(e) if e.index < idx => e.index,
             _ => return 0,
         };
+        let last_idx = self.entries_index.back().unwrap().index;
+        assert!(idx <= last_idx + 1);
 
-        let last_index = self.entries_index.back().unwrap().index;
-        assert!(idx <= last_index + 1);
-
-        // Compact entries index.
-        let compact_size = self
-            .entries_index
-            .drain(..(idx - first_index) as usize)
-            .fold(0, |acc, i| acc + i.len);
-        self.total_size -= compact_size;
-
-        // Compact cache when needed. When entries_index is not empty, there are
-        // at lease one entry in cache.
-        let cache_first_index = self.entries_cache.front().unwrap().get_index();
-        if idx > cache_first_index {
-            self.entries_cache
-                .drain(..(idx - cache_first_index) as usize);
-            // All entries are in cache.
-            self.cache_size = self.total_size;
-
-            if self.entries_cache.len() < SHRINK_CACHE_CAPACITY
-                && self.entries_cache.capacity() > SHRINK_CACHE_CAPACITY
-            {
-                self.entries_cache.shrink_to_fit();
-            }
+        let drain_end = (idx - first_idx) as usize;
+        for e in self.entries_index.drain(..drain_end) {
+            self.total_size -= e.len;
         }
-        idx - first_index
+
+        drain_end as u64
     }
 
+    /// # Panics
+    ///
+    /// This method will panic if `idx` is greater than `last_idx + 1`.
     pub fn compact_cache_to(&mut self, idx: u64) {
-        if let Some(e) = self.entries_index.back() {
-            assert!(e.index + 1 >= idx);
-        }
         let first_idx = match self.entries_cache.front() {
             Some(e) if e.index < idx => e.index,
             _ => return,
         };
+        let last_index = self.entries_index.back().unwrap().index;
+        assert!(idx <= last_index + 1);
 
         let distance = self.cache_distance();
         let drain_end = (idx - first_idx) as usize;
         self.entries_cache.drain(0..drain_end);
 
         for i in 0..drain_end {
-            self.cache_size -= self.entries_index[distance + i].len;
+            let delta = self.entries_index[distance + i].len;
+            self.cache_size -= delta;
+            self.cache_stats.sub_mem_change(delta);
         }
     }
 
     // If entry exist in cache, return (Entry, None).
     // If entry exist but not in cache, return (None, EntryIndex).
     // If entry not exist, return (None, None).
-    pub fn get_entry(&self, index: u64) -> Option<(Option<Entry>, Option<EntryIndex>)> {
-        // Empty.
+    pub fn get_entry(&self, index: u64) -> (Option<Entry>, Option<EntryIndex>) {
         if self.entries_index.is_empty() {
-            return None;
+            return (None, None);
         }
 
-        // Out of range.
         let first_index = self.entries_index.front().unwrap().index;
         let last_index = self.entries_index.back().unwrap().index;
         if index < first_index || index > last_index {
-            return None;
+            return (None, None);
         }
 
-        // Not in cache.
         let ioffset = (index - first_index) as usize;
-        if self.entries_cache.is_empty() {
-            // Todo: actually, shouldn't be empty when entries_index is not empty.
-            return Some((None, Some(self.entries_index[ioffset].clone())));
+        let cache_distance = self.cache_distance();
+        if ioffset < cache_distance {
+            self.cache_stats.miss_cache(1);
+            let entry_index = self.entries_index[ioffset].clone();
+            (None, Some(entry_index))
+        } else {
+            self.cache_stats.hit_cache(1);
+            let coffset = ioffset - cache_distance;
+            let entry = self.entries_cache[coffset].clone();
+            (Some(entry), None)
         }
-
-        // Not in ache.
-        let cache_first_index = self.entries_cache.front().unwrap().get_index();
-        if index < cache_first_index {
-            return Some((None, Some(self.entries_index[ioffset].clone())));
-        }
-
-        // Found in cache
-        let eoffset = (index - cache_first_index) as usize;
-        Some((Some(self.entries_cache[eoffset].clone()), None))
     }
 
     pub(crate) fn fetch_entries_to(
@@ -274,6 +268,7 @@ impl MemTable {
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         assert!(end > begin, "fetch_entries_to({}, {})", begin, end);
+        let (vec_len, vec_idx_len) = (vec.len(), vec_idx.len());
 
         if self.entries_index.is_empty() {
             return Err(Error::Storage(StorageError::Unavailable));
@@ -324,6 +319,8 @@ impl MemTable {
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
         }
+        self.cache_stats.hit_cache(vec.len() - vec_len);
+        self.cache_stats.miss_cache(vec_idx.len() - vec_idx_len);
         Ok(())
     }
 
@@ -384,39 +381,19 @@ impl MemTable {
 
     // Evict entries before `boundary_file_num` from cache.
     pub fn evict_old_from_cache(&mut self, boundary_file_num: u64) {
-        if self.entries_index.is_empty() {
+        if self.entries_cache.is_empty() {
             return;
         }
 
-        // No cached entries behind `boundary_file_num`, this is the mostly case.
-        let first_file_num = self.entries_index.front().unwrap().file_num;
-        if first_file_num >= boundary_file_num {
-            return;
-        }
-
-        let first_index = self.entries_index.front().unwrap().index;
-        let cache_first_index = self.entries_cache.front().unwrap().get_index();
-        let mut cache_offset = (cache_first_index - first_index) as usize;
-
-        // At lease keep one entry in cache
-        while self.entries_cache.len() > 1 {
-            let idx = &self.entries_index[cache_offset];
-            if idx.file_num >= boundary_file_num {
-                break;
+        for i in self.cache_distance()..self.entries_index.len() {
+            if self.entries_index[i].file_num >= boundary_file_num {
+                let index = self.entries_index[i].index;
+                self.compact_cache_to(index);
+                return;
             }
-
-            let e = self.entries_cache.pop_front().unwrap();
-            if e.get_index() != idx.index {
-                panic!(
-                    "Unexpected entry index {} from cache, expect {} from index",
-                    e.get_index(),
-                    idx.index
-                );
-            }
-
-            self.cache_size -= idx.len;
-            cache_offset += 1;
         }
+        let index = self.entries_index.back().unwrap().index;
+        self.compact_cache_to(index + 1);
     }
 
     pub fn region_id(&self) -> u64 {
@@ -476,7 +453,8 @@ mod tests {
     fn test_memtable_append() {
         let region_id = 8;
         let cache_limit = 15;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats);
 
         // Append entries [10, 20) file_num = 1 not over cache size limitation.
         // after appending
@@ -558,12 +536,12 @@ mod tests {
         assert_eq!(memtable.min_file_num().unwrap(), 5);
         assert_eq!(memtable.max_file_num().unwrap(), 5);
 
-        // Cache at lease one entry.
-        let mut memtable = MemTable::new(region_id, 0);
+        // Cache with size limit 0.
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, 0, stats);
         memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 1));
-        assert_eq!(memtable.cache_size(), 1);
-        assert_eq!(memtable.entries_cache.len(), 1);
-        assert_eq!(memtable.entries_cache[0].get_index(), 19);
+        assert_eq!(memtable.cache_size(), 0);
+        assert_eq!(memtable.entries_cache.len(), 0);
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.entries_index.len(), 10);
         assert_eq!(memtable.entries_index[0].index, 10);
@@ -574,7 +552,8 @@ mod tests {
     fn test_memtable_compact() {
         let region_id = 8;
         let cache_limit = 10;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats);
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -632,7 +611,8 @@ mod tests {
     fn test_memtable_compact_cache() {
         let region_id = 8;
         let cache_limit = 10;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats);
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -667,7 +647,8 @@ mod tests {
     fn test_memtable_fetch() {
         let region_id = 8;
         let cache_limit = 10;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -689,6 +670,8 @@ mod tests {
         assert_eq!(ents_idx.len(), 15);
         assert_eq!(ents_idx[0].index, 0);
         assert_eq!(ents_idx[14].index, 14);
+        assert_eq!(stats.hit_times(), 10);
+        assert_eq!(stats.miss_times(), 15);
 
         // After compact:
         // [10, 15) file_num = 2, not in cache
@@ -713,6 +696,7 @@ mod tests {
         // All needed entries are in cache.
         ents.clear();
         ents_idx.clear();
+        stats.reset();
         memtable
             .fetch_entries_to(20, 25, None, &mut ents, &mut ents_idx)
             .unwrap();
@@ -720,10 +704,12 @@ mod tests {
         assert_eq!(ents[0].get_index(), 20);
         assert_eq!(ents[4].get_index(), 24);
         assert!(ents_idx.is_empty());
+        assert_eq!(stats.hit_times(), 5);
 
         // All needed entries are not in cache.
         ents.clear();
         ents_idx.clear();
+        stats.reset();
         memtable
             .fetch_entries_to(10, 15, None, &mut ents, &mut ents_idx)
             .unwrap();
@@ -731,10 +717,12 @@ mod tests {
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
+        assert_eq!(stats.miss_times(), 5);
 
         // Some needed entries are in cache, the others are not.
         ents.clear();
         ents_idx.clear();
+        stats.reset();
         memtable
             .fetch_entries_to(10, 25, None, &mut ents, &mut ents_idx)
             .unwrap();
@@ -744,6 +732,8 @@ mod tests {
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
+        assert_eq!(stats.hit_times(), 10);
+        assert_eq!(stats.miss_times(), 5);
 
         // Max size limitation range fetching.
         // Only can fetch [10, 20) because of size limitation,
@@ -751,6 +741,7 @@ mod tests {
         ents.clear();
         ents_idx.clear();
         let max_size = Some(10);
+        stats.reset();
         memtable
             .fetch_entries_to(10, 25, max_size, &mut ents, &mut ents_idx)
             .unwrap();
@@ -760,23 +751,28 @@ mod tests {
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
+        assert_eq!(stats.hit_times(), 5);
+        assert_eq!(stats.miss_times(), 5);
 
         // Even max size limitation is 0, at least fetch one entry.
         ents.clear();
         ents_idx.clear();
+        stats.reset();
         memtable
             .fetch_entries_to(20, 25, Some(0), &mut ents, &mut ents_idx)
             .unwrap();
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].get_index(), 20);
         assert!(ents_idx.is_empty());
+        assert_eq!(stats.hit_times(), 1);
     }
 
     #[test]
     fn test_memtable_kv_operations() {
         let region_id = 8;
         let cache_limit = 1024;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats);
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
@@ -795,7 +791,8 @@ mod tests {
     fn test_memtable_evict_old_from_cache() {
         let region_id = 8;
         let cache_limit = 1024;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats);
 
         // [0, 10) file_num = 1, in cache
         // [10, 20) file_num = 2, in cache
@@ -840,13 +837,12 @@ mod tests {
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 3);
 
-        // Evict all entries before file 4, at lease left one entry in cache.
+        // Evict all entries before file 4
         memtable.evict_old_from_cache(4);
-        assert_eq!(memtable.cache_size(), 1);
+        assert_eq!(memtable.cache_size(), 0);
         assert_eq!(memtable.entries_size(), 30);
-        assert_eq!(memtable.entries_cache.len(), 1);
+        assert_eq!(memtable.entries_cache.len(), 0);
         assert_eq!(memtable.entries_index.len(), 30);
-        assert_eq!(memtable.entries_cache[0].get_index(), 29);
         assert_eq!(memtable.entries_index[0].index, 0);
         assert_eq!(memtable.entries_index[29].index, 29);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
@@ -857,7 +853,8 @@ mod tests {
     fn test_memtable_get_entry() {
         let region_id = 8;
         let cache_limit = 10;
-        let mut memtable = MemTable::new(region_id, cache_limit);
+        let stats = Arc::new(SharedCacheStats::default());
+        let mut memtable = MemTable::new(region_id, cache_limit, stats);
 
         // [5, 10) file_num = 1, not in cache
         // [10, 20) file_num = 2, in cache
@@ -865,15 +862,15 @@ mod tests {
         memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
 
         // Not in range.
-        assert_eq!(memtable.get_entry(2), None);
-        assert_eq!(memtable.get_entry(25), None);
+        assert_eq!(memtable.get_entry(2), (None, None));
+        assert_eq!(memtable.get_entry(25), (None, None));
 
         // In cache.
-        let (entry, _) = memtable.get_entry(10).unwrap();
+        let (entry, _) = memtable.get_entry(10);
         assert_eq!(entry.unwrap().get_index(), 10);
 
         // Not in cache.
-        let (_, entry_idx) = memtable.get_entry(5).unwrap();
+        let (_, entry_idx) = memtable.get_entry(5);
         assert_eq!(entry_idx.unwrap().index, 5);
     }
 
