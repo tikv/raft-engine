@@ -421,9 +421,17 @@ impl FileEngineInner {
             .write()
             .unwrap();
         if let Some(memtable) = memtables.get_mut(&region_id) {
-            memtable.compact_to(index)
-        } else {
-            0
+            return memtable.compact_to(index);
+        }
+        0
+    }
+
+    fn compact_cache_to(&self, region_id: u64, index: u64) {
+        let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
+            .write()
+            .unwrap();
+        if let Some(memtable) = memtables.get_mut(&region_id) {
+            memtable.compact_cache_to(index);
         }
     }
 
@@ -712,8 +720,8 @@ impl RaftEngine for FileEngine {
         true
     }
 
-    fn gc_entry_cache(&self, _raft_group_id: u64, _to: u64) {
-        // It's handled internally.
+    fn gc_entry_cache(&self, raft_group_id: u64, to: u64) {
+        self.inner.compact_cache_to(raft_group_id, to)
     }
 
     fn flush_stats(&self) -> CacheStats {
