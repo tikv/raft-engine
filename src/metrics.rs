@@ -47,24 +47,4 @@ lazy_static! {
         "Total number of current pipe log files."
     )
     .unwrap();
-    pub static ref READ_ENTRY_FROM_PIPE_FILE: Counter = register_counter!(
-        "tikv_raftengine_fread_counter",
-        "Total number of read from file happens"
-    )
-    .unwrap();
-    pub static ref RAFT_ENGINE_WRITE_HISTOGRAM: Histogram = register_histogram!(
-        "tikv_raftengine_write_duration_seconds",
-        "Bucketed histogram of raft engine write duration",
-        exponential_buckets(0.0005, 2.0, 20).unwrap()
-    )
-    .unwrap();
-    pub static ref APPEND_LOG_SIZE_HISTOGRAM: Histogram = register_histogram!(
-        "tikv_raftengine_append_log_size",
-        "Bucketed histogram of raft engine append log size",
-        vec![
-            128.0, 256.0, 512.0, 1024.0, 4096.0, 65536.0, 262144.0, 524288.0, 1048576.0, 2097152.0,
-            4194304.0, 8388608.0, 16777216.0
-        ]
-    )
-    .unwrap();
 }

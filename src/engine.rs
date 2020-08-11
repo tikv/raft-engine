@@ -7,7 +7,7 @@ use std::{cmp, fmt, mem, u64};
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
-use crate::util::{duration_to_sec, HashMap, HashSet, RAFT_LOG_STATE_KEY};
+use crate::util::{HashMap, HashSet, RAFT_LOG_STATE_KEY};
 
 use crate::config::Config;
 use crate::log_batch::{
@@ -286,41 +286,39 @@ impl FileEngineInner {
                     }
 
                     // Rewrite to new log file
-                    let write_res = { self.pipe_log.append_log_batch(&log_batch, false) };
+                    let mut file_num = 0;
+                    self.pipe_log
+                        .append_log_batch(&log_batch, false, &mut file_num)
+                        .unwrap();
 
-                    // Apply to memtable
-                    match write_res {
-                        // Using slef.apply_to_memtable here will cause deadlock.
-                        Ok(file_num) => {
-                            for item in log_batch.items.borrow_mut().drain(..) {
-                                match item.item_type {
-                                    LogItemType::Entries => {
-                                        let entries_to_add = item.entries.unwrap();
-                                        assert_eq!(entries_to_add.region_id, memtable.region_id());
-                                        memtable.append(
-                                            entries_to_add.entries,
-                                            entries_to_add.entries_index.into_inner(),
-                                        );
+                    // Apply to memtable.
+                    // FIXME: using slef.apply_to_memtable here will cause deadlock.
+                    for item in log_batch.items.borrow_mut().drain(..) {
+                        match item.item_type {
+                            LogItemType::Entries => {
+                                let entries_to_add = item.entries.unwrap();
+                                assert_eq!(entries_to_add.region_id, memtable.region_id());
+                                memtable.append(
+                                    entries_to_add.entries,
+                                    entries_to_add.entries_index.into_inner(),
+                                );
+                            }
+                            LogItemType::CMD => {
+                                panic!("Memtable doesn't contain command item.");
+                            }
+                            LogItemType::KV => {
+                                let kv = item.kv.unwrap();
+                                assert_eq!(kv.region_id, memtable.region_id());
+                                match kv.op_type {
+                                    OpType::Put => {
+                                        memtable.put(kv.key, kv.value.unwrap(), file_num);
                                     }
-                                    LogItemType::CMD => {
-                                        panic!("Memtable doesn't contain command item.");
-                                    }
-                                    LogItemType::KV => {
-                                        let kv = item.kv.unwrap();
-                                        assert_eq!(kv.region_id, memtable.region_id());
-                                        match kv.op_type {
-                                            OpType::Put => {
-                                                memtable.put(kv.key, kv.value.unwrap(), file_num);
-                                            }
-                                            OpType::Del => {
-                                                memtable.delete(kv.key.as_slice());
-                                            }
-                                        }
+                                    OpType::Del => {
+                                        memtable.delete(kv.key.as_slice());
                                     }
                                 }
                             }
                         }
-                        Err(e) => panic!("Rewrite inactive region entries failed. error {:?}", e),
                     }
                 }
             }
@@ -441,17 +439,13 @@ impl FileEngineInner {
         }
     }
 
-    fn write(&self, log_batch: LogBatch, sync: bool) -> Result<()> {
-        let t = Instant::now();
-        match self.pipe_log.append_log_batch(&log_batch, sync) {
-            Ok(file_num) => {
-                self.post_append_to_file(log_batch, file_num);
-                let dur = t.elapsed();
-                RAFT_ENGINE_WRITE_HISTOGRAM.observe(duration_to_sec(dur) as f64);
-                Ok(())
-            }
-            Err(e) => panic!("Append log batch to pipe log failed, error: {:?}", e),
-        }
+    fn write(&self, log_batch: LogBatch, sync: bool) -> Result<usize> {
+        let mut file_num = 0;
+        let bytes = self
+            .pipe_log
+            .append_log_batch(&log_batch, sync, &mut file_num)?;
+        self.post_append_to_file(log_batch, file_num);
+        Ok(bytes)
     }
 
     fn sync(&self) -> Result<()> {
@@ -470,17 +464,10 @@ impl FileEngineInner {
         0
     }
 
-    #[allow(dead_code)]
-    fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
-        let log_batch = LogBatch::new();
-        log_batch.put(region_id, key, value);
-        self.write(log_batch, false)
-    }
-
     fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
         let log_batch = LogBatch::new();
         log_batch.put_msg(region_id, key, m)?;
-        self.write(log_batch, false)
+        self.write(log_batch, false).map(|_| ())
     }
 
     fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -581,9 +568,6 @@ impl FileEngineInner {
             let mut entries_idx = Vec::with_capacity((end - begin) as usize);
             memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
             let count = entries.len() + entries_idx.len();
-            if !entries_idx.is_empty() {
-                READ_ENTRY_FROM_PIPE_FILE.inc_by(entries_idx.len() as f64);
-            }
             for idx in &entries_idx {
                 let e = self.read_entry_from_file(idx)?;
                 vec.push(e);
@@ -712,12 +696,8 @@ impl RaftEngine for FileEngine {
             .fetch_entries_to(raft_group_id, begin, end, max_size, to)
     }
 
-    fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<()> {
-        self.inner.write(std::mem::take(batch), false)?;
-        if sync {
-            self.inner.sync()?;
-        }
-        Ok(())
+    fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<usize> {
+        self.inner.write(std::mem::take(batch), sync)
     }
 
     fn consume_and_shrink(
@@ -726,7 +706,7 @@ impl RaftEngine for FileEngine {
         sync: bool,
         _: usize,
         _: usize,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         self.consume(batch, sync)
     }
 
@@ -735,7 +715,7 @@ impl RaftEngine for FileEngine {
         Ok(())
     }
 
-    fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()> {
+    fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
         let batch = LogBatch::default();
         batch.add_entries(raft_group_id, entries);
         self.inner.write(batch, false)
