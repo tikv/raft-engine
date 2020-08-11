@@ -1,3 +1,4 @@
+use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::io::BufRead;
 use std::{mem, u64};
@@ -13,7 +14,9 @@ use crate::memtable::EntryIndex;
 use crate::util::RAFT_LOG_STATE_KEY;
 use crate::{Error, RaftLocalState, RaftLogBatch, Result};
 
-const BATCH_MIN_SIZE: usize = 12; // 8 bytes total length + 4 checksum
+pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
+pub const HEADER_LEN: usize = 8;
+pub const CHECKSUM_LEN: usize = 4;
 
 const TYPE_ENTRIES: u8 = 0x01;
 const TYPE_COMMAND: u8 = 0x02;
@@ -23,27 +26,20 @@ const CMD_CLEAN: u8 = 0x01;
 
 const COMPRESSION_SIZE: usize = 4096;
 
-enum BatchCompressionType {
-    None,
-    Lz4,
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CompressionType {
+    None = 0,
+    Lz4 = 1,
 }
 
-impl BatchCompressionType {
-    pub fn from_byte(t: u8) -> BatchCompressionType {
-        if t == 0x0 {
-            BatchCompressionType::None
-        } else if t == 0x1 {
-            BatchCompressionType::Lz4
-        } else {
-            panic!("unknown batch compression type {}", t)
-        }
+impl CompressionType {
+    pub fn from_byte(t: u8) -> CompressionType {
+        unsafe { mem::transmute(t) }
     }
 
     pub fn to_byte(&self) -> u8 {
-        match *self {
-            BatchCompressionType::None => 0x0,
-            BatchCompressionType::Lz4 => 0x1,
-        }
+        *self as u8
     }
 }
 
@@ -108,28 +104,30 @@ impl Entries {
         }
     }
 
-    pub unsafe fn from_bytes(
+    pub fn from_bytes(
         buf: &mut SliceReader<'_>,
         file_num: u64,
-        fstart: *const u8,
+        base_offset: u64,  // Offset of the batch from its log file.
+        batch_offset: u64, // Offset of the item from in its batch.
     ) -> Result<Entries> {
+        let content_len = buf.len() as u64;
         let region_id = codec::decode_var_u64(buf)?;
         let mut count = codec::decode_var_u64(buf)? as usize;
+
         let mut entries = Vec::with_capacity(count);
         let mut entries_index = Vec::with_capacity(count);
-        loop {
-            if count == 0 {
-                break;
-            }
-
+        while count > 0 {
             let len = codec::decode_var_u64(buf)? as usize;
             let mut e = Entry::new();
             e.merge_from_bytes(&buf[..len])?;
+
             let mut entry_index = EntryIndex::default();
             entry_index.index = e.get_index();
             entry_index.file_num = file_num;
-            entry_index.offset = buf.as_ptr().offset_from(fstart) as u64;
+            entry_index.base_offset = base_offset;
+            entry_index.offset = batch_offset + content_len - buf.len() as u64;
             entry_index.len = len as u64;
+
             buf.consume(len);
             entries.push(e);
             entries_index.push(entry_index);
@@ -152,13 +150,16 @@ impl Entries {
         for (i, e) in self.entries.iter().enumerate() {
             let content = e.write_to_bytes()?;
             vec.encode_var_u64(content.len() as u64)?;
+
             // file_num = 0 means entry index is not initialized.
             let mut entries_index = self.entries_index.borrow_mut();
             if entries_index[i].file_num == 0 {
                 entries_index[i].index = e.get_index();
+                // This offset doesn't count the header.
                 entries_index[i].offset = vec.len() as u64;
                 entries_index[i].len = content.len() as u64;
             }
+
             vec.extend_from_slice(&content);
         }
         Ok(())
@@ -167,9 +168,17 @@ impl Entries {
     pub fn update_offset_when_needed(&self, file_num: u64, base: u64) {
         for idx in self.entries_index.borrow_mut().iter_mut() {
             if idx.file_num == 0 {
-                idx.offset += base;
+                debug_assert_eq!(idx.base_offset, 0);
                 idx.file_num = file_num;
+                idx.base_offset = base;
             }
+        }
+    }
+
+    pub fn update_compression_type(&self, compression_type: CompressionType, batch_len: u64) {
+        for idx in self.entries_index.borrow_mut().iter_mut() {
+            idx.compression_type = compression_type;
+            idx.batch_len = batch_len;
         }
     }
 }
@@ -331,16 +340,19 @@ impl LogItem {
         Ok(())
     }
 
-    pub unsafe fn from_bytes(
+    pub fn from_bytes(
         buf: &mut SliceReader<'_>,
         file_num: u64,
-        fstart: *const u8,
+        base_offset: u64,      // Offset of the batch from its log file.
+        mut batch_offset: u64, // Offset of the item from in its batch.
     ) -> Result<LogItem> {
         let item_type = LogItemType::from_byte(buf.read_u8()?);
         let mut item = LogItem::new(item_type);
+
+        batch_offset += 1;
         match item_type {
             LogItemType::Entries => {
-                let entries = Entries::from_bytes(buf, file_num, fstart)?;
+                let entries = Entries::from_bytes(buf, file_num, base_offset, batch_offset)?;
                 item.entries = Some(entries);
             }
             LogItemType::CMD => {
@@ -414,89 +426,57 @@ impl LogBatch {
         self.items.borrow().is_empty()
     }
 
-    pub unsafe fn from_bytes(
+    pub fn from_bytes(
         buf: &mut SliceReader<'_>,
         file_num: u64,
-        fstart: *const u8,
+        // The offset of the batch from its log file.
+        base_offset: u64,
     ) -> Result<Option<LogBatch>> {
         if buf.is_empty() {
             return Ok(None);
         }
-
         if buf.len() < BATCH_MIN_SIZE {
             return Err(Error::TooShort);
         }
 
-        // Header 8 bytes = 7 bytes len + 1 byte type
         let header = codec::decode_u64(buf)? as usize;
         let batch_len = header >> 8;
-        let batch_type = BatchCompressionType::from_byte(header as u8);
-        if batch_len < BATCH_MIN_SIZE || buf.len() < batch_len {
-            return Err(Error::TooShort);
+        let batch_type = CompressionType::from_byte(header as u8);
+        test_batch_checksum(&buf[..batch_len])?;
+
+        let decompressed = match batch_type {
+            CompressionType::None => Cow::Borrowed(&buf[..(batch_len - CHECKSUM_LEN)]),
+            CompressionType::Lz4 => Cow::Owned(decompress(&buf[..batch_len - CHECKSUM_LEN])),
+        };
+
+        let mut reader: SliceReader = decompressed.borrow();
+        let content_len = reader.len() + HEADER_LEN; // For its header.
+
+        let mut items_count = codec::decode_var_u64(&mut reader)? as usize;
+        assert!(items_count > 0 && !reader.is_empty());
+        let log_batch = LogBatch::with_capacity(items_count);
+        while items_count > 0 {
+            let content_offset = (content_len - reader.len()) as u64;
+            let item = LogItem::from_bytes(&mut reader, file_num, base_offset, content_offset)?;
+            log_batch.items.borrow_mut().push(item);
+            items_count -= 1;
         }
+        assert!(reader.is_empty());
+        buf.consume(batch_len);
 
-        // verify checksum
-        let offset = batch_len - 4;
-        let mut s = &buf[offset..offset + 4];
-        let old_checksum = codec::decode_u32_le(&mut s)?;
-        let new_checksum = crc32c(&buf[..offset]);
-        if old_checksum != new_checksum {
-            return Err(Error::IncorrectChecksum(old_checksum, new_checksum));
-        }
-
-        match batch_type {
-            BatchCompressionType::None => {
-                let mut items_count = codec::decode_var_u64(buf)? as usize;
-                if items_count == 0 || buf.is_empty() {
-                    panic!("Empty log event is not supported");
-                }
-
-                let log_batch = LogBatch::new();
-                loop {
-                    if items_count == 0 {
-                        // 4 bytes checksum
-                        buf.consume(4);
-                        break;
-                    }
-
-                    let item = LogItem::from_bytes(buf, file_num, fstart)?;
-                    log_batch.items.borrow_mut().push(item);
-
-                    items_count -= 1;
-                }
-                Ok(Some(log_batch))
-            }
-            BatchCompressionType::Lz4 => {
-                let mut decompressed = Vec::with_capacity(4 * batch_len);
-                let decompressed_len = lz4::decode_block(&buf[..batch_len - 4], &mut decompressed);
-                assert_eq!(decompressed_len, decompressed.len());
-                buf.consume(batch_len);
-
-                let reader = &mut decompressed.as_slice();
-
-                let mut items_count = codec::decode_var_u64(reader)? as usize;
-                if items_count == 0 || reader.is_empty() {
-                    panic!("Empty log event is not supported");
-                }
-
-                let log_batch = LogBatch::new();
-                loop {
-                    if items_count == 0 {
-                        assert!(reader.is_empty());
-                        break;
-                    }
-
-                    let item = LogItem::from_bytes(reader, file_num, fstart)?;
-                    log_batch.items.borrow_mut().push(item);
-
-                    items_count -= 1;
-                }
-
-                Ok(Some(log_batch))
+        for item in log_batch.items.borrow_mut().iter_mut() {
+            if item.item_type == LogItemType::Entries {
+                item.entries
+                    .as_mut()
+                    .unwrap()
+                    .update_compression_type(batch_type, batch_len as u64);
             }
         }
+
+        Ok(Some(log_batch))
     }
 
+    // TODO: avoid to write a large batch into one compressed chunk.
     pub fn encode_to_bytes(&self) -> Option<Vec<u8>> {
         if self.items.borrow().is_empty() {
             return None;
@@ -513,16 +493,13 @@ impl LogBatch {
 
         let compression_type = if vec.len() > COMPRESSION_SIZE {
             let mut dst = Vec::with_capacity(vec.len());
-            let compressed_size = lz4::encode_block(&vec.as_slice()[8..], &mut dst);
+            let compressed_size = lz4::encode_block(&vec[8..], &mut dst);
             assert_eq!(compressed_size, dst.len());
-            unsafe {
-                vec.set_len(8);
-            }
-            vec.extend_from_slice(dst.as_slice());
-
-            BatchCompressionType::Lz4
+            vec.truncate(8);
+            vec.extend_from_slice(&dst);
+            CompressionType::Lz4
         } else {
-            BatchCompressionType::None
+            CompressionType::None
         };
 
         let checksum = crc32c(&vec.as_slice()[8..]);
@@ -531,6 +508,16 @@ impl LogBatch {
         let mut header = len << 8;
         header |= u64::from(compression_type.to_byte());
         vec.as_mut_slice().write_u64::<BigEndian>(header).unwrap();
+
+        let batch_len = (vec.len() - 8) as u64;
+        for item in self.items.borrow_mut().iter_mut() {
+            if item.item_type == LogItemType::Entries {
+                item.entries
+                    .as_mut()
+                    .unwrap()
+                    .update_compression_type(compression_type, batch_len);
+            }
+        }
 
         Some(vec)
     }
@@ -553,6 +540,28 @@ impl RaftLogBatch for LogBatch {
     fn is_empty(&self) -> bool {
         self.items.borrow().is_empty()
     }
+}
+
+pub fn test_batch_checksum(buf: &[u8]) -> Result<()> {
+    if buf.len() <= CHECKSUM_LEN {
+        return Err(Error::TooShort);
+    }
+
+    let batch_len = buf.len();
+    let mut s = &buf[(batch_len - CHECKSUM_LEN)..batch_len];
+    let expected = codec::decode_u32_le(&mut s)?;
+    let got = crc32c(&buf[..(batch_len - CHECKSUM_LEN)]);
+    if got != expected {
+        return Err(Error::IncorrectChecksum(expected, got));
+    }
+    Ok(())
+}
+
+// NOTE: lz4::decode_block will truncate the output buffer first.
+pub fn decompress(buf: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(buf.len() * 4);
+    lz4::decode_block(buf, &mut output);
+    return output;
 }
 
 #[cfg(test)]
@@ -589,8 +598,7 @@ mod tests {
             idx.file_num = file_num;
         }
         let mut s = encoded.as_slice();
-        let fstart: *const u8 = encoded.as_ptr();
-        let decode_entries = unsafe { Entries::from_bytes(&mut s, file_num, fstart).unwrap() };
+        let decode_entries = Entries::from_bytes(&mut s, file_num, 0, 0).unwrap();
         assert_eq!(s.len(), 0);
         assert_eq!(entries.region_id, decode_entries.region_id);
         assert_eq!(entries.entries, decode_entries.entries);
@@ -635,8 +643,7 @@ mod tests {
             let mut encoded = vec![];
             item.encode_to(&mut encoded).unwrap();
             let mut s = encoded.as_slice();
-            let fstart: *const u8 = encoded.as_ptr();
-            let decoded_item = unsafe { LogItem::from_bytes(&mut s, file_num, fstart).unwrap() };
+            let decoded_item = LogItem::from_bytes(&mut s, file_num, 0, 0).unwrap();
             assert_eq!(s.len(), 0);
 
             if item.item_type == LogItemType::Entries {
@@ -661,12 +668,7 @@ mod tests {
 
         let encoded = batch.encode_to_bytes().unwrap();
         let mut s = encoded.as_slice();
-        let fstart: *const u8 = encoded.as_ptr();
-        let decoded_batch = unsafe {
-            LogBatch::from_bytes(&mut s, file_num, fstart)
-                .unwrap()
-                .unwrap()
-        };
+        let decoded_batch = LogBatch::from_bytes(&mut s, file_num, 0).unwrap().unwrap();
         assert_eq!(s.len(), 0);
 
         for item in batch.items.borrow_mut().iter_mut() {
