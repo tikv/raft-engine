@@ -213,6 +213,24 @@ impl MemTable {
         idx - first_index
     }
 
+    pub fn compact_cache_to(&mut self, idx: u64) {
+        if let Some(e) = self.entries_index.back() {
+            assert!(e.index + 1 >= idx);
+        }
+        let first_idx = match self.entries_cache.front() {
+            Some(e) if e.index < idx => e.index,
+            _ => return,
+        };
+
+        let distance = self.cache_distance();
+        let drain_end = (idx - first_idx) as usize;
+        self.entries_cache.drain(0..drain_end);
+
+        for i in 0..drain_end {
+            self.cache_size -= self.entries_index[distance + i].len;
+        }
+    }
+
     // If entry exist in cache, return (Entry, None).
     // If entry exist but not in cache, return (None, EntryIndex).
     // If entry not exist, return (None, None).
@@ -608,6 +626,41 @@ mod tests {
         // Compact to 20 or smaller index, nothing happens.
         assert_eq!(memtable.compact_to(20), 0);
         assert_eq!(memtable.compact_to(15), 0);
+    }
+
+    #[test]
+    fn test_memtable_compact_cache() {
+        let region_id = 8;
+        let cache_limit = 10;
+        let mut memtable = MemTable::new(region_id, cache_limit);
+
+        // After appending:
+        // [0, 10) file_num = 1, not in cache
+        // [10, 15) file_num = 2, not in cache
+        // [15, 20) file_num = 2, in cache
+        // [20, 25) file_num = 3, in cache
+        memtable.append(generate_ents(0, 10), generate_ents_index(0, 10, 1));
+        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
+        memtable.append(generate_ents(20, 25), generate_ents_index(20, 25, 3));
+        assert_eq!(memtable.cache_size(), 10);
+        assert_eq!(memtable.entries_size(), 25);
+        assert_eq!(memtable.entries_cache.len(), 10);
+        assert_eq!(memtable.entries_index.len(), 25);
+
+        // Compact cache to 15, nothing needs to be changed.
+        memtable.compact_cache_to(15);
+        assert_eq!(memtable.entries_cache.len(), 10);
+        assert_eq!(memtable.cache_size(), 10);
+
+        // Compact cache to 20.
+        memtable.compact_to(20);
+        assert_eq!(memtable.entries_cache.len(), 5);
+        assert_eq!(memtable.cache_size(), 5);
+
+        // Compact cache to 25
+        memtable.compact_cache_to(25);
+        assert_eq!(memtable.entries_cache.len(), 0);
+        assert_eq!(memtable.cache_size(), 0);
     }
 
     #[test]
