@@ -4,10 +4,8 @@ use std::{cmp, u64};
 use raft::{eraftpb::Entry, StorageError};
 
 use crate::log_batch::CompressionType;
-use crate::{
-    util::{slices_in_range, vec_deque_search, HashMap},
-    Error, Result,
-};
+use crate::util::{slices_in_range, HashMap};
+use crate::{Error, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 
@@ -90,11 +88,18 @@ impl MemTable {
             return;
         }
         let last_index = self.entries_cache.back().unwrap().index;
-        if index > last_index {
+        let first_index = self.entries_cache.front().unwrap().index;
+        let conflict = if index <= first_index {
+            // All entries need to be removed.
+            0
+        } else if index <= last_index {
+            // Entries after `index` (included) need to be removed.
+            (index - first_index) as usize
+        } else {
+            // No entries need to be removed.
             return;
-        }
+        };
 
-        let conflict = vec_deque_search(&self.entries_cache, &index, |e| e.index).unwrap_or(0);
         let distance = self.cache_distance();
         for offset in conflict..self.entries_cache.len() {
             self.cache_size -= self.entries_index[distance + offset].len;
@@ -109,12 +114,14 @@ impl MemTable {
             return;
         }
         let last_index = self.entries_index.back().unwrap().index;
-        if index > last_index {
+        let first_index = self.entries_index.front().unwrap().index;
+        assert!(first_index <= index); // Compacted entries can't be overwritten.
+        let conflict = if index <= last_index {
+            (index - first_index) as usize
+        } else {
             return;
-        }
-        assert!(self.entries_index[0].index <= index);
+        };
 
-        let conflict = vec_deque_search(&self.entries_index, &index, |e| e.index).unwrap();
         for offset in conflict..self.entries_index.len() {
             self.total_size -= self.entries_index[offset].len;
         }
