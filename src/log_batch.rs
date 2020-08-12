@@ -23,6 +23,7 @@ const TYPE_COMMAND: u8 = 0x02;
 const TYPE_KV: u8 = 0x3;
 
 const CMD_CLEAN: u8 = 0x01;
+const CMD_COMPACT: u8 = 0x02;
 
 const COMPRESSION_SIZE: usize = 4096;
 
@@ -186,6 +187,7 @@ impl Entries {
 #[derive(Debug, PartialEq)]
 pub enum Command {
     Clean { region_id: u64 },
+    Compact { region_id: u64, index: u64 },
 }
 
 impl Command {
@@ -195,16 +197,27 @@ impl Command {
                 vec.push(CMD_CLEAN);
                 vec.encode_var_u64(region_id).unwrap();
             }
+            Command::Compact { region_id, index } => {
+                vec.push(CMD_COMPACT);
+                vec.encode_var_u64(region_id).unwrap();
+                vec.encode_var_u64(index).unwrap();
+            }
         }
     }
 
     pub fn from_bytes(buf: &mut SliceReader<'_>) -> Result<Command> {
         let command_type = codec::read_u8(buf)?;
-        if command_type == CMD_CLEAN {
-            let region_id = codec::decode_var_u64(buf)?;
-            Ok(Command::Clean { region_id })
-        } else {
-            panic!("Unsupported command type: {:?}", command_type)
+        match command_type {
+            CMD_CLEAN => {
+                let region_id = codec::decode_var_u64(buf)?;
+                Ok(Command::Clean { region_id })
+            }
+            CMD_COMPACT => {
+                let region_id = codec::decode_var_u64(buf)?;
+                let index = codec::decode_var_u64(buf)?;
+                Ok(Command::Compact { region_id, index })
+            }
+            _ => unreachable!(),
         }
     }
 }

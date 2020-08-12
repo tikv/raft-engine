@@ -544,15 +544,16 @@ impl PipeLog {
         Ok(Some(vec))
     }
 
-    pub fn files_before(&self, size: usize) -> u64 {
+    /// Return the last file number before `total - size`. `0` means no such files.
+    pub fn last_file_before(&self, size: usize) -> u64 {
+        // TODO: refactor it to avoid race.
         let cur_size = self.total_size();
-        if cur_size > size {
-            let count = (cur_size - size) / self.rotate_size;
-            let manager = self.log_manager.read().unwrap();
-            manager.first_file_num + count as u64
-        } else {
-            0
+        if cur_size <= size {
+            return 0;
         }
+        let count = (cur_size - size) / self.rotate_size;
+        let manager = self.log_manager.read().unwrap();
+        manager.first_file_num + count as u64
     }
 }
 

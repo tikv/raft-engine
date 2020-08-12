@@ -67,7 +67,6 @@ pub struct MemTable {
     // key -> (value, file_num)
     kvs: HashMap<Vec<u8>, (Vec<u8>, u64)>,
 
-    total_size: u64,
     cache_size: u64,
     cache_limit: u64,
     cache_stats: Arc<SharedCacheStats>,
@@ -127,9 +126,12 @@ impl MemTable {
             return;
         };
 
+        let mut total_size_delta = 0;
         for offset in conflict..self.entries_index.len() {
-            self.total_size -= self.entries_index[offset].len;
+            total_size_delta += self.entries_index[offset].len;
         }
+        self.cache_stats.sub_total_size(total_size_delta);
+
         self.entries_index.truncate(conflict);
     }
 
@@ -140,7 +142,6 @@ impl MemTable {
             entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
             kvs: HashMap::default(),
 
-            total_size: 0,
             cache_size: 0,
             cache_limit,
             cache_stats: cache_stats,
@@ -159,7 +160,7 @@ impl MemTable {
 
         let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len);
         self.entries_index.extend(entries_index);
-        self.total_size += delta_size;
+        self.cache_stats.add_total_size(delta_size);
         if self.cache_limit > 0 {
             self.entries_cache.extend(entries);
             self.cache_size += delta_size;
@@ -200,11 +201,13 @@ impl MemTable {
         };
         let last_idx = self.entries_index.back().unwrap().index;
         assert!(idx <= last_idx + 1);
-
         let drain_end = (idx - first_idx) as usize;
+
+        let mut total_size_delta = 0;
         for e in self.entries_index.drain(..drain_end) {
-            self.total_size -= e.len;
+            total_size_delta += e.len;
         }
+        self.cache_stats.add_compacted_size(total_size_delta);
 
         drain_end as u64
     }
@@ -371,33 +374,16 @@ impl MemTable {
         self.entries_index.len()
     }
 
-    pub fn entries_size(&self) -> u64 {
-        self.total_size
-    }
-
     pub fn cache_size(&self) -> u64 {
         self.cache_size
     }
 
-    // Evict entries before `boundary_file_num` from cache.
-    pub fn evict_old_from_cache(&mut self, boundary_file_num: u64) {
-        if self.entries_cache.is_empty() {
-            return;
-        }
-
-        for i in self.cache_distance()..self.entries_index.len() {
-            if self.entries_index[i].file_num >= boundary_file_num {
-                let index = self.entries_index[i].index;
-                self.compact_cache_to(index);
-                return;
-            }
-        }
-        let index = self.entries_index.back().unwrap().index;
-        self.compact_cache_to(index + 1);
-    }
-
     pub fn region_id(&self) -> u64 {
         self.region_id
+    }
+
+    pub fn first_index(&self) -> Option<u64> {
+        self.entries_index.front().map(|e| e.index)
     }
 
     fn kvs_min_file_num(&self) -> Option<u64> {
@@ -440,6 +426,11 @@ impl MemTable {
             }
         }
         count
+    }
+
+    #[cfg(test)]
+    fn entries_size(&self) -> u64 {
+        self.entries_index.iter().fold(0, |acc, e| acc + e.len)
     }
 }
 
@@ -785,68 +776,6 @@ mod tests {
 
         memtable.delete(k5.as_ref());
         assert_eq!(memtable.get(k5.as_ref()), None);
-    }
-
-    #[test]
-    fn test_memtable_evict_old_from_cache() {
-        let region_id = 8;
-        let cache_limit = 1024;
-        let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::new(region_id, cache_limit, stats);
-
-        // [0, 10) file_num = 1, in cache
-        // [10, 20) file_num = 2, in cache
-        // [20, 30) file_num = 3, in cache
-        memtable.append(generate_ents(0, 10), generate_ents_index(0, 10, 1));
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
-        memtable.append(generate_ents(20, 30), generate_ents_index(20, 30, 3));
-        assert_eq!(memtable.cache_size(), 30);
-        assert_eq!(memtable.entries_size(), 30);
-        assert_eq!(memtable.entries_cache.len(), 30);
-        assert_eq!(memtable.entries_index.len(), 30);
-        assert_eq!(memtable.entries_cache[0].get_index(), 0);
-        assert_eq!(memtable.entries_cache[29].get_index(), 29);
-        assert_eq!(memtable.entries_index[0].index, 0);
-        assert_eq!(memtable.entries_index[29].index, 29);
-        assert_eq!(memtable.min_file_num().unwrap(), 1);
-        assert_eq!(memtable.max_file_num().unwrap(), 3);
-
-        // Evict all entries before file 2
-        memtable.evict_old_from_cache(2);
-        assert_eq!(memtable.cache_size(), 20);
-        assert_eq!(memtable.entries_size(), 30);
-        assert_eq!(memtable.entries_cache.len(), 20);
-        assert_eq!(memtable.entries_index.len(), 30);
-        assert_eq!(memtable.entries_cache[0].get_index(), 10);
-        assert_eq!(memtable.entries_cache[19].get_index(), 29);
-        assert_eq!(memtable.entries_index[0].index, 0);
-        assert_eq!(memtable.entries_index[29].index, 29);
-        assert_eq!(memtable.min_file_num().unwrap(), 1);
-        assert_eq!(memtable.max_file_num().unwrap(), 3);
-
-        // Evict all entries before file 3
-        memtable.evict_old_from_cache(3);
-        assert_eq!(memtable.cache_size(), 10);
-        assert_eq!(memtable.entries_size(), 30);
-        assert_eq!(memtable.entries_cache.len(), 10);
-        assert_eq!(memtable.entries_index.len(), 30);
-        assert_eq!(memtable.entries_cache[0].get_index(), 20);
-        assert_eq!(memtable.entries_cache[9].get_index(), 29);
-        assert_eq!(memtable.entries_index[0].index, 0);
-        assert_eq!(memtable.entries_index[29].index, 29);
-        assert_eq!(memtable.min_file_num().unwrap(), 1);
-        assert_eq!(memtable.max_file_num().unwrap(), 3);
-
-        // Evict all entries before file 4
-        memtable.evict_old_from_cache(4);
-        assert_eq!(memtable.cache_size(), 0);
-        assert_eq!(memtable.entries_size(), 30);
-        assert_eq!(memtable.entries_cache.len(), 0);
-        assert_eq!(memtable.entries_index.len(), 30);
-        assert_eq!(memtable.entries_index[0].index, 0);
-        assert_eq!(memtable.entries_index[29].index, 29);
-        assert_eq!(memtable.min_file_num().unwrap(), 1);
-        assert_eq!(memtable.max_file_num().unwrap(), 3)
     }
 
     #[test]
