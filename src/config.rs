@@ -51,10 +51,10 @@ impl Default for Config {
             recovery_mode: RecoveryMode::TolerateCorruptedTailRecords,
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
-            purge_threshold: ReadableSize::gb(2),
+            purge_threshold: ReadableSize::gb(20),
             garbage_threshold: 0.75,
             cache_limit: ReadableSize::gb(1),
-            cache_limit_per_raft: ReadableSize::mb(4),
+            cache_limit_per_raft: ReadableSize::mb(128),
         }
     }
 }

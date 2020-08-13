@@ -294,8 +294,7 @@ impl MemTable {
             end_pos = start_pos + count_limit;
         }
 
-        let cache_first_index = self.entries_cache.front().unwrap().get_index();
-        let cache_offset = (cache_first_index - first_index) as usize;
+        let cache_offset = self.cache_distance();
         if cache_offset < end_pos {
             if start_pos >= cache_offset {
                 // All needed entries are in cache.

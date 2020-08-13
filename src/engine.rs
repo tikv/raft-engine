@@ -222,7 +222,7 @@ impl FileEngineInner {
 
         let log_batch = LogBatch::new();
         log_batch.add_command(Command::Compact { region_id, index });
-        self.write(log_batch, true).map(|_| ()).unwrap();
+        self.write(log_batch, false).map(|_| ()).unwrap();
 
         self.first_index(region_id).unwrap_or(index) - first_index
     }
