@@ -101,7 +101,7 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
 
     /// Like `cut_logs` but the range could be very large. Return the deleted count.
     /// Generally, `from` can be passed in `0`.
-    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<usize>;
+    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<(usize, Vec<u64>)>;
 
     /// The `RaftEngine` has a builtin entry cache or not.
     fn has_builtin_entry_cache(&self) -> bool {

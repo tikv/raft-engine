@@ -32,9 +32,6 @@ pub struct Config {
     /// Only purge if disk file size is greater than `purge_threshold`.
     pub purge_threshold: ReadableSize,
 
-    /// Only purge if garbage is greater than `garbage_threshold`.
-    pub garbage_threshold: f64,
-
     /// Total size limit to cache log entries.
     ///
     /// FIXME: it doesn't make effect currently.
@@ -51,8 +48,7 @@ impl Default for Config {
             recovery_mode: RecoveryMode::TolerateCorruptedTailRecords,
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
-            purge_threshold: ReadableSize::gb(20),
-            garbage_threshold: 0.75,
+            purge_threshold: ReadableSize::gb(10),
             cache_limit: ReadableSize::gb(1),
             cache_limit_per_raft: ReadableSize::mb(128),
         }
@@ -65,9 +61,6 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.garbage_threshold >= 1.0 {
-            return Err(box_err!("Invalid garbage_threshold"));
-        }
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge_threshold < target_file_size"));
         }
@@ -98,7 +91,6 @@ mod tests {
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
-            garbage-threshold = 0.9
             cache-limit = "1GB"
             cache-limit-per-raft = "8MB"
         "#;
@@ -108,7 +100,6 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
-        assert_eq!(load.garbage_threshold, 0.9);
         assert_eq!(load.cache_limit, ReadableSize::gb(1));
         assert_eq!(load.cache_limit_per_raft, ReadableSize::mb(8));
     }

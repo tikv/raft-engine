@@ -1,6 +1,6 @@
 use std::io::BufRead;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::{cmp, fmt, u64};
 
@@ -18,6 +18,7 @@ use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::{codec, CacheStats, RaftEngine, RaftLocalState, Result};
 
 const SLOTS_COUNT: usize = 128;
+const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 128;
 
 struct FileEngineInner {
     cfg: Config,
@@ -30,6 +31,9 @@ struct FileEngineInner {
     pipe_log: PipeLog,
 
     cache_stats: Arc<SharedCacheStats>,
+
+    // To protect concurrent calls of `gc`.
+    purge_mutex: Mutex<()>,
 }
 
 impl FileEngineInner {
@@ -191,6 +195,62 @@ impl FileEngineInner {
         }
     }
 
+    fn rewrite_inactive_logs(&self, will_force_compact: &mut Vec<u64>) {
+        let inactive_file_num = {
+            let total_size = self.pipe_log.total_size();
+            let garbage_ratio = self.cache_stats.garbage_ratio();
+            let rewrite_limit = (total_size as f64 * (1.0 - garbage_ratio)) as usize;
+            self.pipe_log.last_file_before(rewrite_limit)
+        };
+        if inactive_file_num == 0 {
+            return;
+        }
+
+        let (mut log_batches, mut cache) = (Vec::new(), HashMap::default());
+        for memtables in &self.memtables {
+            for memtable in memtables.read().unwrap().values() {
+                let min_file_num = memtable.min_file_num().unwrap_or(u64::MAX);
+                if min_file_num > inactive_file_num {
+                    continue;
+                }
+                let entries_count = memtable.entries_count();
+                let region_id = memtable.region_id();
+
+                if entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
+                    // TODO: force rewrite it if it can't be compacted more.
+                    will_force_compact.push(region_id);
+                    continue;
+                }
+
+                let log_batch = LogBatch::new();
+                log_batch.clean_region(region_id);
+
+                let mut ents = Vec::with_capacity(entries_count);
+                let mut ents_idx = Vec::with_capacity(entries_count);
+                memtable.fetch_all(&mut ents, &mut ents_idx);
+                let mut all_ents = Vec::with_capacity(entries_count);
+                for ei in ents_idx {
+                    let e = self.read_entry_from_file(&ei, Some(&mut cache)).unwrap();
+                    all_ents.push(e);
+                }
+                all_ents.extend(ents.into_iter());
+                log_batch.add_entries(region_id, all_ents);
+
+                let mut kvs = Vec::new();
+                memtable.fetch_all_kvs(&mut kvs);
+                for (key, value) in kvs {
+                    log_batch.put(region_id, &key, &value);
+                }
+
+                log_batches.push(log_batch);
+            }
+        }
+        for log_batch in log_batches {
+            self.write(log_batch, false).unwrap();
+        }
+    }
+
+    #[allow(dead_code)]
     fn purge_expired_files(&self) -> Result<()> {
         let mut min_file_num = u64::MAX;
         for memtables in &self.memtables {
@@ -201,7 +261,10 @@ impl FileEngineInner {
                 }
             }
         }
-        self.pipe_log.purge_to(min_file_num)
+        self.pipe_log.purge_to(min_file_num)?;
+        // FIXME: not all stale entries are purged.
+        self.cache_stats.on_purge();
+        Ok(())
     }
 
     fn first_index(&self, region_id: u64) -> Option<u64> {
@@ -307,16 +370,15 @@ impl FileEngineInner {
         };
 
         // Read from file
-        let entry = self.read_entry_from_file(&entry_idx).unwrap_or_else(|e| {
-            panic!(
-                "Read entry from file for region {} index {} failed, err {:?}",
-                region_id, log_idx, e
-            )
-        });
+        let entry = self.read_entry_from_file(&entry_idx, None).unwrap();
         Ok(Some(entry))
     }
 
-    fn read_entry_from_file(&self, entry_index: &EntryIndex) -> Result<Entry> {
+    fn read_entry_from_file(
+        &self,
+        entry_index: &EntryIndex,
+        _: Option<&mut HashMap<(u64, u64), Vec<u8>>>,
+    ) -> Result<Entry> {
         let file_num = entry_index.file_num;
         let base_offset = entry_index.base_offset;
         let batch_len = entry_index.batch_len;
@@ -366,7 +428,7 @@ impl FileEngineInner {
             memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
             let count = entries.len() + entries_idx.len();
             for idx in &entries_idx {
-                let e = self.read_entry_from_file(idx)?;
+                let e = self.read_entry_from_file(idx, None)?;
                 vec.push(e);
             }
             vec.extend(entries.into_iter());
@@ -427,10 +489,10 @@ impl SharedCacheStats {
     pub fn miss_times(&self) -> usize {
         self.miss.load(Ordering::Relaxed)
     }
-    pub fn need_purge(&self, garbage_threshold: f64) -> bool {
-        let compacted = self.compacted_size.load(Ordering::Relaxed);
-        let total = self.total_size.load(Ordering::Relaxed);
-        compacted as f64 / total as f64 > garbage_threshold
+    pub fn garbage_ratio(&self) -> f64 {
+        let compacted = self.compacted_size.load(Ordering::Acquire);
+        let total = self.total_size.load(Ordering::Acquire);
+        compacted as f64 / total as f64
     }
     pub fn on_purge(&self) {
         let compacted = self.compacted_size.swap(0, Ordering::SeqCst);
@@ -475,6 +537,7 @@ impl FileEngine {
             memtables,
             pipe_log,
             cache_stats,
+            purge_mutex: Mutex::new(()),
         };
         let recovery_mode = RecoveryMode::from(engine.cfg.recovery_mode);
         engine
@@ -491,22 +554,10 @@ impl FileEngine {
         self.inner.compact_to(raft_group_id, to) as usize
     }
 
-    // Do purge and update some internal stats.
-    fn do_purge(&self) {
-        // TODO: rewrite inactive logs.
-        self.inner.purge_expired_files().unwrap();
-        self.inner.cache_stats.on_purge();
-    }
-
-    fn need_purge(&self) -> bool {
+    fn needs_purge_log_files(&self) -> bool {
         let total_size = self.inner.pipe_log.total_size();
-        let purge_threshold = self.inner.cfg.purge_threshold.0;
-        let garbage_threshold = self.inner.cfg.garbage_threshold;
-        total_size as u64 > purge_threshold && self.cache_stats().need_purge(garbage_threshold)
-    }
-
-    fn cache_stats(&self) -> &SharedCacheStats {
-        &self.inner.cache_stats
+        let purge_threshold = self.inner.cfg.purge_threshold.0 as usize;
+        total_size > purge_threshold
     }
 }
 
@@ -570,12 +621,17 @@ impl RaftEngine for FileEngine {
         self.inner.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
     }
 
-    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> Result<usize> {
+    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> Result<(usize, Vec<u64>)> {
         let entries = self.do_gc(raft_group_id, to);
-        if self.need_purge() {
-            self.do_purge();
+        let mut will_force_compact = Vec::new();
+        if let Ok(_x) = self.inner.purge_mutex.try_lock() {
+            if self.needs_purge_log_files() {
+                self.inner.rewrite_inactive_logs(&mut will_force_compact);
+                self.inner.purge_expired_files().unwrap();
+                will_force_compact.sort();
+            }
         }
-        Ok(entries)
+        Ok((entries, will_force_compact))
     }
 
     fn has_builtin_entry_cache(&self) -> bool {
@@ -600,6 +656,13 @@ impl RaftEngine for FileEngine {
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
+
+    fn append_log(engine: &FileEngine, raft: u64, entry: &Entry) {
+        engine.append(raft, vec![entry.clone()]).unwrap();
+        let mut state = RaftLocalState::new();
+        state.last_index = entry.index;
+        engine.put_raft_state(raft, &state).unwrap();
+    }
 
     #[test]
     fn test_get_entry_from_file() {
@@ -648,9 +711,7 @@ mod tests {
         }
     }
 
-    // Test whether GC works fine or not, and purge should be triggered when
-    // 1. garbage is more than `garbage_threshold`, and
-    // 2. total storage size is greater than `purge_threshold`.
+    // Test whether GC works fine or not, and purge should be triggered correctly.
     #[test]
     fn test_gc_and_purge() {
         let dir = tempfile::Builder::new()
@@ -668,38 +729,48 @@ mod tests {
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
             entry.set_index(i);
-            engine.append(1, vec![entry.clone()]).unwrap();
+            append_log(&engine, 1, &entry);
         }
 
-        // GC first 50 log entries.
-        let count = engine.do_gc(1, 50);
-        assert_eq!(count, 50);
-        // Garbage is not enough to trigger a purge.
-        assert!(!engine.cache_stats().need_purge(0.75));
-        assert!(!engine.need_purge());
-
-        // GC first 80 log entries.
-        let count = engine.do_gc(1, 80);
-        assert_eq!(count, 30);
-        // Garbage is enouth but purge_threshold is not reached.
-        assert!(engine.cache_stats().need_purge(0.75));
-        assert!(!engine.need_purge());
+        // GC all log entries.
+        let count = engine.do_gc(1, 100);
+        assert_eq!(count, 100);
+        assert!(!engine.needs_purge_log_files());
 
         // Append more logs to make total size greater than `purge_threshold`.
         for i in 100..200 {
             entry.set_index(i);
-            engine.append(1, vec![entry.clone()]).unwrap();
+            append_log(&engine, 1, &entry);
         }
 
-        // GC first 150 log entries.
-        let count = engine.do_gc(1, 160);
-        assert_eq!(count, 80);
-        // Garbage is enouth and purge_threshold is reached.
-        assert!(engine.cache_stats().need_purge(0.75));
-        assert!(engine.need_purge());
+        // GC first 101 log entries.
+        let count = engine.do_gc(1, 101);
+        assert_eq!(count, 1);
+        // Needs to purge because the total size is greater than `purge_threshold`.
+        assert!(engine.needs_purge_log_files());
+        let mut will_force_compact = Vec::new();
+        engine.inner.rewrite_inactive_logs(&mut will_force_compact);
+        // All entries should be rewritten.
+        assert!(will_force_compact.is_empty());
+        // After purge, entries and raft state are still available.
+        engine.inner.purge_expired_files().unwrap();
+        assert!(engine.get_entry(1, 101).unwrap().is_some());
+        assert!(engine.get_raft_state(1).unwrap().is_some());
 
-        // Do purge, internal stats should be updated.
-        engine.do_purge();
-        assert!(!engine.cache_stats().need_purge(0.75));
+        // Append more logs to trigger purge with force compact.
+        for i in 200..400 {
+            entry.set_index(i);
+            append_log(&engine, 1, &entry);
+        }
+
+        let count = engine.do_gc(1, 102);
+        assert_eq!(count, 1);
+        // Needs to purge because the total size is greater than `purge_threshold`.
+        assert!(engine.needs_purge_log_files());
+        let mut will_force_compact = Vec::new();
+        engine.inner.rewrite_inactive_logs(&mut will_force_compact);
+        // Can't rewrite logs for the region because it has too many entries.
+        assert!(!will_force_compact.is_empty());
+        assert_eq!(will_force_compact[0], 1);
     }
 }
