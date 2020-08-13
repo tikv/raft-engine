@@ -329,7 +329,7 @@ impl FileEngineInner {
                 self.pipe_log.fread(file_num, offset, len)?
             }
             CompressionType::Lz4 => {
-                let read_len = batch_len + 8; // 8 bytes for header.
+                let read_len = batch_len + HEADER_LEN as u64;
                 let compressed = self.pipe_log.fread(file_num, base_offset, read_len)?;
                 let mut reader = compressed.as_ref();
                 let header = codec::decode_u64(&mut reader)?;

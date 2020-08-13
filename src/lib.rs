@@ -1,4 +1,5 @@
 #![feature(ptr_offset_from)]
+#![feature(shrink_to)]
 #![allow(clippy::missing_safety_doc)]
 
 #[macro_use]

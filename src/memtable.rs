@@ -10,6 +10,7 @@ use crate::util::{slices_in_range, HashMap};
 use crate::{Error, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
+const SHRINK_CACHE_LIMIT: usize = 512;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryIndex {
@@ -135,6 +136,22 @@ impl MemTable {
         self.entries_index.truncate(conflict);
     }
 
+    fn shrink_entries_cache(&mut self) {
+        if self.entries_cache.capacity() > SHRINK_CACHE_LIMIT
+            && self.entries_cache.len() <= SHRINK_CACHE_CAPACITY
+        {
+            self.entries_cache.shrink_to(SHRINK_CACHE_CAPACITY);
+        }
+    }
+
+    fn shrink_entries_index(&mut self) {
+        if self.entries_index.capacity() > SHRINK_CACHE_LIMIT
+            && self.entries_index.len() <= SHRINK_CACHE_CAPACITY
+        {
+            self.entries_index.shrink_to(SHRINK_CACHE_CAPACITY);
+        }
+    }
+
     pub fn new(region_id: u64, cache_limit: u64, cache_stats: Arc<SharedCacheStats>) -> MemTable {
         MemTable {
             region_id,
@@ -208,6 +225,7 @@ impl MemTable {
             total_size_delta += e.len;
         }
         self.cache_stats.add_compacted_size(total_size_delta);
+        self.shrink_entries_index();
 
         drain_end as u64
     }
@@ -232,6 +250,7 @@ impl MemTable {
             self.cache_size -= delta;
             self.cache_stats.sub_mem_change(delta);
         }
+        self.shrink_entries_cache();
     }
 
     // If entry exist in cache, return (Entry, None).
