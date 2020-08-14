@@ -401,7 +401,7 @@ impl PipeLog {
         Ok(0)
     }
 
-    pub fn purge_to(&self, file_num: u64) -> Result<()> {
+    pub fn purge_to(&self, file_num: u64) -> Result<usize> {
         let (mut first_file_num, active_file_num) = {
             let manager = self.log_manager.read().unwrap();
             (manager.first_file_num, manager.active_file_num)
@@ -410,7 +410,7 @@ impl PipeLog {
         if first_file_num >= file_num {
             debug!("Purge nothing.");
             EXPIRED_FILES_PURGED_HISTOGRAM.observe(0.0);
-            return Ok(());
+            return Ok(0);
         }
 
         if file_num > active_file_num {
@@ -445,12 +445,11 @@ impl PipeLog {
             fs::remove_file(path)?;
         }
 
-        debug!(
-            "purge {} expired files",
-            first_file_num - old_first_file_num
-        );
-        EXPIRED_FILES_PURGED_HISTOGRAM.observe((first_file_num - old_first_file_num) as f64);
-        Ok(())
+        let purged = (first_file_num - old_first_file_num) as usize;
+
+        debug!("purge {} expired files", purged);
+        EXPIRED_FILES_PURGED_HISTOGRAM.observe(purged as f64);
+        Ok(purged)
     }
 
     // Shrink file size and synchronize.

@@ -18,6 +18,9 @@ use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::{codec, CacheStats, RaftEngine, RaftLocalState, Result};
 
 const SLOTS_COUNT: usize = 128;
+
+// If a region has some very old raft logs less than this threshold,
+// rewrite them to clean stale log files ASAP.
 const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 128;
 
 struct FileEngineInner {
@@ -195,30 +198,47 @@ impl FileEngineInner {
         }
     }
 
-    fn rewrite_inactive_logs(&self, will_force_compact: &mut Vec<u64>) {
-        let inactive_file_num = {
-            let total_size = self.pipe_log.total_size();
-            let garbage_ratio = self.cache_stats.garbage_ratio();
-            let rewrite_limit = (total_size as f64 * (1.0 - garbage_ratio)) as usize;
-            self.pipe_log.last_file_before(rewrite_limit)
-        };
-        if inactive_file_num == 0 {
-            return;
-        }
+    // 0 means no inactive file.
+    fn max_inactive_file_num(&self) -> u64 {
+        let total_size = self.pipe_log.total_size();
+        let garbage_ratio = self.cache_stats.garbage_ratio();
+        let rewrite_limit = (total_size as f64 * (1.0 - garbage_ratio)) as usize;
+        self.pipe_log.last_file_before(rewrite_limit)
+    }
 
+    // Scan all regions and for every one
+    // 1. return it if raft logs size between committed index and last index is greater than
+    //    `force_compact_threshold`;
+    // 2. rewrite inactive logs if it has less entries than `REWRITE_ENTRY_COUNT_THRESHOLD`.
+    fn regions_rewrite_or_force_compact(
+        &self,
+        last_inactive: u64,
+        force_compact_threshold: usize,
+        will_force_compact: &mut Vec<u64>,
+    ) {
         let (mut log_batches, mut cache) = (Vec::new(), HashMap::default());
         for memtables in &self.memtables {
             for memtable in memtables.read().unwrap().values() {
-                let min_file_num = memtable.min_file_num().unwrap_or(u64::MAX);
-                if min_file_num > inactive_file_num {
-                    continue;
-                }
-                let entries_count = memtable.entries_count();
                 let region_id = memtable.region_id();
 
-                if entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
-                    // TODO: force rewrite it if it can't be compacted more.
-                    will_force_compact.push(region_id);
+                // Check the memtable needs force compaction or not.
+                if let Some(value) = memtable.get(RAFT_LOG_STATE_KEY) {
+                    let mut raft_state = RaftLocalState::new();
+                    raft_state.merge_from_bytes(&value).unwrap();
+                    let committed = raft_state.get_hard_state().commit;
+                    let last = raft_state.get_last_index();
+                    let delay_size = memtable.entries_size_in(committed + 1, last + 1);
+                    if delay_size > force_compact_threshold {
+                        // The region needs force compaction, so skip to rewrite logs for it.
+                        will_force_compact.push(region_id);
+                        continue;
+                    }
+                }
+
+                let min_file_num = memtable.min_file_num().unwrap_or(u64::MAX);
+                let entries_count = memtable.entries_count();
+                if min_file_num > last_inactive || entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
+                    // TODO: maybe it's not necessary to rewrite all logs for a region.
                     continue;
                 }
 
@@ -248,10 +268,12 @@ impl FileEngineInner {
         for log_batch in log_batches {
             self.write(log_batch, false).unwrap();
         }
+        will_force_compact.sort();
     }
 
-    #[allow(dead_code)]
-    fn purge_expired_files(&self) -> Result<()> {
+    fn purge_expired_files(&self, last_inactive: u64) -> Result<()> {
+        let first_file_num = self.pipe_log.first_file_num();
+
         let mut min_file_num = u64::MAX;
         for memtables in &self.memtables {
             let memtables = memtables.read().unwrap();
@@ -261,9 +283,14 @@ impl FileEngineInner {
                 }
             }
         }
-        self.pipe_log.purge_to(min_file_num)?;
-        // FIXME: not all stale entries are purged.
-        self.cache_stats.on_purge();
+
+        let expected = (last_inactive + 1 - first_file_num) as usize;
+        let purged = self.pipe_log.purge_to(min_file_num)?;
+        self.cache_stats.on_purge(purged, expected);
+        info!(
+            "puerge_expired_fies deletes {} files, {} is best",
+            purged, expected
+        );
         Ok(())
     }
 
@@ -494,9 +521,12 @@ impl SharedCacheStats {
         let total = self.total_size.load(Ordering::Acquire);
         compacted as f64 / total as f64
     }
-    pub fn on_purge(&self) {
-        let compacted = self.compacted_size.swap(0, Ordering::SeqCst);
-        self.total_size.fetch_sub(compacted, Ordering::Relaxed);
+    pub fn on_purge(&self, purged: usize, expected: usize) {
+        let x1 = self.compacted_size.load(Ordering::SeqCst);
+        let x2 = (x1 as f64 * purged as f64 / expected as f64) as usize;
+        let compacted = cmp::min(x1, x2);
+        self.compacted_size.fetch_sub(compacted, Ordering::SeqCst);
+        self.total_size.fetch_sub(compacted, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -549,15 +579,17 @@ impl FileEngine {
         }
     }
 
-    // Only gc but not purge.
-    fn do_gc(&self, raft_group_id: u64, to: u64) -> usize {
-        self.inner.compact_to(raft_group_id, to) as usize
-    }
-
     fn needs_purge_log_files(&self) -> bool {
         let total_size = self.inner.pipe_log.total_size();
         let purge_threshold = self.inner.cfg.purge_threshold.0 as usize;
         total_size > purge_threshold
+    }
+
+    #[cfg(test)]
+    fn commit_to(&self, raft_group_id: u64, index: u64) {
+        let mut raft_state = self.get_raft_state(raft_group_id).unwrap().unwrap();
+        raft_state.mut_hard_state().commit = index;
+        self.put_raft_state(raft_group_id, &raft_state).unwrap();
     }
 }
 
@@ -621,17 +653,25 @@ impl RaftEngine for FileEngine {
         self.inner.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
     }
 
-    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> Result<(usize, Vec<u64>)> {
-        let entries = self.do_gc(raft_group_id, to);
-        let mut will_force_compact = Vec::new();
+    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> usize {
+        self.inner.compact_to(raft_group_id, to) as usize
+    }
+
+    fn purge_expired_files(&self, force_compact_threshold: usize) -> Vec<u64> {
         if let Ok(_x) = self.inner.purge_mutex.try_lock() {
             if self.needs_purge_log_files() {
-                self.inner.rewrite_inactive_logs(&mut will_force_compact);
-                self.inner.purge_expired_files().unwrap();
-                will_force_compact.sort();
+                let last_inactive = self.inner.max_inactive_file_num();
+                let mut will_force_compact = Vec::new();
+                self.inner.regions_rewrite_or_force_compact(
+                    last_inactive,
+                    force_compact_threshold,
+                    &mut will_force_compact,
+                );
+                self.inner.purge_expired_files(last_inactive).unwrap();
+                return will_force_compact;
             }
         }
-        Ok((entries, will_force_compact))
+        vec![]
     }
 
     fn has_builtin_entry_cache(&self) -> bool {
@@ -733,43 +773,46 @@ mod tests {
         }
 
         // GC all log entries.
-        let count = engine.do_gc(1, 100);
+        engine.commit_to(1, 99);
+        let count = engine.gc(1, 0, 100);
         assert_eq!(count, 100);
         assert!(!engine.needs_purge_log_files());
 
         // Append more logs to make total size greater than `purge_threshold`.
-        for i in 100..200 {
+        for i in 100..250 {
             entry.set_index(i);
             append_log(&engine, 1, &entry);
         }
 
         // GC first 101 log entries.
-        let count = engine.do_gc(1, 101);
+        engine.commit_to(1, 100);
+        let count = engine.gc(1, 0, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
-        let mut will_force_compact = Vec::new();
-        engine.inner.rewrite_inactive_logs(&mut will_force_compact);
-        // All entries should be rewritten.
+
+        let old_min_file_num = engine.inner.pipe_log.first_file_num();
+        let will_force_compact = engine.purge_expired_files(200 * 1024);
+        let new_min_file_num = engine.inner.pipe_log.first_file_num();
+        // Some entries are rewritten.
+        assert!(new_min_file_num > old_min_file_num);
+        // No regions need to be force compacted because the threshold is not reached.
         assert!(will_force_compact.is_empty());
         // After purge, entries and raft state are still available.
-        engine.inner.purge_expired_files().unwrap();
         assert!(engine.get_entry(1, 101).unwrap().is_some());
         assert!(engine.get_raft_state(1).unwrap().is_some());
 
-        // Append more logs to trigger purge with force compact.
-        for i in 200..400 {
-            entry.set_index(i);
-            append_log(&engine, 1, &entry);
-        }
-
-        let count = engine.do_gc(1, 102);
+        engine.commit_to(1, 101);
+        let count = engine.gc(1, 0, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
-        let mut will_force_compact = Vec::new();
-        engine.inner.rewrite_inactive_logs(&mut will_force_compact);
-        // Can't rewrite logs for the region because it has too many entries.
+        let old_min_file_num = engine.inner.pipe_log.first_file_num();
+        let will_force_compact = engine.purge_expired_files(100 * 1024);
+        let new_min_file_num = engine.inner.pipe_log.first_file_num();
+        // No entries are rewritten.
+        assert_eq!(new_min_file_num, old_min_file_num);
+        // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
     }

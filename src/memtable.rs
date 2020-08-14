@@ -238,8 +238,9 @@ impl MemTable {
             Some(e) if e.index < idx => e.index,
             _ => return,
         };
-        let last_index = self.entries_index.back().unwrap().index;
+        let last_index = self.entries_cache.back().unwrap().index;
         assert!(idx <= last_index + 1);
+        assert!(last_index == self.entries_index.back().unwrap().index);
 
         let distance = self.cache_distance();
         let drain_end = (idx - first_idx) as usize;
@@ -446,9 +447,33 @@ impl MemTable {
         count
     }
 
+    pub fn entries_size_in(&self, begin: u64, to: u64) -> usize {
+        let first_index = match self.entries_index.front() {
+            Some(e) => e.index,
+            None => return 0,
+        };
+        let last_index = self.entries_index.back().unwrap().index;
+        assert!(begin >= first_index && to <= last_index + 1);
+        (begin..to).fold(0, |acc, idx| {
+            acc + self.entries_index[(idx - first_index) as usize].len as usize
+        })
+    }
+
     #[cfg(test)]
     fn entries_size(&self) -> u64 {
         self.entries_index.iter().fold(0, |acc, e| acc + e.len)
+    }
+
+    #[cfg(test)]
+    fn check_entries_index_and_cache(&self) {
+        match (self.entries_index.back(), self.entries_cache.back()) {
+            (Some(ei), Some(ec)) if ei.index != ec.index => panic!(
+                "entries_index.last = {}, entries_cache.last = {}",
+                ei.index, ec.index
+            ),
+            (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
+            _ => return,
+        }
     }
 }
 
@@ -473,6 +498,7 @@ mod tests {
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 1);
+        memtable.check_entries_index_and_cache();
 
         // Append entries [20, 30) file_num = 2, over cache size limitation 15,
         // after appending:
@@ -490,6 +516,7 @@ mod tests {
         assert_eq!(memtable.entries_index[19].index, 29);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 2);
+        memtable.check_entries_index_and_cache();
 
         // Overlap Appending, partial overlap with cache.
         // Append entries [25, 35) file_num = 3, will truncate
@@ -509,6 +536,7 @@ mod tests {
         assert_eq!(memtable.entries_index[24].index, 34);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 3);
+        memtable.check_entries_index_and_cache();
 
         // Overlap Appending, whole overlap with cache.
         // Append entries [20, 40) file_num = 4.
@@ -527,6 +555,7 @@ mod tests {
         assert_eq!(memtable.entries_index[29].index, 39);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 4);
+        memtable.check_entries_index_and_cache();
 
         // Overlap Appending, whole overlap with index.
         // Append entries [10, 30) file_num = 5.
@@ -544,6 +573,7 @@ mod tests {
         assert_eq!(memtable.entries_index[19].index, 29);
         assert_eq!(memtable.min_file_num().unwrap(), 5);
         assert_eq!(memtable.max_file_num().unwrap(), 5);
+        memtable.check_entries_index_and_cache();
 
         // Cache with size limit 0.
         let stats = Arc::new(SharedCacheStats::default());
@@ -555,6 +585,7 @@ mod tests {
         assert_eq!(memtable.entries_index.len(), 10);
         assert_eq!(memtable.entries_index[0].index, 10);
         assert_eq!(memtable.entries_index[9].index, 19);
+        memtable.check_entries_index_and_cache();
     }
 
     #[test]
@@ -582,6 +613,7 @@ mod tests {
         assert_eq!(memtable.entries_index[24].index, 24);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 3);
+        memtable.check_entries_index_and_cache();
 
         // Compact to 5.
         // Only index is needed to compact.
@@ -596,6 +628,7 @@ mod tests {
         assert_eq!(memtable.entries_index[19].index, 24);
         assert_eq!(memtable.min_file_num().unwrap(), 1);
         assert_eq!(memtable.max_file_num().unwrap(), 3);
+        memtable.check_entries_index_and_cache();
 
         // Compact to 20.
         // Both index and cache  need compaction.
@@ -610,10 +643,12 @@ mod tests {
         assert_eq!(memtable.entries_index[4].index, 24);
         assert_eq!(memtable.min_file_num().unwrap(), 3);
         assert_eq!(memtable.max_file_num().unwrap(), 3);
+        memtable.check_entries_index_and_cache();
 
         // Compact to 20 or smaller index, nothing happens.
         assert_eq!(memtable.compact_to(20), 0);
         assert_eq!(memtable.compact_to(15), 0);
+        memtable.check_entries_index_and_cache();
     }
 
     #[test]
@@ -635,21 +670,25 @@ mod tests {
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(memtable.entries_cache.len(), 10);
         assert_eq!(memtable.entries_index.len(), 25);
+        memtable.check_entries_index_and_cache();
 
         // Compact cache to 15, nothing needs to be changed.
         memtable.compact_cache_to(15);
         assert_eq!(memtable.entries_cache.len(), 10);
         assert_eq!(memtable.cache_size(), 10);
+        memtable.check_entries_index_and_cache();
 
         // Compact cache to 20.
         memtable.compact_to(20);
         assert_eq!(memtable.entries_cache.len(), 5);
         assert_eq!(memtable.cache_size(), 5);
+        memtable.check_entries_index_and_cache();
 
         // Compact cache to 25
         memtable.compact_cache_to(25);
         assert_eq!(memtable.entries_cache.len(), 0);
         assert_eq!(memtable.cache_size(), 0);
+        memtable.check_entries_index_and_cache();
     }
 
     #[test]
