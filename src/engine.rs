@@ -163,7 +163,9 @@ impl FileEngineInner {
                             let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
                                 .write()
                                 .unwrap();
-                            memtables.remove(&region_id);
+                            if let Some(mut memtable) = memtables.remove(&region_id) {
+                                memtable.remove();
+                            }
                         }
                         Command::Compact { region_id, index } => {
                             let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
@@ -243,6 +245,7 @@ impl FileEngineInner {
                 }
 
                 let log_batch = LogBatch::new();
+                // Clean the region because all old raft logs can be treated as compacted.
                 log_batch.clean_region(region_id);
 
                 let mut ents = Vec::with_capacity(entries_count);
@@ -499,15 +502,14 @@ impl SharedCacheStats {
     pub fn miss_cache(&self, count: usize) {
         self.miss.fetch_add(count, Ordering::Relaxed);
     }
-    pub fn add_total_size(&self, size: u64) {
-        self.total_size.fetch_add(size as usize, Ordering::Relaxed);
+    pub fn add_total_size(&self, size: usize) {
+        self.total_size.fetch_add(size, Ordering::Relaxed);
     }
-    pub fn sub_total_size(&self, size: u64) {
-        self.total_size.fetch_sub(size as usize, Ordering::Relaxed);
+    pub fn sub_total_size(&self, size: usize) {
+        self.total_size.fetch_sub(size, Ordering::Relaxed);
     }
-    pub fn add_compacted_size(&self, size: u64) {
-        self.compacted_size
-            .fetch_add(size as usize, Ordering::Relaxed);
+    pub fn add_compacted_size(&self, size: usize) {
+        self.compacted_size.fetch_add(size, Ordering::Relaxed);
     }
 
     pub fn hit_times(&self) -> usize {

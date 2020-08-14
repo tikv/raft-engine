@@ -131,7 +131,7 @@ impl MemTable {
         for offset in conflict..self.entries_index.len() {
             total_size_delta += self.entries_index[offset].len;
         }
-        self.cache_stats.sub_total_size(total_size_delta);
+        self.cache_stats.sub_total_size(total_size_delta as usize);
 
         self.entries_index.truncate(conflict);
     }
@@ -177,7 +177,7 @@ impl MemTable {
 
         let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len);
         self.entries_index.extend(entries_index);
-        self.cache_stats.add_total_size(delta_size);
+        self.cache_stats.add_total_size(delta_size as usize);
         if self.cache_limit > 0 {
             self.entries_cache.extend(entries);
             self.cache_size += delta_size;
@@ -224,7 +224,8 @@ impl MemTable {
         for e in self.entries_index.drain(..drain_end) {
             total_size_delta += e.len;
         }
-        self.cache_stats.add_compacted_size(total_size_delta);
+        self.cache_stats
+            .add_compacted_size(total_size_delta as usize);
         self.shrink_entries_index();
 
         drain_end as u64
@@ -393,8 +394,8 @@ impl MemTable {
         self.entries_index.len()
     }
 
-    pub fn cache_size(&self) -> u64 {
-        self.cache_size
+    pub fn cache_size(&self) -> usize {
+        self.cache_size as usize
     }
 
     pub fn region_id(&self) -> u64 {
@@ -459,9 +460,14 @@ impl MemTable {
         })
     }
 
-    #[cfg(test)]
-    fn entries_size(&self) -> u64 {
-        self.entries_index.iter().fold(0, |acc, e| acc + e.len)
+    fn entries_size(&self) -> usize {
+        self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
+    }
+
+    pub fn remove(&mut self) {
+        // All raft logs should be treated as compacted.
+        let entries_size = self.entries_size();
+        self.cache_stats.add_compacted_size(entries_size);
     }
 
     #[cfg(test)]
@@ -474,6 +480,12 @@ impl MemTable {
             (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
             _ => return,
         }
+    }
+}
+
+impl Drop for MemTable {
+    fn drop(&mut self) {
+        self.cache_stats.sub_mem_change(self.cache_size);
     }
 }
 
