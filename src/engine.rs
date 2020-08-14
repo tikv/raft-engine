@@ -21,7 +21,7 @@ const SLOTS_COUNT: usize = 128;
 
 // If a region has some very old raft logs less than this threshold,
 // rewrite them to clean stale log files ASAP.
-const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 128;
+const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
 
 struct FileEngineInner {
     cfg: Config,
