@@ -5,7 +5,7 @@ use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use compress::lz4;
-use crc32c::crc32c;
+use crc32fast::Hasher;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
@@ -25,6 +25,13 @@ const TYPE_KV: u8 = 0x3;
 const CMD_CLEAN: u8 = 0x01;
 
 const COMPRESSION_SIZE: usize = 4096;
+
+#[inline]
+fn crc32(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -502,7 +509,7 @@ impl LogBatch {
             CompressionType::None
         };
 
-        let checksum = crc32c(&vec.as_slice()[8..]);
+        let checksum = crc32(&vec[8..]);
         vec.encode_u32_le(checksum).unwrap();
         let len = vec.len() as u64 - 8;
         let mut header = len << 8;
@@ -550,7 +557,7 @@ pub fn test_batch_checksum(buf: &[u8]) -> Result<()> {
     let batch_len = buf.len();
     let mut s = &buf[(batch_len - CHECKSUM_LEN)..batch_len];
     let expected = codec::decode_u32_le(&mut s)?;
-    let got = crc32c(&buf[..(batch_len - CHECKSUM_LEN)]);
+    let got = crc32(&buf[..(batch_len - CHECKSUM_LEN)]);
     if got != expected {
         return Err(Error::IncorrectChecksum(expected, got));
     }

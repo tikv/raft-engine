@@ -1,4 +1,3 @@
-#![feature(ptr_offset_from)]
 #![allow(clippy::missing_safety_doc)]
 
 #[macro_use]

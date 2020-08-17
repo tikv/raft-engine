@@ -102,7 +102,7 @@ impl FileEngineInner {
                 match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
                     Ok(Some(log_batch)) => {
                         self.apply_to_memtable(log_batch, current_read_file);
-                        offset = unsafe { buf.as_ptr().offset_from(start_ptr) as u64 };
+                        offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
                     Ok(None) => {
                         info!("Recovered raft log file {}.", current_read_file);
