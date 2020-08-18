@@ -373,12 +373,7 @@ impl PipeLog {
             .unwrap_or_else(|e| panic!("Write header failed, error {:?}", e));
     }
 
-    pub fn append_log_batch(
-        &self,
-        batch: &LogBatch,
-        sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize> {
+    pub fn write(&self, batch: &LogBatch, sync: bool, file_num: &mut u64) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
             let bytes = content.len();
             let (cur_file_num, offset) = {

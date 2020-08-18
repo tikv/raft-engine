@@ -5,6 +5,7 @@ use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
 use std::ops::{Div, Mul};
 use std::str::FromStr;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use serde::de::{self, Unexpected, Visitor};
@@ -194,7 +195,6 @@ pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T]
     } else if high <= first.len() {
         (&first[low..high], &[])
     } else {
-        println!("first len: {}, second len: {}", first.len(), second.len());
         (&first[low..], &second[..high - first.len()])
     }
 }
@@ -204,6 +204,20 @@ pub fn duration_to_sec(d: Duration) -> f64 {
     let nanos = f64::from(d.subsec_nanos());
     // Most of case, we can't have so large Duration, so here just panic if overflow now.
     d.as_secs() as f64 + (nanos / 1_000_000_000.0)
+}
+
+pub trait HandyRwLock<T> {
+    fn wl(&self) -> RwLockWriteGuard<'_, T>;
+    fn rl(&self) -> RwLockReadGuard<'_, T>;
+}
+
+impl<T> HandyRwLock<T> for RwLock<T> {
+    fn wl(&self) -> RwLockWriteGuard<'_, T> {
+        self.write().unwrap()
+    }
+    fn rl(&self) -> RwLockReadGuard<'_, T> {
+        self.read().unwrap()
+    }
 }
 
 pub(crate) const RAFT_LOG_STATE_KEY: &[u8] = b"R";

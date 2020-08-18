@@ -74,25 +74,6 @@ pub struct MemTable {
 }
 
 impl MemTable {
-    pub fn rewrite_entries_index(&mut self, mut entries_index: Vec<EntryIndex>) {
-        if entries_index.is_empty() || self.entries_index.is_empty() {
-            return;
-        }
-        let first_index = entries_index.first().unwrap().index;
-        let front_index = self.entries_index.front().unwrap().index;
-        let last_index = entries_index.last().unwrap().index;
-        let back_index = self.entries_index.back().unwrap().index;
-
-        let start_index = cmp::max(first_index, front_index);
-        let end_index = cmp::min(last_index, back_index);
-        let src_offset = start_index - first_index;
-        let dst_offset = start_index - front_index;
-        for i in start_index..=end_index {
-            let index = std::mem::take(&mut entries_index[(i - src_offset) as usize]);
-            self.entries_index[(i - dst_offset) as usize] = index;
-        }
-    }
-
     fn cache_distance(&self) -> usize {
         if self.entries_cache.is_empty() {
             return self.entries_index.len();
@@ -339,10 +320,6 @@ impl MemTable {
             return Err(Error::Storage(StorageError::Unavailable));
         }
 
-        if last_index - first_index + 1 != self.entries_index.len() as u64 {
-            println!("what a bug, entries index: {:?}", self.entries_index);
-        }
-
         let start_pos = (begin - first_index) as usize;
         let mut end_pos = (end - begin) as usize + start_pos;
 
@@ -353,48 +330,28 @@ impl MemTable {
         }
 
         let cache_offset = self.cache_distance();
-        println!(
-            "{} fetch_entries, begin: {}, end: {}, first: {:?}, last: {:?}, first cache: {:?}, last_cache: {:?}, start_pos: {}, end_pos: {}, cache_offset: {}",
-            self.region_id, begin, end, first_index, last_index,
-            self.entries_cache.front().map(|e| e.index),
-            self.entries_cache.back().map(|e| e.index),
-            start_pos, end_pos, cache_offset,
-        );
         if cache_offset < end_pos {
             if start_pos >= cache_offset {
                 // All needed entries are in cache.
                 let low = start_pos - cache_offset;
                 let high = end_pos - cache_offset;
-                println!(
-                    "calling slices_in_range(cache), low: {}, high: {}",
-                    low, high
-                );
                 let (first, second) = slices_in_range(&self.entries_cache, low, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
             } else {
                 // Partial needed entries are in cache.
                 let high = end_pos - cache_offset;
-                println!("calling slices_in_range(cache), low: {}, high: {}", 0, high);
                 let (first, second) = slices_in_range(&self.entries_cache, 0, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
 
                 // Entries that not in cache should return their indices.
-                println!(
-                    "calling slices_in_range(index), low: {}, high: {}",
-                    start_pos, cache_offset
-                );
                 let (first, second) = slices_in_range(&self.entries_index, start_pos, cache_offset);
                 vec_idx.extend_from_slice(first);
                 vec_idx.extend_from_slice(second);
             }
         } else {
             // All needed entries are not in cache
-            println!(
-                "calling slices_in_range(index), low: {}, high: {}",
-                start_pos, end_pos
-            );
             let (first, second) = slices_in_range(&self.entries_index, start_pos, end_pos);
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
@@ -463,6 +420,10 @@ impl MemTable {
         self.entries_index.front().map(|e| e.index)
     }
 
+    pub fn last_index(&self) -> Option<u64> {
+        self.entries_index.back().map(|e| e.index)
+    }
+
     fn kvs_min_file_num(&self) -> Option<u64> {
         if self.kvs.is_empty() {
             return None;
@@ -516,7 +477,18 @@ impl MemTable {
     pub fn remove(&mut self) {
         // All raft logs should be treated as compacted.
         let entries_size = self.entries_size();
+        self.entries_index.clear();
         self.cache_stats.add_compacted_size(entries_size);
+
+        self.entries_cache.clear();
+        self.cache_size = 0;
+        self.cache_stats.sub_mem_change(self.cache_size);
+
+        self.kvs.clear();
+    }
+
+    pub fn uninitialized(&self) -> bool {
+        self.entries_index.is_empty() && self.kvs.is_empty()
     }
 
     #[cfg(test)]
@@ -529,12 +501,6 @@ impl MemTable {
             (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
             _ => return,
         }
-    }
-}
-
-impl Drop for MemTable {
-    fn drop(&mut self) {
-        self.cache_stats.sub_mem_change(self.cache_size);
     }
 }
 
