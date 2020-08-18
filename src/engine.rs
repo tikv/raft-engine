@@ -28,7 +28,7 @@ struct FileEngineInner {
 
     // Multiple slots
     // region_id -> MemTable.
-    memtables: Vec<RwLock<HashMap<u64, MemTable>>>,
+    memtables: Vec<RwLock<HashMap<u64, Arc<RwLock<MemTable>>>>>,
 
     // Persistent entries.
     pipe_log: PipeLog,
@@ -40,6 +40,29 @@ struct FileEngineInner {
 }
 
 impl FileEngineInner {
+    fn get_or_insert_memtable(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
+        let mut memtables = self.memtables[raft_group_id as usize % SLOTS_COUNT]
+            .write()
+            .unwrap();
+        let memtable = memtables.entry(raft_group_id).or_insert_with(|| {
+            let cache_limit = self.cfg.cache_limit_per_raft.0;
+            let cache_stats = self.cache_stats.clone();
+            Arc::new(RwLock::new(MemTable::new(
+                raft_group_id,
+                cache_limit,
+                cache_stats,
+            )))
+        });
+        memtable.clone()
+    }
+
+    fn get_memtable(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
+        let memtables = self.memtables[raft_group_id as usize % SLOTS_COUNT]
+            .read()
+            .unwrap();
+        memtables.get(&raft_group_id).map(|c| c.clone())
+    }
+
     // recover from disk.
     fn recover(&mut self, recovery_mode: RecoveryMode) -> Result<()> {
         // Get first file number and last file number.
@@ -91,7 +114,7 @@ impl FileEngineInner {
                 match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
                     Ok(Some(log_batch)) => {
                         self.apply_to_memtable(log_batch, current_read_file);
-                        offset = unsafe { buf.as_ptr().offset_from(start_ptr) as u64 };
+                        offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
                     Ok(None) => {
                         info!("Recovered raft log file {}.", current_read_file);
@@ -143,15 +166,8 @@ impl FileEngineInner {
                 LogItemType::Entries => {
                     let entries_to_add = item.entries.unwrap();
                     let region_id = entries_to_add.region_id;
-                    let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-                        .write()
-                        .unwrap();
-                    let memtable = memtables.entry(region_id).or_insert_with(|| {
-                        let cache_limit = self.cfg.cache_limit_per_raft.0;
-                        let cache_stats = self.cache_stats.clone();
-                        MemTable::new(region_id, cache_limit, cache_stats)
-                    });
-                    memtable.append(
+                    let memtable = self.get_or_insert_memtable(region_id);
+                    memtable.write().unwrap().append(
                         entries_to_add.entries,
                         entries_to_add.entries_index.into_inner(),
                     );
@@ -160,33 +176,21 @@ impl FileEngineInner {
                     let command = item.command.unwrap();
                     match command {
                         Command::Clean { region_id } => {
-                            let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-                                .write()
-                                .unwrap();
-                            if let Some(mut memtable) = memtables.remove(&region_id) {
-                                memtable.remove();
+                            if let Some(memtable) = self.get_memtable(region_id) {
+                                memtable.write().unwrap().remove();
                             }
                         }
                         Command::Compact { region_id, index } => {
-                            let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-                                .write()
-                                .unwrap();
-                            if let Some(memtable) = memtables.get_mut(&region_id) {
-                                memtable.compact_to(index);
+                            if let Some(memtable) = self.get_memtable(region_id) {
+                                memtable.write().unwrap().compact_to(index);
                             }
                         }
                     }
                 }
                 LogItemType::KV => {
                     let kv = item.kv.unwrap();
-                    let mut memtables = self.memtables[kv.region_id as usize % SLOTS_COUNT]
-                        .write()
-                        .unwrap();
-                    let memtable = memtables.entry(kv.region_id).or_insert_with(|| {
-                        let cache_limit = self.cfg.cache_limit_per_raft.0;
-                        let stats = self.cache_stats.clone();
-                        MemTable::new(kv.region_id, cache_limit, stats)
-                    });
+                    let memtable = self.get_or_insert_memtable(kv.region_id);
+                    let mut memtable = memtable.write().unwrap();
                     match kv.op_type {
                         OpType::Put => {
                             memtable.put(kv.key, kv.value.unwrap(), file_num);
@@ -218,9 +222,14 @@ impl FileEngineInner {
         force_compact_threshold: usize,
         will_force_compact: &mut Vec<u64>,
     ) {
+        let mut memtables = Vec::new();
+        for ts in &self.memtables {
+            memtables.extend(ts.read().unwrap().values().map(|t| t.clone()));
+        }
+
         let mut cache = HashMap::default();
-        for memtables in &self.memtables {
-            for memtable in memtables.read().unwrap().values() {
+        for memtable in memtables {
+                let memtable = memtable.read().unwrap();
                 let region_id = memtable.region_id();
 
                 // Check the memtable needs force compaction or not.
@@ -247,7 +256,6 @@ impl FileEngineInner {
 
                 info!("[QP] region {} needs rewrite", region_id);
 
-
                 let mut ents = Vec::with_capacity(entries_count);
                 let mut ents_idx = Vec::with_capacity(entries_count);
                 memtable.fetch_all(&mut ents, &mut ents_idx);
@@ -260,12 +268,7 @@ impl FileEngineInner {
 
                 let mut kvs = Vec::new();
                 memtable.fetch_all_kvs(&mut kvs);
-                for (key, value) in kvs {
-                    log_batch.put(region_id, &key, &value);
-                }
-
-                self.rewrite(region_id, all_ents, kvs);
-            }
+                self.rewrite(region_id, all_ents, kvs).unwrap();
         }
         will_force_compact.sort();
     }
@@ -277,7 +280,8 @@ impl FileEngineInner {
         for memtables in &self.memtables {
             let memtables = memtables.read().unwrap();
             for memtable in memtables.values() {
-                if let Some(file_num) = memtable.min_file_num() {
+                let t = memtable.read().unwrap();
+                if let Some(file_num) = t.min_file_num() {
                     min_file_num = cmp::min(min_file_num, file_num);
                 }
             }
@@ -294,11 +298,8 @@ impl FileEngineInner {
     }
 
     fn first_index(&self, region_id: u64) -> Option<u64> {
-        let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-            .read()
-            .unwrap();
-        if let Some(memtable) = memtables.get(&region_id) {
-            return memtable.first_index();
+        if let Some(memtable) = self.get_memtable(region_id) {
+            return memtable.read().unwrap().first_index();
         }
         None
     }
@@ -317,11 +318,8 @@ impl FileEngineInner {
     }
 
     fn compact_cache_to(&self, region_id: u64, index: u64) {
-        let mut memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-            .write()
-            .unwrap();
-        if let Some(memtable) = memtables.get_mut(&region_id) {
-            memtable.compact_cache_to(index);
+        if let Some(memtable) = self.get_memtable(region_id) {
+            memtable.write().unwrap().compact_cache_to(index);
         }
     }
 
@@ -334,7 +332,14 @@ impl FileEngineInner {
         Ok(bytes)
     }
 
-    fn rewrite(&self, raft_group_id: u64, entries: Vec<Entries>, kvs: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
+    fn rewrite(
+        &self,
+        _raft_group_id: u64,
+        _entries: Vec<Entry>,
+        _kvs: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<()> {
+        Ok(())
+        /******************************************************
         let log_batch = LogBatch::new();
         log_batch.add_entries(raft_group_id, entries);
         for (k, v) in kvs {
@@ -390,6 +395,7 @@ impl FileEngineInner {
 
         // Clean the region because all old raft logs can be treated as compacted.
         log_batch.clean_region(region_id);
+        ******************************************************/
     }
 
     fn sync(&self) -> Result<()> {
@@ -399,13 +405,8 @@ impl FileEngineInner {
 
     #[allow(dead_code)]
     fn kv_count(&self, region_id: u64) -> usize {
-        let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-            .read()
-            .unwrap();
-        if let Some(memtable) = memtables.get(&region_id) {
-            return memtable.kvs_total_count();
-        }
-        0
+        self.get_memtable(region_id)
+            .map_or(0, |t| t.read().unwrap().kvs_total_count())
     }
 
     fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
@@ -415,14 +416,9 @@ impl FileEngineInner {
     }
 
     fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-            .read()
-            .unwrap();
-        if let Some(memtable) = memtables.get(&region_id) {
-            Ok(memtable.get(key))
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .get_memtable(region_id)
+            .and_then(|t| t.read().unwrap().get(key)))
     }
 
     fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
@@ -439,11 +435,8 @@ impl FileEngineInner {
     fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<Entry>> {
         // Fetch from cache
         let entry_idx = {
-            let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-                .read()
-                .expect("must get memtable");
-            if let Some(memtable) = memtables.get(&region_id) {
-                match memtable.get_entry(log_idx) {
+            if let Some(memtable) = self.get_memtable(region_id) {
+                match memtable.read().unwrap().get_entry(log_idx) {
                     (Some(entry), _) => return Ok(Some(entry)),
                     (None, Some(idx)) => idx,
                     (None, None) => return Ok(None),
@@ -503,10 +496,8 @@ impl FileEngineInner {
         max_size: Option<usize>,
         vec: &mut Vec<Entry>,
     ) -> Result<usize> {
-        let memtables = self.memtables[region_id as usize % SLOTS_COUNT]
-            .read()
-            .unwrap();
-        if let Some(memtable) = memtables.get(&region_id) {
+        if let Some(memtable) = self.get_memtable(region_id) {
+            let memtable = memtable.read().unwrap();
             let mut entries = Vec::with_capacity((end - begin) as usize);
             let mut entries_idx = Vec::with_capacity((end - begin) as usize);
             memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
@@ -664,17 +655,15 @@ impl FileEngine {
     }
 
     pub fn first_index(&self, raft_group_id: u64) -> Option<u64> {
-        let slot = &self.inner.memtables[raft_group_id as usize % SLOTS_COUNT];
-        let memtables = slot.read().unwrap();
-        let memtable = memtables.get(&raft_group_id).unwrap();
-        memtable.entries_index.front().map(|e| e.index)
+        let memtable = self.inner.get_memtable(raft_group_id).unwrap();
+        let t = memtable.read().unwrap();
+        t.entries_index.front().map(|e| e.index)
     }
 
     pub fn last_index(&self, raft_group_id: u64) -> Option<u64> {
-        let slot = &self.inner.memtables[raft_group_id as usize % SLOTS_COUNT];
-        let memtables = slot.read().unwrap();
-        let memtable = memtables.get(&raft_group_id).unwrap();
-        memtable.entries_index.back().map(|e| e.index)
+        let memtable = self.inner.get_memtable(raft_group_id).unwrap();
+        let t = memtable.read().unwrap();
+        t.entries_index.back().map(|e| e.index)
     }
 }
 

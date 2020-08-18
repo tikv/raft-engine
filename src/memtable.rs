@@ -74,7 +74,7 @@ pub struct MemTable {
 }
 
 impl MemTable {
-    pub fn rewrite_entries_index(&mut self, entries_index: Vec<EntryIndex>) {
+    pub fn rewrite_entries_index(&mut self, mut entries_index: Vec<EntryIndex>) {
         if entries_index.is_empty() || self.entries_index.is_empty() {
             return;
         }
@@ -88,7 +88,8 @@ impl MemTable {
         let src_offset = start_index - first_index;
         let dst_offset = start_index - front_index;
         for i in start_index..=end_index {
-            self.entries_index[i-dst_offset] = entries_index[i-src_offset];
+            let index = std::mem::take(&mut entries_index[(i - src_offset) as usize]);
+            self.entries_index[(i - dst_offset) as usize] = index;
         }
     }
 
@@ -364,7 +365,10 @@ impl MemTable {
                 // All needed entries are in cache.
                 let low = start_pos - cache_offset;
                 let high = end_pos - cache_offset;
-                println!("calling slices_in_range(cache), low: {}, high: {}", low, high);
+                println!(
+                    "calling slices_in_range(cache), low: {}, high: {}",
+                    low, high
+                );
                 let (first, second) = slices_in_range(&self.entries_cache, low, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
@@ -377,14 +381,20 @@ impl MemTable {
                 vec.extend_from_slice(second);
 
                 // Entries that not in cache should return their indices.
-                println!("calling slices_in_range(index), low: {}, high: {}", start_pos, cache_offset);
+                println!(
+                    "calling slices_in_range(index), low: {}, high: {}",
+                    start_pos, cache_offset
+                );
                 let (first, second) = slices_in_range(&self.entries_index, start_pos, cache_offset);
                 vec_idx.extend_from_slice(first);
                 vec_idx.extend_from_slice(second);
             }
         } else {
             // All needed entries are not in cache
-            println!("calling slices_in_range(index), low: {}, high: {}", start_pos, end_pos);
+            println!(
+                "calling slices_in_range(index), low: {}, high: {}",
+                start_pos, end_pos
+            );
             let (first, second) = slices_in_range(&self.entries_index, start_pos, end_pos);
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);

@@ -4,8 +4,7 @@ use std::io::BufRead;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use compress::lz4;
-use crc32c::crc32c;
+use crc32fast::Hasher;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
@@ -26,6 +25,82 @@ const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
 const COMPRESSION_SIZE: usize = 4096;
+
+#[inline]
+fn crc32(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
+}
+
+mod lz4 {
+    use std::{i32, ptr};
+
+    // TODO: use in place compression instead.
+    #[inline]
+    pub fn encode_block(src: &[u8]) -> Vec<u8> {
+        unsafe {
+            let bound = lz4_sys::LZ4_compressBound(src.len() as i32);
+            if bound > 0 && src.len() <= i32::MAX as usize {
+                let mut output = Vec::<u8>::with_capacity(bound as usize + 4);
+                let le_len = src.len().to_le_bytes();
+                ptr::copy_nonoverlapping(le_len.as_ptr(), output.as_mut_ptr(), 4);
+                let size = lz4_sys::LZ4_compress_default(
+                    src.as_ptr() as _,
+                    output.as_mut_ptr().add(4) as _,
+                    src.len() as i32,
+                    bound,
+                );
+                if size > 0 {
+                    output.set_len(size as usize + 4);
+                    return output;
+                }
+                panic!("compression fail: {}", size);
+            }
+            panic!("input size is too large: {}", src.len());
+        }
+    }
+
+    #[inline]
+    pub fn decode_block(src: &[u8]) -> Vec<u8> {
+        unsafe {
+            if src.len() > 4 {
+                let len = u32::from_le(ptr::read_unaligned(src.as_ptr() as *const u32));
+                let mut dst = Vec::with_capacity(len as usize);
+                let l = lz4_sys::LZ4_decompress_safe(
+                    src.as_ptr().add(4) as _,
+                    dst.as_mut_ptr() as _,
+                    src.len() as i32 - 4,
+                    dst.capacity() as i32,
+                );
+                if l == len as i32 {
+                    dst.set_len(l as usize);
+                    return dst;
+                }
+                if l < 0 {
+                    panic!("decompress failed: {}", l);
+                } else {
+                    panic!("length of decompress result not match {} != {}", len, l);
+                }
+            }
+            panic!("data is too short: {} <= 4", src.len());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn test_basic() {
+            let data: Vec<&'static [u8]> = vec![b"", b"123", b"12345678910"];
+            for d in data {
+                let compressed = super::encode_block(d);
+                assert!(compressed.len() > 4);
+                let res = super::decode_block(&compressed);
+                assert_eq!(res, d);
+            }
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -505,9 +580,7 @@ impl LogBatch {
         }
 
         let compression_type = if vec.len() > COMPRESSION_SIZE {
-            let mut dst = Vec::with_capacity(vec.len());
-            let compressed_size = lz4::encode_block(&vec[8..], &mut dst);
-            assert_eq!(compressed_size, dst.len());
+            let dst = lz4::encode_block(&vec[8..]);
             vec.truncate(8);
             vec.extend_from_slice(&dst);
             CompressionType::Lz4
@@ -515,7 +588,7 @@ impl LogBatch {
             CompressionType::None
         };
 
-        let checksum = crc32c(&vec.as_slice()[8..]);
+        let checksum = crc32(&vec[8..]);
         vec.encode_u32_le(checksum).unwrap();
         let len = vec.len() as u64 - 8;
         let mut header = len << 8;
@@ -563,7 +636,7 @@ pub fn test_batch_checksum(buf: &[u8]) -> Result<()> {
     let batch_len = buf.len();
     let mut s = &buf[(batch_len - CHECKSUM_LEN)..batch_len];
     let expected = codec::decode_u32_le(&mut s)?;
-    let got = crc32c(&buf[..(batch_len - CHECKSUM_LEN)]);
+    let got = crc32(&buf[..(batch_len - CHECKSUM_LEN)]);
     if got != expected {
         return Err(Error::IncorrectChecksum(expected, got));
     }
@@ -572,9 +645,7 @@ pub fn test_batch_checksum(buf: &[u8]) -> Result<()> {
 
 // NOTE: lz4::decode_block will truncate the output buffer first.
 pub fn decompress(buf: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(buf.len() * 4);
-    lz4::decode_block(buf, &mut output);
-    return output;
+    self::lz4::decode_block(buf)
 }
 
 #[cfg(test)]
