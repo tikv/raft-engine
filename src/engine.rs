@@ -160,8 +160,8 @@ impl FileEngineInner {
         Ok(())
     }
 
-    fn apply_to_memtable(&self, log_batch: LogBatch, file_num: u64) {
-        for item in log_batch.items.borrow_mut().drain(..) {
+    fn apply_to_memtable(&self, mut log_batch: LogBatch, file_num: u64) {
+        for item in log_batch.items.drain(..) {
             match item.item_type {
                 LogItemType::Entries => {
                     let entries_to_add = item.entries.unwrap();
@@ -229,46 +229,46 @@ impl FileEngineInner {
 
         let mut cache = HashMap::default();
         for memtable in memtables {
-                let memtable = memtable.read().unwrap();
-                let region_id = memtable.region_id();
+            let memtable = memtable.read().unwrap();
+            let region_id = memtable.region_id();
 
-                // Check the memtable needs force compaction or not.
-                if let Some(value) = memtable.get(RAFT_LOG_STATE_KEY) {
-                    let mut raft_state = RaftLocalState::new();
-                    raft_state.merge_from_bytes(&value).unwrap();
-                    let committed = raft_state.get_hard_state().commit;
-                    let last = raft_state.get_last_index();
-                    let delay_size = memtable.entries_size_in(committed + 1, last + 1);
-                    if delay_size > force_compact_threshold {
-                        info!("[QP] region {} needs to be force compacted", region_id);
-                        // The region needs force compaction, so skip to rewrite logs for it.
-                        will_force_compact.push(region_id);
-                        continue;
-                    }
-                }
-
-                let min_file_num = memtable.min_file_num().unwrap_or(u64::MAX);
-                let entries_count = memtable.entries_count();
-                if min_file_num > last_inactive || entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
-                    // TODO: maybe it's not necessary to rewrite all logs for a region.
+            // Check the memtable needs force compaction or not.
+            if let Some(value) = memtable.get(RAFT_LOG_STATE_KEY) {
+                let mut raft_state = RaftLocalState::new();
+                raft_state.merge_from_bytes(&value).unwrap();
+                let committed = raft_state.get_hard_state().commit;
+                let last = raft_state.get_last_index();
+                let delay_size = memtable.entries_size_in(committed + 1, last + 1);
+                if delay_size > force_compact_threshold {
+                    info!("[QP] region {} needs to be force compacted", region_id);
+                    // The region needs force compaction, so skip to rewrite logs for it.
+                    will_force_compact.push(region_id);
                     continue;
                 }
+            }
 
-                info!("[QP] region {} needs rewrite", region_id);
+            let min_file_num = memtable.min_file_num().unwrap_or(u64::MAX);
+            let entries_count = memtable.entries_count();
+            if min_file_num > last_inactive || entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
+                // TODO: maybe it's not necessary to rewrite all logs for a region.
+                continue;
+            }
 
-                let mut ents = Vec::with_capacity(entries_count);
-                let mut ents_idx = Vec::with_capacity(entries_count);
-                memtable.fetch_all(&mut ents, &mut ents_idx);
-                let mut all_ents = Vec::with_capacity(entries_count);
-                for ei in ents_idx {
-                    let e = self.read_entry_from_file(&ei, Some(&mut cache)).unwrap();
-                    all_ents.push(e);
-                }
-                all_ents.extend(ents.into_iter());
+            info!("[QP] region {} needs rewrite", region_id);
 
-                let mut kvs = Vec::new();
-                memtable.fetch_all_kvs(&mut kvs);
-                self.rewrite(region_id, all_ents, kvs).unwrap();
+            let mut ents = Vec::with_capacity(entries_count);
+            let mut ents_idx = Vec::with_capacity(entries_count);
+            memtable.fetch_all(&mut ents, &mut ents_idx);
+            let mut all_ents = Vec::with_capacity(entries_count);
+            for ei in ents_idx {
+                let e = self.read_entry_from_file(&ei, Some(&mut cache)).unwrap();
+                all_ents.push(e);
+            }
+            all_ents.extend(ents.into_iter());
+
+            let mut kvs = Vec::new();
+            memtable.fetch_all_kvs(&mut kvs);
+            self.rewrite(region_id, all_ents, kvs).unwrap();
         }
         will_force_compact.sort();
     }
@@ -310,7 +310,7 @@ impl FileEngineInner {
             None => return 0,
         };
 
-        let log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::new();
         log_batch.add_command(Command::Compact { region_id, index });
         self.write(log_batch, false).map(|_| ()).unwrap();
 
@@ -324,6 +324,7 @@ impl FileEngineInner {
     }
 
     fn write(&self, log_batch: LogBatch, sync: bool) -> Result<usize> {
+        let mut memtables = Vec::with_capacity(log_batch.items.len());
         let mut file_num = 0;
         let bytes = self
             .pipe_log
@@ -410,15 +411,14 @@ impl FileEngineInner {
     }
 
     fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
-        let log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::new();
         log_batch.put_msg(region_id, key, m)?;
         self.write(log_batch, false).map(|_| ())
     }
 
     fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .get_memtable(region_id)
-            .and_then(|t| t.read().unwrap().get(key)))
+        let memtable = self.get_memtable(region_id);
+        Ok(memtable.and_then(|t| t.read().unwrap().get(key)))
     }
 
     fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
@@ -718,7 +718,7 @@ impl RaftEngine for FileEngine {
     }
 
     fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
-        let batch = LogBatch::default();
+        let mut batch = LogBatch::default();
         batch.add_entries(raft_group_id, entries);
         self.inner.write(batch, false)
     }

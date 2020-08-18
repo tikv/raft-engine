@@ -458,13 +458,13 @@ impl LogItem {
 
 #[derive(Debug, PartialEq)]
 pub struct LogBatch {
-    pub items: RefCell<Vec<LogItem>>,
+    pub items: Vec<LogItem>,
 }
 
 impl Default for LogBatch {
     fn default() -> Self {
         Self {
-            items: RefCell::new(Vec::with_capacity(16)),
+            items: Vec::with_capacity(16),
         }
     }
 }
@@ -476,42 +476,47 @@ impl LogBatch {
 
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            items: RefCell::new(Vec::with_capacity(cap)),
+            items: Vec::with_capacity(cap),
         }
     }
 
-    pub fn add_entries(&self, region_id: u64, entries: Vec<Entry>) {
+    pub fn add_entries(&mut self, region_id: u64, entries: Vec<Entry>) {
         let item = LogItem::from_entries(region_id, entries);
-        self.items.borrow_mut().push(item);
+        self.items.push(item);
     }
 
-    pub fn clean_region(&self, region_id: u64) {
+    pub fn clean_region(&mut self, region_id: u64) {
         self.add_command(Command::Clean { region_id });
     }
 
-    pub fn add_command(&self, cmd: Command) {
+    pub fn add_command(&mut self, cmd: Command) {
         let item = LogItem::from_command(cmd);
-        self.items.borrow_mut().push(item);
+        self.items.push(item);
     }
 
-    pub fn delete(&self, region_id: u64, key: &[u8]) {
+    pub fn delete(&mut self, region_id: u64, key: &[u8]) {
         let item = LogItem::from_kv(OpType::Del, region_id, key, None);
-        self.items.borrow_mut().push(item);
+        self.items.push(item);
     }
 
-    pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) {
+    pub fn put(&mut self, region_id: u64, key: &[u8], value: &[u8]) {
         let item = LogItem::from_kv(OpType::Put, region_id, key, Some(value));
-        self.items.borrow_mut().push(item);
+        self.items.push(item);
     }
 
-    pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
+    pub fn put_msg<M: protobuf::Message>(
+        &mut self,
+        region_id: u64,
+        key: &[u8],
+        m: &M,
+    ) -> Result<()> {
         let value = m.write_to_bytes()?;
         self.put(region_id, key, &value);
         Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.borrow().is_empty()
+        self.items.is_empty()
     }
 
     pub fn from_bytes(
@@ -542,17 +547,17 @@ impl LogBatch {
 
         let mut items_count = codec::decode_var_u64(&mut reader)? as usize;
         assert!(items_count > 0 && !reader.is_empty());
-        let log_batch = LogBatch::with_capacity(items_count);
+        let mut log_batch = LogBatch::with_capacity(items_count);
         while items_count > 0 {
             let content_offset = (content_len - reader.len()) as u64;
             let item = LogItem::from_bytes(&mut reader, file_num, base_offset, content_offset)?;
-            log_batch.items.borrow_mut().push(item);
+            log_batch.items.push(item);
             items_count -= 1;
         }
         assert!(reader.is_empty());
         buf.consume(batch_len);
 
-        for item in log_batch.items.borrow_mut().iter_mut() {
+        for item in log_batch.items.iter_mut() {
             if item.item_type == LogItemType::Entries {
                 item.entries
                     .as_mut()
@@ -566,16 +571,15 @@ impl LogBatch {
 
     // TODO: avoid to write a large batch into one compressed chunk.
     pub fn encode_to_bytes(&self) -> Option<Vec<u8>> {
-        if self.items.borrow().is_empty() {
+        if self.items.is_empty() {
             return None;
         }
 
         // layout = { 8 bytes len | item count | multiple items | 4 bytes checksum }
         let mut vec = Vec::with_capacity(4096);
         vec.encode_u64(0).unwrap();
-        vec.encode_var_u64(self.items.borrow().len() as u64)
-            .unwrap();
-        for item in self.items.borrow_mut().iter_mut() {
+        vec.encode_var_u64(self.items.len() as u64).unwrap();
+        for item in &self.items {
             item.encode_to(&mut vec).unwrap();
         }
 
@@ -596,12 +600,10 @@ impl LogBatch {
         vec.as_mut_slice().write_u64::<BigEndian>(header).unwrap();
 
         let batch_len = (vec.len() - 8) as u64;
-        for item in self.items.borrow_mut().iter_mut() {
+        for item in &self.items {
             if item.item_type == LogItemType::Entries {
-                item.entries
-                    .as_mut()
-                    .unwrap()
-                    .update_compression_type(compression_type, batch_len);
+                let entries = item.entries.as_ref().unwrap();
+                entries.update_compression_type(compression_type, batch_len);
             }
         }
 
@@ -624,7 +626,7 @@ impl RaftLogBatch for LogBatch {
     }
 
     fn is_empty(&self) -> bool {
-        self.items.borrow().is_empty()
+        self.items.is_empty()
     }
 }
 
@@ -744,7 +746,7 @@ mod tests {
     fn test_log_batch_enc_dec() {
         let region_id = 8;
         let file_num = 1;
-        let batch = LogBatch::new();
+        let mut batch = LogBatch::new();
         batch.add_entries(region_id, vec![Entry::new(); 10]);
         batch.add_command(Command::Clean { region_id });
         batch.put(region_id, b"key", b"value");
@@ -755,7 +757,7 @@ mod tests {
         let decoded_batch = LogBatch::from_bytes(&mut s, file_num, 0).unwrap().unwrap();
         assert_eq!(s.len(), 0);
 
-        for item in batch.items.borrow_mut().iter_mut() {
+        for item in batch.items.iter_mut() {
             if item.item_type == LogItemType::Entries {
                 item.entries
                     .as_ref()

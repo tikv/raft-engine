@@ -385,13 +385,12 @@ impl PipeLog {
                 let _write_lock = self.write_lock.lock().unwrap();
                 self.append(&content, sync)?
             };
-            for item in batch.items.borrow_mut().iter_mut() {
+            for item in &batch.items {
                 match item.item_type {
-                    LogItemType::Entries => item
-                        .entries
-                        .as_mut()
-                        .unwrap()
-                        .update_offset_when_needed(cur_file_num, offset),
+                    LogItemType::Entries => {
+                        let entries = item.entries.as_ref().unwrap();
+                        entries.update_offset_when_needed(cur_file_num, offset);
+                    }
                     LogItemType::KV | LogItemType::CMD => {}
                 }
             }
