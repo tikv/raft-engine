@@ -14,9 +14,15 @@ quick_error! {
             cause(err)
             display("{}", err)
         }
-        KeyLength {display("bad format key(length)")}
-        KeyPadding {display("bad format key(padding)")}
-        KeyNotFound {display("key not found")}
+        KeyLength {
+            display("bad format key(length)")
+        }
+        KeyPadding {
+            display("bad format key(padding)")
+        }
+        KeyNotFound {
+            display("key not found")
+        }
     }
 }
 

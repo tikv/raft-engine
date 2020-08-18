@@ -11,7 +11,7 @@ use crate::util::{HashMap, RAFT_LOG_STATE_KEY};
 
 use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{
-    self, Command, CompressionType, LogBatch, LogItemType, OpType, CHECKSUM_LEN, HEADER_LEN,
+    self, Command, CompressionType, LogBatch, LogItemContent, OpType, CHECKSUM_LEN, HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
@@ -162,44 +162,26 @@ impl FileEngineInner {
 
     fn apply_to_memtable(&self, mut log_batch: LogBatch, file_num: u64) {
         for item in log_batch.items.drain(..) {
-            match item.item_type {
-                LogItemType::Entries => {
-                    let entries_to_add = item.entries.unwrap();
-                    let region_id = entries_to_add.region_id;
-                    let memtable = self.get_or_insert_memtable(region_id);
-                    memtable.write().unwrap().append(
+            let region_id = item.raft_group_id;
+            let m = self.get_or_insert_memtable(region_id);
+            let mut memtable = m.write().unwrap();
+            match item.content {
+                LogItemContent::Entries(entries_to_add) => {
+                    memtable.append(
                         entries_to_add.entries,
                         entries_to_add.entries_index.into_inner(),
                     );
                 }
-                LogItemType::CMD => {
-                    let command = item.command.unwrap();
-                    match command {
-                        Command::Clean { region_id } => {
-                            if let Some(memtable) = self.get_memtable(region_id) {
-                                memtable.write().unwrap().remove();
-                            }
-                        }
-                        Command::Compact { region_id, index } => {
-                            if let Some(memtable) = self.get_memtable(region_id) {
-                                memtable.write().unwrap().compact_to(index);
-                            }
-                        }
-                    }
+                LogItemContent::Command(Command::Clean) => {
+                    memtable.remove();
                 }
-                LogItemType::KV => {
-                    let kv = item.kv.unwrap();
-                    let memtable = self.get_or_insert_memtable(kv.region_id);
-                    let mut memtable = memtable.write().unwrap();
-                    match kv.op_type {
-                        OpType::Put => {
-                            memtable.put(kv.key, kv.value.unwrap(), file_num);
-                        }
-                        OpType::Del => {
-                            memtable.delete(kv.key.as_slice());
-                        }
-                    }
+                LogItemContent::Command(Command::Compact { index }) => {
+                    memtable.compact_to(index);
                 }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => memtable.put(kv.key, kv.value.unwrap(), file_num),
+                    OpType::Del => memtable.delete(kv.key.as_slice()),
+                },
             }
         }
     }
@@ -311,7 +293,7 @@ impl FileEngineInner {
         };
 
         let mut log_batch = LogBatch::new();
-        log_batch.add_command(Command::Compact { region_id, index });
+        log_batch.add_command(region_id, Command::Compact { index });
         self.write(log_batch, false).map(|_| ()).unwrap();
 
         self.first_index(region_id).unwrap_or(index) - first_index
@@ -324,7 +306,7 @@ impl FileEngineInner {
     }
 
     fn write(&self, log_batch: LogBatch, sync: bool) -> Result<usize> {
-        let mut memtables = Vec::with_capacity(log_batch.items.len());
+        // let mut memtables = Vec::with_capacity(log_batch.items.len());
         let mut file_num = 0;
         let bytes = self
             .pipe_log
@@ -412,7 +394,7 @@ impl FileEngineInner {
 
     fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
         let mut log_batch = LogBatch::new();
-        log_batch.put_msg(region_id, key, m)?;
+        log_batch.put_msg(region_id, key.to_vec(), m)?;
         self.write(log_batch, false).map(|_| ())
     }
 

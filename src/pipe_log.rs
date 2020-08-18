@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::u64;
 
-use super::log_batch::{LogBatch, LogItemType};
+use super::log_batch::{LogBatch, LogItemContent};
 use super::metrics::*;
 use super::{Error, Result};
 
@@ -386,12 +386,8 @@ impl PipeLog {
                 self.append(&content, sync)?
             };
             for item in &batch.items {
-                match item.item_type {
-                    LogItemType::Entries => {
-                        let entries = item.entries.as_ref().unwrap();
-                        entries.update_offset_when_needed(cur_file_num, offset);
-                    }
-                    LogItemType::KV | LogItemType::CMD => {}
+                if let LogItemContent::Entries(ref entries) = item.content {
+                    entries.update_offset_when_needed(cur_file_num, offset);
                 }
             }
             *file_num = cur_file_num;
