@@ -194,6 +194,7 @@ pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T]
     } else if high <= first.len() {
         (&first[low..high], &[])
     } else {
+        println!("first len: {}, second len: {}", first.len(), second.len());
         (&first[low..], &second[..high - first.len()])
     }
 }

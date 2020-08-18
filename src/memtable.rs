@@ -62,7 +62,7 @@ pub struct MemTable {
     entries_cache: VecDeque<Entry>,
 
     // All entries index
-    entries_index: VecDeque<EntryIndex>,
+    pub entries_index: VecDeque<EntryIndex>,
 
     // Region scope key/value pairs
     // key -> (value, file_num)
@@ -74,6 +74,24 @@ pub struct MemTable {
 }
 
 impl MemTable {
+    pub fn rewrite_entries_index(&mut self, entries_index: Vec<EntryIndex>) {
+        if entries_index.is_empty() || self.entries_index.is_empty() {
+            return;
+        }
+        let first_index = entries_index.first().unwrap().index;
+        let front_index = self.entries_index.front().unwrap().index;
+        let last_index = entries_index.last().unwrap().index;
+        let back_index = self.entries_index.back().unwrap().index;
+
+        let start_index = cmp::max(first_index, front_index);
+        let end_index = cmp::min(last_index, back_index);
+        let src_offset = start_index - first_index;
+        let dst_offset = start_index - front_index;
+        for i in start_index..=end_index {
+            self.entries_index[i-dst_offset] = entries_index[i-src_offset];
+        }
+    }
+
     fn cache_distance(&self) -> usize {
         if self.entries_cache.is_empty() {
             return self.entries_index.len();
@@ -273,11 +291,25 @@ impl MemTable {
         let cache_distance = self.cache_distance();
         if ioffset < cache_distance {
             self.cache_stats.miss_cache(1);
+            // TODO: remove it.
+            assert!(
+                ioffset < self.entries_index.len(),
+                "ioffset: {}, len: {}",
+                ioffset,
+                self.entries_index.len()
+            );
             let entry_index = self.entries_index[ioffset].clone();
             (None, Some(entry_index))
         } else {
             self.cache_stats.hit_cache(1);
             let coffset = ioffset - cache_distance;
+            // TODO: remove it.
+            assert!(
+                coffset < self.entries_cache.len(),
+                "coffset: {}, len: {}",
+                coffset,
+                self.entries_cache.len()
+            );
             let entry = self.entries_cache[coffset].clone();
             (Some(entry), None)
         }
@@ -306,6 +338,10 @@ impl MemTable {
             return Err(Error::Storage(StorageError::Unavailable));
         }
 
+        if last_index - first_index + 1 != self.entries_index.len() as u64 {
+            println!("what a bug, entries index: {:?}", self.entries_index);
+        }
+
         let start_pos = (begin - first_index) as usize;
         let mut end_pos = (end - begin) as usize + start_pos;
 
@@ -316,28 +352,39 @@ impl MemTable {
         }
 
         let cache_offset = self.cache_distance();
+        println!(
+            "{} fetch_entries, begin: {}, end: {}, first: {:?}, last: {:?}, first cache: {:?}, last_cache: {:?}, start_pos: {}, end_pos: {}, cache_offset: {}",
+            self.region_id, begin, end, first_index, last_index,
+            self.entries_cache.front().map(|e| e.index),
+            self.entries_cache.back().map(|e| e.index),
+            start_pos, end_pos, cache_offset,
+        );
         if cache_offset < end_pos {
             if start_pos >= cache_offset {
                 // All needed entries are in cache.
                 let low = start_pos - cache_offset;
                 let high = end_pos - cache_offset;
+                println!("calling slices_in_range(cache), low: {}, high: {}", low, high);
                 let (first, second) = slices_in_range(&self.entries_cache, low, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
             } else {
                 // Partial needed entries are in cache.
                 let high = end_pos - cache_offset;
+                println!("calling slices_in_range(cache), low: {}, high: {}", 0, high);
                 let (first, second) = slices_in_range(&self.entries_cache, 0, high);
                 vec.extend_from_slice(first);
                 vec.extend_from_slice(second);
 
                 // Entries that not in cache should return their indices.
+                println!("calling slices_in_range(index), low: {}, high: {}", start_pos, cache_offset);
                 let (first, second) = slices_in_range(&self.entries_index, start_pos, cache_offset);
                 vec_idx.extend_from_slice(first);
                 vec_idx.extend_from_slice(second);
             }
         } else {
             // All needed entries are not in cache
+            println!("calling slices_in_range(index), low: {}, high: {}", start_pos, end_pos);
             let (first, second) = slices_in_range(&self.entries_index, start_pos, end_pos);
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
@@ -428,21 +475,13 @@ impl MemTable {
         assert!(start_idx < end_idx);
         let (first, second) = slices_in_range(&self.entries_index, start_idx, end_idx);
 
-        let mut count = 0;
-        let mut total_size = 0;
-        for i in first {
+        let (mut count, mut total_size) = (0, 0);
+        for i in first.into_iter().chain(second) {
             count += 1;
             total_size += i.len;
             if total_size as usize > max_size {
                 // No matter max_size's value, fetch one entry at lease.
-                return if count > 1 { count - 1 } else { count };
-            }
-        }
-        for i in second {
-            count += 1;
-            total_size += i.len;
-            if total_size as usize > max_size {
-                return if count > 1 { count - 1 } else { count };
+                return cmp::max(count - 1, 1);
             }
         }
         count
