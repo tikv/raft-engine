@@ -534,7 +534,7 @@ impl PipeLog {
     }
 
     /// Return the last file number before `total - size`. `0` means no such files.
-    pub fn last_file_before(&self, size: usize) -> u64 {
+    pub fn latest_file_before(&self, size: usize) -> u64 {
         // TODO: refactor it to avoid race.
         let cur_size = self.total_size();
         if cur_size <= size {

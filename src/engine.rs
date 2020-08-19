@@ -22,7 +22,7 @@ const SLOTS_COUNT: usize = 128;
 // If a region has some very old raft logs less than this threshold,
 // rewrite them to clean stale log files ASAP.
 const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
-const PURGE_REWRITE_BEFORE: f64 = 0.3;
+const REWRITE_INACTIVE_RATIO: f64 = 0.7;
 
 struct FileEngineInner {
     cfg: Config,
@@ -199,9 +199,8 @@ impl FileEngineInner {
     // 0 means no inactive file.
     fn max_inactive_file_num(&self) -> u64 {
         let total_size = self.pipe_log.total_size();
-        let garbage_ratio = PURGE_REWRITE_BEFORE;
-        let rewrite_limit = (total_size as f64 * (1.0 - garbage_ratio)) as usize;
-        self.pipe_log.last_file_before(rewrite_limit)
+        let rewrite_limit = (total_size as f64 * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
+        self.pipe_log.latest_file_before(rewrite_limit)
     }
 
     // Scan all regions and for every one
