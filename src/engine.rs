@@ -232,7 +232,6 @@ impl FileEngineInner {
                 let last = raft_state.get_last_index();
                 let delay_size = memtable.entries_size_in(committed + 1, last + 1);
                 if delay_size > force_compact_threshold {
-                    info!("[QP] region {} needs to be force compacted", region_id);
                     // The region needs force compaction, so skip to rewrite logs for it.
                     will_force_compact.push(region_id);
                     continue;
@@ -245,8 +244,6 @@ impl FileEngineInner {
                 // TODO: maybe it's not necessary to rewrite all logs for a region.
                 continue;
             }
-
-            info!("[QP] region {} needs rewrite", region_id);
 
             let mut ents = Vec::with_capacity(entries_count);
             let mut ents_idx = Vec::with_capacity(entries_count);
@@ -501,10 +498,6 @@ impl FileEngineInner {
     fn needs_purge_log_files(&self) -> bool {
         let total_size = self.pipe_log.total_size();
         let purge_threshold = self.cfg.purge_threshold.0 as usize;
-        info!(
-            "[QP] Testing needs purge, total: {}, threshold: {}",
-            total_size, purge_threshold
-        );
         total_size > purge_threshold
     }
 }
@@ -697,7 +690,6 @@ impl RaftEngine for FileEngine {
         if let Ok(_x) = self.inner.purge_mutex.try_lock() {
             if self.inner.needs_purge_log_files() {
                 let last_inactive = self.inner.max_inactive_file_num();
-                info!("[QP] last_inactive file number: {}", last_inactive);
                 let mut will_force_compact = Vec::new();
                 self.inner.regions_rewrite_or_force_compact(
                     last_inactive,
