@@ -104,7 +104,7 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
 
     /// Purge expired logs files and return a set of Raft group ids
     /// which needs to be compacted ASAP.
-    fn purge_expired_files(&self, force_compact_threshold: usize) -> Vec<u64>;
+    fn purge_expired_files(&self) -> Vec<u64>;
 
     /// The `RaftEngine` has a builtin entry cache or not.
     fn has_builtin_entry_cache(&self) -> bool {

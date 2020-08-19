@@ -23,6 +23,7 @@ const SLOTS_COUNT: usize = 128;
 // rewrite them to clean stale log files ASAP.
 const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
 const REWRITE_INACTIVE_RATIO: f64 = 0.7;
+const FORCE_COMPACT_RATIO: f64 = 0.2;
 
 struct FileEngineInner {
     cfg: Config,
@@ -196,54 +197,53 @@ impl FileEngineInner {
         }
     }
 
-    // 0 means no inactive file.
-    fn max_inactive_file_num(&self) -> u64 {
-        let total_size = self.pipe_log.total_size();
-        let rewrite_limit = (total_size as f64 * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
-        self.pipe_log.latest_file_before(rewrite_limit)
+    // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
+    fn latest_inactive_file_num(&self) -> (u64, u64) {
+        let total_size = self.pipe_log.total_size() as f64;
+        let rewrite_limit = (total_size * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
+        let compact_limit = (total_size * (1.0 - FORCE_COMPACT_RATIO)) as usize;
+        let latest_needs_rewrite = self.pipe_log.latest_file_before(rewrite_limit);
+        let latest_needs_compact = self.pipe_log.latest_file_before(compact_limit);
+        (latest_needs_rewrite, latest_needs_compact)
     }
 
-    // Scan all regions and for every one
-    // 1. return it if raft logs size between committed index and last index is greater than
-    //    `force_compact_threshold`;
-    // 2. rewrite inactive logs if it has less entries than `REWRITE_ENTRY_COUNT_THRESHOLD`.
     fn regions_rewrite_or_force_compact(
         &self,
-        last_inactive: u64,
-        force_compact_threshold: usize,
+        rewrite_latest_file_num: u64,
+        compact_latest_file_num: u64,
         will_force_compact: &mut Vec<u64>,
     ) {
+        assert!(compact_latest_file_num <= rewrite_latest_file_num);
+        let limit = cmp::max(rewrite_latest_file_num, compact_latest_file_num);
+
         let mut memtables = Vec::new();
         for ts in &self.memtables {
-            memtables.extend(ts.rl().values().map(|t| t.clone()));
+            // Collect all memtables which have entries need to rewrite or compact.
+            memtables.extend(ts.rl().values().filter_map(|t| {
+                let min_file_num = t.rl().min_file_num().unwrap_or(u64::MAX);
+                if min_file_num <= limit {
+                    return Some((min_file_num, t.clone()));
+                }
+                None
+            }));
         }
 
         let mut cache = HashMap::default();
-        for m in memtables {
+        for (min_file_num, m) in memtables {
             let memtable = m.wl();
             let region_id = memtable.region_id();
 
-            // Check the memtable needs force compaction or not.
-            if let Some(value) = memtable.get(RAFT_LOG_STATE_KEY) {
-                let mut raft_state = RaftLocalState::new();
-                raft_state.merge_from_bytes(&value).unwrap();
-                let committed = raft_state.get_hard_state().commit;
-                let last = raft_state.get_last_index();
-                let delay_size = memtable.entries_size_in(committed + 1, last + 1);
-                if delay_size > force_compact_threshold {
-                    // The region needs force compaction, so skip to rewrite logs for it.
-                    will_force_compact.push(region_id);
-                    continue;
-                }
+            if min_file_num <= compact_latest_file_num {
+                // The region needs force compaction, so skip to rewrite logs for it.
+                will_force_compact.push(region_id);
+                continue;
             }
-
-            let min_file_num = memtable.min_file_num().unwrap_or(u64::MAX);
             let entries_count = memtable.entries_count();
-            if min_file_num > last_inactive || entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
-                // TODO: maybe it's not necessary to rewrite all logs for a region.
+            if entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
                 continue;
             }
 
+            // TODO: maybe it's not necessary to rewrite all logs for a region.
             let mut ents = Vec::with_capacity(entries_count);
             let mut ents_idx = Vec::with_capacity(entries_count);
             memtable.fetch_all(&mut ents, &mut ents_idx);
@@ -258,12 +258,9 @@ impl FileEngineInner {
             memtable.fetch_all_kvs(&mut kvs);
             self.rewrite(region_id, all_ents, kvs, memtable).unwrap();
         }
-        will_force_compact.sort();
     }
 
-    fn purge_expired_files(&self, last_inactive: u64) -> Result<()> {
-        let first_file_num = self.pipe_log.first_file_num();
-
+    fn purge_expired_files(&self) -> Result<()> {
         let mut min_file_num = u64::MAX;
         for memtables in &self.memtables {
             let memtables = memtables.rl();
@@ -275,12 +272,8 @@ impl FileEngineInner {
             }
         }
 
-        let expected = (last_inactive + 1 - first_file_num) as usize;
         let purged = self.pipe_log.purge_to(min_file_num)?;
-        info!(
-            "puerge_expired_fies deletes {} files, {} is best",
-            purged, expected
-        );
+        info!("purged {} expired log files", purged);
         Ok(())
     }
 
@@ -327,29 +320,35 @@ impl FileEngineInner {
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
     fn write(&self, log_batch: LogBatch, sync: bool) -> Result<usize> {
-        let mut memtables = Vec::with_capacity(log_batch.items.len());
+        let mut rafts = Vec::with_capacity(log_batch.items.len());
         for raft in log_batch.items.iter().map(|item| item.raft_group_id) {
-            memtables.push((raft, self.get_or_insert_memtable(raft)));
+            rafts.push(raft);
         }
-        memtables.sort_by_key(|t| t.0);
-        memtables.dedup_by_key(|t| t.0);
-        let mut locked = Vec::with_capacity(memtables.len());
-        for (raft, memtable) in memtables.iter_mut() {
-            locked.push((raft, memtable.wl()));
+        rafts.sort();
+        rafts.dedup();
+
+        let mut memtables = Vec::with_capacity(rafts.len());
+        let mut locked = Vec::with_capacity(rafts.len());
+        for raft in &rafts {
+            memtables.push(self.get_or_insert_memtable(*raft));
+            let x = memtables.last_mut().unwrap().wl();
+            unsafe {
+                // Unsafe block because `locked` has mutable references to `memtables`.
+                let x: RwLockWriteGuard<'static, MemTable> = std::mem::transmute(x);
+                locked.push(x);
+            }
         }
 
         let mut file_num = 0;
         let bytes = self.pipe_log.write(&log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             for item in log_batch.items {
-                let offset = locked
-                    .binary_search_by_key(&item.raft_group_id, |t| *t.0)
-                    .unwrap();
-                let m = &mut locked[offset].1;
+                let offset = rafts.binary_search(&item.raft_group_id).unwrap();
+                let m = &mut locked[offset];
                 Self::apply_log_item_to_memtable(item.content, &mut *m, file_num);
             }
         }
-        for (_, memtable) in locked {
+        for memtable in locked {
             if memtable.uninitialized() {
                 self.remove_memtable(memtable.region_id());
             }
@@ -685,17 +684,17 @@ impl RaftEngine for FileEngine {
         self.inner.compact_to(raft_group_id, to) as usize
     }
 
-    fn purge_expired_files(&self, force_compact_threshold: usize) -> Vec<u64> {
+    fn purge_expired_files(&self) -> Vec<u64> {
         if let Ok(_x) = self.inner.purge_mutex.try_lock() {
             if self.inner.needs_purge_log_files() {
-                let last_inactive = self.inner.max_inactive_file_num();
+                let (rewrite_limit, compact_limit) = self.inner.latest_inactive_file_num();
                 let mut will_force_compact = Vec::new();
                 self.inner.regions_rewrite_or_force_compact(
-                    last_inactive,
-                    force_compact_threshold,
+                    rewrite_limit,
+                    compact_limit,
                     &mut will_force_compact,
                 );
-                self.inner.purge_expired_files(last_inactive).unwrap();
+                self.inner.purge_expired_files().unwrap();
                 return will_force_compact;
             }
         }
@@ -800,7 +799,7 @@ mod tests {
             append_log(&engine, 1, &entry);
         }
 
-        // GC all log entries.
+        // GC all log entries. Won't trigger purge because total size is not enough.
         engine.commit_to(1, 99);
         let count = engine.gc(1, 0, 100);
         assert_eq!(count, 100);
@@ -820,7 +819,7 @@ mod tests {
         assert!(engine.inner.needs_purge_log_files());
 
         let old_min_file_num = engine.inner.pipe_log.first_file_num();
-        let will_force_compact = engine.purge_expired_files(200 * 1024);
+        let will_force_compact = engine.purge_expired_files();
         let new_min_file_num = engine.inner.pipe_log.first_file_num();
         // Some entries are rewritten.
         assert!(new_min_file_num > old_min_file_num);
@@ -836,7 +835,7 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.inner.needs_purge_log_files());
         let old_min_file_num = engine.inner.pipe_log.first_file_num();
-        let will_force_compact = engine.purge_expired_files(100 * 1024);
+        let will_force_compact = engine.purge_expired_files();
         let new_min_file_num = engine.inner.pipe_log.first_file_num();
         // No entries are rewritten.
         assert_eq!(new_min_file_num, old_min_file_num);
