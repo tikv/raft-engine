@@ -22,6 +22,7 @@ const SLOTS_COUNT: usize = 128;
 // If a region has some very old raft logs less than this threshold,
 // rewrite them to clean stale log files ASAP.
 const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
+const PURGE_REWRITE_BEFORE: f64 = 0.3;
 
 struct FileEngineInner {
     cfg: Config,
@@ -198,7 +199,7 @@ impl FileEngineInner {
     // 0 means no inactive file.
     fn max_inactive_file_num(&self) -> u64 {
         let total_size = self.pipe_log.total_size();
-        let garbage_ratio = self.cache_stats.garbage_ratio();
+        let garbage_ratio = PURGE_REWRITE_BEFORE;
         let rewrite_limit = (total_size as f64 * (1.0 - garbage_ratio)) as usize;
         self.pipe_log.last_file_before(rewrite_limit)
     }
@@ -280,7 +281,6 @@ impl FileEngineInner {
 
         let expected = (last_inactive + 1 - first_file_num) as usize;
         let purged = self.pipe_log.purge_to(min_file_num)?;
-        self.cache_stats.on_purge(purged, expected);
         info!(
             "puerge_expired_fies deletes {} files, {} is best",
             purged, expected
@@ -497,6 +497,16 @@ impl FileEngineInner {
         }
         Ok(0)
     }
+
+    fn needs_purge_log_files(&self) -> bool {
+        let total_size = self.pipe_log.total_size();
+        let purge_threshold = self.cfg.purge_threshold.0 as usize;
+        info!(
+            "[QP] Testing needs purge, total: {}, threshold: {}",
+            total_size, purge_threshold
+        );
+        total_size > purge_threshold
+    }
 }
 
 #[derive(Default)]
@@ -540,18 +550,6 @@ impl SharedCacheStats {
     }
     pub fn miss_times(&self) -> usize {
         self.miss.load(Ordering::Relaxed)
-    }
-    pub fn garbage_ratio(&self) -> f64 {
-        let compacted = self.compacted_size.load(Ordering::Acquire);
-        let total = self.total_size.load(Ordering::Acquire);
-        compacted as f64 / total as f64
-    }
-    pub fn on_purge(&self, purged: usize, expected: usize) {
-        let x1 = self.compacted_size.load(Ordering::SeqCst);
-        let x2 = (x1 as f64 * purged as f64 / expected as f64) as usize;
-        let compacted = cmp::min(x1, x2);
-        self.compacted_size.fetch_sub(compacted, Ordering::SeqCst);
-        self.total_size.fetch_sub(compacted, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -602,16 +600,6 @@ impl FileEngine {
         FileEngine {
             inner: Arc::new(engine),
         }
-    }
-
-    fn needs_purge_log_files(&self) -> bool {
-        let total_size = self.inner.pipe_log.total_size();
-        let purge_threshold = self.inner.cfg.purge_threshold.0 as usize;
-        info!(
-            "[QP] Testing needs purge, total: {}, threshold: {}",
-            total_size, purge_threshold
-        );
-        total_size > purge_threshold
     }
 
     #[cfg(test)]
@@ -707,7 +695,7 @@ impl RaftEngine for FileEngine {
 
     fn purge_expired_files(&self, force_compact_threshold: usize) -> Vec<u64> {
         if let Ok(_x) = self.inner.purge_mutex.try_lock() {
-            if self.needs_purge_log_files() {
+            if self.inner.needs_purge_log_files() {
                 let last_inactive = self.inner.max_inactive_file_num();
                 info!("[QP] last_inactive file number: {}", last_inactive);
                 let mut will_force_compact = Vec::new();
@@ -825,7 +813,7 @@ mod tests {
         engine.commit_to(1, 99);
         let count = engine.gc(1, 0, 100);
         assert_eq!(count, 100);
-        assert!(!engine.needs_purge_log_files());
+        assert!(!engine.inner.needs_purge_log_files());
 
         // Append more logs to make total size greater than `purge_threshold`.
         for i in 100..250 {
@@ -838,7 +826,7 @@ mod tests {
         let count = engine.gc(1, 0, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.needs_purge_log_files());
+        assert!(engine.inner.needs_purge_log_files());
 
         let old_min_file_num = engine.inner.pipe_log.first_file_num();
         let will_force_compact = engine.purge_expired_files(200 * 1024);
@@ -855,7 +843,7 @@ mod tests {
         let count = engine.gc(1, 0, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.needs_purge_log_files());
+        assert!(engine.inner.needs_purge_log_files());
         let old_min_file_num = engine.inner.pipe_log.first_file_num();
         let will_force_compact = engine.purge_expired_files(100 * 1024);
         let new_min_file_num = engine.inner.pipe_log.first_file_num();
