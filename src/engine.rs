@@ -1,5 +1,5 @@
 use std::io::BufRead;
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
 use std::time::Instant;
 use std::{cmp, fmt, u64};
@@ -10,6 +10,7 @@ use raft::eraftpb::Entry;
 use crate::util::{HandyRwLock, HashMap, RAFT_LOG_STATE_KEY};
 
 use crate::config::{Config, RecoveryMode};
+use crate::entry_cache::{EntryCache, DEFAULT_CACHE_CHUNK_SIZE};
 use crate::log_batch::{
     self, Command, CompressionType, LogBatch, LogItemContent, OpType, CHECKSUM_LEN, HEADER_LEN,
 };
@@ -29,7 +30,7 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 // We can use LRU cache or slots to reduce conflicts.
 type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 #[derive(Clone)]
-struct MemTableAccessor {
+pub struct MemTableAccessor {
     slots: Vec<Arc<RwLock<MemTables>>>,
     creator: Arc<dyn Fn(u64) -> MemTable + Send + Sync>,
 }
@@ -43,7 +44,7 @@ impl MemTableAccessor {
         MemTableAccessor { slots, creator }
     }
 
-    fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
+    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
         let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .write()
             .unwrap();
@@ -53,21 +54,21 @@ impl MemTableAccessor {
         memtable.clone()
     }
 
-    fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
+    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
         let memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .read()
             .unwrap();
         memtables.get(&raft_group_id).map(|c| c.clone())
     }
 
-    fn remove(&self, raft_group_id: u64) {
+    pub fn remove(&self, raft_group_id: u64) {
         let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .write()
             .unwrap();
         memtables.remove(&raft_group_id);
     }
 
-    fn fold<B, F: Fn(B, &MemTable) -> B>(&self, mut init: B, fold: F) -> B {
+    pub fn fold<B, F: Fn(B, &MemTable) -> B>(&self, mut init: B, fold: F) -> B {
         for tables in &self.slots {
             for memtable in tables.rl().values() {
                 init = fold(init, &*memtable.rl());
@@ -76,7 +77,10 @@ impl MemTableAccessor {
         init
     }
 
-    fn collect<F: FnMut(&MemTable) -> bool>(&self, mut condition: F) -> Vec<Arc<RwLock<MemTable>>> {
+    pub fn collect<F: FnMut(&MemTable) -> bool>(
+        &self,
+        mut condition: F,
+    ) -> Vec<Arc<RwLock<MemTable>>> {
         let mut memtables = Vec::new();
         for tables in &self.slots {
             memtables.extend(tables.rl().values().filter_map(|t| {
@@ -98,6 +102,8 @@ pub struct FileEngine {
 
     // Persistent entries.
     pipe_log: PipeLog,
+
+    entry_cache: EntryCache,
 
     cache_stats: Arc<SharedCacheStats>,
 
@@ -150,6 +156,17 @@ impl FileEngine {
             loop {
                 match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
                     Ok(Some(log_batch)) => {
+                        let entries_size = log_batch.entries_size();
+                        let tracker = pipe_log.cache_agent().lock().unwrap().get_cache_tracker(
+                            current_read_file,
+                            offset,
+                            entries_size,
+                        );
+                        for item in &log_batch.items {
+                            if let LogItemContent::Entries(ref entries) = item.content {
+                                entries.attach_cache_tracker(tracker.clone());
+                            }
+                        }
                         Self::apply_to_memtable(memtables, log_batch, current_read_file);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
@@ -499,17 +516,15 @@ impl FileEngine {
 pub struct SharedCacheStats {
     hit: AtomicUsize,
     miss: AtomicUsize,
-    mem_size_change: AtomicIsize,
+    cache_size: AtomicUsize,
 }
 
 impl SharedCacheStats {
-    pub fn sub_mem_change(&self, bytes: u64) {
-        self.mem_size_change
-            .fetch_sub(bytes as isize, Ordering::Relaxed);
+    pub fn sub_mem_change(&self, bytes: usize) {
+        self.cache_size.fetch_sub(bytes, Ordering::Relaxed);
     }
-    pub fn add_mem_change(&self, bytes: u64) {
-        self.mem_size_change
-            .fetch_add(bytes as isize, Ordering::Relaxed);
+    pub fn add_mem_change(&self, bytes: usize) {
+        self.cache_size.fetch_add(bytes, Ordering::Relaxed);
     }
     pub fn hit_cache(&self, count: usize) {
         self.hit.fetch_add(count, Ordering::Relaxed);
@@ -524,12 +539,15 @@ impl SharedCacheStats {
     pub fn miss_times(&self) -> usize {
         self.miss.load(Ordering::Relaxed)
     }
+    pub fn cache_size(&self) -> usize {
+        self.cache_size.load(Ordering::Relaxed)
+    }
 
     #[cfg(test)]
     pub fn reset(&self) {
         self.hit.store(0, Ordering::Relaxed);
         self.miss.store(0, Ordering::Relaxed);
-        self.mem_size_change.store(0, Ordering::Relaxed);
+        self.cache_size.store(0, Ordering::Relaxed);
     }
 }
 
@@ -540,21 +558,24 @@ impl fmt::Debug for FileEngine {
 }
 
 impl FileEngine {
-    pub fn new(cfg: Config) -> FileEngine {
+    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine {
         let cache_stats = Arc::new(SharedCacheStats::default());
+        let (mut entry_cache, agent) = EntryCache::new(
+            "entry_cache_gc".to_owned(),
+            cfg.cache_limit.0 as usize,
+            cache_stats.clone(),
+            chunk_limit,
+        );
 
-        let mut pipe_log = PipeLog::open(
-            &cfg.dir,
-            cfg.bytes_per_sync.0 as usize,
-            cfg.target_file_size.0 as usize,
-        )
-        .unwrap_or_else(|e| panic!("Open raft log failed, error: {:?}", e));
+        let mut pipe_log = PipeLog::open(&cfg, agent).expect("Open raft log");
 
-        let cache_limit = cfg.cache_limit_per_raft.0;
+        let cache_limit = cfg.cache_limit.0;
         let stats = cache_stats.clone();
         let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, cache_limit, stats.clone())
+            MemTable::new(id, cache_limit as usize, stats.clone())
         }));
+
+        entry_cache.start(memtables.clone(), pipe_log.clone());
 
         let recovery_mode = RecoveryMode::from(cfg.recovery_mode);
         FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
@@ -563,9 +584,14 @@ impl FileEngine {
             cfg,
             memtables,
             pipe_log,
+            entry_cache,
             cache_stats,
             purge_mutex: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub fn new(cfg: Config) -> FileEngine {
+        Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
 
     #[cfg(test)]
@@ -674,8 +700,12 @@ impl RaftEngine for FileEngine {
         CacheStats {
             hit: self.cache_stats.hit.swap(0, Ordering::SeqCst),
             miss: self.cache_stats.miss.swap(0, Ordering::SeqCst),
-            mem_size_change: self.cache_stats.mem_size_change.swap(0, Ordering::SeqCst),
+            cache_size: self.cache_stats.cache_size.load(Ordering::SeqCst),
         }
+    }
+
+    fn stop(&self) {
+        self.entry_cache.stop();
     }
 }
 
@@ -697,7 +727,7 @@ mod tests {
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size, compressed_batch_size] {
             let dir = tempfile::Builder::new()
-                .prefix("test_engine")
+                .prefix("test_get_entry_from_file")
                 .tempdir()
                 .unwrap();
 
@@ -742,7 +772,7 @@ mod tests {
     #[test]
     fn test_gc_and_purge() {
         let dir = tempfile::Builder::new()
-            .prefix("test_engine")
+            .prefix("test_gc_and_purge")
             .tempdir()
             .unwrap();
 
@@ -802,5 +832,40 @@ mod tests {
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
+    }
+
+    #[test]
+    fn test_cache_limit() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_recover_with_cache_limit")
+            .tempdir()
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.target_file_size = ReadableSize::kb(6);
+        cfg.cache_limit = ReadableSize::mb(10);
+        cfg.cache_limit_per_raft = ReadableSize::mb(10);
+
+        let engine = FileEngine::new_impl(cfg.clone(), 4096);
+
+        // Append some entries with total size 100M.
+        let mut entry = Entry::new();
+        entry.set_data(vec![b'x'; 1024]);
+        for idx in 1..=10 {
+            for raft_id in 1..=10000 {
+                entry.set_index(idx);
+                append_log(&engine, raft_id, &entry);
+            }
+        }
+
+        let cache_size = engine.cache_stats.cache_size();
+        assert!(cache_size <= 10 * 1024 * 1024);
+
+        // Recover from log files.
+        drop(engine);
+        let engine = FileEngine::new_impl(cfg.clone(), 8192);
+        let cache_size = engine.cache_stats.cache_size();
+        assert!(cache_size <= 10 * 1024 * 1024);
     }
 }

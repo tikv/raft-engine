@@ -117,6 +117,8 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
 
     /// Flush current cache stats.
     fn flush_stats(&self) -> CacheStats;
+
+    fn stop(&self) {}
 }
 
 pub trait RaftLogBatch: Send {
@@ -140,5 +142,5 @@ pub trait RaftLogBatch: Send {
 pub struct CacheStats {
     pub hit: usize,
     pub miss: usize,
-    pub mem_size_change: isize,
+    pub cache_size: usize,
 }
