@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::u64;
 
-use super::log_batch::{LogBatch, LogItemType};
+use super::log_batch::{LogBatch, LogItemContent};
 use super::metrics::*;
 use super::{Error, Result};
 
@@ -373,26 +373,16 @@ impl PipeLog {
             .unwrap_or_else(|e| panic!("Write header failed, error {:?}", e));
     }
 
-    pub fn append_log_batch(
-        &self,
-        batch: &LogBatch,
-        sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize> {
+    pub fn write(&self, batch: &LogBatch, sync: bool, file_num: &mut u64) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
             let bytes = content.len();
             let (cur_file_num, offset) = {
                 let _write_lock = self.write_lock.lock().unwrap();
                 self.append(&content, sync)?
             };
-            for item in batch.items.borrow_mut().iter_mut() {
-                match item.item_type {
-                    LogItemType::Entries => item
-                        .entries
-                        .as_mut()
-                        .unwrap()
-                        .update_offset_when_needed(cur_file_num, offset),
-                    LogItemType::KV | LogItemType::CMD => {}
+            for item in &batch.items {
+                if let LogItemContent::Entries(ref entries) = item.content {
+                    entries.update_offset_when_needed(cur_file_num, offset);
                 }
             }
             *file_num = cur_file_num;
@@ -401,7 +391,7 @@ impl PipeLog {
         Ok(0)
     }
 
-    pub fn purge_to(&self, file_num: u64) -> Result<()> {
+    pub fn purge_to(&self, file_num: u64) -> Result<usize> {
         let (mut first_file_num, active_file_num) = {
             let manager = self.log_manager.read().unwrap();
             (manager.first_file_num, manager.active_file_num)
@@ -410,7 +400,7 @@ impl PipeLog {
         if first_file_num >= file_num {
             debug!("Purge nothing.");
             EXPIRED_FILES_PURGED_HISTOGRAM.observe(0.0);
-            return Ok(());
+            return Ok(0);
         }
 
         if file_num > active_file_num {
@@ -445,12 +435,11 @@ impl PipeLog {
             fs::remove_file(path)?;
         }
 
-        debug!(
-            "purge {} expired files",
-            first_file_num - old_first_file_num
-        );
-        EXPIRED_FILES_PURGED_HISTOGRAM.observe((first_file_num - old_first_file_num) as f64);
-        Ok(())
+        let purged = (first_file_num - old_first_file_num) as usize;
+
+        debug!("purge {} expired files", purged);
+        EXPIRED_FILES_PURGED_HISTOGRAM.observe(purged as f64);
+        Ok(purged)
     }
 
     // Shrink file size and synchronize.
@@ -544,15 +533,15 @@ impl PipeLog {
         Ok(Some(vec))
     }
 
-    pub fn files_before(&self, size: usize) -> u64 {
+    /// Return the last file number before `total - size`. `0` means no such files.
+    pub fn latest_file_before(&self, size: usize) -> u64 {
         let cur_size = self.total_size();
-        if cur_size > size {
-            let count = (cur_size - size) / self.rotate_size;
-            let manager = self.log_manager.read().unwrap();
-            manager.first_file_num + count as u64
-        } else {
-            0
+        if cur_size <= size {
+            return 0;
         }
+        let count = (cur_size - size) / self.rotate_size;
+        let manager = self.log_manager.read().unwrap();
+        manager.first_file_num + count as u64
     }
 }
 

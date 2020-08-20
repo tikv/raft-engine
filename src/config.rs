@@ -13,39 +13,44 @@
 
 use crate::{util::ReadableSize, Result};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryMode {
+    TolerateCorruptedTailRecords = 0,
+    AbsoluteConsistency = 1,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub dir: String,
-    pub recovery_mode: i32,
+    pub recovery_mode: RecoveryMode,
     pub bytes_per_sync: ReadableSize,
     pub target_file_size: ReadableSize,
-    pub cache_size_limit: ReadableSize,
-    pub total_size_limit: ReadableSize,
 
-    // Use raftstore.cfg.raft_log_gc_threshold
-    #[doc(hidden)]
-    #[serde(skip_serializing)]
-    pub compact_threshold: usize,
+    /// Only purge if disk file size is greater than `purge_threshold`.
+    pub purge_threshold: ReadableSize,
 
-    // Use raftstore.cfg.region_split_size
-    #[doc(hidden)]
-    #[serde(skip_serializing)]
-    pub region_size: ReadableSize,
+    /// Total size limit to cache log entries.
+    ///
+    /// FIXME: it doesn't make effect currently.
+    pub cache_limit: ReadableSize,
+
+    /// Size limit to cache log entries for every Raft.
+    pub cache_limit_per_raft: ReadableSize,
 }
 
 impl Default for Config {
     fn default() -> Config {
         Config {
             dir: "".to_owned(),
-            recovery_mode: 0,
+            recovery_mode: RecoveryMode::TolerateCorruptedTailRecords,
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
-            cache_size_limit: ReadableSize::gb(2),
-            total_size_limit: ReadableSize::gb(20),
-            compact_threshold: 0,
-            region_size: ReadableSize::mb(0),
+            purge_threshold: ReadableSize::gb(10),
+            cache_limit: ReadableSize::gb(1),
+            cache_limit_per_raft: ReadableSize::mb(128),
         }
     }
 }
@@ -56,37 +61,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.total_size_limit.0 <= self.target_file_size.0 {
-            return Err(box_err!(
-                "Total size limit {:?} less than target file size {:?}",
-                self.total_size_limit,
-                self.target_file_size
-            ));
+        if self.purge_threshold.0 < self.target_file_size.0 {
+            return Err(box_err!("purge_threshold < target_file_size"));
         }
-
-        if self.cache_size_limit.0 < self.target_file_size.0 {
-            return Err(box_err!(
-                "Cache size limit {:?} less than target file size {:?}",
-                self.cache_size_limit,
-                self.target_file_size
-            ));
+        if self.cache_limit_per_raft.0 > self.cache_limit.0 {
+            return Err(box_err!("cache_limit_per_raft > cache_limit"));
         }
-
-        if self.total_size_limit.0 < self.cache_size_limit.0 {
-            return Err(box_err!(
-                "Total size limit {:?} is less than cache limit size {:?}",
-                self.total_size_limit,
-                self.cache_size_limit
-            ));
-        }
-
-        if self.recovery_mode < 0 || self.recovery_mode > 1 {
-            return Err(box_err!(
-                "Unknown recovery mode {} for raftengine",
-                self.recovery_mode
-            ));
-        }
-
         Ok(())
     }
 }
@@ -96,30 +76,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_validate() {
-        let mut cfg = Config::new();
-        assert!(cfg.validate().is_ok());
+    fn test_serde() {
+        let value = Config::default();
+        let dump = toml::to_string_pretty(&value).unwrap();
+        let load = toml::from_str(&dump).unwrap();
+        assert_eq!(value, load);
+    }
 
-        cfg.recovery_mode = 1;
-        assert!(cfg.validate().is_ok());
-
-        cfg.recovery_mode = 2;
-        assert!(cfg.validate().is_err());
-
-        cfg.recovery_mode = -1;
-        assert!(cfg.validate().is_err());
-
-        cfg = Config::new();
-        cfg.target_file_size = ReadableSize::kb(20);
-        cfg.total_size_limit = ReadableSize::kb(10);
-        assert!(cfg.validate().is_err());
-
-        cfg.cache_size_limit = ReadableSize::mb(10);
-        cfg.total_size_limit = ReadableSize::mb(1);
-        assert!(cfg.validate().is_err());
-
-        cfg.cache_size_limit = ReadableSize::mb(1);
-        cfg.total_size_limit = ReadableSize::mb(10);
-        assert!(cfg.validate().is_ok());
+    #[test]
+    fn test_custom() {
+        let custom = r#"
+            dir = "custom_dir"
+            recovery-mode = "absolute-consistency"
+            bytes-per-sync = "2KB"
+            target-file-size = "1MB"
+            purge-threshold = "3MB"
+            cache-limit = "1GB"
+            cache-limit-per-raft = "8MB"
+        "#;
+        let load: Config = toml::from_str(custom).unwrap();
+        assert_eq!(load.dir, "custom_dir");
+        assert_eq!(load.recovery_mode, RecoveryMode::AbsoluteConsistency);
+        assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
+        assert_eq!(load.target_file_size, ReadableSize::mb(1));
+        assert_eq!(load.purge_threshold, ReadableSize::mb(3));
+        assert_eq!(load.cache_limit, ReadableSize::gb(1));
+        assert_eq!(load.cache_limit_per_raft, ReadableSize::mb(8));
     }
 }
