@@ -1,15 +1,14 @@
-use std::cmp;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
-use std::u64;
+use std::sync::{Arc, Mutex, RwLock};
+use std::{cmp, u64};
 
-use super::log_batch::{LogBatch, LogItemContent};
-use super::metrics::*;
-use super::{Error, Result};
+use crate::log_batch::{LogBatch, LogItemContent};
+use crate::metrics::*;
+use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
@@ -53,30 +52,28 @@ impl LogManager {
     }
 }
 
+#[derive(Clone)]
 pub struct PipeLog {
-    log_manager: RwLock<LogManager>,
-
-    rotate_size: usize,
-
     dir: String,
-
+    rotate_size: usize,
     bytes_per_sync: usize,
+
+    log_manager: Arc<RwLock<LogManager>>,
+    write_lock: Arc<Mutex<()>>,
 
     // Used when recovering from disk.
     current_read_file_num: u64,
-
-    write_lock: Mutex<()>,
 }
 
 impl PipeLog {
     pub fn new(dir: &str, bytes_per_sync: usize, rotate_size: usize) -> PipeLog {
         PipeLog {
-            log_manager: RwLock::new(LogManager::new()),
-            rotate_size,
             dir: dir.to_string(),
+            rotate_size,
             bytes_per_sync,
+            log_manager: Arc::new(RwLock::new(LogManager::new())),
+            write_lock: Arc::new(Mutex::new(())),
             current_read_file_num: 0,
-            write_lock: Mutex::new(()),
         }
     }
 

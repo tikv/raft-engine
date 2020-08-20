@@ -126,13 +126,6 @@ impl MemTable {
         } else {
             return;
         };
-
-        let mut total_size_delta = 0;
-        for offset in conflict..self.entries_index.len() {
-            total_size_delta += self.entries_index[offset].len;
-        }
-        self.cache_stats.sub_total_size(total_size_delta as usize);
-
         self.entries_index.truncate(conflict);
     }
 
@@ -177,7 +170,6 @@ impl MemTable {
 
         let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len);
         self.entries_index.extend(entries_index);
-        self.cache_stats.add_total_size(delta_size as usize);
         if self.cache_limit > 0 {
             self.entries_cache.extend(entries);
             self.cache_size += delta_size;
@@ -220,14 +212,8 @@ impl MemTable {
         assert!(idx <= last_idx + 1);
         let drain_end = (idx - first_idx) as usize;
 
-        let mut total_size_delta = 0;
-        for e in self.entries_index.drain(..drain_end) {
-            total_size_delta += e.len;
-        }
-        self.cache_stats
-            .add_compacted_size(total_size_delta as usize);
+        self.entries_index.drain(..drain_end);
         self.shrink_entries_index();
-
         drain_end as u64
     }
 
@@ -394,10 +380,6 @@ impl MemTable {
         self.entries_index.len()
     }
 
-    pub fn cache_size(&self) -> usize {
-        self.cache_size as usize
-    }
-
     pub fn region_id(&self) -> u64 {
         self.region_id
     }
@@ -444,27 +426,9 @@ impl MemTable {
         count
     }
 
-    pub fn entries_size_in(&self, begin: u64, to: u64) -> usize {
-        let first_index = match self.entries_index.front() {
-            Some(e) => e.index,
-            None => return 0,
-        };
-        let last_index = self.entries_index.back().unwrap().index;
-        assert!(begin >= first_index && to <= last_index + 1);
-        (begin..to).fold(0, |acc, idx| {
-            acc + self.entries_index[(idx - first_index) as usize].len as usize
-        })
-    }
-
-    fn entries_size(&self) -> usize {
-        self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
-    }
-
     pub fn remove(&mut self) {
         // All raft logs should be treated as compacted.
-        let entries_size = self.entries_size();
         self.entries_index.clear();
-        self.cache_stats.add_compacted_size(entries_size);
 
         self.entries_cache.clear();
         self.cache_size = 0;
@@ -475,6 +439,21 @@ impl MemTable {
 
     pub fn uninitialized(&self) -> bool {
         self.entries_index.is_empty() && self.kvs.is_empty()
+    }
+
+    #[cfg(test)]
+    fn entries_size(&self) -> usize {
+        self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
+    }
+
+    #[cfg(test)]
+    pub fn cache_size(&self) -> usize {
+        let mut cache_size = 0;
+        for i in 0..self.entries_cache.len() {
+            let distance = self.cache_distance();
+            cache_size += self.entries_index[i + distance].len as usize;
+        }
+        cache_size
     }
 
     #[cfg(test)]
