@@ -501,10 +501,6 @@ pub struct SharedCacheStats {
     hit: AtomicUsize,
     miss: AtomicUsize,
     mem_size_change: AtomicIsize,
-    // Size of all entries which have not been purged.
-    total_size: AtomicUsize,
-    // Size of all entries which are compacted but not purged.
-    compacted_size: AtomicUsize,
 }
 
 impl SharedCacheStats {
@@ -521,15 +517,6 @@ impl SharedCacheStats {
     }
     pub fn miss_cache(&self, count: usize) {
         self.miss.fetch_add(count, Ordering::Relaxed);
-    }
-    pub fn add_total_size(&self, size: usize) {
-        self.total_size.fetch_add(size, Ordering::Relaxed);
-    }
-    pub fn sub_total_size(&self, size: usize) {
-        self.total_size.fetch_sub(size, Ordering::Relaxed);
-    }
-    pub fn add_compacted_size(&self, size: usize) {
-        self.compacted_size.fetch_add(size, Ordering::Relaxed);
     }
 
     pub fn hit_times(&self) -> usize {
