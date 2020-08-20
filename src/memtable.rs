@@ -234,10 +234,10 @@ impl MemTable {
     /// # Panics
     ///
     /// This method will panic if `idx` is greater than `last_idx + 1`.
-    pub fn compact_cache_to(&mut self, idx: u64) {
+    pub fn compact_cache_to(&mut self, idx: u64) -> (usize, usize) {
         let first_idx = match self.entries_cache.front() {
             Some(e) if e.index < idx => e.index,
-            _ => return,
+            _ => return (0, 0),
         };
         let last_index = self.entries_cache.back().unwrap().index;
         assert!(idx <= last_index + 1);
@@ -247,12 +247,14 @@ impl MemTable {
         let drain_end = (idx - first_idx) as usize;
         self.entries_cache.drain(0..drain_end);
 
+        let old_cache_size = self.cache_size;
         for i in 0..drain_end {
             let delta = self.entries_index[distance + i].len;
             self.cache_size -= delta;
             self.cache_stats.sub_mem_change(delta);
         }
         self.shrink_entries_cache();
+        (drain_end, (self.cache_size - old_cache_size) as usize)
     }
 
     // If entry exist in cache, return (Entry, None).

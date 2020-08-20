@@ -27,6 +27,7 @@ macro_rules! box_err {
 pub mod codec;
 pub mod config;
 pub mod engine;
+mod entry_cache;
 mod errors;
 pub mod log_batch;
 pub mod memtable;
