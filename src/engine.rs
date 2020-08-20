@@ -214,30 +214,26 @@ impl FileEngineInner {
         will_force_compact: &mut Vec<u64>,
     ) {
         assert!(compact_latest_file_num <= rewrite_latest_file_num);
-        let limit = cmp::max(rewrite_latest_file_num, compact_latest_file_num);
 
         let mut memtables = Vec::new();
         for ts in &self.memtables {
             // Collect all memtables which have entries need to rewrite or compact.
             memtables.extend(ts.rl().values().filter_map(|t| {
                 let min_file_num = t.rl().min_file_num().unwrap_or(u64::MAX);
-                if min_file_num <= limit {
-                    return Some((min_file_num, t.clone()));
+                if min_file_num <= compact_latest_file_num {
+                    will_force_compact.push(t.rl().region_id());
+                } else if min_file_num <= rewrite_latest_file_num {
+                    return Some(t.clone());
                 }
                 None
             }));
         }
 
         let mut cache = HashMap::default();
-        for (min_file_num, m) in memtables {
+        for m in memtables {
             let memtable = m.wl();
             let region_id = memtable.region_id();
 
-            if min_file_num <= compact_latest_file_num {
-                // The region needs force compaction, so skip to rewrite logs for it.
-                will_force_compact.push(region_id);
-                continue;
-            }
             let entries_count = memtable.entries_count();
             if entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
                 continue;
@@ -600,7 +596,7 @@ impl FileEngine {
         self.put_raft_state(raft_group_id, &raft_state).unwrap();
     }
 
-    pub fn all_rafts(&self) -> Vec<u64> {
+    pub fn all_raft_groups(&self) -> Vec<u64> {
         let mut rafts = Vec::new();
         for slot in &self.inner.memtables {
             let memtables = slot.rl();

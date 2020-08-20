@@ -273,25 +273,11 @@ impl MemTable {
         let cache_distance = self.cache_distance();
         if ioffset < cache_distance {
             self.cache_stats.miss_cache(1);
-            // TODO: remove it.
-            assert!(
-                ioffset < self.entries_index.len(),
-                "ioffset: {}, len: {}",
-                ioffset,
-                self.entries_index.len()
-            );
             let entry_index = self.entries_index[ioffset].clone();
             (None, Some(entry_index))
         } else {
             self.cache_stats.hit_cache(1);
             let coffset = ioffset - cache_distance;
-            // TODO: remove it.
-            assert!(
-                coffset < self.entries_cache.len(),
-                "coffset: {}, len: {}",
-                coffset,
-                self.entries_cache.len()
-            );
             let entry = self.entries_cache[coffset].clone();
             (Some(entry), None)
         }
