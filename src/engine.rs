@@ -57,7 +57,7 @@ impl MemTableAccessor {
         let memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .read()
             .unwrap();
-        memtables.get(&raft_group_id).map(|c| c.clone())
+        memtables.get(&raft_group_id).cloned()
     }
 
     fn remove(&self, raft_group_id: u64) {
@@ -556,7 +556,7 @@ impl FileEngine {
             MemTable::new(id, cache_limit, stats.clone())
         }));
 
-        let recovery_mode = RecoveryMode::from(cfg.recovery_mode);
+        let recovery_mode = cfg.recovery_mode;
         FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
 
         FileEngine {
