@@ -154,7 +154,7 @@ impl MemTable {
 
             cache_size: 0,
             cache_limit,
-            cache_stats: cache_stats,
+            cache_stats,
         }
     }
 
@@ -415,7 +415,7 @@ impl MemTable {
         let (first, second) = slices_in_range(&self.entries_index, start_idx, end_idx);
 
         let (mut count, mut total_size) = (0, 0);
-        for i in first.into_iter().chain(second) {
+        for i in first.iter().chain(second) {
             count += 1;
             total_size += i.len;
             if total_size as usize > max_size {
