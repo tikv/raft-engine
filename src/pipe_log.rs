@@ -86,7 +86,6 @@ impl PipeLog {
             fs::create_dir(dir).map_err::<Error, _>(|e| {
                 box_err!("Create raft log directory failed, err: {:?}", e)
             })?;
-            // .unwrap_or_else(|e| panic!("Create raft log directory failed, err: {:?}", e));
         }
 
         if !path.is_dir() {
