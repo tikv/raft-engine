@@ -36,9 +36,6 @@ pub struct Config {
     ///
     /// FIXME: it doesn't make effect currently.
     pub cache_limit: ReadableSize,
-
-    /// Size limit to cache log entries for every Raft.
-    pub cache_limit_per_raft: ReadableSize,
 }
 
 impl Default for Config {
@@ -50,7 +47,6 @@ impl Default for Config {
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             cache_limit: ReadableSize::gb(1),
-            cache_limit_per_raft: ReadableSize::mb(128),
         }
     }
 }
@@ -63,9 +59,6 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge_threshold < target_file_size"));
-        }
-        if self.cache_limit_per_raft.0 > self.cache_limit.0 {
-            return Err(box_err!("cache_limit_per_raft > cache_limit"));
         }
         Ok(())
     }
@@ -92,7 +85,6 @@ mod tests {
             target-file-size = "1MB"
             purge-threshold = "3MB"
             cache-limit = "1GB"
-            cache-limit-per-raft = "8MB"
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -101,6 +93,5 @@ mod tests {
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
         assert_eq!(load.cache_limit, ReadableSize::gb(1));
-        assert_eq!(load.cache_limit_per_raft, ReadableSize::mb(8));
     }
 }
