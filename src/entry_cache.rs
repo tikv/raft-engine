@@ -257,24 +257,21 @@ impl EntryCacheInner {
                 _ => continue,
             };
 
+            let file_num = chunk.file_num;
             let read_len = if chunk.end_offset == u64::MAX {
-                self.pipe_log.file_len(chunk.file_num) - chunk.base_offset
+                self.pipe_log.file_len(file_num) - chunk.base_offset
             } else {
                 chunk.end_offset - chunk.base_offset
             };
             let chunk_content = self
                 .pipe_log
-                .fread(chunk.file_num, chunk.base_offset, read_len)
+                .fread(file_num, chunk.base_offset, read_len)
                 .unwrap();
 
             let mut reader: &[u8] = chunk_content.as_ref();
             let mut offset = chunk.base_offset;
-            while reader.len() > 0 {
-                let b = LogBatch::from_bytes(&mut reader, chunk.file_num, offset)
-                    .unwrap()
-                    .unwrap();
+            while let Some(b) = LogBatch::from_bytes(&mut reader, file_num, offset).unwrap() {
                 offset += read_len - reader.len() as u64;
-
                 for item in b.items {
                     if let LogItemContent::Entries(entries) = item.content {
                         let gc_cache_to = match entries.entries.last() {
