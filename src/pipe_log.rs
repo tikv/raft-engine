@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::{cmp, u64};
 
+use crate::config::Config;
+use crate::entry_cache::CacheAgent;
 use crate::log_batch::{LogBatch, LogItemContent};
 use crate::metrics::*;
 use crate::util::HandyRwLock;
@@ -60,28 +62,28 @@ pub struct PipeLog {
     bytes_per_sync: usize,
 
     log_manager: Arc<RwLock<LogManager>>,
-    write_lock: Arc<Mutex<()>>,
+    cache_agent: Arc<Mutex<CacheAgent>>,
 
     // Used when recovering from disk.
     current_read_file_num: u64,
 }
 
 impl PipeLog {
-    pub fn new(dir: &str, bytes_per_sync: usize, rotate_size: usize) -> PipeLog {
+    fn new(cfg: &Config, cache_agent: CacheAgent) -> PipeLog {
         PipeLog {
-            dir: dir.to_string(),
-            rotate_size,
-            bytes_per_sync,
+            dir: cfg.dir.clone(),
+            rotate_size: cfg.target_file_size.0 as usize,
+            bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             log_manager: Arc::new(RwLock::new(LogManager::new())),
-            write_lock: Arc::new(Mutex::new(())),
+            cache_agent: Arc::new(Mutex::new(cache_agent)),
             current_read_file_num: 0,
         }
     }
 
-    pub fn open(dir: &str, bytes_per_sync: usize, rotate_size: usize) -> Result<PipeLog> {
-        let path = Path::new(dir);
+    pub fn open(cfg: &Config, cache_agent: CacheAgent) -> Result<PipeLog> {
+        let path = Path::new(&cfg.dir);
         if !path.exists() {
-            info!("Create raft log directory: {}", dir);
+            info!("Create raft log directory: {}", &cfg.dir);
             fs::create_dir(dir).map_err::<Error, _>(|e| {
                 box_err!("Create raft log directory failed, err: {:?}", e)
             })?;
@@ -117,7 +119,7 @@ impl PipeLog {
         }
 
         // Initialize.
-        let mut pipe_log = PipeLog::new(dir, bytes_per_sync, rotate_size);
+        let mut pipe_log = PipeLog::new(cfg, cache_agent);
         if log_files.is_empty() {
             {
                 let mut manager = pipe_log.log_manager.wl();
@@ -203,16 +205,13 @@ impl PipeLog {
     }
 
     pub fn close(&self) -> Result<()> {
-        let _write_lock = self.write_lock.lock().unwrap();
-        {
-            let active_log_size = {
-                let manager = self.log_manager.rl();
-                manager.active_log_size
-            };
-            self.truncate_active_log(active_log_size)?;
-        }
-        let manager = self.log_manager.rl();
-        for fd in manager.all_files.iter() {
+        let _write_lock = self.cache_agent.lock().unwrap();
+
+        let active_log_size = self.log_manager.rl().active_log_size;
+        self.truncate_active_log(active_log_size)?;
+
+        for fd in self.log_manager.rl().all_files.iter() {
+            unsafe { libc::close(*fd) };
             nix::unistd::close(*fd)?
         }
         Ok(())
@@ -347,13 +346,17 @@ impl PipeLog {
     pub fn write(&self, batch: &LogBatch, sync: bool, file_num: &mut u64) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
             let bytes = content.len();
-            let (cur_file_num, offset) = {
-                let _write_lock = self.write_lock.lock().unwrap();
-                self.append(&content, sync)?
-            };
+
+            let mut cache_agent = self.cache_agent.lock().unwrap();
+            let (cur_file_num, offset) = self.append(&content, sync)?;
+            let entries_size = batch.entries_size();
+            let tracker = cache_agent.get_cache_tracker(cur_file_num, offset, entries_size);
+            drop(cache_agent);
+
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
                     entries.update_offset_when_needed(cur_file_num, offset);
+                    entries.attach_cache_tracker(tracker.clone());
                 }
             }
             *file_num = cur_file_num;
@@ -506,6 +509,18 @@ impl PipeLog {
         let manager = self.log_manager.rl();
         manager.first_file_num + count as u64
     }
+
+    pub fn file_len(&self, file_num: u64) -> u64 {
+        let mgr = self.log_manager.rl();
+        let fd = mgr.all_files[(file_num - mgr.first_file_num) as usize];
+        let offset = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+        assert!(offset > 0);
+        offset as u64
+    }
+
+    pub fn cache_agent(&self) -> Arc<Mutex<CacheAgent>> {
+        self.cache_agent.clone()
+    }
 }
 
 fn new_log_file(dir: &str, file_num: u64) -> Result<RawFd> {
@@ -532,9 +547,30 @@ fn extract_file_num(file_name: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
+
+    use raft::eraftpb::Entry;
     use tempfile::Builder;
 
     use super::*;
+    use crate::entry_cache::{CacheTask, EntryCache};
+    use crate::util::ReadableSize;
+
+    fn new_test_pipe_log(
+        path: &str,
+        bytes_per_sync: usize,
+        rotate_size: usize,
+    ) -> (PipeLog, Receiver<CacheTask>) {
+        let mut cfg = Config::default();
+        cfg.dir = path.to_owned();
+        cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
+        cfg.target_file_size = ReadableSize(rotate_size as u64);
+
+        let (receiver, agent) = EntryCache::new_without_background("test".to_owned(), 4096);
+        let log = PipeLog::open(&cfg, agent).unwrap();
+        (log, receiver)
+    }
 
     #[test]
     fn test_file_name() {
@@ -553,7 +589,7 @@ mod tests {
 
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
-        let mut pipe_log = PipeLog::open(path, bytes_per_sync, rotate_size).unwrap();
+        let (mut pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.first_file_num(), INIT_FILE_NUM);
         assert_eq!(pipe_log.active_file_num(), INIT_FILE_NUM);
 
@@ -628,7 +664,7 @@ mod tests {
         pipe_log.close().unwrap();
 
         // reopen
-        let pipe_log = PipeLog::open(path, bytes_per_sync, rotate_size).unwrap();
+        let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.active_file_num(), 3);
         assert_eq!(
             pipe_log.active_log_size(),
@@ -638,5 +674,78 @@ mod tests {
             pipe_log.active_log_capacity(),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
+    }
+
+    #[test]
+    fn test_cache_agent() {
+        let dir = Builder::new().prefix("test_pipe_log").tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let rotate_size = 6 * 1024; // 6K to rotate.
+        let bytes_per_sync = 32 * 1024;
+        let (pipe_log, receiver) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+
+        let get_1m_batch = || {
+            let mut entry = Entry::new();
+            entry.set_data(vec![b'a'; 1024]); // 1K data.
+            let mut log_batch = LogBatch::new();
+            log_batch.add_entries(1, vec![entry]);
+            log_batch
+        };
+
+        // Collect `LogBatch`s to avoid `CacheTracker::drop` is called.
+        let mut log_batches = Vec::new();
+        // Collect received tasks.
+        let mut tasks = Vec::new();
+
+        // After 4 batches are written into pipe log, no `CacheTask::NewChunk`
+        // task should be triggered. However the last batch will trigger it.
+        for i in 0..5 {
+            let log_batch = get_1m_batch();
+            let mut file_num = 0;
+            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            log_batches.push(log_batch);
+            let x = receiver.recv_timeout(Duration::from_millis(100));
+            if i < 4 {
+                assert!(x.is_err());
+            } else {
+                tasks.push(x.unwrap());
+            }
+        }
+
+        // Write more 2 batches into pipe log. A `CacheTask::NewChunk` will be
+        // emit on the second batch because log file is switched.
+        for i in 5..7 {
+            let log_batch = get_1m_batch();
+            let mut file_num = 0;
+            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            log_batches.push(log_batch);
+            let x = receiver.recv_timeout(Duration::from_millis(100));
+            if i < 6 {
+                assert!(x.is_err());
+            } else {
+                tasks.push(x.unwrap());
+            }
+        }
+
+        // Write more batches. No `CacheTask::NewChunk` will be emit because
+        // `CacheTracker`s accociated in `EntryIndex`s are droped.
+        drop(log_batches);
+        for _ in 7..20 {
+            let log_batch = get_1m_batch();
+            let mut file_num = 0;
+            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            drop(log_batch);
+            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        }
+
+        // All task's size should be 0 because all cached entries are released.
+        for task in &tasks {
+            if let CacheTask::NewChunk(ref chunk) = task {
+                chunk.self_check(0);
+                continue;
+            }
+            unreachable!();
+        }
     }
 }

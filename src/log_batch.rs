@@ -1,6 +1,8 @@
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::io::BufRead;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -9,6 +11,7 @@ use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
 use crate::codec::{self, Error as CodecError, NumberEncoder};
+use crate::entry_cache::CacheTracker;
 use crate::memtable::EntryIndex;
 use crate::util::RAFT_LOG_STATE_KEY;
 use crate::{Error, RaftLocalState, RaftLogBatch, Result};
@@ -205,6 +208,18 @@ impl Entries {
                 idx.file_num = file_num;
                 idx.base_offset = base;
             }
+        }
+    }
+
+    pub fn attach_cache_tracker(&self, size: Arc<AtomicUsize>) {
+        for idx in self.entries_index.borrow_mut().iter_mut() {
+            let sub_on_drop = idx.len as usize;
+            let chunk_size = size.clone();
+            let tracker = CacheTracker {
+                chunk_size,
+                sub_on_drop,
+            };
+            idx.cache_tracker = Some(tracker);
         }
     }
 
@@ -558,6 +573,18 @@ impl LogBatch {
         }
 
         Some(vec)
+    }
+
+    pub fn entries_size(&self) -> usize {
+        let mut size = 0;
+        for item in &self.items {
+            if let LogItemContent::Entries(ref entries) = item.content {
+                for entry in entries.entries_index.borrow().iter() {
+                    size += entry.len as usize;
+                }
+            }
+        }
+        size
     }
 }
 
