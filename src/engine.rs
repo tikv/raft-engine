@@ -154,7 +154,7 @@ impl FileEngine {
                 match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
                     Ok(Some(log_batch)) => {
                         let entries_size = log_batch.entries_size();
-                        let tracker = pipe_log.cache_agent().lock().unwrap().get_cache_tracker(
+                        let tracker = pipe_log.cache_submitor().get_cache_tracker(
                             current_read_file,
                             offset,
                             entries_size,
@@ -559,7 +559,7 @@ impl fmt::Debug for FileEngine {
 
 impl FileEngine {
     fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine {
-        let cache_limit = cfg.cache_limit.0;
+        let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
@@ -568,20 +568,23 @@ impl FileEngine {
 
         let stats = cache_stats.clone();
         let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, cache_limit as usize, stats.clone())
+            MemTable::new(id, cache_limit, stats.clone())
         }));
 
         let cache_evict_runner = CacheEvictRunner::new(
-            cache_limit as usize,
+            cache_limit,
             cache_stats.clone(),
             chunk_limit,
             memtables.clone(),
             pipe_log.clone(),
         );
+        let cache_notifier = cache_evict_runner.cache_full_notifier.clone();
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
+        pipe_log.cache_submitor().block_on_full(cache_notifier);
         FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
+        pipe_log.cache_submitor().nonblock_on_full();
 
         FileEngine {
             cfg: Arc::new(cfg),
@@ -870,7 +873,7 @@ mod tests {
 
         // Recover from log files.
         drop(engine);
-        let engine = FileEngine::new_impl(cfg.clone(), 8192);
+        let engine = FileEngine::new_impl(cfg.clone(), 1024 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
