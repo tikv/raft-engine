@@ -25,6 +25,7 @@ lazy_static = "1.3"
 fxhash = "0.2"
 toml = "0.4"
 nix = "0.18.0"
+crossbeam = "0"
 
 [dependencies.prometheus]
 version = "0.8"

@@ -1,21 +1,22 @@
 use std::io::BufRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{cmp, fmt, u64};
 
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
-use crate::util::{HandyRwLock, HashMap, RAFT_LOG_STATE_KEY};
-
+use crate::cache_evict::{
+    CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
+};
 use crate::config::{Config, RecoveryMode};
-use crate::entry_cache::{EntryCache, DEFAULT_CACHE_CHUNK_SIZE};
 use crate::log_batch::{
     self, Command, CompressionType, LogBatch, LogItemContent, OpType, CHECKSUM_LEN, HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::util::{HandyRwLock, HashMap, Worker, RAFT_LOG_STATE_KEY};
 use crate::{codec, CacheStats, RaftEngine, RaftLocalState, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -96,16 +97,12 @@ impl MemTableAccessor {
 
 #[derive(Clone)]
 pub struct FileEngine {
-    cfg: Config,
-
+    cfg: Arc<Config>,
     memtables: MemTableAccessor,
-
-    // Persistent entries.
     pipe_log: PipeLog,
-
-    entry_cache: EntryCache,
-
     cache_stats: Arc<SharedCacheStats>,
+
+    workers: Arc<RwLock<Workers>>,
 
     // To protect concurrent calls of `gc`.
     purge_mutex: Arc<Mutex<()>>,
@@ -550,6 +547,10 @@ impl SharedCacheStats {
     }
 }
 
+struct Workers {
+    cache_evict: Worker<CacheTask>,
+}
+
 impl fmt::Debug for FileEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FileEngine dir: {}", self.cfg.dir)
@@ -558,33 +559,38 @@ impl fmt::Debug for FileEngine {
 
 impl FileEngine {
     fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine {
-        let cache_stats = Arc::new(SharedCacheStats::default());
-        let (mut entry_cache, agent) = EntryCache::new(
-            "entry_cache_gc".to_owned(),
-            cfg.cache_limit.0 as usize,
-            cache_stats.clone(),
-            chunk_limit,
-        );
-
-        let mut pipe_log = PipeLog::open(&cfg, agent).expect("Open raft log");
-
         let cache_limit = cfg.cache_limit.0;
+        let cache_stats = Arc::new(SharedCacheStats::default());
+
+        let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
+        let submitor = CacheSubmitor::new(chunk_limit, cache_evict_worker.scheduler());
+        let mut pipe_log = PipeLog::open(&cfg, submitor).expect("Open raft log");
+
         let stats = cache_stats.clone();
         let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
             MemTable::new(id, cache_limit as usize, stats.clone())
         }));
 
-        entry_cache.start(memtables.clone(), pipe_log.clone());
+        let cache_evict_runner = CacheEvictRunner::new(
+            cache_limit as usize,
+            cache_stats.clone(),
+            chunk_limit,
+            memtables.clone(),
+            pipe_log.clone(),
+        );
+        cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
         FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
 
         FileEngine {
-            cfg,
+            cfg: Arc::new(cfg),
             memtables,
             pipe_log,
-            entry_cache,
             cache_stats,
+            workers: Arc::new(RwLock::new(Workers {
+                cache_evict: cache_evict_worker,
+            })),
             purge_mutex: Arc::new(Mutex::new(())),
         }
     }
@@ -704,7 +710,8 @@ impl RaftEngine for FileEngine {
     }
 
     fn stop(&self) {
-        self.entry_cache.stop();
+        let mut workers = self.workers.wl();
+        workers.cache_evict.stop();
     }
 }
 

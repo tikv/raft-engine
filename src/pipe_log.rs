@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::{cmp, u64};
 
+use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
-use crate::entry_cache::CacheAgent;
 use crate::log_batch::{LogBatch, LogItemContent};
 use crate::metrics::*;
 use crate::util::HandyRwLock;
@@ -62,14 +62,14 @@ pub struct PipeLog {
     bytes_per_sync: usize,
 
     log_manager: Arc<RwLock<LogManager>>,
-    cache_agent: Arc<Mutex<CacheAgent>>,
+    cache_agent: Arc<Mutex<CacheSubmitor>>,
 
     // Used when recovering from disk.
     current_read_file_num: u64,
 }
 
 impl PipeLog {
-    fn new(cfg: &Config, cache_agent: CacheAgent) -> PipeLog {
+    fn new(cfg: &Config, cache_agent: CacheSubmitor) -> PipeLog {
         PipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -80,11 +80,11 @@ impl PipeLog {
         }
     }
 
-    pub fn open(cfg: &Config, cache_agent: CacheAgent) -> Result<PipeLog> {
+    pub fn open(cfg: &Config, cache_agent: CacheSubmitor) -> Result<PipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
-            fs::create_dir(dir).map_err::<Error, _>(|e| {
+            fs::create_dir(&cfg.dir).map_err::<Error, _>(|e| {
                 box_err!("Create raft log directory failed, err: {:?}", e)
             })?;
         }
@@ -518,7 +518,7 @@ impl PipeLog {
         offset as u64
     }
 
-    pub fn cache_agent(&self) -> Arc<Mutex<CacheAgent>> {
+    pub fn cache_agent(&self) -> Arc<Mutex<CacheSubmitor>> {
         self.cache_agent.clone()
     }
 }
@@ -547,29 +547,31 @@ fn extract_file_num(file_name: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
     use raft::eraftpb::Entry;
     use tempfile::Builder;
+    use crossbeam::channel::Receiver;
 
     use super::*;
-    use crate::entry_cache::{CacheTask, EntryCache};
+    use crate::cache_evict::{CacheTask, CacheSubmitor};
+    use crate::util::Worker;
     use crate::util::ReadableSize;
 
     fn new_test_pipe_log(
         path: &str,
         bytes_per_sync: usize,
         rotate_size: usize,
-    ) -> (PipeLog, Receiver<CacheTask>) {
+    ) -> (PipeLog, Receiver<Option<CacheTask>>) {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        let (receiver, agent) = EntryCache::new_without_background("test".to_owned(), 4096);
-        let log = PipeLog::open(&cfg, agent).unwrap();
-        (log, receiver)
+        let mut worker = Worker::new("test".to_owned(), None);
+        let submitor = CacheSubmitor::new(4096, worker.scheduler());
+        let log = PipeLog::open(&cfg, submitor).unwrap();
+        (log, worker.take_receiver())
     }
 
     #[test]
@@ -741,7 +743,7 @@ mod tests {
 
         // All task's size should be 0 because all cached entries are released.
         for task in &tasks {
-            if let CacheTask::NewChunk(ref chunk) = task {
+            if let Some(CacheTask::NewChunk(ref chunk)) = task {
                 chunk.self_check(0);
                 continue;
             }

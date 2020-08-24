@@ -10,8 +10,8 @@ use crc32fast::Hasher;
 use protobuf::Message as PbMsg;
 use raft::eraftpb::Entry;
 
+use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
-use crate::entry_cache::CacheTracker;
 use crate::memtable::EntryIndex;
 use crate::util::RAFT_LOG_STATE_KEY;
 use crate::{Error, RaftLocalState, RaftLogBatch, Result};
