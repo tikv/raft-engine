@@ -843,10 +843,10 @@ mod tests {
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.purge_threshold = ReadableSize::mb(70);
-        cfg.target_file_size = ReadableSize::kb(6);
+        cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::new_impl(cfg.clone(), 4096);
+        let engine = FileEngine::new_impl(cfg.clone(), 1024 * 1024);
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -865,8 +865,6 @@ mod tests {
         drop(engine);
         let engine = FileEngine::new_impl(cfg.clone(), 8192);
         let cache_size = engine.cache_stats.cache_size();
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        println!("cache_size: {}", cache_size);
         assert!(cache_size <= 10 * 1024 * 1024);
 
         // Rewrite inactive logs.
@@ -874,7 +872,6 @@ mod tests {
             engine.compact_to(raft_id, 8);
         }
         assert!(engine.purge_expired_files().is_empty());
-        assert!(engine.pipe_log.first_file_num() > 10000);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
     }
