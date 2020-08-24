@@ -211,7 +211,6 @@ impl PipeLog {
         self.truncate_active_log(active_log_size)?;
 
         for fd in self.log_manager.rl().all_files.iter() {
-            unsafe { libc::close(*fd) };
             nix::unistd::close(*fd)?
         }
         Ok(())

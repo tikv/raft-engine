@@ -134,7 +134,8 @@ impl Runner {
         while !self.cache_reach_low_water() {
             let chunk = match self.valid_cache_chunks.pop_front() {
                 Some(chunk) if chunk.size_tracker.load(Ordering::Relaxed) > 0 => chunk,
-                _ => continue,
+                Some(_) => continue,
+                _ => break,
             };
 
             let file_num = chunk.file_num;
