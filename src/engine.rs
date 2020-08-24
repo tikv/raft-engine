@@ -399,8 +399,7 @@ impl FileEngine {
     }
 
     fn sync(&self) -> Result<()> {
-        self.pipe_log.sync();
-        Ok(())
+        self.pipe_log.sync()
     }
 
     fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {

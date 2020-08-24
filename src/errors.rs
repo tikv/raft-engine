@@ -65,4 +65,10 @@ impl From<Error> for raft::Error {
     }
 }
 
+impl From<nix::Error> for Error {
+    fn from(err: nix::Error) -> Error {
+        raft::StorageError::Other(err.into()).into()
+    }
+}
+
 pub type Result<T> = ::std::result::Result<T, Error>;
