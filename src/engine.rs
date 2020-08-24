@@ -865,6 +865,8 @@ mod tests {
         drop(engine);
         let engine = FileEngine::new_impl(cfg.clone(), 8192);
         let cache_size = engine.cache_stats.cache_size();
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        println!("cache_size: {}", cache_size);
         assert!(cache_size <= 10 * 1024 * 1024);
 
         // Rewrite inactive logs.
