@@ -517,10 +517,10 @@ pub struct SharedCacheStats {
 
 impl SharedCacheStats {
     pub fn sub_mem_change(&self, bytes: usize) {
-        self.cache_size.fetch_sub(bytes, Ordering::Relaxed);
+        self.cache_size.fetch_sub(bytes, Ordering::Release);
     }
     pub fn add_mem_change(&self, bytes: usize) {
-        self.cache_size.fetch_add(bytes, Ordering::Relaxed);
+        self.cache_size.fetch_add(bytes, Ordering::Release);
     }
     pub fn hit_cache(&self, count: usize) {
         self.hit.fetch_add(count, Ordering::Relaxed);
@@ -536,7 +536,7 @@ impl SharedCacheStats {
         self.miss.load(Ordering::Relaxed)
     }
     pub fn cache_size(&self) -> usize {
-        self.cache_size.load(Ordering::Relaxed)
+        self.cache_size.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -563,13 +563,23 @@ impl FileEngine {
         let cache_stats = Arc::new(SharedCacheStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
-        let submitor = CacheSubmitor::new(chunk_limit, cache_evict_worker.scheduler());
-        let mut pipe_log = PipeLog::open(&cfg, submitor).expect("Open raft log");
 
-        let stats = cache_stats.clone();
-        let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, cache_limit, stats.clone())
-        }));
+        let mut pipe_log = PipeLog::open(
+            &cfg,
+            CacheSubmitor::new(
+                chunk_limit,
+                cache_evict_worker.scheduler(),
+                cache_stats.clone(),
+            ),
+        )
+        .expect("Open raft log");
+
+        let memtables = {
+            let stats = cache_stats.clone();
+            MemTableAccessor::new(Arc::new(move |id: u64| {
+                MemTable::new(id, cache_limit, stats.clone())
+            }))
+        };
 
         let cache_evict_runner = CacheEvictRunner::new(
             cache_limit,

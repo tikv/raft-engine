@@ -180,7 +180,6 @@ impl MemTable {
         if self.cache_limit > 0 {
             self.entries_cache.extend(entries);
             self.cache_size += delta_size;
-            self.cache_stats.add_mem_change(delta_size);
         }
 
         // Evict front entries from cache when reaching cache size limitation.

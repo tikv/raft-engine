@@ -288,7 +288,7 @@ impl<T: Send + 'static> Worker<T> {
     where
         R: Runnable<T> + Send + 'static,
     {
-        let tick = tick.unwrap_or(Duration::from_secs(u64::MAX));
+        let tick = tick.unwrap_or_else(|| Duration::from_secs(u64::MAX));
         let receiver = match self.receiver.take() {
             Some(rx) => rx,
             None => return false,

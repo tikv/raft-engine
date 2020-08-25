@@ -179,8 +179,7 @@ impl PipeLog {
             return Err(box_err!("File not exist, file number {}", file_num));
         }
 
-        let mut result: Vec<u8> = Vec::with_capacity(len as usize);
-        result.resize(len as usize, 0);
+        let mut result = vec![0; len as usize];
         let fd = manager.all_files[(file_num - manager.first_file_num) as usize];
         loop {
             match uio::pread(fd, &mut result, offset as _) {
@@ -568,7 +567,7 @@ mod tests {
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
         let mut worker = Worker::new("test".to_owned(), None);
-        let submitor = CacheSubmitor::new(4096, worker.scheduler());
+        let submitor = CacheSubmitor::new(4096, worker.scheduler(), Default::default());
         let log = PipeLog::open(&cfg, submitor).unwrap();
         (log, worker.take_receiver())
     }
