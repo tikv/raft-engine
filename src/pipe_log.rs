@@ -84,13 +84,13 @@ impl PipeLog {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
-            fs::create_dir(dir).map_err::<Error, _>(|e| {
+            fs::create_dir(&cfg.dir).map_err::<Error, _>(|e| {
                 box_err!("Create raft log directory failed, err: {:?}", e)
             })?;
         }
 
         if !path.is_dir() {
-            return Err(box_err!("Not directory."));
+            return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
         let mut min_file_num: u64 = u64::MAX;
@@ -211,7 +211,6 @@ impl PipeLog {
         self.truncate_active_log(active_log_size)?;
 
         for fd in self.log_manager.rl().all_files.iter() {
-            unsafe { libc::close(*fd) };
             nix::unistd::close(*fd)?
         }
         Ok(())
