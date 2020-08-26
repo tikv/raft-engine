@@ -104,7 +104,7 @@ pub struct FileEngine {
 
     workers: Arc<RwLock<Workers>>,
 
-    // To protect concurrent calls of `gc`.
+    // To protect concurrent calls of `purge_expired_files`.
     purge_mutex: Arc<Mutex<()>>,
 }
 
@@ -256,7 +256,7 @@ impl FileEngine {
         will_force_compact: &mut Vec<u64>,
     ) {
         assert!(compact_latest_file_num <= rewrite_latest_file_num);
-        let memtables = self.memtables.collect(|t| {
+        let mut memtables = self.memtables.collect(|t| {
             let min_file_num = t.min_file_num().unwrap_or(u64::MAX);
             if min_file_num <= compact_latest_file_num {
                 will_force_compact.push(t.region_id());
@@ -264,6 +264,8 @@ impl FileEngine {
             }
             min_file_num <= rewrite_latest_file_num
         });
+
+        memtables.sort_by_key(|t| t.rl().region_id());
 
         let mut cache = HashMap::default();
         for m in memtables {
