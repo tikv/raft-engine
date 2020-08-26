@@ -351,12 +351,15 @@ impl PipeLog {
             let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
             drop(cache_submitor);
 
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_offset_when_needed(cur_file_num, offset);
-                    entries.attach_cache_tracker(tracker.clone());
+            if let Some(tracker) = tracker {
+                for item in &batch.items {
+                    if let LogItemContent::Entries(ref entries) = item.content {
+                        entries.update_offset_when_needed(cur_file_num, offset);
+                        entries.attach_cache_tracker(tracker.clone());
+                    }
                 }
             }
+
             *file_num = cur_file_num;
             return Ok(bytes);
         }
@@ -553,8 +556,8 @@ mod tests {
 
     use super::*;
     use crate::cache_evict::{CacheSubmitor, CacheTask};
-    use crate::util::ReadableSize;
-    use crate::util::Worker;
+    use crate::engine::SharedCacheStats;
+    use crate::util::{ReadableSize, Worker};
 
     fn new_test_pipe_log(
         path: &str,
@@ -567,7 +570,8 @@ mod tests {
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
         let mut worker = Worker::new("test".to_owned(), None);
-        let submitor = CacheSubmitor::new(4096, worker.scheduler(), Default::default());
+        let stats = Arc::new(SharedCacheStats::default());
+        let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
         let log = PipeLog::open(&cfg, submitor).unwrap();
         (log, worker.take_receiver())
     }
