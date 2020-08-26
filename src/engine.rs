@@ -154,14 +154,15 @@ impl FileEngine {
                 match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
                     Ok(Some(log_batch)) => {
                         let entries_size = log_batch.entries_size();
-                        let tracker = pipe_log.cache_submitor().get_cache_tracker(
+                        if let Some(tracker) = pipe_log.cache_submitor().get_cache_tracker(
                             current_read_file,
                             offset,
                             entries_size,
-                        );
-                        for item in &log_batch.items {
-                            if let LogItemContent::Entries(ref entries) = item.content {
-                                entries.attach_cache_tracker(tracker.clone());
+                        ) {
+                            for item in &log_batch.items {
+                                if let LogItemContent::Entries(ref entries) = item.content {
+                                    entries.attach_cache_tracker(tracker.clone());
+                                }
                             }
                         }
                         Self::apply_to_memtable(memtables, log_batch, current_read_file);
@@ -256,7 +257,7 @@ impl FileEngine {
         will_force_compact: &mut Vec<u64>,
     ) {
         assert!(compact_latest_file_num <= rewrite_latest_file_num);
-        let mut memtables = self.memtables.collect(|t| {
+        let memtables = self.memtables.collect(|t| {
             let min_file_num = t.min_file_num().unwrap_or(u64::MAX);
             if min_file_num <= compact_latest_file_num {
                 will_force_compact.push(t.region_id());
@@ -264,8 +265,6 @@ impl FileEngine {
             }
             min_file_num <= rewrite_latest_file_num
         });
-
-        memtables.sort_by_key(|t| t.rl().region_id());
 
         let mut cache = HashMap::default();
         for m in memtables {
@@ -569,12 +568,14 @@ impl FileEngine {
         let mut pipe_log = PipeLog::open(
             &cfg,
             CacheSubmitor::new(
+                cache_limit,
                 chunk_limit,
                 cache_evict_worker.scheduler(),
                 cache_stats.clone(),
             ),
         )
         .expect("Open raft log");
+        pipe_log.cache_submitor().block_on_full();
 
         let memtables = {
             let stats = cache_stats.clone();
@@ -590,11 +591,9 @@ impl FileEngine {
             memtables.clone(),
             pipe_log.clone(),
         );
-        let cache_notifier = cache_evict_runner.cache_full_notifier.clone();
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
-        pipe_log.cache_submitor().block_on_full(cache_notifier);
         FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
         pipe_log.cache_submitor().nonblock_on_full();
 
@@ -681,14 +680,14 @@ impl RaftEngine for FileEngine {
         self.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
     }
 
-    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> usize {
-        self.compact_to(raft_group_id, to) as usize
+    fn gc(&self, raft_group_id: u64, _from: u64, to: u64) -> Result<usize> {
+        Ok(self.compact_to(raft_group_id, to) as usize)
     }
 
-    fn purge_expired_files(&self) -> Vec<u64> {
+    fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _purge_mutex = match self.purge_mutex.try_lock() {
             Ok(locked) if self.needs_purge_log_files() => locked,
-            _ => return vec![],
+            _ => return Ok(vec![]),
         };
 
         let (rewrite_limit, compact_limit) = self.latest_inactive_file_num();
@@ -702,10 +701,10 @@ impl RaftEngine for FileEngine {
         let min_file_num = self.memtables.fold(u64::MAX, |min, t| {
             cmp::min(min, t.min_file_num().unwrap_or(u64::MAX))
         });
-        let purged = self.pipe_log.purge_to(min_file_num).unwrap();
+        let purged = self.pipe_log.purge_to(min_file_num)?;
         info!("purged {} expired log files", purged);
 
-        will_force_compact
+        Ok(will_force_compact)
     }
 
     fn has_builtin_entry_cache(&self) -> bool {
@@ -812,7 +811,7 @@ mod tests {
 
         // GC all log entries. Won't trigger purge because total size is not enough.
         engine.commit_to(1, 99);
-        let count = engine.gc(1, 0, 100);
+        let count = engine.gc(1, 0, 100).unwrap();
         assert_eq!(count, 100);
         assert!(!engine.needs_purge_log_files());
 
@@ -824,13 +823,13 @@ mod tests {
 
         // GC first 101 log entries.
         engine.commit_to(1, 100);
-        let count = engine.gc(1, 0, 101);
+        let count = engine.gc(1, 0, 101).unwrap();
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
 
         let old_min_file_num = engine.pipe_log.first_file_num();
-        let will_force_compact = engine.purge_expired_files();
+        let will_force_compact = engine.purge_expired_files().unwrap();
         let new_min_file_num = engine.pipe_log.first_file_num();
         // Some entries are rewritten.
         assert!(new_min_file_num > old_min_file_num);
@@ -841,12 +840,12 @@ mod tests {
         assert!(engine.get_raft_state(1).unwrap().is_some());
 
         engine.commit_to(1, 101);
-        let count = engine.gc(1, 0, 102);
+        let count = engine.gc(1, 0, 102).unwrap();
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
         let old_min_file_num = engine.pipe_log.first_file_num();
-        let will_force_compact = engine.purge_expired_files();
+        let will_force_compact = engine.purge_expired_files().unwrap();
         let new_min_file_num = engine.pipe_log.first_file_num();
         // No entries are rewritten.
         assert_eq!(new_min_file_num, old_min_file_num);
@@ -868,7 +867,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::new_impl(cfg.clone(), 1024 * 1024);
+        let engine = FileEngine::new_impl(cfg.clone(), 512 * 1024);
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -884,8 +883,9 @@ mod tests {
         assert!(cache_size <= 10 * 1024 * 1024);
 
         // Recover from log files.
+        engine.stop();
         drop(engine);
-        let engine = FileEngine::new_impl(cfg.clone(), 1024 * 1024);
+        let engine = FileEngine::new_impl(cfg.clone(), 512 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
@@ -893,7 +893,7 @@ mod tests {
         for raft_id in 1..=10000 {
             engine.compact_to(raft_id, 8);
         }
-        assert!(engine.purge_expired_files().is_empty());
+        assert!(engine.purge_expired_files().unwrap().is_empty());
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
     }

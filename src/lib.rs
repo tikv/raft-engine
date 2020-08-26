@@ -1,5 +1,4 @@
 #![feature(shrink_to)]
-#![allow(clippy::missing_safety_doc)]
 
 #[macro_use]
 extern crate log;
@@ -101,11 +100,11 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
 
     /// Like `cut_logs` but the range could be very large. Return the deleted count.
     /// Generally, `from` can be passed in `0`.
-    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> usize;
+    fn gc(&self, raft_group_id: u64, from: u64, to: u64) -> Result<usize>;
 
     /// Purge expired logs files and return a set of Raft group ids
     /// which needs to be compacted ASAP.
-    fn purge_expired_files(&self) -> Vec<u64>;
+    fn purge_expired_files(&self) -> Result<Vec<u64>>;
 
     /// The `RaftEngine` has a builtin entry cache or not.
     fn has_builtin_entry_cache(&self) -> bool {
@@ -116,7 +115,9 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
     fn gc_entry_cache(&self, _raft_group_id: u64, _to: u64) {}
 
     /// Flush current cache stats.
-    fn flush_stats(&self) -> CacheStats;
+    fn flush_stats(&self) -> CacheStats {
+        CacheStats::default()
+    }
 
     fn stop(&self) {}
 }

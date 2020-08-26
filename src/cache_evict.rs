@@ -2,7 +2,9 @@ use std::cmp::PartialEq;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+
+use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
 use crate::log_batch::{LogBatch, LogItemContent};
@@ -15,21 +17,6 @@ const HIGH_WATER_RATIO: f64 = 0.9;
 const LOW_WATER_RATIO: f64 = 0.8;
 const CHUNKS_SHRINK_TO: usize = 1024;
 
-#[derive(Clone)]
-pub struct CacheFullNotifier {
-    cache_limit: usize,
-    lock_and_cond: Arc<(Mutex<()>, Condvar)>,
-}
-
-impl CacheFullNotifier {
-    fn new(cache_limit: usize) -> Self {
-        CacheFullNotifier {
-            cache_limit,
-            lock_and_cond: Arc::new((Mutex::new(()), Condvar::new())),
-        }
-    }
-}
-
 /// Used in `PipLog` to emit `CacheTask::NewChunk` tasks.
 pub struct CacheSubmitor {
     file_num: u64,
@@ -40,14 +27,15 @@ pub struct CacheSubmitor {
     size_tracker: Arc<AtomicUsize>,
 
     scheduler: Scheduler<CacheTask>,
+    cache_limit: usize,
     chunk_limit: usize,
     cache_stats: Arc<SharedCacheStats>,
-
-    cache_full_notifier: Option<CacheFullNotifier>,
+    block_on_full: bool,
 }
 
 impl CacheSubmitor {
     pub fn new(
+        cache_limit: usize,
         chunk_limit: usize,
         scheduler: Scheduler<CacheTask>,
         cache_stats: Arc<SharedCacheStats>,
@@ -58,18 +46,19 @@ impl CacheSubmitor {
             chunk_size: 0,
             size_tracker: Arc::new(AtomicUsize::new(0)),
             scheduler,
+            cache_limit,
             chunk_limit,
             cache_stats,
-            cache_full_notifier: None,
+            block_on_full: false,
         }
     }
 
-    pub fn block_on_full(&mut self, notifier: CacheFullNotifier) {
-        self.cache_full_notifier = Some(notifier);
+    pub fn block_on_full(&mut self) {
+        self.block_on_full = true;
     }
 
     pub fn nonblock_on_full(&mut self) {
-        self.cache_full_notifier = None;
+        self.block_on_full = false;
     }
 
     pub fn get_cache_tracker(
@@ -77,7 +66,11 @@ impl CacheSubmitor {
         file_num: u64,
         offset: u64,
         size: usize,
-    ) -> Arc<AtomicUsize> {
+    ) -> Option<Arc<AtomicUsize>> {
+        if self.cache_limit == 0 {
+            return None;
+        }
+
         if self.file_num == 0 {
             self.file_num = file_num;
             self.offset = offset;
@@ -101,18 +94,20 @@ impl CacheSubmitor {
             self.reset(file_num, offset);
         }
 
-        if let Some(ref notifier) = self.cache_full_notifier {
+        if self.block_on_full {
             let cache_size = self.cache_stats.cache_size();
-            if cache_size > notifier.cache_limit {
-                let _ = self.scheduler.schedule(CacheTask::EvictOldest);
-                let lock = notifier.lock_and_cond.0.lock().unwrap();
-                let _lock = notifier.lock_and_cond.1.wait(lock).unwrap();
+            if cache_size > self.cache_limit {
+                let (tx, rx) = bounded(1);
+                if self.scheduler.schedule(CacheTask::EvictOldest(tx)).is_ok() {
+                    let _ = rx.recv();
+                }
             }
         }
+
         self.chunk_size += size;
         self.size_tracker.fetch_add(size, Ordering::Release);
         self.cache_stats.add_mem_change(size);
-        self.size_tracker.clone()
+        Some(self.size_tracker.clone())
     }
 
     fn reset(&mut self, file_num: u64, offset: u64) {
@@ -130,7 +125,6 @@ pub struct Runner {
     valid_cache_chunks: VecDeque<CacheChunk>,
     memtables: MemTableAccessor,
     pipe_log: PipeLog,
-    pub cache_full_notifier: CacheFullNotifier,
 }
 
 impl Runner {
@@ -141,7 +135,6 @@ impl Runner {
         memtables: MemTableAccessor,
         pipe_log: PipeLog,
     ) -> Runner {
-        let notifier = CacheFullNotifier::new(cache_limit);
         Runner {
             cache_limit,
             cache_stats,
@@ -149,7 +142,6 @@ impl Runner {
             valid_cache_chunks: Default::default(),
             memtables,
             pipe_log,
-            cache_full_notifier: notifier,
         }
     }
 
@@ -215,21 +207,13 @@ impl Runner {
     }
 }
 
-impl Drop for Runner {
-    fn drop(&mut self) {
-        // Wake up all blocked writers.
-        let lock_and_cond = &self.cache_full_notifier.lock_and_cond;
-        let _lock = lock_and_cond.0.lock().unwrap();
-        lock_and_cond.1.notify_all();
-    }
-}
-
 impl Runnable<CacheTask> for Runner {
     fn run(&mut self, task: CacheTask) -> bool {
         match task {
             CacheTask::NewChunk(chunk) => self.valid_cache_chunks.push_back(chunk),
-            CacheTask::EvictOldest => {
-                self.evict_oldest_cache();
+            CacheTask::EvictOldest(tx) => {
+                assert!(self.evict_oldest_cache());
+                let _ = tx.send(());
                 return false;
             }
         }
@@ -237,10 +221,8 @@ impl Runnable<CacheTask> for Runner {
     }
     fn on_tick(&mut self) {
         self.retain_valid_cache();
-        if self.cache_reach_high_water() && self.evict_oldest_cache() {
-            let lock_and_cond = &self.cache_full_notifier.lock_and_cond;
-            let _lock = lock_and_cond.0.lock().unwrap();
-            lock_and_cond.1.notify_one();
+        if self.cache_reach_high_water() {
+            self.evict_oldest_cache();
         }
     }
 }
@@ -248,7 +230,7 @@ impl Runnable<CacheTask> for Runner {
 #[derive(Clone)]
 pub enum CacheTask {
     NewChunk(CacheChunk),
-    EvictOldest,
+    EvictOldest(Sender<()>),
 }
 
 #[derive(Clone)]
