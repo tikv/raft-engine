@@ -215,6 +215,15 @@ impl Runner {
     }
 }
 
+impl Drop for Runner {
+    fn drop(&mut self) {
+        // Wake up all blocked writers.
+        let lock_and_cond = &self.cache_full_notifier.lock_and_cond;
+        let _lock = lock_and_cond.0.lock().unwrap();
+        lock_and_cond.1.notify_all();
+    }
+}
+
 impl Runnable<CacheTask> for Runner {
     fn run(&mut self, task: CacheTask) -> bool {
         match task {
