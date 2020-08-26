@@ -3,11 +3,11 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{cmp, u64};
 
+use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
-use crate::entry_cache::CacheAgent;
 use crate::log_batch::{LogBatch, LogItemContent};
 use crate::metrics::*;
 use crate::util::HandyRwLock;
@@ -62,25 +62,25 @@ pub struct PipeLog {
     bytes_per_sync: usize,
 
     log_manager: Arc<RwLock<LogManager>>,
-    cache_agent: Arc<Mutex<CacheAgent>>,
+    cache_submitor: Arc<Mutex<CacheSubmitor>>,
 
     // Used when recovering from disk.
     current_read_file_num: u64,
 }
 
 impl PipeLog {
-    fn new(cfg: &Config, cache_agent: CacheAgent) -> PipeLog {
+    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLog {
         PipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             log_manager: Arc::new(RwLock::new(LogManager::new())),
-            cache_agent: Arc::new(Mutex::new(cache_agent)),
+            cache_submitor: Arc::new(Mutex::new(cache_submitor)),
             current_read_file_num: 0,
         }
     }
 
-    pub fn open(cfg: &Config, cache_agent: CacheAgent) -> Result<PipeLog> {
+    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -119,7 +119,7 @@ impl PipeLog {
         }
 
         // Initialize.
-        let mut pipe_log = PipeLog::new(cfg, cache_agent);
+        let mut pipe_log = PipeLog::new(cfg, cache_submitor);
         if log_files.is_empty() {
             {
                 let mut manager = pipe_log.log_manager.wl();
@@ -179,8 +179,7 @@ impl PipeLog {
             return Err(box_err!("File not exist, file number {}", file_num));
         }
 
-        let mut result: Vec<u8> = Vec::with_capacity(len as usize);
-        result.resize(len as usize, 0);
+        let mut result = vec![0; len as usize];
         let fd = manager.all_files[(file_num - manager.first_file_num) as usize];
         loop {
             match uio::pread(fd, &mut result, offset as _) {
@@ -205,7 +204,7 @@ impl PipeLog {
     }
 
     pub fn close(&self) -> Result<()> {
-        let _write_lock = self.cache_agent.lock().unwrap();
+        let _write_lock = self.cache_submitor.lock().unwrap();
 
         let active_log_size = self.log_manager.rl().active_log_size;
         self.truncate_active_log(active_log_size)?;
@@ -346,11 +345,11 @@ impl PipeLog {
         if let Some(content) = batch.encode_to_bytes() {
             let bytes = content.len();
 
-            let mut cache_agent = self.cache_agent.lock().unwrap();
+            let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset) = self.append(&content, sync)?;
             let entries_size = batch.entries_size();
-            let tracker = cache_agent.get_cache_tracker(cur_file_num, offset, entries_size);
-            drop(cache_agent);
+            let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
+            drop(cache_submitor);
 
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
@@ -517,8 +516,8 @@ impl PipeLog {
         offset as u64
     }
 
-    pub fn cache_agent(&self) -> Arc<Mutex<CacheAgent>> {
-        self.cache_agent.clone()
+    pub fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {
+        self.cache_submitor.lock().unwrap()
     }
 }
 
@@ -546,29 +545,31 @@ fn extract_file_num(file_name: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
+    use crossbeam::channel::Receiver;
     use raft::eraftpb::Entry;
     use tempfile::Builder;
 
     use super::*;
-    use crate::entry_cache::{CacheTask, EntryCache};
+    use crate::cache_evict::{CacheSubmitor, CacheTask};
     use crate::util::ReadableSize;
+    use crate::util::Worker;
 
     fn new_test_pipe_log(
         path: &str,
         bytes_per_sync: usize,
         rotate_size: usize,
-    ) -> (PipeLog, Receiver<CacheTask>) {
+    ) -> (PipeLog, Receiver<Option<CacheTask>>) {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        let (receiver, agent) = EntryCache::new_without_background("test".to_owned(), 4096);
-        let log = PipeLog::open(&cfg, agent).unwrap();
-        (log, receiver)
+        let mut worker = Worker::new("test".to_owned(), None);
+        let submitor = CacheSubmitor::new(4096, worker.scheduler(), Default::default());
+        let log = PipeLog::open(&cfg, submitor).unwrap();
+        (log, worker.take_receiver())
     }
 
     #[test]
@@ -676,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_agent() {
+    fn test_cache_submitor() {
         let dir = Builder::new().prefix("test_pipe_log").tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
 
@@ -740,7 +741,7 @@ mod tests {
 
         // All task's size should be 0 because all cached entries are released.
         for task in &tasks {
-            if let CacheTask::NewChunk(ref chunk) = task {
+            if let Some(CacheTask::NewChunk(ref chunk)) = task {
                 chunk.self_check(0);
                 continue;
             }

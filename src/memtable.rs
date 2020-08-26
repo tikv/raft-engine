@@ -4,8 +4,8 @@ use std::{cmp, u64};
 
 use raft::{eraftpb::Entry, StorageError};
 
+use crate::cache_evict::CacheTracker;
 use crate::engine::SharedCacheStats;
-use crate::entry_cache::CacheTracker;
 use crate::log_batch::CompressionType;
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, Result};
@@ -29,6 +29,7 @@ pub struct EntryIndex {
 
     // Take and drop the field when the entry is removed from entry cache.
     pub cache_tracker: Option<CacheTracker>,
+    // pub index_tracker: Option<IndexTracker>,
 }
 
 impl Default for EntryIndex {
@@ -179,7 +180,6 @@ impl MemTable {
         if self.cache_limit > 0 {
             self.entries_cache.extend(entries);
             self.cache_size += delta_size;
-            self.cache_stats.add_mem_change(delta_size);
         }
 
         // Evict front entries from cache when reaching cache size limitation.

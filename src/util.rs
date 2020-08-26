@@ -15,6 +15,8 @@ pub type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<fxhash::FxHasher>>;
 pub type HashSet<T> = StdHashSet<T, BuildHasherDefault<fxhash::FxHasher>>;
 pub use std::collections::hash_map::Entry as HashMapEntry;
 
+pub(crate) const RAFT_LOG_STATE_KEY: &[u8] = b"R";
+
 const UNIT: u64 = 1;
 const DATA_MAGNITUDE: u64 = 1024;
 pub const KB: u64 = UNIT * DATA_MAGNITUDE;
@@ -185,7 +187,7 @@ impl<'de> Deserialize<'de> for ReadableSize {
 
 /// Take slices in the range.
 ///
-/// ### Panic
+/// ### Panics
 ///
 /// if [low, high) is out of bound.
 pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T], &[T]) {
@@ -220,4 +222,104 @@ impl<T> HandyRwLock<T> for RwLock<T> {
     }
 }
 
-pub(crate) const RAFT_LOG_STATE_KEY: &[u8] = b"R";
+pub use crossbeam::channel::SendError as ScheduleError;
+use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
+
+pub trait Runnable<T> {
+    fn run(&mut self, task: T) -> bool;
+    fn on_tick(&mut self);
+    fn shutdown(&mut self) {}
+}
+
+#[derive(Clone)]
+pub struct Scheduler<T> {
+    name: Arc<String>,
+    sender: Sender<Option<T>>,
+}
+
+impl<T> Scheduler<T> {
+    pub fn schedule(&self, task: T) -> Result<(), ScheduleError<T>> {
+        if let Err(ScheduleError(e)) = self.sender.send(Some(task)) {
+            return Err(ScheduleError(e.unwrap()));
+        }
+        Ok(())
+    }
+}
+
+pub struct Worker<T> {
+    scheduler: Scheduler<T>,
+    receiver: Option<Receiver<Option<T>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+// `scheduler` is `!Sync`, but we didn't uses the field.
+// unsafe impl<T> Sync for Worker<T> {}
+
+impl<T: Clone> Worker<T> {
+    pub fn new(name: String, capacity: Option<usize>) -> Worker<T> {
+        let (tx, rx) = match capacity {
+            Some(capacity) => bounded(capacity),
+            None => unbounded(),
+        };
+        let scheduler = Scheduler {
+            name: Arc::new(name),
+            sender: tx,
+        };
+        Worker {
+            scheduler,
+            receiver: Some(rx),
+            handle: None,
+        }
+    }
+    pub fn scheduler(&self) -> Scheduler<T> {
+        self.scheduler.clone()
+    }
+
+    #[cfg(test)]
+    pub fn take_receiver(&mut self) -> Receiver<Option<T>> {
+        self.receiver.take().unwrap()
+    }
+}
+
+impl<T: Send + 'static> Worker<T> {
+    pub fn start<R>(&mut self, runner: R, tick: Option<Duration>) -> bool
+    where
+        R: Runnable<T> + Send + 'static,
+    {
+        let tick = tick.unwrap_or_else(|| Duration::from_secs(u64::MAX));
+        let receiver = match self.receiver.take() {
+            Some(rx) => rx,
+            None => return false,
+        };
+        let name = self.scheduler.name.as_ref().clone();
+        let th = ThreadBuilder::new()
+            .name(name)
+            .spawn(move || poll(runner, receiver, tick))
+            .unwrap();
+        self.handle = Some(th);
+        true
+    }
+
+    pub fn stop(&mut self) {
+        let _ = self.scheduler.sender.send(None);
+        if let Some(handle) = self.handle.take() {
+            return handle.join().unwrap();
+        }
+    }
+}
+
+fn poll<T, R: Runnable<T>>(mut runner: R, receiver: Receiver<Option<T>>, tick: Duration) {
+    loop {
+        match receiver.recv_timeout(tick) {
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Some(task)) => {
+                if runner.run(task) {
+                    runner.on_tick();
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => runner.on_tick(),
+        }
+    }
+}
