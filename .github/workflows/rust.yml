@@ -21,6 +21,7 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: clippy
       - name: Clippy
         run: cargo clippy --all
       - name: Build
