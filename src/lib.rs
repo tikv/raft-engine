@@ -119,6 +119,9 @@ pub trait RaftEngine: Clone + Sync + Send + 'static {
         CacheStats::default()
     }
 
+    fn flush_metrics(&self, _instance: &str) {}
+    fn reset_statistics(&self) {}
+
     fn stop(&self) {}
 }
 
