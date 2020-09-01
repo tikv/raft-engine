@@ -25,11 +25,6 @@ const LOG_SUFFIX_LEN: usize = 8;
 const FILE_NUM_LEN: usize = 16;
 const FILE_NAME_LEN: usize = FILE_NUM_LEN + LOG_SUFFIX_LEN;
 
-const REWRITE_SUFFIX: &str = ".rewrite";
-const REWRITE_SUFFIX_LEN: usize = 8;
-const REWRITE_NUM_LEN: usize = 8;
-const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX_LEN;
-
 const INIT_FILE_NUM: u64 = 1;
 
 pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
@@ -47,7 +42,6 @@ struct LogManager {
     pub last_sync_size: usize,
 
     pub all_files: VecDeque<RawFd>,
-    pub rewrite_files: VecDeque<RawFd>,
 }
 
 impl LogManager {
@@ -60,7 +54,6 @@ impl LogManager {
             active_log_capacity: 0,
             last_sync_size: 0,
             all_files: VecDeque::with_capacity(DEFAULT_FILES_COUNT),
-            rewrite_files: VecDeque::new(),
         }
     }
 
@@ -140,8 +133,7 @@ impl PipeLog {
         let mut pipe_log = PipeLog::new(cfg, cache_submitor);
 
         let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
-        let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
-        let (mut log_files, mut rewrite_files) = (vec![], vec![]);
+        let mut log_files = vec![];
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let file_path = entry.path();
@@ -158,14 +150,6 @@ impl PipeLog {
                 min_file_num = cmp::min(min_file_num, file_num);
                 max_file_num = cmp::max(max_file_num, file_num);
                 log_files.push(file_name.to_string());
-            } else if is_rewrite_file(file_name) {
-                let file_num = match extract_rewrite_num(file_name) {
-                    Ok(num) => num,
-                    Err(_) => continue,
-                };
-                min_rewrite_num = cmp::min(min_rewrite_num, file_num);
-                max_rewrite_num = cmp::min(max_rewrite_num, file_num);
-                rewrite_files.push(file_name.to_string());
             }
         }
 
@@ -177,24 +161,11 @@ impl PipeLog {
         }
 
         log_files.sort();
-        rewrite_files.sort();
         if log_files.len() as u64 != max_file_num - min_file_num + 1 {
             return Err(box_err!("Corruption occurs on log files"));
         }
-        if !rewrite_files.is_empty()
-            && rewrite_files.len() as u64 != max_rewrite_num - min_rewrite_num + 1
-        {
-            return Err(box_err!("Corruption occurs on rewrite files"));
-        }
 
-        pipe_log.open_all_files(
-            log_files,
-            min_file_num,
-            max_file_num,
-            rewrite_files,
-            min_rewrite_num,
-            max_rewrite_num,
-        )?;
+        pipe_log.open_all_files(log_files, min_file_num, max_file_num)?;
         Ok(pipe_log)
     }
 
@@ -203,9 +174,6 @@ impl PipeLog {
         logs: Vec<String>,
         min_file_num: u64,
         max_file_num: u64,
-        _rewrites: Vec<String>,
-        _min_rewrite_num: u64,
-        _max_rewrite_num: u64,
     ) -> Result<()> {
         let mut manager = self.log_manager.wl();
         manager.first_file_num = min_file_num;
@@ -472,19 +440,8 @@ fn extract_file_num(file_name: &str) -> Result<u64> {
     }
 }
 
-fn extract_rewrite_num(file_name: &str) -> Result<u64> {
-    match file_name[..REWRITE_NUM_LEN].parse::<u64>() {
-        Ok(num) => Ok(num),
-        Err(_) => Err(Error::ParseFileName(file_name.to_owned())),
-    }
-}
-
 fn is_log_file(file_name: &str) -> bool {
     file_name.ends_with(LOG_SUFFIX) && file_name.len() == FILE_NAME_LEN
-}
-
-fn is_rewrite_file(file_name: &str) -> bool {
-    file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN
 }
 
 fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
