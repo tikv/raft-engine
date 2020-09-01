@@ -15,7 +15,7 @@ use nix::NixPath;
 
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
-use crate::log_batch::{LogBatch, LogItemContent};
+use crate::log_batch::{LogBatch, LogItemContent, Entry};
 use crate::metrics::*;
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
@@ -268,7 +268,7 @@ impl PipeLog {
         Ok(())
     }
 
-    pub fn write(&self, batch: &LogBatch, sync: bool, file_num: &mut u64) -> Result<usize> {
+    pub fn write<T: Entry>(&self, batch: &LogBatch<T>, sync: bool, file_num: &mut u64) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
             let bytes = content.len();
 
@@ -638,7 +638,7 @@ mod tests {
         let (pipe_log, receiver) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
 
         let get_1m_batch = || {
-            let mut entry = Entry::new();
+            let mut entry = RaftEntry::new();
             entry.set_data(vec![b'a'; 1024]); // 1K data.
             let mut log_batch = LogBatch::new();
             log_batch.add_entries(1, vec![entry]);

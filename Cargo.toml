@@ -36,7 +36,7 @@ features = ["nightly"]
 git = "https://github.com/pingcap/kvproto.git"
 default-features = false
 
-[dependencies.raft]
+[dev-dependencies.raft]
 git = "https://github.com/pingcap/raft-rs"
 branch = "master"
 default-features = false

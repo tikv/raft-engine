@@ -7,14 +7,12 @@ use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
-use protobuf::Message as PbMsg;
-use raft::eraftpb::Entry;
+use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
-use crate::util::RAFT_LOG_STATE_KEY;
-use crate::{Error, RaftLocalState, RaftLogBatch, Result};
+use crate::{Error, Result};
 
 pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
 pub const HEADER_LEN: usize = 8;
@@ -123,16 +121,19 @@ impl CompressionType {
 }
 
 type SliceReader<'a> = &'a [u8];
+pub trait Entry: Message {
+    fn index(&self) -> u64;
+}
 
 #[derive(Debug, PartialEq)]
-pub struct Entries {
-    pub entries: Vec<Entry>,
+pub struct Entries<T: Entry> {
+    pub entries: Vec<T>,
     // EntryIndex may be update after write to file.
     pub entries_index: RefCell<Vec<EntryIndex>>,
 }
 
-impl Entries {
-    pub fn new(entries: Vec<Entry>, entries_index: Option<Vec<EntryIndex>>) -> Entries {
+impl<T: Entry> Entries<T> {
+    pub fn new(entries: Vec<T>, entries_index: Option<Vec<EntryIndex>>) -> Entries<T> {
         let len = entries.len();
         Entries {
             entries,
@@ -148,18 +149,18 @@ impl Entries {
         file_num: u64,
         base_offset: u64,  // Offset of the batch from its log file.
         batch_offset: u64, // Offset of the item from in its batch.
-    ) -> Result<Entries> {
+    ) -> Result<Entries<T>> {
         let content_len = buf.len() as u64;
         let mut count = codec::decode_var_u64(buf)? as usize;
         let mut entries = Vec::with_capacity(count);
         let mut entries_index = Vec::with_capacity(count);
         while count > 0 {
             let len = codec::decode_var_u64(buf)? as usize;
-            let mut e = Entry::new();
+            let mut e = T::new();
             e.merge_from_bytes(&buf[..len])?;
 
             let mut entry_index = EntryIndex::default();
-            entry_index.index = e.get_index();
+            entry_index.index = e.index();
             entry_index.file_num = file_num;
             entry_index.base_offset = base_offset;
             entry_index.offset = batch_offset + content_len - buf.len() as u64;
@@ -190,7 +191,7 @@ impl Entries {
             // file_num = 0 means entry index is not initialized.
             let mut entries_index = self.entries_index.borrow_mut();
             if entries_index[i].file_num == 0 {
-                entries_index[i].index = e.get_index();
+                entries_index[i].index = e.index();
                 // This offset doesn't count the header.
                 entries_index[i].offset = vec.len() as u64;
                 entries_index[i].len = content.len() as u64;
@@ -333,27 +334,27 @@ impl KeyValue {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LogItem {
+pub struct LogItem<T: Entry> {
     pub raft_group_id: u64,
-    pub content: LogItemContent,
+    pub content: LogItemContent<T>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum LogItemContent {
-    Entries(Entries),
+pub enum LogItemContent<T: Entry> {
+    Entries(Entries<T>),
     Command(Command),
     Kv(KeyValue),
 }
 
-impl LogItem {
-    pub fn from_entries(raft_group_id: u64, entries: Vec<Entry>) -> LogItem {
+impl<T: Entry> LogItem<T> {
+    pub fn from_entries(raft_group_id: u64, entries: Vec<T>) -> LogItem<T> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Entries(Entries::new(entries, None)),
         }
     }
 
-    pub fn from_command(raft_group_id: u64, command: Command) -> LogItem {
+    pub fn from_command(raft_group_id: u64, command: Command) -> LogItem<T> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Command(command),
@@ -365,7 +366,7 @@ impl LogItem {
         op_type: OpType,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
-    ) -> LogItem {
+    ) -> LogItem<T> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Kv(KeyValue::new(op_type, key, value)),
@@ -397,7 +398,7 @@ impl LogItem {
         file_num: u64,
         base_offset: u64,      // Offset of the batch from its log file.
         mut batch_offset: u64, // Offset of the item from in its batch.
-    ) -> Result<LogItem> {
+    ) -> Result<LogItem<T>> {
         let buf_len = buf.len();
         let raft_group_id = codec::decode_var_u64(buf)?;
         batch_offset += (buf_len - buf.len()) as u64;
@@ -425,12 +426,12 @@ impl LogItem {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct LogBatch {
-    pub items: Vec<LogItem>,
+#[derive(Debug)]
+pub struct LogBatch<T: Entry> {
+    pub items: Vec<LogItem<T>>,
 }
 
-impl Default for LogBatch {
+impl<T: Entry> Default for LogBatch<T> {
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(16),
@@ -438,7 +439,7 @@ impl Default for LogBatch {
     }
 }
 
-impl LogBatch {
+impl<T: Entry> LogBatch<T> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -449,7 +450,7 @@ impl LogBatch {
         }
     }
 
-    pub fn add_entries(&mut self, region_id: u64, entries: Vec<Entry>) {
+    pub fn add_entries(&mut self, region_id: u64, entries: Vec<T>) {
         let item = LogItem::from_entries(region_id, entries);
         self.items.push(item);
     }
@@ -493,7 +494,7 @@ impl LogBatch {
         file_num: u64,
         // The offset of the batch from its log file.
         base_offset: u64,
-    ) -> Result<Option<LogBatch>> {
+    ) -> Result<Option<LogBatch<T>>> {
         if buf.is_empty() {
             return Ok(None);
         }
@@ -585,25 +586,6 @@ impl LogBatch {
             }
         }
         size
-    }
-}
-
-impl RaftLogBatch for LogBatch {
-    fn append(&mut self, raft_group_id: u64, entries: Vec<Entry>) -> Result<()> {
-        self.add_entries(raft_group_id, entries);
-        Ok(())
-    }
-
-    fn cut_logs(&mut self, _: u64, _: u64, _: u64) {
-        // It's unnecessary because overlapped entries can be handled in `append`.
-    }
-
-    fn put_raft_state(&mut self, raft_group_id: u64, state: &RaftLocalState) -> Result<()> {
-        self.put_msg(raft_group_id, RAFT_LOG_STATE_KEY.to_vec(), state)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.items.is_empty()
     }
 }
 

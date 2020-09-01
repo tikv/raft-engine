@@ -3,7 +3,6 @@ use std::io::Error as IoError;
 
 use crate::codec::Error as CodecError;
 
-use raft::StorageError;
 
 quick_error! {
     #[derive(Debug)]
@@ -45,24 +44,14 @@ quick_error! {
             description("Raft group not found")
             display("Raft group not found: {}", raft_group_id)
         }
-        Storage(err: StorageError) {
-            from()
-            cause(err)
-            description(err.description())
+        StorageUnavailable {
+            description("Entries index is empty and unavailable to read")
+        }
+        StorageCompacted {
+            description("The entry acquired has been compacted")
         }
     }
 }
 
-impl From<Error> for raft::Error {
-    fn from(err: Error) -> raft::Error {
-        match err {
-            Error::Storage(e) => raft::Error::Store(e),
-            e => {
-                let boxed = Box::new(e) as Box<dyn std::error::Error + Sync + Send>;
-                raft::Error::Store(StorageError::Other(boxed))
-            }
-        }
-    }
-}
 
 pub type Result<T> = ::std::result::Result<T, Error>;

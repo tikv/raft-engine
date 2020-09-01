@@ -2,11 +2,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{cmp, u64};
 
-use raft::{eraftpb::Entry, StorageError};
 
 use crate::cache_evict::CacheTracker;
 use crate::engine::SharedCacheStats;
-use crate::log_batch::CompressionType;
+use crate::log_batch::{CompressionType, Entry};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, Result};
 
@@ -61,11 +60,11 @@ impl Default for EntryIndex {
  *                 first entry                               last entry
  */
 
-pub struct MemTable {
+pub struct MemTable<T: Entry> {
     region_id: u64,
 
     // latest N entries
-    entries_cache: VecDeque<Entry>,
+    entries_cache: VecDeque<T>,
 
     // All entries index
     pub entries_index: VecDeque<EntryIndex>,
@@ -79,13 +78,13 @@ pub struct MemTable {
     cache_stats: Arc<SharedCacheStats>,
 }
 
-impl MemTable {
+impl<T: Entry + Clone> MemTable<T> {
     fn cache_distance(&self) -> usize {
         if self.entries_cache.is_empty() {
             return self.entries_index.len();
         }
         let distance = self.entries_index.len() - self.entries_cache.len();
-        let cache_first = self.entries_cache[0].index;
+        let cache_first = self.entries_cache[0].index();
         let index_first = self.entries_index[distance].index;
         assert_eq!(cache_first, index_first);
         distance
@@ -96,8 +95,8 @@ impl MemTable {
         if self.entries_cache.is_empty() {
             return;
         }
-        let last_index = self.entries_cache.back().unwrap().index;
-        let first_index = self.entries_cache.front().unwrap().index;
+        let last_index = self.entries_cache.back().unwrap().index();
+        let first_index = self.entries_cache.front().unwrap().index();
         let conflict = if index <= first_index {
             // All entries need to be removed.
             0
@@ -152,7 +151,7 @@ impl MemTable {
         }
     }
 
-    pub fn new(region_id: u64, cache_limit: usize, cache_stats: Arc<SharedCacheStats>) -> MemTable {
+    pub fn new(region_id: u64, cache_limit: usize, cache_stats: Arc<SharedCacheStats>) -> MemTable<T> {
         MemTable {
             region_id,
             entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
@@ -165,13 +164,13 @@ impl MemTable {
         }
     }
 
-    pub fn append(&mut self, entries: Vec<Entry>, entries_index: Vec<EntryIndex>) {
+    pub fn append(&mut self, entries: Vec<T>, entries_index: Vec<EntryIndex>) {
         assert_eq!(entries.len(), entries_index.len());
         if entries.is_empty() {
             return;
         }
 
-        let first_index_to_add = entries[0].index;
+        let first_index_to_add = entries[0].index();
         self.cut_entries_cache(first_index_to_add);
         self.cut_entries_index(first_index_to_add);
 
@@ -230,10 +229,10 @@ impl MemTable {
     /// This method will panic if `idx` is greater than `last_idx + 1`.
     pub fn compact_cache_to(&mut self, idx: u64) {
         let first_idx = match self.entries_cache.front() {
-            Some(e) if e.index < idx => e.index,
+            Some(e) if e.index() < idx => e.index(),
             _ => return,
         };
-        let last_index = self.entries_cache.back().unwrap().index;
+        let last_index = self.entries_cache.back().unwrap().index();
         assert!(idx <= last_index + 1);
         assert!(last_index == self.entries_index.back().unwrap().index);
 
@@ -253,7 +252,7 @@ impl MemTable {
     // If entry exist in cache, return (Entry, None).
     // If entry exist but not in cache, return (None, EntryIndex).
     // If entry not exist, return (None, None).
-    pub fn get_entry(&self, index: u64) -> (Option<Entry>, Option<EntryIndex>) {
+    pub fn get_entry(&self, index: u64) -> (Option<T>, Option<EntryIndex>) {
         if self.entries_index.is_empty() {
             return (None, None);
         }
@@ -283,22 +282,22 @@ impl MemTable {
         begin: u64,
         end: u64,
         max_size: Option<usize>,
-        vec: &mut Vec<Entry>,
+        vec: &mut Vec<T>,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         assert!(end > begin, "fetch_entries_to({}, {})", begin, end);
         let (vec_len, vec_idx_len) = (vec.len(), vec_idx.len());
 
         if self.entries_index.is_empty() {
-            return Err(Error::Storage(StorageError::Unavailable));
+            return Err(Error::StorageUnavailable);
         }
         let first_index = self.entries_index.front().unwrap().index;
         if begin < first_index {
-            return Err(Error::Storage(StorageError::Compacted));
+            return Err(Error::StorageCompacted);
         }
         let last_index = self.entries_index.back().unwrap().index;
         if end > last_index + 1 {
-            return Err(Error::Storage(StorageError::Unavailable));
+            return Err(Error::StorageUnavailable);
         }
 
         let start_pos = (begin - first_index) as usize;
@@ -342,7 +341,7 @@ impl MemTable {
         Ok(())
     }
 
-    pub fn fetch_all(&self, vec: &mut Vec<Entry>, vec_idx: &mut Vec<EntryIndex>) {
+    pub fn fetch_all(&self, vec: &mut Vec<T>, vec_idx: &mut Vec<EntryIndex>) {
         if self.entries_index.is_empty() {
             return;
         }
@@ -471,14 +470,14 @@ impl MemTable {
 mod tests {
     use super::*;
 
-    use raft::eraftpb::Entry;
+    use raft::eraftpb::Entry as RaftEntry;
 
     #[test]
     fn test_memtable_append() {
         let region_id = 8;
         let cache_limit = 15;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
 
         // Append entries [10, 20) file_num = 1 not over cache size limitation.
         // after appending
