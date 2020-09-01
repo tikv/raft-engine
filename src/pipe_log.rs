@@ -1,10 +1,17 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{cmp, u64};
+
+use nix::errno::Errno;
+use nix::fcntl::{self, fallocate, OFlag};
+use nix::sys::stat::Mode;
+use nix::sys::uio::{pread, pwrite};
+use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
+use nix::NixPath;
 
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
@@ -13,19 +20,20 @@ use crate::metrics::*;
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
 
-use nix::fcntl;
-use nix::fcntl::OFlag;
-use nix::sys::stat::Mode;
-use nix::sys::uio;
-use nix::unistd;
-
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
 const FILE_NUM_LEN: usize = 16;
 const FILE_NAME_LEN: usize = FILE_NUM_LEN + LOG_SUFFIX_LEN;
+
+const REWRITE_SUFFIX: &str = ".rewrite";
+const REWRITE_SUFFIX_LEN: usize = 8;
+const REWRITE_NUM_LEN: usize = 8;
+const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX_LEN;
+
+const INIT_FILE_NUM: u64 = 1;
+
 pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 pub const VERSION: &[u8] = b"v1.0.0";
-const INIT_FILE_NUM: u64 = 1;
 const DEFAULT_FILES_COUNT: usize = 32;
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
@@ -39,19 +47,58 @@ struct LogManager {
     pub last_sync_size: usize,
 
     pub all_files: VecDeque<RawFd>,
+    pub rewrite_files: VecDeque<RawFd>,
 }
 
 impl LogManager {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             first_file_num: INIT_FILE_NUM,
-            active_file_num: INIT_FILE_NUM,
+            active_file_num: 0,
             active_log_fd: 0,
             active_log_size: 0,
             active_log_capacity: 0,
             last_sync_size: 0,
             all_files: VecDeque::with_capacity(DEFAULT_FILES_COUNT),
+            rewrite_files: VecDeque::new(),
         }
+    }
+
+    fn new_log_file(&mut self, dir: &str) -> Result<()> {
+        if self.active_file_num > 0 {
+            self.truncate_active_log(None)?;
+        }
+
+        let mut path = PathBuf::from(dir);
+        path.push(generate_file_name(self.active_file_num + 1));
+        let fd = open_active_file(&path)?;
+        self.active_log_fd = fd;
+        self.active_file_num += 1;
+        self.all_files.push_back(fd);
+        self.active_log_size = 0;
+        self.active_log_capacity = 0;
+        Ok(())
+    }
+
+    fn truncate_active_log(&mut self, offset: Option<usize>) -> Result<()> {
+        let offset = offset.unwrap_or(self.active_log_size);
+        match offset.cmp(&self.active_log_size) {
+            cmp::Ordering::Greater => {
+                let io_error = IoError::new(IoErrorKind::UnexpectedEof, "truncate");
+                return Err(Error::Io(io_error));
+            }
+            cmp::Ordering::Equal => {
+                // TODO: truncate extra space.
+                return Ok(());
+            }
+            _ => {}
+        }
+        ftruncate(self.active_log_fd, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
+        fsync(self.active_log_fd).map_err(|e| parse_nix_error(e, "fsync"))?;
+        self.active_log_size = offset;
+        self.active_log_capacity = offset;
+        self.last_sync_size = self.active_log_size;
+        Ok(())
     }
 }
 
@@ -84,92 +131,101 @@ impl PipeLog {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
-            fs::create_dir(&cfg.dir).map_err::<Error, _>(|e| {
-                box_err!("Create raft log directory failed, err: {:?}", e)
-            })?;
+            fs::create_dir(&cfg.dir)?;
         }
-
         if !path.is_dir() {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let mut min_file_num: u64 = u64::MAX;
-        let mut max_file_num: u64 = 0;
-        let mut log_files = vec![];
+        let mut pipe_log = PipeLog::new(cfg, cache_submitor);
+
+        let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
+        let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
+        let (mut log_files, mut rewrite_files) = (vec![], vec![]);
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let file_path = entry.path();
-
             if !file_path.is_file() {
                 continue;
             }
 
             let file_name = file_path.file_name().unwrap().to_str().unwrap();
-            if file_name.ends_with(LOG_SUFFIX) && file_name.len() == FILE_NAME_LEN {
+            if is_log_file(file_name) {
                 let file_num = match extract_file_num(file_name) {
                     Ok(num) => num,
-                    Err(_) => {
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
                 min_file_num = cmp::min(min_file_num, file_num);
                 max_file_num = cmp::max(max_file_num, file_num);
                 log_files.push(file_name.to_string());
+            } else if is_rewrite_file(file_name) {
+                let file_num = match extract_rewrite_num(file_name) {
+                    Ok(num) => num,
+                    Err(_) => continue,
+                };
+                min_rewrite_num = cmp::min(min_rewrite_num, file_num);
+                max_rewrite_num = cmp::min(max_rewrite_num, file_num);
+                rewrite_files.push(file_name.to_string());
             }
         }
 
-        // Initialize.
-        let mut pipe_log = PipeLog::new(cfg, cache_submitor);
         if log_files.is_empty() {
-            {
-                let mut manager = pipe_log.log_manager.wl();
-                let new_fd = new_log_file(&pipe_log.dir, manager.active_file_num)?;
-                manager.active_log_fd = new_fd;
-                manager.all_files.push_back(new_fd);
-            }
+            // New created pipe log, open the first log file.
+            pipe_log.log_manager.wl().new_log_file(&pipe_log.dir)?;
             pipe_log.write_header()?;
             return Ok(pipe_log);
         }
 
         log_files.sort();
-        log_files.dedup();
+        rewrite_files.sort();
         if log_files.len() as u64 != max_file_num - min_file_num + 1 {
-            return Err(box_err!("Corruption occurs"));
+            return Err(box_err!("Corruption occurs on log files"));
+        }
+        if !rewrite_files.is_empty()
+            && rewrite_files.len() as u64 != max_rewrite_num - min_rewrite_num + 1
+        {
+            return Err(box_err!("Corruption occurs on rewrite files"));
         }
 
-        {
-            let mut manager = pipe_log.log_manager.wl();
-            manager.first_file_num = min_file_num;
-            manager.active_file_num = max_file_num;
-        }
-        pipe_log.open_all_files()?;
+        pipe_log.open_all_files(
+            log_files,
+            min_file_num,
+            max_file_num,
+            rewrite_files,
+            min_rewrite_num,
+            max_rewrite_num,
+        )?;
         Ok(pipe_log)
     }
 
-    fn open_all_files(&mut self) -> Result<()> {
+    fn open_all_files(
+        &mut self,
+        logs: Vec<String>,
+        min_file_num: u64,
+        max_file_num: u64,
+        _rewrites: Vec<String>,
+        _min_rewrite_num: u64,
+        _max_rewrite_num: u64,
+    ) -> Result<()> {
         let mut manager = self.log_manager.wl();
-        let mut current_file = manager.first_file_num;
-        while current_file <= manager.active_file_num {
-            let mut path = PathBuf::from(&self.dir);
-            path.push(generate_file_name(current_file));
+        manager.first_file_num = min_file_num;
+        manager.active_file_num = max_file_num;
 
-            let oflag = if current_file < manager.active_file_num {
-                // Open inactive files with readonly mode.
-                OFlag::O_RDONLY
-            } else {
-                // Open active file with readwrite mode.
-                OFlag::O_RDWR
-            };
-            let fd = fcntl::open(&path, oflag, Mode::S_IRWXU)
-                .map_err(|e| raft::StorageError::Other(e.into()))?;
+        for file_name in &logs[0..logs.len() - 1] {
+            let mut path = PathBuf::from(&self.dir);
+            path.push(file_name);
+            let fd = open_frozen_file(&path)?;
             manager.all_files.push_back(fd);
-            if current_file == manager.active_file_num {
-                manager.active_log_fd = fd;
-                manager.active_log_size = unistd::lseek(fd, 0, unistd::Whence::SeekEnd)? as usize;
-                manager.active_log_capacity = manager.active_log_size;
-            }
-            current_file += 1;
         }
+
+        let mut path = PathBuf::from(&self.dir);
+        path.push(logs.last().unwrap());
+        let fd = open_active_file(&path)?;
+        manager.all_files.push_back(fd);
+        manager.active_log_fd = fd;
+        manager.active_log_size =
+            lseek(fd, 0, Whence::SeekEnd).map_err(|e| parse_nix_error(e, "lseek"))? as usize;
+        manager.active_log_capacity = manager.active_log_size;
         Ok(())
     }
 
@@ -178,124 +234,52 @@ impl PipeLog {
         if file_num < manager.first_file_num || file_num > manager.active_file_num {
             return Err(box_err!("File not exist, file number {}", file_num));
         }
-
-        let mut result = vec![0; len as usize];
         let fd = manager.all_files[(file_num - manager.first_file_num) as usize];
-        loop {
-            match uio::pread(fd, &mut result, offset as _) {
-                Ok(ret) => {
-                    if ret != len as usize {
-                        return Err(box_err!(
-                            "Pread failed, expected return size {}, actual return size {}",
-                            len,
-                            ret
-                        ));
-                    }
-                    return Ok(result);
-                }
-                Err(e) => {
-                    if e.as_errno() == Some(nix::errno::Errno::EAGAIN) {
-                        continue;
-                    }
-                    return Err(box_err!("pread failed on file {}: {:?}", file_num, e));
-                }
-            }
-        }
+        pread_exact(fd, offset, len as usize)
     }
 
     pub fn close(&self) -> Result<()> {
         let _write_lock = self.cache_submitor.lock().unwrap();
 
-        let active_log_size = self.log_manager.rl().active_log_size;
-        self.truncate_active_log(active_log_size)?;
-
+        self.log_manager.wl().truncate_active_log(None)?;
         for fd in self.log_manager.rl().all_files.iter() {
-            nix::unistd::close(*fd)?
+            close(*fd).map_err(|e| parse_nix_error(e, "close"))?;
         }
         Ok(())
     }
 
     fn append(&self, content: &[u8], sync: bool) -> Result<(u64, u64)> {
-        let (active_log_fd, mut active_log_size, last_sync_size, file_num, offset) = {
-            let manager = self.log_manager.rl();
-            (
-                manager.active_log_fd,
-                manager.active_log_size,
-                manager.last_sync_size,
-                manager.active_file_num,
-                manager.active_log_size as u64,
+        let mut manager = self.log_manager.wl();
+        let active_log_fd = manager.active_log_fd;
+        let last_sync_size = manager.last_sync_size;
+        let file_num = manager.active_file_num;
+
+        let new_len = manager.active_log_size + content.len();
+        while manager.active_log_capacity < new_len {
+            // Use fallocate to pre-allocate disk space for active file.
+            fallocate(
+                active_log_fd,
+                fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
+                manager.active_log_capacity as _,
+                FILE_ALLOCATE_SIZE as _,
             )
-        };
-        {
-            // Use fallocate to pre-allocate disk space for active file. fallocate is faster than File::set_len,
-            // because it will not fill the space with 0s, but File::set_len does.
-            let (new_size, mut active_log_capacity) = {
-                let manager = self.log_manager.rl();
-                (
-                    manager.active_log_size + content.len(),
-                    manager.active_log_capacity,
-                )
-            };
-            while active_log_capacity < new_size {
-                fcntl::fallocate(
-                    active_log_fd,
-                    fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
-                    active_log_capacity as _,
-                    FILE_ALLOCATE_SIZE as _,
-                )
-                .map_err::<Error, _>(|e| {
-                    box_err!("Allocate disk space for active log failed : {:?}", e)
-                })?;
-                {
-                    let mut manager = self.log_manager.wl();
-                    manager.active_log_capacity += FILE_ALLOCATE_SIZE;
-                    active_log_capacity = manager.active_log_capacity;
-                }
-            }
+            .map_err(|e| parse_nix_error(e, "fallocate"))?;
+            manager.active_log_capacity += FILE_ALLOCATE_SIZE;
         }
 
-        let mut remaining_content = content;
-        // Write to file
-        let mut written_bytes: usize = 0;
-        let len = content.len();
-        while written_bytes < len {
-            match uio::pwrite(active_log_fd, remaining_content, active_log_size as _) {
-                Ok(write_ret) => {
-                    active_log_size += write_ret;
-                    written_bytes += write_ret;
-                    remaining_content = &remaining_content[write_ret..];
-                    continue;
-                }
-                Err(e) => {
-                    if e.as_errno() == Some(nix::errno::Errno::EAGAIN) {
-                        continue;
-                    }
-                    return Err(box_err!("Write to active log failed, err {:?}", e));
-                }
-            }
-        }
-        {
-            // Update active log size.
-            let mut manager = self.log_manager.wl();
-            manager.active_log_size = active_log_size;
-        }
+        let offset = manager.active_log_size as u64;
+        pwrite_exact(active_log_fd, offset, content)?;
+        manager.active_log_size = new_len;
 
         // Sync data if needed.
-        if sync
-            || self.bytes_per_sync > 0 && active_log_size - last_sync_size >= self.bytes_per_sync
-        {
-            unistd::fsync(active_log_fd).map_err::<Error, _>(|e| {
-                box_err!("Allocate disk space for active log failed : {:?}", e)
-            })?;
-            {
-                // Update last sync size.
-                let mut manager = self.log_manager.wl();
-                manager.last_sync_size = active_log_size;
-            }
+        if sync || self.bytes_per_sync > 0 && new_len - last_sync_size >= self.bytes_per_sync {
+            fsync(active_log_fd).map_err(|e| parse_nix_error(e, "fsync"))?;
+            manager.last_sync_size = new_len;
         }
+        drop(manager);
 
         // Rotate if needed
-        if active_log_size >= self.rotate_size {
+        if new_len >= self.rotate_size {
             self.rotate_log()?;
         }
 
@@ -311,33 +295,8 @@ impl PipeLog {
     }
 
     fn rotate_log(&self) -> Result<()> {
-        {
-            let active_log_size = {
-                let manager = self.log_manager.rl();
-                manager.active_log_size
-            };
-            self.truncate_active_log(active_log_size).unwrap();
-        }
-
-        // New log file.
-        let next_file_num = {
-            let manager = self.log_manager.rl();
-            manager.active_file_num + 1
-        };
-        let new_fd = new_log_file(&self.dir, next_file_num)?;
-        {
-            let mut manager = self.log_manager.wl();
-            manager.all_files.push_back(new_fd);
-            manager.active_log_fd = new_fd;
-            manager.active_log_size = 0;
-            manager.active_log_capacity = 0;
-            manager.last_sync_size = 0;
-            manager.active_file_num = next_file_num;
-        }
-
-        // Write Header
-        self.write_header()
-            .map_err::<Error, _>(|e| box_err!("Write header failed, err {:?}", e))?;
+        self.log_manager.wl().new_log_file(&self.dir)?;
+        self.write_header()?;
         Ok(())
     }
 
@@ -345,6 +304,9 @@ impl PipeLog {
         if let Some(content) = batch.encode_to_bytes() {
             let bytes = content.len();
 
+            // TODO: `write` holds a big lock. Move the lock to log manager.
+            // And theoretically, 2 log batches can be written to disks concurrently
+            // because we use `pwrite` instead of `write(append)`.
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset) = self.append(&content, sync)?;
             let entries_size = batch.entries_size();
@@ -399,8 +361,7 @@ impl PipeLog {
                 )
             };
             // Close the file.
-            unistd::close(old_fd)
-                .map_err::<Error, _>(|e| box_err!("close file failed, err {:?}", e))?;
+            close(old_fd).map_err(|e| parse_nix_error(e, "close"))?;
 
             // Remove the file
             let mut path = PathBuf::from(&self.dir);
@@ -417,36 +378,12 @@ impl PipeLog {
 
     // Shrink file size and synchronize.
     pub fn truncate_active_log(&self, offset: usize) -> Result<()> {
-        {
-            let manager = self.log_manager.rl();
-            assert!(
-                manager.active_log_size >= offset,
-                "attempt to truncate_active_log({}), but active_log_size is {}",
-                offset,
-                manager.active_log_size
-            );
-            if manager.active_log_size == offset {
-                return Ok(());
-            }
-            unistd::ftruncate(manager.active_log_fd, offset as _)
-                .map_err::<Error, _>(|e| box_err!("Ftruncate file failed, err {:?}", e))?;
-            unistd::fsync(manager.active_log_fd)
-                .map_err::<Error, _>(|e| box_err!("Fsync file failed, err : {:?}", e))?;
-        }
-        {
-            let mut manager = self.log_manager.wl();
-            manager.active_log_size = offset;
-            manager.active_log_capacity = offset;
-            manager.last_sync_size = manager.active_log_size;
-        }
-
-        Ok(())
+        self.log_manager.wl().truncate_active_log(Some(offset))
     }
 
     pub fn sync(&self) -> Result<()> {
         let manager = self.log_manager.rl();
-        unistd::fsync(manager.active_log_fd)
-            .map_err::<Error, _>(|e| box_err!("Fsync file failed, err : {:?}", e))?;
+        fsync(manager.active_log_fd).map_err(|e| parse_nix_error(e, "fsync"))?;
         Ok(())
     }
 
@@ -524,17 +461,6 @@ impl PipeLog {
     }
 }
 
-fn new_log_file(dir: &str, file_num: u64) -> Result<RawFd> {
-    let mut path = PathBuf::from(dir);
-    path.push(generate_file_name(file_num));
-    fcntl::open(
-        &path,
-        OFlag::O_RDWR | OFlag::O_CREAT,
-        Mode::S_IRUSR | Mode::S_IWUSR,
-    )
-    .map_err(|e| e.into())
-}
-
 fn generate_file_name(file_num: u64) -> String {
     format!("{:016}{}", file_num, LOG_SUFFIX)
 }
@@ -544,6 +470,72 @@ fn extract_file_num(file_name: &str) -> Result<u64> {
         Ok(num) => Ok(num),
         Err(_) => Err(Error::ParseFileName(file_name.to_owned())),
     }
+}
+
+fn extract_rewrite_num(file_name: &str) -> Result<u64> {
+    match file_name[..REWRITE_NUM_LEN].parse::<u64>() {
+        Ok(num) => Ok(num),
+        Err(_) => Err(Error::ParseFileName(file_name.to_owned())),
+    }
+}
+
+fn is_log_file(file_name: &str) -> bool {
+    file_name.ends_with(LOG_SUFFIX) && file_name.len() == FILE_NAME_LEN
+}
+
+fn is_rewrite_file(file_name: &str) -> bool {
+    file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN
+}
+
+fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
+    match e {
+        nix::Error::Sys(no) => {
+            let kind = IoError::from(no).kind();
+            Error::Io(IoError::new(kind, custom))
+        }
+        e => box_err!("{}: {:?}", custom, e),
+    }
+}
+
+fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+    let flags = OFlag::O_RDWR | OFlag::O_CREAT;
+    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
+    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_active_file"))
+}
+
+fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+    let flags = OFlag::O_RDONLY;
+    let mode = Mode::S_IRWXU;
+    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_frozen_file"))
+}
+
+fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> Result<Vec<u8>> {
+    let mut result = vec![0; len as usize];
+    let mut readed = 0;
+    while readed < len {
+        let bytes = match pread(fd, &mut result[readed..], offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pread")),
+        };
+        readed += bytes;
+        offset += bytes as u64;
+    }
+    Ok(result)
+}
+
+fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
+    let mut written = 0;
+    while written < content.len() {
+        let bytes = match pwrite(fd, &content[written..], offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pwrite")),
+        };
+        written += bytes;
+        offset += bytes as u64;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -652,9 +644,8 @@ mod tests {
             pipe_log.active_log_size(),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
-        let trunc_big_offset = std::panic::catch_unwind(|| {
-            pipe_log.truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len())
-        });
+        let trunc_big_offset =
+            pipe_log.truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len());
         assert!(trunc_big_offset.is_err());
 
         // read next file
