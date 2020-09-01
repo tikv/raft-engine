@@ -47,7 +47,6 @@ struct LogManager {
     pub last_sync_size: usize,
 
     pub all_files: VecDeque<RawFd>,
-    pub rewrite_files: VecDeque<RawFd>,
 }
 
 impl LogManager {
@@ -60,7 +59,6 @@ impl LogManager {
             active_log_capacity: 0,
             last_sync_size: 0,
             all_files: VecDeque::with_capacity(DEFAULT_FILES_COUNT),
-            rewrite_files: VecDeque::new(),
         }
     }
 
@@ -108,7 +106,7 @@ pub struct PipeLog {
     rotate_size: usize,
     bytes_per_sync: usize,
 
-    log_manager: Arc<RwLock<LogManager>>,
+    append_manager: Arc<RwLock<LogManager>>,
     cache_submitor: Arc<Mutex<CacheSubmitor>>,
 
     // Used when recovering from disk.
@@ -121,7 +119,7 @@ impl PipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
-            log_manager: Arc::new(RwLock::new(LogManager::new())),
+            append_manager: Arc::new(RwLock::new(LogManager::new())),
             cache_submitor: Arc::new(Mutex::new(cache_submitor)),
             current_read_file_num: 0,
         }
@@ -171,7 +169,7 @@ impl PipeLog {
 
         if log_files.is_empty() {
             // New created pipe log, open the first log file.
-            pipe_log.log_manager.wl().new_log_file(&pipe_log.dir)?;
+            pipe_log.append_manager.wl().new_log_file(&pipe_log.dir)?;
             pipe_log.write_header()?;
             return Ok(pipe_log);
         }
@@ -207,7 +205,7 @@ impl PipeLog {
         _min_rewrite_num: u64,
         _max_rewrite_num: u64,
     ) -> Result<()> {
-        let mut manager = self.log_manager.wl();
+        let mut manager = self.append_manager.wl();
         manager.first_file_num = min_file_num;
         manager.active_file_num = max_file_num;
 
@@ -230,7 +228,7 @@ impl PipeLog {
     }
 
     pub fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         if file_num < manager.first_file_num || file_num > manager.active_file_num {
             return Err(box_err!("File not exist, file number {}", file_num));
         }
@@ -241,15 +239,15 @@ impl PipeLog {
     pub fn close(&self) -> Result<()> {
         let _write_lock = self.cache_submitor.lock().unwrap();
 
-        self.log_manager.wl().truncate_active_log(None)?;
-        for fd in self.log_manager.rl().all_files.iter() {
+        self.append_manager.wl().truncate_active_log(None)?;
+        for fd in self.append_manager.rl().all_files.iter() {
             close(*fd).map_err(|e| parse_nix_error(e, "close"))?;
         }
         Ok(())
     }
 
     fn append(&self, content: &[u8], sync: bool) -> Result<(u64, u64)> {
-        let mut manager = self.log_manager.wl();
+        let mut manager = self.append_manager.wl();
         let active_log_fd = manager.active_log_fd;
         let last_sync_size = manager.last_sync_size;
         let file_num = manager.active_file_num;
@@ -295,7 +293,7 @@ impl PipeLog {
     }
 
     fn rotate_log(&self) -> Result<()> {
-        self.log_manager.wl().new_log_file(&self.dir)?;
+        self.append_manager.wl().new_log_file(&self.dir)?;
         self.write_header()?;
         Ok(())
     }
@@ -330,7 +328,7 @@ impl PipeLog {
 
     pub fn purge_to(&self, file_num: u64) -> Result<usize> {
         let (mut first_file_num, active_file_num) = {
-            let manager = self.log_manager.rl();
+            let manager = self.append_manager.rl();
             (manager.first_file_num, manager.active_file_num)
         };
         PIPE_FILES_COUNT_GAUGE.set((active_file_num - first_file_num + 1) as f64);
@@ -352,7 +350,7 @@ impl PipeLog {
 
             // Pop the oldest file.
             let (old_fd, old_file_num) = {
-                let mut manager = self.log_manager.wl();
+                let mut manager = self.append_manager.wl();
                 manager.first_file_num += 1;
                 first_file_num = manager.first_file_num;
                 (
@@ -378,45 +376,45 @@ impl PipeLog {
 
     // Shrink file size and synchronize.
     pub fn truncate_active_log(&self, offset: usize) -> Result<()> {
-        self.log_manager.wl().truncate_active_log(Some(offset))
+        self.append_manager.wl().truncate_active_log(Some(offset))
     }
 
     pub fn sync(&self) -> Result<()> {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         fsync(manager.active_log_fd).map_err(|e| parse_nix_error(e, "fsync"))?;
         Ok(())
     }
 
     #[cfg(test)]
     fn active_log_size(&self) -> usize {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         manager.active_log_size
     }
 
     #[cfg(test)]
     fn active_log_capacity(&self) -> usize {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         manager.active_log_capacity
     }
 
     pub fn active_file_num(&self) -> u64 {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         manager.active_file_num
     }
 
     pub fn first_file_num(&self) -> u64 {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         manager.first_file_num
     }
 
     pub fn total_size(&self) -> usize {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         (manager.active_file_num - manager.first_file_num) as usize * self.rotate_size
             + manager.active_log_size
     }
 
     pub fn read_next_file(&mut self) -> Result<Option<Vec<u8>>> {
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         if self.current_read_file_num == 0 {
             self.current_read_file_num = manager.first_file_num;
         }
@@ -444,12 +442,12 @@ impl PipeLog {
             return 0;
         }
         let count = (cur_size - size) / self.rotate_size;
-        let manager = self.log_manager.rl();
+        let manager = self.append_manager.rl();
         manager.first_file_num + count as u64
     }
 
     pub fn file_len(&self, file_num: u64) -> u64 {
-        let mgr = self.log_manager.rl();
+        let mgr = self.append_manager.rl();
         let fd = mgr.all_files[(file_num - mgr.first_file_num) as usize];
         let offset = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
         assert!(offset > 0);
