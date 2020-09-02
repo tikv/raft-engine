@@ -4,11 +4,6 @@ version = "0.1.0"
 authors = ["zhangjinpeng1987 <zhangjinpeng@pingcap.com>"]
 edition = "2018"
 
-[features]
-default = ["protobuf-codec"]
-protobuf-codec = ["raft/protobuf-codec"]
-prost-codec = ["raft/prost-codec"]
-
 [dependencies]
 protobuf = "=2.8.0"
 quick-error = "1.2.2"
@@ -36,3 +31,4 @@ features = ["nightly"]
 git = "https://github.com/pingcap/raft-rs"
 branch = "master"
 default-features = false
+features = ["protobuf-codec", "prost-codec"]
