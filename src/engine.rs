@@ -295,39 +295,6 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
-    pub fn first_index(&self, region_id: u64) -> Option<u64> {
-        if let Some(memtable) = self.memtables.get(region_id) {
-            return memtable.rl().first_index();
-        }
-        None
-    }
-
-    pub fn last_index(&self, region_id: u64) -> Option<u64> {
-        if let Some(memtable) = self.memtables.get(region_id) {
-            return memtable.rl().last_index();
-        }
-        None
-    }
-
-    pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
-        let first_index = match self.first_index(region_id) {
-            Some(index) => index,
-            None => return 0,
-        };
-
-        let mut log_batch = LogBatch::new();
-        log_batch.add_command(region_id, Command::Compact { index });
-        self.write(log_batch, false).map(|_| ()).unwrap();
-
-        self.first_index(region_id).unwrap_or(index) - first_index
-    }
-
-    pub fn compact_cache_to(&self, region_id: u64, index: u64) {
-        if let Some(memtable) = self.memtables.get(region_id) {
-            memtable.wl().compact_cache_to(index);
-        }
-    }
-
     // Write a batch needs 3 steps:
     // 1. find all involved raft groups and then lock their memtables;
     // 2. append the log batch to pipe log;
@@ -337,7 +304,7 @@ impl<T: Entry + Clone> FileEngine<T> {
     // 2. Users can call `append` on one raft group concurrently.
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
-    pub fn write(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
+    fn write_impl(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
         let mut rafts = Vec::with_capacity(log_batch.items.len());
         for raft in log_batch.items.iter().map(|item| item.raft_group_id) {
             rafts.push(raft);
@@ -374,7 +341,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         Ok(bytes)
     }
 
-    pub fn rewrite(
+    fn rewrite(
         &self,
         raft_group_id: u64,
         entries: Vec<T>,
@@ -396,51 +363,6 @@ impl<T: Entry + Clone> FileEngine<T> {
             }
         }
         Ok(())
-    }
-
-    pub fn sync(&self) -> Result<()> {
-        self.pipe_log.sync()
-    }
-
-    pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
-        let mut log_batch = LogBatch::new();
-        log_batch.put_msg(region_id, key.to_vec(), m)?;
-        self.write(log_batch, false).map(|_| ())
-    }
-
-    pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let memtable = self.memtables.get(region_id);
-        Ok(memtable.and_then(|t| t.rl().get(key)))
-    }
-
-    pub fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
-        match self.get(region_id, key)? {
-            Some(value) => {
-                let mut m = M::new();
-                m.merge_from_bytes(&value)?;
-                Ok(Some(m))
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<T>> {
-        // Fetch from cache
-        let entry_idx = {
-            if let Some(memtable) = self.memtables.get(region_id) {
-                match memtable.rl().get_entry(log_idx) {
-                    (Some(entry), _) => return Ok(Some(entry)),
-                    (None, Some(idx)) => idx,
-                    (None, None) => return Ok(None),
-                }
-            } else {
-                return Ok(None);
-            }
-        };
-
-        // Read from file
-        let entry = self.read_entry_from_file(&entry_idx, None)?;
-        Ok(Some(entry))
     }
 
     fn read_entry_from_file(
@@ -478,30 +400,6 @@ impl<T: Entry + Clone> FileEngine<T> {
         e.merge_from_bytes(&entry_content)?;
         assert_eq!(e.index(), entry_index.index);
         Ok(e)
-    }
-
-    pub fn fetch_entries_to(
-        &self,
-        region_id: u64,
-        begin: u64,
-        end: u64,
-        max_size: Option<usize>,
-        vec: &mut Vec<T>,
-    ) -> Result<usize> {
-        if let Some(memtable) = self.memtables.get(region_id) {
-            let memtable = memtable.rl();
-            let mut entries = Vec::with_capacity((end - begin) as usize);
-            let mut entries_idx = Vec::with_capacity((end - begin) as usize);
-            memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
-            let count = entries.len() + entries_idx.len();
-            for idx in &entries_idx {
-                let e = self.read_entry_from_file(idx, None)?;
-                vec.push(e);
-            }
-            vec.extend(entries.into_iter());
-            return Ok(count);
-        }
-        Ok(0)
     }
 
     fn needs_purge_log_files(&self) -> bool {
@@ -615,6 +513,60 @@ impl<T: Entry + Clone> FileEngine<T> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
 
+    /// Synchronize the Raft engine.
+    pub fn sync(&self) -> Result<()> {
+        self.pipe_log.sync()
+    }
+
+    pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
+        let mut log_batch = LogBatch::new();
+        log_batch.put(region_id, key.to_vec(), value.to_vec());
+        self.write(log_batch, false).map(|_| ())
+    }
+
+    pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
+        let mut log_batch = LogBatch::new();
+        log_batch.put_msg(region_id, key.to_vec(), m)?;
+        self.write(log_batch, false).map(|_| ())
+    }
+
+    pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let memtable = self.memtables.get(region_id);
+        Ok(memtable.and_then(|t| t.rl().get(key)))
+    }
+
+    pub fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
+        match self.get(region_id, key)? {
+            Some(value) => {
+                let mut m = M::new();
+                m.merge_from_bytes(&value)?;
+                Ok(Some(m))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<T>> {
+        // Fetch from cache
+        let entry_idx = {
+            if let Some(memtable) = self.memtables.get(region_id) {
+                match memtable.rl().get_entry(log_idx) {
+                    (Some(entry), _) => return Ok(Some(entry)),
+                    (None, Some(idx)) => idx,
+                    (None, None) => return Ok(None),
+                }
+            } else {
+                return Ok(None);
+            }
+        };
+
+        // Read from file
+        let entry = self.read_entry_from_file(&entry_idx, None)?;
+        Ok(Some(entry))
+    }
+
+    /// Purge expired logs files and return a set of Raft group ids
+    /// which needs to be compacted ASAP.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _purge_mutex = match self.purge_mutex.try_lock() {
             Ok(locked) if self.needs_purge_log_files() => locked,
@@ -638,10 +590,73 @@ impl<T: Entry + Clone> FileEngine<T> {
         Ok(will_force_compact)
     }
 
-    pub fn has_builtin_entry_cache(&self) -> bool {
-        true
+    /// Return count of fetched entries.
+    pub fn fetch_entries_to(
+        &self,
+        region_id: u64,
+        begin: u64,
+        end: u64,
+        max_size: Option<usize>,
+        vec: &mut Vec<T>,
+    ) -> Result<usize> {
+        if let Some(memtable) = self.memtables.get(region_id) {
+            let memtable = memtable.rl();
+            let mut entries = Vec::with_capacity((end - begin) as usize);
+            let mut entries_idx = Vec::with_capacity((end - begin) as usize);
+            memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
+            let count = entries.len() + entries_idx.len();
+            for idx in &entries_idx {
+                let e = self.read_entry_from_file(idx, None)?;
+                vec.push(e);
+            }
+            vec.extend(entries.into_iter());
+            return Ok(count);
+        }
+        Ok(0)
     }
 
+    pub fn first_index(&self, region_id: u64) -> Option<u64> {
+        if let Some(memtable) = self.memtables.get(region_id) {
+            return memtable.rl().first_index();
+        }
+        None
+    }
+
+    pub fn last_index(&self, region_id: u64) -> Option<u64> {
+        if let Some(memtable) = self.memtables.get(region_id) {
+            return memtable.rl().last_index();
+        }
+        None
+    }
+
+    /// Like `cut_logs` but the range could be very large. Return the deleted count.
+    /// Generally, `from` can be passed in `0`.
+    pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
+        let first_index = match self.first_index(region_id) {
+            Some(index) => index,
+            None => return 0,
+        };
+
+        let mut log_batch = LogBatch::new();
+        log_batch.add_command(region_id, Command::Compact { index });
+        self.write(log_batch, false).map(|_| ()).unwrap();
+
+        self.first_index(region_id).unwrap_or(index) - first_index
+    }
+
+    pub fn compact_cache_to(&self, region_id: u64, index: u64) {
+        if let Some(memtable) = self.memtables.get(region_id) {
+            memtable.wl().compact_cache_to(index);
+        }
+    }
+
+    /// Write the content of LogBatch into the engine and return written bytes.
+    /// If set sync true, the data will be persisted on disk by `fsync`.
+    pub fn write(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
+        self.write_impl(log_batch, sync)
+    }
+
+    /// Flush stats about EntryCache.
     pub fn flush_stats(&self) -> CacheStats {
         CacheStats {
             hit: self.cache_stats.hit.swap(0, Ordering::SeqCst),
@@ -650,6 +665,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
+    /// Stop background thread which will keep trying evict caching.
     pub fn stop(&self) {
         let mut workers = self.workers.wl();
         workers.cache_evict.stop();
@@ -668,17 +684,7 @@ mod tests {
             self.get_index()
         }
     }
-    pub trait RaftEngine {
-        fn put_raft_state(&self, raft_group_id: u64, state: &HardState) -> Result<()>;
-        fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<HardState>>;
-        fn commit_to(&self, raft_group_id: u64, index: u64) {
-            let mut raft_state = self.get_raft_state(raft_group_id).unwrap().unwrap();
-            raft_state.commit = index;
-            self.put_raft_state(raft_group_id, &raft_state).unwrap();
-        }
-        fn append(&self, raft_group_id: u64, entries: Vec<RaftEntry>) -> Result<usize>;
-    }
-    impl RaftEngine for RaftLogEngine {
+    impl RaftLogEngine {
         fn put_raft_state(&self, raft_group_id: u64, state: &HardState) -> Result<()> {
             self.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
         }
@@ -689,6 +695,11 @@ mod tests {
             let mut batch = LogBatch::default();
             batch.add_entries(raft_group_id, entries);
             self.write(batch, false)
+        }
+        fn commit_to(&self, raft_group_id: u64, index: u64) {
+            let mut raft_state = self.get_raft_state(raft_group_id).unwrap().unwrap();
+            raft_state.commit = index;
+            self.put_raft_state(raft_group_id, &raft_state).unwrap();
         }
     }
 
