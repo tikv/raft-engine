@@ -660,32 +660,35 @@ impl<T: Entry + Clone> FileEngine<T> {
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
-    use raft::eraftpb::{Entry as RaftEntry, RaftLocalState};
+    use kvproto::raft_serverpb::RaftLocalState;
+    use raft::eraftpb::{Entry as RaftEntry, HardState};
     type RaftLogEngine = FileEngine<RaftEntry>;
     const RAFT_LOG_STATE_KEY: &[u8] = b"R";
+    impl Entry for RaftEntry {
+        fn index(&self) -> u64 {
+            self.get_index()
+        }
+    }
     pub trait RaftEngine {
-        fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
-        fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>>;
+        fn put_raft_state(&self, raft_group_id: u64, state: &HardState) -> Result<()>;
+        fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<HardState>>;
         fn commit_to(&self, raft_group_id: u64, index: u64) {
             let mut raft_state = self.get_raft_state(raft_group_id).unwrap().unwrap();
-            raft_state.mut_hard_state().commit = index;
+            raft_state.commit = index;
             self.put_raft_state(raft_group_id, &raft_state).unwrap();
         }
     }
     impl RaftEngine for RaftLogEngine {
-        fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()> {
+        fn put_raft_state(&self, raft_group_id: u64, state: &HardState) -> Result<()> {
             self.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
         }
-        fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>> {
+        fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<HardState>> {
             self.get_msg(raft_group_id, RAFT_LOG_STATE_KEY)
         }
     }
 
-    fn append_log(engine: &RaftEngine, raft: u64, entry: &Entry) {
+    fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
         engine.append(raft, vec![entry.clone()]).unwrap();
-        let mut state = RaftLocalState::new();
-        state.last_index = entry.index;
-        engine.put_raft_state(raft, &state).unwrap();
     }
 
     #[test]
@@ -701,8 +704,8 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = FileEngine::new(cfg.clone());
-            let mut entry = Entry::new();
+            let engine = FileEngine::<RaftEntry>::new(cfg.clone());
+            let mut entry = RaftEntry::new();
             entry.set_data(vec![b'x'; entry_size]);
             for i in 10..20 {
                 entry.set_index(i);
@@ -724,7 +727,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = FileEngine::new(cfg.clone());
+            let engine = FileEngine::<RaftEntry>::new(cfg.clone());
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -748,8 +751,8 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = FileEngine::new(cfg.clone());
-        let mut entry = Entry::new();
+        let engine = FileEngine::<RaftEntry>::new(cfg.clone());
+        let mut entry = RaftEntry::new();
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
             entry.set_index(i);
@@ -758,7 +761,7 @@ mod tests {
 
         // GC all log entries. Won't trigger purge because total size is not enough.
         engine.commit_to(1, 99);
-        let count = engine.gc(1, 0, 100).unwrap();
+        let count = engine.compact_to(1, 100).unwrap();
         assert_eq!(count, 100);
         assert!(!engine.needs_purge_log_files());
 
@@ -814,10 +817,10 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::new_impl(cfg.clone(), 512 * 1024);
+        let engine = FileEngine::<RaftEntry>::new_impl(cfg.clone(), 512 * 1024);
 
         // Append some entries with total size 100M.
-        let mut entry = Entry::new();
+        let mut entry = RaftEntry::new();
         entry.set_data(vec![b'x'; 1024]);
         for idx in 1..=10 {
             for raft_id in 1..=10000 {
@@ -832,7 +835,7 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = FileEngine::new_impl(cfg.clone(), 512 * 1024);
+        let engine = FileEngine::<RaftEntry>::new_impl(cfg.clone(), 512 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
