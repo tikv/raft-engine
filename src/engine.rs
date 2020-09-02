@@ -676,38 +676,25 @@ impl<T: Entry + Clone> FileEngine<T> {
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
-    use raft::eraftpb::{Entry as RaftEntry, HardState};
+    use raft::eraftpb::Entry as RaftEntry;
     type RaftLogEngine = FileEngine<RaftEntry>;
-    const RAFT_LOG_STATE_KEY: &[u8] = b"R";
+
     impl Entry for RaftEntry {
         fn index(&self) -> u64 {
             self.get_index()
         }
     }
+
     impl RaftLogEngine {
-        fn put_raft_state(&self, raft_group_id: u64, state: &HardState) -> Result<()> {
-            self.put_msg(raft_group_id, RAFT_LOG_STATE_KEY, state)
-        }
-        fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<HardState>> {
-            self.get_msg(raft_group_id, RAFT_LOG_STATE_KEY)
-        }
         fn append(&self, raft_group_id: u64, entries: Vec<RaftEntry>) -> Result<usize> {
             let mut batch = LogBatch::default();
             batch.add_entries(raft_group_id, entries);
             self.write(batch, false)
         }
-        fn commit_to(&self, raft_group_id: u64, index: u64) {
-            let mut raft_state = self.get_raft_state(raft_group_id).unwrap().unwrap();
-            raft_state.commit = index;
-            self.put_raft_state(raft_group_id, &raft_state).unwrap();
-        }
     }
 
     fn append_log(engine: &RaftLogEngine, raft: u64, entry: &RaftEntry) {
         engine.append(raft, vec![entry.clone()]).unwrap();
-        let mut state = HardState::new();
-        state.commit = 0;
-        engine.put_raft_state(raft, &state).unwrap();
     }
 
     #[test]
@@ -779,7 +766,6 @@ mod tests {
         }
 
         // GC all log entries. Won't trigger purge because total size is not enough.
-        engine.commit_to(1, 99);
         let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
         assert!(!engine.needs_purge_log_files());
@@ -791,7 +777,6 @@ mod tests {
         }
 
         // GC first 101 log entries.
-        engine.commit_to(1, 100);
         let count = engine.compact_to(1, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
@@ -806,9 +791,7 @@ mod tests {
         assert!(will_force_compact.is_empty());
         // After purge, entries and raft state are still available.
         assert!(engine.get_entry(1, 101).unwrap().is_some());
-        assert!(engine.get_raft_state(1).unwrap().is_some());
 
-        engine.commit_to(1, 101);
         let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
