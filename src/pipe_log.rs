@@ -98,6 +98,45 @@ impl LogManager {
         self.last_sync_size = self.active_log_size;
         Ok(())
     }
+
+    fn open_all_files(
+        &mut self,
+        dir: &str,
+        logs: Vec<String>,
+        min_file_num: u64,
+        max_file_num: u64,
+    ) -> Result<()> {
+        if !logs.is_empty() {
+            for file_name in &logs[0..logs.len() - 1] {
+                let mut path = PathBuf::from(dir);
+                path.push(file_name);
+                let fd = open_frozen_file(&path)?;
+                self.all_files.push_back(fd);
+            }
+
+            let mut path = PathBuf::from(dir);
+            path.push(logs.last().unwrap());
+            let fd = open_active_file(&path)?;
+            self.all_files.push_back(fd);
+            self.active_log_fd = fd;
+            self.active_log_size =
+                lseek(fd, 0, Whence::SeekEnd).map_err(|e| parse_nix_error(e, "lseek"))? as usize;
+            self.active_log_capacity = self.active_log_size;
+
+            self.first_file_num = min_file_num;
+            self.active_file_num = max_file_num;
+        }
+        Ok(())
+    }
+
+    pub fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+        // FIXME: read shouldn't happen in lock contexts.
+        if file_num < self.first_file_num || file_num > self.active_file_num {
+            return Err(box_err!("File {} not exist", file_num));
+        }
+        let fd = self.all_files[(file_num - self.first_file_num) as usize];
+        pread_exact(fd, offset, len as usize)
+    }
 }
 
 #[derive(Clone)]
@@ -107,6 +146,7 @@ pub struct PipeLog {
     bytes_per_sync: usize,
 
     append_manager: Arc<RwLock<LogManager>>,
+    rewrite_manager: Arc<RwLock<LogManager>>,
     cache_submitor: Arc<Mutex<CacheSubmitor>>,
 
     // Used when recovering from disk.
@@ -120,6 +160,7 @@ impl PipeLog {
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             append_manager: Arc::new(RwLock::new(LogManager::new())),
+            rewrite_manager: Arc::new(RwLock::new(LogManager::new())),
             cache_submitor: Arc::new(Mutex::new(cache_submitor)),
             current_read_file_num: 0,
         }
@@ -135,7 +176,7 @@ impl PipeLog {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let mut pipe_log = PipeLog::new(cfg, cache_submitor);
+        let pipe_log = PipeLog::new(cfg, cache_submitor);
 
         let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
@@ -185,55 +226,28 @@ impl PipeLog {
             return Err(box_err!("Corruption occurs on rewrite files"));
         }
 
-        pipe_log.open_all_files(
+        pipe_log.append_manager.wl().open_all_files(
+            &pipe_log.dir,
             log_files,
             min_file_num,
             max_file_num,
+        )?;
+        pipe_log.rewrite_manager.wl().open_all_files(
+            &pipe_log.dir,
             rewrite_files,
             min_rewrite_num,
             max_rewrite_num,
         )?;
+
         Ok(pipe_log)
     }
 
-    fn open_all_files(
-        &mut self,
-        logs: Vec<String>,
-        min_file_num: u64,
-        max_file_num: u64,
-        _rewrites: Vec<String>,
-        _min_rewrite_num: u64,
-        _max_rewrite_num: u64,
-    ) -> Result<()> {
-        let mut manager = self.append_manager.wl();
-        manager.first_file_num = min_file_num;
-        manager.active_file_num = max_file_num;
-
-        for file_name in &logs[0..logs.len() - 1] {
-            let mut path = PathBuf::from(&self.dir);
-            path.push(file_name);
-            let fd = open_frozen_file(&path)?;
-            manager.all_files.push_back(fd);
-        }
-
-        let mut path = PathBuf::from(&self.dir);
-        path.push(logs.last().unwrap());
-        let fd = open_active_file(&path)?;
-        manager.all_files.push_back(fd);
-        manager.active_log_fd = fd;
-        manager.active_log_size =
-            lseek(fd, 0, Whence::SeekEnd).map_err(|e| parse_nix_error(e, "lseek"))? as usize;
-        manager.active_log_capacity = manager.active_log_size;
-        Ok(())
+    pub fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+        self.append_manager.rl().fread(file_num, offset, len)
     }
 
-    pub fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let manager = self.append_manager.rl();
-        if file_num < manager.first_file_num || file_num > manager.active_file_num {
-            return Err(box_err!("File not exist, file number {}", file_num));
-        }
-        let fd = manager.all_files[(file_num - manager.first_file_num) as usize];
-        pread_exact(fd, offset, len as usize)
+    pub fn fread_from_rewrite(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+        self.rewrite_manager.rl().fread(file_num, offset, len)
     }
 
     pub fn close(&self) -> Result<()> {
@@ -247,6 +261,8 @@ impl PipeLog {
     }
 
     fn append(&self, content: &[u8], sync: bool) -> Result<(u64, u64)> {
+
+
         let mut manager = self.append_manager.wl();
         let active_log_fd = manager.active_log_fd;
         let last_sync_size = manager.last_sync_size;
