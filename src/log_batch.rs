@@ -453,6 +453,19 @@ where
     _phantom: PhantomData<W>,
 }
 
+impl<E, W> Clone for LogBatch<E, W>
+where
+    E: Message + Clone,
+    W: EntryExt<E>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<E, W> Default for LogBatch<E, W>
 where
     E: Message,
