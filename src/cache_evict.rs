@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
-use crate::log_batch::{LogBatch, LogItemContent, Entry};
+use crate::log_batch::{Entry, LogBatch, LogItemContent};
 use crate::pipe_log::PipeLog;
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 

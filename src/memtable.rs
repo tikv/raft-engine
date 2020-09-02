@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{cmp, u64};
 
-
 use crate::cache_evict::CacheTracker;
 use crate::engine::SharedCacheStats;
 use crate::log_batch::{CompressionType, Entry};
@@ -151,7 +150,11 @@ impl<T: Entry + Clone> MemTable<T> {
         }
     }
 
-    pub fn new(region_id: u64, cache_limit: usize, cache_stats: Arc<SharedCacheStats>) -> MemTable<T> {
+    pub fn new(
+        region_id: u64,
+        cache_limit: usize,
+        cache_stats: Arc<SharedCacheStats>,
+    ) -> MemTable<T> {
         MemTable {
             region_id,
             entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),

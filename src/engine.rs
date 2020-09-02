@@ -8,7 +8,10 @@ use crate::cache_evict::{
     CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
 };
 use crate::config::{Config, RecoveryMode};
-use crate::log_batch::{self, Command, CompressionType, LogBatch, LogItemContent, OpType, CHECKSUM_LEN, HEADER_LEN, Entry};
+use crate::log_batch::{
+    self, Command, CompressionType, Entry, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
+    HEADER_LEN,
+};
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
@@ -207,7 +210,11 @@ impl<T: Entry + Clone> FileEngine<T> {
         Ok(())
     }
 
-    fn apply_log_item_to_memtable(content: LogItemContent<T>, memtable: &mut MemTable<T>, file_num: u64) {
+    fn apply_log_item_to_memtable(
+        content: LogItemContent<T>,
+        memtable: &mut MemTable<T>,
+        file_num: u64,
+    ) {
         match content {
             LogItemContent::Entries(entries_to_add) => {
                 memtable.append(
@@ -302,7 +309,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         None
     }
 
-    fn compact_to(&self, region_id: u64, index: u64) -> u64 {
+    pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
         let first_index = match self.first_index(region_id) {
             Some(index) => index,
             None => return 0,
@@ -315,7 +322,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         self.first_index(region_id).unwrap_or(index) - first_index
     }
 
-    fn compact_cache_to(&self, region_id: u64, index: u64) {
+    pub fn compact_cache_to(&self, region_id: u64, index: u64) {
         if let Some(memtable) = self.memtables.get(region_id) {
             memtable.wl().compact_cache_to(index);
         }
@@ -330,7 +337,7 @@ impl<T: Entry + Clone> FileEngine<T> {
     // 2. Users can call `append` on one raft group concurrently.
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
-    fn write(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
+    pub fn write(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
         let mut rafts = Vec::with_capacity(log_batch.items.len());
         for raft in log_batch.items.iter().map(|item| item.raft_group_id) {
             rafts.push(raft);
@@ -367,7 +374,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         Ok(bytes)
     }
 
-    fn rewrite(
+    pub fn rewrite(
         &self,
         raft_group_id: u64,
         entries: Vec<T>,
@@ -391,22 +398,22 @@ impl<T: Entry + Clone> FileEngine<T> {
         Ok(())
     }
 
-    fn sync(&self) -> Result<()> {
+    pub fn sync(&self) -> Result<()> {
         self.pipe_log.sync()
     }
 
-    fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
+    pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
         let mut log_batch = LogBatch::new();
         log_batch.put_msg(region_id, key.to_vec(), m)?;
         self.write(log_batch, false).map(|_| ())
     }
 
-    fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let memtable = self.memtables.get(region_id);
         Ok(memtable.and_then(|t| t.rl().get(key)))
     }
 
-    fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
+    pub fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
         match self.get(region_id, key)? {
             Some(value) => {
                 let mut m = M::new();
@@ -417,7 +424,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
-    fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<T>> {
+    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<T>> {
         // Fetch from cache
         let entry_idx = {
             if let Some(memtable) = self.memtables.get(region_id) {
@@ -608,7 +615,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
 
-    fn purge_expired_files(&self) -> Result<Vec<u64>> {
+    pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _purge_mutex = match self.purge_mutex.try_lock() {
             Ok(locked) if self.needs_purge_log_files() => locked,
             _ => return Ok(vec![]),
@@ -631,11 +638,11 @@ impl<T: Entry + Clone> FileEngine<T> {
         Ok(will_force_compact)
     }
 
-    fn has_builtin_entry_cache(&self) -> bool {
+    pub fn has_builtin_entry_cache(&self) -> bool {
         true
     }
 
-    fn flush_stats(&self) -> CacheStats {
+    pub fn flush_stats(&self) -> CacheStats {
         CacheStats {
             hit: self.cache_stats.hit.swap(0, Ordering::SeqCst),
             miss: self.cache_stats.miss.swap(0, Ordering::SeqCst),
@@ -643,7 +650,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
-    fn stop(&self) {
+    pub fn stop(&self) {
         let mut workers = self.workers.wl();
         workers.cache_evict.stop();
     }
@@ -655,6 +662,7 @@ mod tests {
     use crate::util::ReadableSize;
     use raft::eraftpb::{Entry as RaftEntry, RaftLocalState};
     type RaftLogEngine = FileEngine<RaftEntry>;
+    const RAFT_LOG_STATE_KEY: &[u8] = b"R";
     pub trait RaftEngine {
         fn put_raft_state(&self, raft_group_id: u64, state: &RaftLocalState) -> Result<()>;
         fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<RaftLocalState>>;

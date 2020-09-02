@@ -3,7 +3,6 @@ use std::io::Error as IoError;
 
 use crate::codec::Error as CodecError;
 
-
 quick_error! {
     #[derive(Debug)]
     pub enum Error {
@@ -52,6 +51,5 @@ quick_error! {
         }
     }
 }
-
 
 pub type Result<T> = ::std::result::Result<T, Error>;

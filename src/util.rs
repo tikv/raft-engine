@@ -15,8 +15,6 @@ pub type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<fxhash::FxHasher>>;
 pub type HashSet<T> = StdHashSet<T, BuildHasherDefault<fxhash::FxHasher>>;
 pub use std::collections::hash_map::Entry as HashMapEntry;
 
-pub(crate) const RAFT_LOG_STATE_KEY: &[u8] = b"R";
-
 const UNIT: u64 = 1;
 const DATA_MAGNITUDE: u64 = 1024;
 pub const KB: u64 = UNIT * DATA_MAGNITUDE;
