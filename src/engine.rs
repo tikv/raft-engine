@@ -333,7 +333,7 @@ where
     // 2. Users can call `append` on one raft group concurrently.
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
-    fn write_impl(&self, log_batch: LogBatch<E, W>, sync: bool) -> Result<usize> {
+    fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         let mut rafts = Vec::with_capacity(log_batch.items.len());
         for raft in log_batch.items.iter().map(|item| item.raft_group_id) {
             rafts.push(raft);
@@ -354,9 +354,9 @@ where
         }
 
         let mut file_num = 0;
-        let bytes = self.pipe_log.write(&log_batch, sync, &mut file_num)?;
+        let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
-            for item in log_batch.items {
+            for item in log_batch.items.drain(..) {
                 let offset = rafts.binary_search(&item.raft_group_id).unwrap();
                 let m = &mut locked[offset];
                 Self::apply_log_item_to_memtable(item.content, &mut *m, file_num);
@@ -558,13 +558,13 @@ where
     pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
         let mut log_batch = LogBatch::new();
         log_batch.put(region_id, key.to_vec(), value.to_vec());
-        self.write(log_batch, false).map(|_| ())
+        self.write(&mut log_batch, false).map(|_| ())
     }
 
     pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
         let mut log_batch = LogBatch::new();
         log_batch.put_msg(region_id, key.to_vec(), m)?;
-        self.write(log_batch, false).map(|_| ())
+        self.write(&mut log_batch, false).map(|_| ())
     }
 
     pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -676,7 +676,7 @@ where
 
         let mut log_batch = LogBatch::new();
         log_batch.add_command(region_id, Command::Compact { index });
-        self.write(log_batch, false).map(|_| ()).unwrap();
+        self.write(&mut log_batch, false).map(|_| ()).unwrap();
 
         self.first_index(region_id).unwrap_or(index) - first_index
     }
@@ -689,7 +689,7 @@ where
 
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: LogBatch<E, W>, sync: bool) -> Result<usize> {
+    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         self.write_impl(log_batch, sync)
     }
 
