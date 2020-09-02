@@ -660,7 +660,6 @@ impl<T: Entry + Clone> FileEngine<T> {
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
-    use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::{Entry as RaftEntry, HardState};
     type RaftLogEngine = FileEngine<RaftEntry>;
     const RAFT_LOG_STATE_KEY: &[u8] = b"R";
@@ -677,6 +676,7 @@ mod tests {
             raft_state.commit = index;
             self.put_raft_state(raft_group_id, &raft_state).unwrap();
         }
+        fn append(&self, raft_group_id: u64, entries: Vec<RaftEntry>) -> Result<usize>;
     }
     impl RaftEngine for RaftLogEngine {
         fn put_raft_state(&self, raft_group_id: u64, state: &HardState) -> Result<()> {
@@ -685,10 +685,18 @@ mod tests {
         fn get_raft_state(&self, raft_group_id: u64) -> Result<Option<HardState>> {
             self.get_msg(raft_group_id, RAFT_LOG_STATE_KEY)
         }
+        fn append(&self, raft_group_id: u64, entries: Vec<RaftEntry>) -> Result<usize> {
+            let mut batch = LogBatch::default();
+            batch.add_entries(raft_group_id, entries);
+            self.write(batch, false)
+        }
     }
 
-    fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
+    fn append_log(engine: &RaftLogEngine, raft: u64, entry: &RaftEntry) {
         engine.append(raft, vec![entry.clone()]).unwrap();
+        let mut state = HardState::new();
+        state.commit = 0;
+        engine.put_raft_state(raft, &state).unwrap();
     }
 
     #[test]
@@ -761,7 +769,7 @@ mod tests {
 
         // GC all log entries. Won't trigger purge because total size is not enough.
         engine.commit_to(1, 99);
-        let count = engine.compact_to(1, 100).unwrap();
+        let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
         assert!(!engine.needs_purge_log_files());
 
@@ -773,7 +781,7 @@ mod tests {
 
         // GC first 101 log entries.
         engine.commit_to(1, 100);
-        let count = engine.gc(1, 0, 101).unwrap();
+        let count = engine.compact_to(1, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
@@ -790,7 +798,7 @@ mod tests {
         assert!(engine.get_raft_state(1).unwrap().is_some());
 
         engine.commit_to(1, 101);
-        let count = engine.gc(1, 0, 102).unwrap();
+        let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
@@ -843,7 +851,13 @@ mod tests {
         for raft_id in 1..=10000 {
             engine.compact_to(raft_id, 8);
         }
-        assert!(engine.purge_expired_files().unwrap().is_empty());
+        let ret = engine.purge_expired_files().unwrap();
+        if !ret.is_empty() {
+            for x in ret.iter() {
+                println!("region: {}", *x);
+            }
+        }
+        assert!(ret.is_empty());
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
     }

@@ -505,7 +505,7 @@ mod tests {
     use std::time::Duration;
 
     use crossbeam::channel::Receiver;
-    use raft::eraftpb::Entry;
+    use raft::eraftpb::Entry as RaftEntry;
     use tempfile::Builder;
 
     use super::*;

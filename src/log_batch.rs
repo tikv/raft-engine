@@ -439,6 +439,12 @@ impl<T: Entry> Default for LogBatch<T> {
     }
 }
 
+impl<T: Entry + PartialEq> PartialEq for LogBatch<T> {
+    fn eq(&self, other: &LogBatch<T>) -> bool {
+        self.items == other.items
+    }
+}
+
 impl<T: Entry> LogBatch<T> {
     pub fn new() -> Self {
         Self::default()
