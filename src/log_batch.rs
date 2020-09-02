@@ -1,6 +1,7 @@
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::io::BufRead;
+use std::marker::PhantomData;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::{mem, u64};
@@ -121,19 +122,29 @@ impl CompressionType {
 }
 
 type SliceReader<'a> = &'a [u8];
-pub trait Entry: Message {
-    fn index(&self) -> u64;
+
+pub trait EntryExt<M: Message>: Send + Sync {
+    fn index(m: &M) -> u64;
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Entries<T: Entry> {
-    pub entries: Vec<T>,
+#[derive(Debug)]
+pub struct Entries<E>
+where
+    E: Message,
+{
+    pub entries: Vec<E>,
     // EntryIndex may be update after write to file.
     pub entries_index: RefCell<Vec<EntryIndex>>,
 }
 
-impl<T: Entry> Entries<T> {
-    pub fn new(entries: Vec<T>, entries_index: Option<Vec<EntryIndex>>) -> Entries<T> {
+impl<E: Message + PartialEq> PartialEq for Entries<E> {
+    fn eq(&self, other: &Entries<E>) -> bool {
+        self.entries == other.entries && self.entries_index == other.entries_index
+    }
+}
+
+impl<E: Message> Entries<E> {
+    pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
         let len = entries.len();
         Entries {
             entries,
@@ -144,23 +155,23 @@ impl<T: Entry> Entries<T> {
         }
     }
 
-    pub fn from_bytes(
+    pub fn from_bytes<W: EntryExt<E>>(
         buf: &mut SliceReader<'_>,
         file_num: u64,
         base_offset: u64,  // Offset of the batch from its log file.
         batch_offset: u64, // Offset of the item from in its batch.
-    ) -> Result<Entries<T>> {
+    ) -> Result<Entries<E>> {
         let content_len = buf.len() as u64;
         let mut count = codec::decode_var_u64(buf)? as usize;
         let mut entries = Vec::with_capacity(count);
         let mut entries_index = Vec::with_capacity(count);
         while count > 0 {
             let len = codec::decode_var_u64(buf)? as usize;
-            let mut e = T::new();
+            let mut e = E::new();
             e.merge_from_bytes(&buf[..len])?;
 
             let mut entry_index = EntryIndex::default();
-            entry_index.index = e.index();
+            entry_index.index = W::index(&e);
             entry_index.file_num = file_num;
             entry_index.base_offset = base_offset;
             entry_index.offset = batch_offset + content_len - buf.len() as u64;
@@ -175,7 +186,7 @@ impl<T: Entry> Entries<T> {
         Ok(Entries::new(entries, Some(entries_index)))
     }
 
-    pub fn encode_to(&self, vec: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_to<W: EntryExt<E>>(&self, vec: &mut Vec<u8>) -> Result<()> {
         if self.entries.is_empty() {
             return Ok(());
         }
@@ -191,7 +202,7 @@ impl<T: Entry> Entries<T> {
             // file_num = 0 means entry index is not initialized.
             let mut entries_index = self.entries_index.borrow_mut();
             if entries_index[i].file_num == 0 {
-                entries_index[i].index = e.index();
+                entries_index[i].index = W::index(&e);
                 // This offset doesn't count the header.
                 entries_index[i].offset = vec.len() as u64;
                 entries_index[i].len = content.len() as u64;
@@ -334,27 +345,33 @@ impl KeyValue {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LogItem<T: Entry> {
+pub struct LogItem<E>
+where
+    E: Message,
+{
     pub raft_group_id: u64,
-    pub content: LogItemContent<T>,
+    pub content: LogItemContent<E>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum LogItemContent<T: Entry> {
-    Entries(Entries<T>),
+pub enum LogItemContent<E>
+where
+    E: Message,
+{
+    Entries(Entries<E>),
     Command(Command),
     Kv(KeyValue),
 }
 
-impl<T: Entry> LogItem<T> {
-    pub fn from_entries(raft_group_id: u64, entries: Vec<T>) -> LogItem<T> {
+impl<E: Message> LogItem<E> {
+    pub fn from_entries(raft_group_id: u64, entries: Vec<E>) -> LogItem<E> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Entries(Entries::new(entries, None)),
         }
     }
 
-    pub fn from_command(raft_group_id: u64, command: Command) -> LogItem<T> {
+    pub fn from_command(raft_group_id: u64, command: Command) -> LogItem<E> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Command(command),
@@ -366,20 +383,20 @@ impl<T: Entry> LogItem<T> {
         op_type: OpType,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
-    ) -> LogItem<T> {
+    ) -> LogItem<E> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Kv(KeyValue::new(op_type, key, value)),
         }
     }
 
-    pub fn encode_to(&self, vec: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_to<W: EntryExt<E>>(&self, vec: &mut Vec<u8>) -> Result<()> {
         // layout = { 8 byte id | 1 byte type | item layout }
         vec.encode_var_u64(self.raft_group_id)?;
         match self.content {
             LogItemContent::Entries(ref entries) => {
                 vec.push(TYPE_ENTRIES);
-                entries.encode_to(vec)?;
+                entries.encode_to::<W>(vec)?;
             }
             LogItemContent::Command(ref command) => {
                 vec.push(TYPE_COMMAND);
@@ -393,12 +410,12 @@ impl<T: Entry> LogItem<T> {
         Ok(())
     }
 
-    pub fn from_bytes(
+    pub fn from_bytes<W: EntryExt<E>>(
         buf: &mut SliceReader<'_>,
         file_num: u64,
         base_offset: u64,      // Offset of the batch from its log file.
         mut batch_offset: u64, // Offset of the item from in its batch.
-    ) -> Result<LogItem<T>> {
+    ) -> Result<LogItem<E>> {
         let buf_len = buf.len();
         let raft_group_id = codec::decode_var_u64(buf)?;
         batch_offset += (buf_len - buf.len()) as u64;
@@ -406,7 +423,7 @@ impl<T: Entry> LogItem<T> {
         batch_offset += 1;
         let content = match item_type {
             TYPE_ENTRIES => {
-                let entries = Entries::from_bytes(buf, file_num, base_offset, batch_offset)?;
+                let entries = Entries::from_bytes::<W>(buf, file_num, base_offset, batch_offset)?;
                 LogItemContent::Entries(entries)
             }
             TYPE_COMMAND => {
@@ -426,26 +443,34 @@ impl<T: Entry> LogItem<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct LogBatch<T: Entry> {
-    pub items: Vec<LogItem<T>>,
+#[derive(Debug, PartialEq)]
+pub struct LogBatch<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
+    pub items: Vec<LogItem<E>>,
+    _phantom: PhantomData<W>,
 }
 
-impl<T: Entry> Default for LogBatch<T> {
+impl<E, W> Default for LogBatch<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(16),
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<T: Entry + PartialEq> PartialEq for LogBatch<T> {
-    fn eq(&self, other: &LogBatch<T>) -> bool {
-        self.items == other.items
-    }
-}
-
-impl<T: Entry> LogBatch<T> {
+impl<E, W> LogBatch<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
     pub fn new() -> Self {
         Self::default()
     }
@@ -453,10 +478,11 @@ impl<T: Entry> LogBatch<T> {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
+            _phantom: PhantomData,
         }
     }
 
-    pub fn add_entries(&mut self, region_id: u64, entries: Vec<T>) {
+    pub fn add_entries(&mut self, region_id: u64, entries: Vec<E>) {
         let item = LogItem::from_entries(region_id, entries);
         self.items.push(item);
     }
@@ -500,7 +526,7 @@ impl<T: Entry> LogBatch<T> {
         file_num: u64,
         // The offset of the batch from its log file.
         base_offset: u64,
-    ) -> Result<Option<LogBatch<T>>> {
+    ) -> Result<Option<LogBatch<E, W>>> {
         if buf.is_empty() {
             return Ok(None);
         }
@@ -526,7 +552,8 @@ impl<T: Entry> LogBatch<T> {
         let mut log_batch = LogBatch::with_capacity(items_count);
         while items_count > 0 {
             let content_offset = (content_len - reader.len()) as u64;
-            let item = LogItem::from_bytes(&mut reader, file_num, base_offset, content_offset)?;
+            let item =
+                LogItem::from_bytes::<W>(&mut reader, file_num, base_offset, content_offset)?;
             log_batch.items.push(item);
             items_count -= 1;
         }
@@ -553,7 +580,7 @@ impl<T: Entry> LogBatch<T> {
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
         for item in &self.items {
-            item.encode_to(&mut vec).unwrap();
+            item.encode_to::<W>(&mut vec).unwrap();
         }
 
         let compression_type = if vec.len() > COMPRESSION_SIZE {

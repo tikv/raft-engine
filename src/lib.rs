@@ -37,7 +37,7 @@ pub mod util;
 pub use self::config::Config;
 pub use self::engine::FileEngine as RaftLogEngine;
 pub use self::errors::{Error, Result};
-pub use self::log_batch::{LogBatch, Entry};
+pub use self::log_batch::{EntryExt, LogBatch};
 
 #[derive(Clone, Copy, Default)]
 pub struct CacheStats {

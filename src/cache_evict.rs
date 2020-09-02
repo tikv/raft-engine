@@ -7,9 +7,10 @@ use std::sync::Arc;
 use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
-use crate::log_batch::{Entry, LogBatch, LogItemContent};
+use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::PipeLog;
 use crate::util::{HandyRwLock, Runnable, Scheduler};
+use protobuf::Message;
 
 pub const DEFAULT_CACHE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
@@ -118,23 +119,31 @@ impl CacheSubmitor {
     }
 }
 
-pub struct Runner<T: Entry> {
+pub struct Runner<E, W>
+where
+    E: Message,
+    W: EntryExt<E> + 'static,
+{
     cache_limit: usize,
     cache_stats: Arc<SharedCacheStats>,
     chunk_limit: usize,
     valid_cache_chunks: VecDeque<CacheChunk>,
-    memtables: MemTableAccessor<T>,
+    memtables: MemTableAccessor<E, W>,
     pipe_log: PipeLog,
 }
 
-impl<T: Entry + Clone> Runner<T> {
+impl<E, W> Runner<E, W>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+{
     pub fn new(
         cache_limit: usize,
         cache_stats: Arc<SharedCacheStats>,
         chunk_limit: usize,
-        memtables: MemTableAccessor<T>,
+        memtables: MemTableAccessor<E, W>,
         pipe_log: PipeLog,
-    ) -> Runner<T> {
+    ) -> Runner<E, W> {
         Runner {
             cache_limit,
             cache_stats,
@@ -188,12 +197,13 @@ impl<T: Entry + Clone> Runner<T> {
 
             let mut reader: &[u8] = chunk_content.as_ref();
             let mut offset = chunk.base_offset;
-            while let Some(b) = LogBatch::<T>::from_bytes(&mut reader, file_num, offset).unwrap() {
+            while let Some(b) = LogBatch::<E, W>::from_bytes(&mut reader, file_num, offset).unwrap()
+            {
                 offset += read_len - reader.len() as u64;
                 for item in b.items {
                     if let LogItemContent::Entries(entries) = item.content {
                         let gc_cache_to = match entries.entries.last() {
-                            Some(entry) => entry.index() + 1,
+                            Some(entry) => W::index(entry) + 1,
                             None => continue,
                         };
                         if let Some(memtable) = self.memtables.get(item.raft_group_id) {
@@ -207,7 +217,11 @@ impl<T: Entry + Clone> Runner<T> {
     }
 }
 
-impl<T: Entry + Clone> Runnable<CacheTask> for Runner<T> {
+impl<E, W> Runnable<CacheTask> for Runner<E, W>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+{
     fn run(&mut self, task: CacheTask) -> bool {
         match task {
             CacheTask::NewChunk(chunk) => self.valid_cache_chunks.push_back(chunk),

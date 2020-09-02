@@ -15,10 +15,11 @@ use nix::NixPath;
 
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
-use crate::log_batch::{Entry, LogBatch, LogItemContent};
+use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::metrics::*;
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
+use protobuf::Message;
 
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
@@ -268,9 +269,9 @@ impl PipeLog {
         Ok(())
     }
 
-    pub fn write<T: Entry>(
+    pub fn write<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<T>,
+        batch: &LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
