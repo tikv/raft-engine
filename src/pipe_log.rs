@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{cmp, u64};
 
 use nix::errno::Errno;
-use nix::fcntl::{self, fallocate, OFlag};
+use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
@@ -34,14 +34,17 @@ const INIT_FILE_NUM: u64 = 1;
 pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 pub const VERSION: &[u8] = b"v1.0.0";
 const DEFAULT_FILES_COUNT: usize = 32;
+#[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 struct LogFd(RawFd);
+
 impl LogFd {
     fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
 }
+
 impl Drop for LogFd {
     fn drop(&mut self) {
         if let Err(e) = self.close() {
@@ -190,11 +193,13 @@ impl LogManager {
         let fd = self.get_active_fd().unwrap();
 
         self.active_log_size += content_len;
+
+        #[cfg(target_os = "linux")]
         if self.active_log_size > self.active_log_capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let reserve = self.active_log_size - self.active_log_capacity;
             let alloc_size = cmp::max(reserve, FILE_ALLOCATE_SIZE);
-            fallocate(
+            fcntl::fallocate(
                 fd.0,
                 fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
                 self.active_log_capacity as _,
