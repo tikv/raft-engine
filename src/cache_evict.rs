@@ -8,7 +8,7 @@ use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::{PipeLog, PipeLogImpl};
+use crate::pipe_log::PipeLog;
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use protobuf::Message;
 
@@ -119,31 +119,33 @@ impl CacheSubmitor {
     }
 }
 
-pub struct Runner<E, W>
+pub struct Runner<E, W, P>
 where
     E: Message,
     W: EntryExt<E> + 'static,
+    P: PipeLog,
 {
     cache_limit: usize,
     cache_stats: Arc<SharedCacheStats>,
     chunk_limit: usize,
     valid_cache_chunks: VecDeque<CacheChunk>,
     memtables: MemTableAccessor<E, W>,
-    pipe_log: PipeLogImpl,
+    pipe_log: P,
 }
 
-impl<E, W> Runner<E, W>
+impl<E, W, P> Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
+    P: PipeLog,
 {
     pub fn new(
         cache_limit: usize,
         cache_stats: Arc<SharedCacheStats>,
         chunk_limit: usize,
         memtables: MemTableAccessor<E, W>,
-        pipe_log: PipeLogImpl,
-    ) -> Runner<E, W> {
+        pipe_log: P,
+    ) -> Runner<E, W, P> {
         Runner {
             cache_limit,
             cache_stats,
@@ -217,10 +219,11 @@ where
     }
 }
 
-impl<E, W> Runnable<CacheTask> for Runner<E, W>
+impl<E, W, P> Runnable<CacheTask> for Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
+    P: PipeLog,
 {
     fn run(&mut self, task: CacheTask) -> bool {
         match task {

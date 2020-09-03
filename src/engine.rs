@@ -13,7 +13,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{PipeLog, PipeLogImpl, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
 use protobuf::Message;
@@ -111,14 +111,15 @@ where
 }
 
 #[derive(Clone)]
-pub struct FileEngine<E, W>
+pub struct FileEngine<E, W, P>
 where
     E: Message,
     W: EntryExt<E>,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
-    pipe_log: PipeLogImpl,
+    pipe_log: P,
     cache_stats: Arc<SharedCacheStats>,
 
     workers: Arc<RwLock<Workers>>,
@@ -127,14 +128,15 @@ where
     purge_mutex: Arc<Mutex<()>>,
 }
 
-impl<E, W> FileEngine<E, W>
+impl<E, W, P> FileEngine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
+    P: PipeLog,
 {
     // recover from disk.
     fn recover(
-        pipe_log: &mut PipeLogImpl,
+        pipe_log: &mut P,
         memtables: &MemTableAccessor<E, W>,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -481,28 +483,30 @@ struct Workers {
     cache_evict: Worker<CacheTask>,
 }
 
-impl<E, W> fmt::Debug for FileEngine<E, W>
+impl<E, W, P> fmt::Debug for FileEngine<E, W, P>
 where
     E: Message,
     W: EntryExt<E>,
+    P: PipeLog,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FileEngine dir: {}", self.cfg.dir)
     }
 }
 
-impl<E, W> FileEngine<E, W>
+impl<E, W, P> FileEngine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
+    P: PipeLog + 'static,
 {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W> {
+    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W, P> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut pipe_log = PipeLogImpl::open(
+        let mut pipe_log = P::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
@@ -546,7 +550,7 @@ where
         }
     }
 
-    pub fn new(cfg: Config) -> FileEngine<E, W> {
+    pub fn new(cfg: Config) -> FileEngine<E, W, P> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
 

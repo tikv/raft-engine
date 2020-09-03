@@ -232,7 +232,11 @@ pub struct PipeLogImpl {
     current_read_file_num: u64,
 }
 
-pub trait PipeLog {
+pub trait PipeLog: Sized + Clone + Send {
+    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> Self;
+
+    fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<Self>;
+
     fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
 
     fn fread_from_rewrite(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
@@ -276,7 +280,19 @@ pub trait PipeLog {
 }
 
 impl PipeLogImpl {
-    pub fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLogImpl {
+    #[cfg(test)]
+    pub fn active_log_size(&self) -> usize {
+        self.appender.rl().active_log_size
+    }
+
+    #[cfg(test)]
+    pub fn active_log_capacity(&self) -> usize {
+        self.appender.rl().active_log_capacity
+    }
+}
+
+impl PipeLog for PipeLogImpl {
+    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLogImpl {
         let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
         PipeLogImpl {
@@ -290,7 +306,7 @@ impl PipeLogImpl {
         }
     }
 
-    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLogImpl> {
+    fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLogImpl> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -361,18 +377,6 @@ impl PipeLogImpl {
         Ok(pipe_log)
     }
 
-    #[cfg(test)]
-    pub fn active_log_size(&self) -> usize {
-        self.appender.rl().active_log_size
-    }
-
-    #[cfg(test)]
-    pub fn active_log_capacity(&self) -> usize {
-        self.appender.rl().active_log_capacity
-    }
-}
-
-impl PipeLog for PipeLogImpl {
     fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
         let fd = self.appender.rl().get_fd(file_num)?;
         pread_exact(fd.0, offset, len as usize)
