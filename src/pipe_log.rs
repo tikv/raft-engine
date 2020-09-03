@@ -7,8 +7,6 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{cmp, u64};
 
 use nix::errno::Errno;
-#[cfg(target_os = "linux")]
-use nix::fcntl::fallocate;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
@@ -201,7 +199,7 @@ impl LogManager {
             // Use fallocate to pre-allocate disk space for active file.
             let reserve = self.active_log_size - self.active_log_capacity;
             let alloc_size = cmp::max(reserve, FILE_ALLOCATE_SIZE);
-            fallocate(
+            fcntl::fallocate(
                 fd.0,
                 fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
                 self.active_log_capacity as _,
