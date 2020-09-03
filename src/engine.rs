@@ -9,13 +9,14 @@ use crate::cache_evict::{
 };
 use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{
-    self, Command, CompressionType, Entry, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
+    self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
+use protobuf::Message;
 
 const SLOTS_COUNT: usize = 128;
 
@@ -27,15 +28,31 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 
 // When add/delete a memtable, a write lock is required.
 // We can use LRU cache or slots to reduce conflicts.
-type MemTables<T> = HashMap<u64, Arc<RwLock<MemTable<T>>>>;
-#[derive(Clone)]
-pub struct MemTableAccessor<T: Entry> {
-    slots: Vec<Arc<RwLock<MemTables<T>>>>,
-    creator: Arc<dyn Fn(u64) -> MemTable<T> + Send + Sync>,
+type MemTables<E, W> = HashMap<u64, Arc<RwLock<MemTable<E, W>>>>;
+pub struct MemTableAccessor<E: Message, W: EntryExt<E>> {
+    slots: Vec<Arc<RwLock<MemTables<E, W>>>>,
+    creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>,
 }
 
-impl<T: Entry + Clone> MemTableAccessor<T> {
-    fn new(creator: Arc<dyn Fn(u64) -> MemTable<T> + Send + Sync>) -> MemTableAccessor<T> {
+impl<E, W> Clone for MemTableAccessor<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            slots: self.slots.clone(),
+            creator: self.creator.clone(),
+        }
+    }
+}
+
+impl<E, W> MemTableAccessor<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
+    fn new(creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>) -> MemTableAccessor<E, W> {
         let mut slots = Vec::with_capacity(SLOTS_COUNT);
         for _ in 0..SLOTS_COUNT {
             slots.push(Arc::new(RwLock::new(MemTables::default())));
@@ -43,7 +60,7 @@ impl<T: Entry + Clone> MemTableAccessor<T> {
         MemTableAccessor { slots, creator }
     }
 
-    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable<T>>> {
+    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable<E, W>>> {
         let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .write()
             .unwrap();
@@ -53,7 +70,7 @@ impl<T: Entry + Clone> MemTableAccessor<T> {
         memtable.clone()
     }
 
-    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<T>>>> {
+    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<E, W>>>> {
         let memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .read()
             .unwrap();
@@ -67,7 +84,7 @@ impl<T: Entry + Clone> MemTableAccessor<T> {
         memtables.remove(&raft_group_id);
     }
 
-    pub fn fold<B, F: Fn(B, &MemTable<T>) -> B>(&self, mut init: B, fold: F) -> B {
+    pub fn fold<B, F: Fn(B, &MemTable<E, W>) -> B>(&self, mut init: B, fold: F) -> B {
         for tables in &self.slots {
             for memtable in tables.rl().values() {
                 init = fold(init, &*memtable.rl());
@@ -76,10 +93,10 @@ impl<T: Entry + Clone> MemTableAccessor<T> {
         init
     }
 
-    pub fn collect<F: FnMut(&MemTable<T>) -> bool>(
+    pub fn collect<F: FnMut(&MemTable<E, W>) -> bool>(
         &self,
         mut condition: F,
-    ) -> Vec<Arc<RwLock<MemTable<T>>>> {
+    ) -> Vec<Arc<RwLock<MemTable<E, W>>>> {
         let mut memtables = Vec::new();
         for tables in &self.slots {
             memtables.extend(tables.rl().values().filter_map(|t| {
@@ -94,9 +111,13 @@ impl<T: Entry + Clone> MemTableAccessor<T> {
 }
 
 #[derive(Clone)]
-pub struct FileEngine<T: Entry> {
+pub struct FileEngine<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
     cfg: Arc<Config>,
-    memtables: MemTableAccessor<T>,
+    memtables: MemTableAccessor<E, W>,
     pipe_log: PipeLog,
     cache_stats: Arc<SharedCacheStats>,
 
@@ -106,11 +127,15 @@ pub struct FileEngine<T: Entry> {
     purge_mutex: Arc<Mutex<()>>,
 }
 
-impl<T: Entry + Clone> FileEngine<T> {
+impl<E, W> FileEngine<E, W>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+{
     // recover from disk.
     fn recover(
         pipe_log: &mut PipeLog,
-        memtables: &MemTableAccessor<T>,
+        memtables: &MemTableAccessor<E, W>,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
         // Get first file number and last file number.
@@ -211,8 +236,8 @@ impl<T: Entry + Clone> FileEngine<T> {
     }
 
     fn apply_log_item_to_memtable(
-        content: LogItemContent<T>,
-        memtable: &mut MemTable<T>,
+        content: LogItemContent<E>,
+        memtable: &mut MemTable<E, W>,
         file_num: u64,
     ) {
         match content {
@@ -235,7 +260,11 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
-    fn apply_to_memtable(memtables: &MemTableAccessor<T>, log_batch: LogBatch<T>, file_num: u64) {
+    fn apply_to_memtable(
+        memtables: &MemTableAccessor<E, W>,
+        log_batch: LogBatch<E, W>,
+        file_num: u64,
+    ) {
         for item in log_batch.items {
             let m = memtables.get_or_insert(item.raft_group_id);
             Self::apply_log_item_to_memtable(item.content, &mut *m.wl(), file_num);
@@ -304,7 +333,7 @@ impl<T: Entry + Clone> FileEngine<T> {
     // 2. Users can call `append` on one raft group concurrently.
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
-    fn write_impl(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
+    fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         let mut rafts = Vec::with_capacity(log_batch.items.len());
         for raft in log_batch.items.iter().map(|item| item.raft_group_id) {
             rafts.push(raft);
@@ -319,15 +348,15 @@ impl<T: Entry + Clone> FileEngine<T> {
             let x = memtables.last_mut().unwrap().wl();
             unsafe {
                 // Unsafe block because `locked` has mutable references to `memtables`.
-                let x: RwLockWriteGuard<'static, MemTable<T>> = std::mem::transmute(x);
+                let x: RwLockWriteGuard<'static, MemTable<E, W>> = std::mem::transmute(x);
                 locked.push(x);
             }
         }
 
         let mut file_num = 0;
-        let bytes = self.pipe_log.write(&log_batch, sync, &mut file_num)?;
+        let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
-            for item in log_batch.items {
+            for item in log_batch.items.drain(..) {
                 let offset = rafts.binary_search(&item.raft_group_id).unwrap();
                 let m = &mut locked[offset];
                 Self::apply_log_item_to_memtable(item.content, &mut *m, file_num);
@@ -344,11 +373,11 @@ impl<T: Entry + Clone> FileEngine<T> {
     fn rewrite(
         &self,
         raft_group_id: u64,
-        entries: Vec<T>,
+        entries: Vec<E>,
         kvs: Vec<(Vec<u8>, Vec<u8>)>,
-        mut m: RwLockWriteGuard<MemTable<T>>,
+        mut m: RwLockWriteGuard<MemTable<E, W>>,
     ) -> Result<()> {
-        let mut log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::<E, W>::new();
         log_batch.add_command(raft_group_id, Command::Clean);
         log_batch.add_entries(raft_group_id, entries);
         for (k, v) in kvs {
@@ -369,7 +398,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         &self,
         entry_index: &EntryIndex,
         _: Option<&mut HashMap<(u64, u64), Vec<u8>>>,
-    ) -> Result<T> {
+    ) -> Result<E> {
         let file_num = entry_index.file_num;
         let base_offset = entry_index.base_offset;
         let batch_len = entry_index.batch_len;
@@ -396,9 +425,9 @@ impl<T: Entry + Clone> FileEngine<T> {
             }
         };
 
-        let mut e = T::new();
+        let mut e = E::new();
         e.merge_from_bytes(&entry_content)?;
-        assert_eq!(e.index(), entry_index.index);
+        assert_eq!(W::index(&e), entry_index.index);
         Ok(e)
     }
 
@@ -452,14 +481,22 @@ struct Workers {
     cache_evict: Worker<CacheTask>,
 }
 
-impl<T: Entry> fmt::Debug for FileEngine<T> {
+impl<E, W> fmt::Debug for FileEngine<E, W>
+where
+    E: Message,
+    W: EntryExt<E>,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FileEngine dir: {}", self.cfg.dir)
     }
 }
 
-impl<T: Entry + Clone> FileEngine<T> {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<T> {
+impl<E, W> FileEngine<E, W>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+{
+    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
@@ -479,7 +516,7 @@ impl<T: Entry + Clone> FileEngine<T> {
 
         let memtables = {
             let stats = cache_stats.clone();
-            MemTableAccessor::<T>::new(Arc::new(move |id: u64| {
+            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| {
                 MemTable::new(id, cache_limit, stats.clone())
             }))
         };
@@ -509,7 +546,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
-    pub fn new(cfg: Config) -> FileEngine<T> {
+    pub fn new(cfg: Config) -> FileEngine<E, W> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
 
@@ -521,13 +558,13 @@ impl<T: Entry + Clone> FileEngine<T> {
     pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
         let mut log_batch = LogBatch::new();
         log_batch.put(region_id, key.to_vec(), value.to_vec());
-        self.write(log_batch, false).map(|_| ())
+        self.write(&mut log_batch, false).map(|_| ())
     }
 
     pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
         let mut log_batch = LogBatch::new();
         log_batch.put_msg(region_id, key.to_vec(), m)?;
-        self.write(log_batch, false).map(|_| ())
+        self.write(&mut log_batch, false).map(|_| ())
     }
 
     pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -546,7 +583,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         }
     }
 
-    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<T>> {
+    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<E>> {
         // Fetch from cache
         let entry_idx = {
             if let Some(memtable) = self.memtables.get(region_id) {
@@ -597,7 +634,7 @@ impl<T: Entry + Clone> FileEngine<T> {
         begin: u64,
         end: u64,
         max_size: Option<usize>,
-        vec: &mut Vec<T>,
+        vec: &mut Vec<E>,
     ) -> Result<usize> {
         if let Some(memtable) = self.memtables.get(region_id) {
             let memtable = memtable.rl();
@@ -639,7 +676,7 @@ impl<T: Entry + Clone> FileEngine<T> {
 
         let mut log_batch = LogBatch::new();
         log_batch.add_command(region_id, Command::Compact { index });
-        self.write(log_batch, false).map(|_| ()).unwrap();
+        self.write(&mut log_batch, false).map(|_| ()).unwrap();
 
         self.first_index(region_id).unwrap_or(index) - first_index
     }
@@ -652,7 +689,7 @@ impl<T: Entry + Clone> FileEngine<T> {
 
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: LogBatch<T>, sync: bool) -> Result<usize> {
+    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         self.write_impl(log_batch, sync)
     }
 
@@ -676,24 +713,24 @@ impl<T: Entry + Clone> FileEngine<T> {
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
-    use raft::eraftpb::Entry as RaftEntry;
-    type RaftLogEngine = FileEngine<RaftEntry>;
+    use raft::eraftpb::Entry;
 
-    impl Entry for RaftEntry {
-        fn index(&self) -> u64 {
-            self.get_index()
+    impl EntryExt<Entry> for Entry {
+        fn index(e: &Entry) -> u64 {
+            e.get_index()
         }
     }
 
+    type RaftLogEngine = FileEngine<Entry, Entry>;
     impl RaftLogEngine {
-        fn append(&self, raft_group_id: u64, entries: Vec<RaftEntry>) -> Result<usize> {
+        fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
             batch.add_entries(raft_group_id, entries);
-            self.write(batch, false)
+            self.write(&mut batch, false)
         }
     }
 
-    fn append_log(engine: &RaftLogEngine, raft: u64, entry: &RaftEntry) {
+    fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
         engine.append(raft, vec![entry.clone()]).unwrap();
     }
 
@@ -710,8 +747,8 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = FileEngine::<RaftEntry>::new(cfg.clone());
-            let mut entry = RaftEntry::new();
+            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+            let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size]);
             for i in 10..20 {
                 entry.set_index(i);
@@ -733,7 +770,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = FileEngine::<RaftEntry>::new(cfg.clone());
+            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -757,8 +794,8 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = FileEngine::<RaftEntry>::new(cfg.clone());
-        let mut entry = RaftEntry::new();
+        let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+        let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
             entry.set_index(i);
@@ -819,10 +856,10 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::<RaftEntry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
 
         // Append some entries with total size 100M.
-        let mut entry = RaftEntry::new();
+        let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         for idx in 1..=10 {
             for raft_id in 1..=10000 {
@@ -837,7 +874,7 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = FileEngine::<RaftEntry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 

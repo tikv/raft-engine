@@ -4,7 +4,6 @@ version = "0.1.0"
 authors = ["zhangjinpeng1987 <zhangjinpeng@pingcap.com>"]
 edition = "2018"
 
-[features]
 
 [dependencies]
 protobuf = "=2.8.0"

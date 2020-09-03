@@ -15,9 +15,10 @@ use nix::NixPath;
 
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
-use crate::log_batch::{Entry, LogBatch, LogItemContent};
+use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
+use protobuf::Message;
 
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
@@ -344,9 +345,9 @@ impl PipeLog {
         Ok((file_num, offset))
     }
 
-    pub fn write<T: Entry>(
+    pub fn write<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<T>,
+        batch: &LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
@@ -578,7 +579,7 @@ mod tests {
     use std::time::Duration;
 
     use crossbeam::channel::Receiver;
-    use raft::eraftpb::Entry as RaftEntry;
+    use raft::eraftpb::Entry;
     use tempfile::Builder;
 
     use super::*;
@@ -723,9 +724,9 @@ mod tests {
         let (pipe_log, receiver) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
 
         let get_1m_batch = || {
-            let mut entry = RaftEntry::new();
+            let mut entry = Entry::new();
             entry.set_data(vec![b'a'; 1024]); // 1K data.
-            let mut log_batch = LogBatch::new();
+            let mut log_batch = LogBatch::<Entry, Entry>::new();
             log_batch.add_entries(1, vec![entry]);
             log_batch
         };

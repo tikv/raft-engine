@@ -1,12 +1,14 @@
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::{cmp, u64};
 
 use crate::cache_evict::CacheTracker;
 use crate::engine::SharedCacheStats;
-use crate::log_batch::{CompressionType, Entry};
+use crate::log_batch::{CompressionType, EntryExt};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, Result};
+use protobuf::Message;
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
@@ -59,11 +61,11 @@ impl Default for EntryIndex {
  *                 first entry                               last entry
  */
 
-pub struct MemTable<T: Entry> {
+pub struct MemTable<E: Message, W: EntryExt<E>> {
     region_id: u64,
 
     // latest N entries
-    entries_cache: VecDeque<T>,
+    entries_cache: VecDeque<E>,
 
     // All entries index
     pub entries_index: VecDeque<EntryIndex>,
@@ -75,15 +77,16 @@ pub struct MemTable<T: Entry> {
     cache_size: usize,
     cache_limit: usize,
     cache_stats: Arc<SharedCacheStats>,
+    _phantom: PhantomData<W>,
 }
 
-impl<T: Entry + Clone> MemTable<T> {
+impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     fn cache_distance(&self) -> usize {
         if self.entries_cache.is_empty() {
             return self.entries_index.len();
         }
         let distance = self.entries_index.len() - self.entries_cache.len();
-        let cache_first = self.entries_cache[0].index();
+        let cache_first = W::index(&self.entries_cache[0]);
         let index_first = self.entries_index[distance].index;
         assert_eq!(cache_first, index_first);
         distance
@@ -94,8 +97,8 @@ impl<T: Entry + Clone> MemTable<T> {
         if self.entries_cache.is_empty() {
             return;
         }
-        let last_index = self.entries_cache.back().unwrap().index();
-        let first_index = self.entries_cache.front().unwrap().index();
+        let last_index = W::index(self.entries_cache.back().unwrap());
+        let first_index = W::index(self.entries_cache.front().unwrap());
         let conflict = if index <= first_index {
             // All entries need to be removed.
             0
@@ -154,8 +157,8 @@ impl<T: Entry + Clone> MemTable<T> {
         region_id: u64,
         cache_limit: usize,
         cache_stats: Arc<SharedCacheStats>,
-    ) -> MemTable<T> {
-        MemTable {
+    ) -> MemTable<E, W> {
+        MemTable::<E, W> {
             region_id,
             entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
             entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
@@ -164,16 +167,17 @@ impl<T: Entry + Clone> MemTable<T> {
             cache_size: 0,
             cache_limit,
             cache_stats,
+            _phantom: PhantomData,
         }
     }
 
-    pub fn append(&mut self, entries: Vec<T>, entries_index: Vec<EntryIndex>) {
+    pub fn append(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex>) {
         assert_eq!(entries.len(), entries_index.len());
         if entries.is_empty() {
             return;
         }
 
-        let first_index_to_add = entries[0].index();
+        let first_index_to_add = W::index(&entries[0]);
         self.cut_entries_cache(first_index_to_add);
         self.cut_entries_index(first_index_to_add);
 
@@ -232,10 +236,10 @@ impl<T: Entry + Clone> MemTable<T> {
     /// This method will panic if `idx` is greater than `last_idx + 1`.
     pub fn compact_cache_to(&mut self, idx: u64) {
         let first_idx = match self.entries_cache.front() {
-            Some(e) if e.index() < idx => e.index(),
+            Some(e) if W::index(e) < idx => W::index(e),
             _ => return,
         };
-        let last_index = self.entries_cache.back().unwrap().index();
+        let last_index = W::index(self.entries_cache.back().unwrap());
         assert!(idx <= last_index + 1);
         assert!(last_index == self.entries_index.back().unwrap().index);
 
@@ -255,7 +259,7 @@ impl<T: Entry + Clone> MemTable<T> {
     // If entry exist in cache, return (Entry, None).
     // If entry exist but not in cache, return (None, EntryIndex).
     // If entry not exist, return (None, None).
-    pub fn get_entry(&self, index: u64) -> (Option<T>, Option<EntryIndex>) {
+    pub fn get_entry(&self, index: u64) -> (Option<E>, Option<EntryIndex>) {
         if self.entries_index.is_empty() {
             return (None, None);
         }
@@ -285,7 +289,7 @@ impl<T: Entry + Clone> MemTable<T> {
         begin: u64,
         end: u64,
         max_size: Option<usize>,
-        vec: &mut Vec<T>,
+        vec: &mut Vec<E>,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         assert!(end > begin, "fetch_entries_to({}, {})", begin, end);
@@ -344,7 +348,7 @@ impl<T: Entry + Clone> MemTable<T> {
         Ok(())
     }
 
-    pub fn fetch_all(&self, vec: &mut Vec<T>, vec_idx: &mut Vec<EntryIndex>) {
+    pub fn fetch_all(&self, vec: &mut Vec<E>, vec_idx: &mut Vec<EntryIndex>) {
         if self.entries_index.is_empty() {
             return;
         }
@@ -459,10 +463,10 @@ impl<T: Entry + Clone> MemTable<T> {
     #[cfg(test)]
     fn check_entries_index_and_cache(&self) {
         match (self.entries_index.back(), self.entries_cache.back()) {
-            (Some(ei), Some(ec)) if ei.index != ec.index() => panic!(
+            (Some(ei), Some(ec)) if ei.index != W::index(ec) => panic!(
                 "entries_index.last = {}, entries_cache.last = {}",
                 ei.index,
-                ec.index()
+                W::index(ec)
             ),
             (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
             _ => return,
@@ -474,14 +478,14 @@ impl<T: Entry + Clone> MemTable<T> {
 mod tests {
     use super::*;
 
-    use raft::eraftpb::Entry as RaftEntry;
+    use raft::eraftpb::Entry;
 
     #[test]
     fn test_memtable_append() {
         let region_id = 8;
         let cache_limit = 15;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // Append entries [10, 20) file_num = 1 not over cache size limitation.
         // after appending
@@ -570,7 +574,7 @@ mod tests {
 
         // Cache with size limit 0.
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, 0, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, 0, stats);
         memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 1));
         assert_eq!(memtable.cache_size, 0);
         assert_eq!(memtable.entries_cache.len(), 0);
@@ -586,7 +590,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -649,7 +653,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -689,7 +693,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -813,7 +817,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 1024;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
@@ -833,7 +837,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // [5, 10) file_num = 1, not in cache
         // [10, 20) file_num = 2, in cache
@@ -853,11 +857,11 @@ mod tests {
         assert_eq!(entry_idx.unwrap().index, 5);
     }
 
-    fn generate_ents(begin_idx: u64, end_idx: u64) -> Vec<RaftEntry> {
+    fn generate_ents(begin_idx: u64, end_idx: u64) -> Vec<Entry> {
         assert!(end_idx >= begin_idx);
         let mut ents = vec![];
         for idx in begin_idx..end_idx {
-            let mut ent = RaftEntry::new();
+            let mut ent = Entry::new();
             ent.set_index(idx);
             ents.push(ent);
         }
