@@ -579,7 +579,7 @@ mod tests {
     use std::time::Duration;
 
     use crossbeam::channel::Receiver;
-    use raft::eraftpb::Entry as RaftEntry;
+    use raft::eraftpb::Entry;
     use tempfile::Builder;
 
     use super::*;
@@ -724,9 +724,9 @@ mod tests {
         let (pipe_log, receiver) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
 
         let get_1m_batch = || {
-            let mut entry = RaftEntry::new();
+            let mut entry = Entry::new();
             entry.set_data(vec![b'a'; 1024]); // 1K data.
-            let mut log_batch = LogBatch::new();
+            let mut log_batch = LogBatch::<Entry, Entry>::new();
             log_batch.add_entries(1, vec![entry]);
             log_batch
         };

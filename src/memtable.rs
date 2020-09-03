@@ -463,10 +463,10 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     #[cfg(test)]
     fn check_entries_index_and_cache(&self) {
         match (self.entries_index.back(), self.entries_cache.back()) {
-            (Some(ei), Some(ec)) if ei.index != ec.index() => panic!(
+            (Some(ei), Some(ec)) if ei.index != W::index(ec) => panic!(
                 "entries_index.last = {}, entries_cache.last = {}",
                 ei.index,
-                ec.index()
+                W::index(ec)
             ),
             (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
             _ => return,
@@ -478,14 +478,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 mod tests {
     use super::*;
 
-    use raft::eraftpb::Entry as RaftEntry;
+    use raft::eraftpb::Entry;
 
     #[test]
     fn test_memtable_append() {
         let region_id = 8;
         let cache_limit = 15;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // Append entries [10, 20) file_num = 1 not over cache size limitation.
         // after appending
@@ -574,7 +574,7 @@ mod tests {
 
         // Cache with size limit 0.
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, 0, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, 0, stats);
         memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 1));
         assert_eq!(memtable.cache_size, 0);
         assert_eq!(memtable.entries_cache.len(), 0);
@@ -590,7 +590,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -653,7 +653,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -693,7 +693,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1, not in cache
@@ -817,7 +817,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 1024;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
@@ -837,7 +837,7 @@ mod tests {
         let region_id = 8;
         let cache_limit = 10;
         let stats = Arc::new(SharedCacheStats::default());
-        let mut memtable = MemTable::<RaftEntry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // [5, 10) file_num = 1, not in cache
         // [10, 20) file_num = 2, in cache
@@ -857,11 +857,11 @@ mod tests {
         assert_eq!(entry_idx.unwrap().index, 5);
     }
 
-    fn generate_ents(begin_idx: u64, end_idx: u64) -> Vec<RaftEntry> {
+    fn generate_ents(begin_idx: u64, end_idx: u64) -> Vec<Entry> {
         assert!(end_idx >= begin_idx);
         let mut ents = vec![];
         for idx in begin_idx..end_idx {
-            let mut ent = RaftEntry::new();
+            let mut ent = Entry::new();
             ent.set_index(idx);
             ents.push(ent);
         }

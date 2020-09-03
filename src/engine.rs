@@ -713,7 +713,6 @@ where
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
-    use nix::dir::Entry;
     use raft::eraftpb::Entry;
 
     impl EntryExt<Entry> for Entry {
@@ -727,7 +726,7 @@ mod tests {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
             batch.add_entries(raft_group_id, entries);
-            self.write(batch, false)
+            self.write(&mut batch, false)
         }
     }
 
@@ -748,7 +747,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = FileEngine::<Entry>::new(cfg.clone());
+            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
             let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size]);
             for i in 10..20 {
@@ -771,7 +770,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = FileEngine::<Entry>::new(cfg.clone());
+            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -795,7 +794,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = FileEngine::<Entry>::new(cfg.clone());
+        let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
@@ -857,7 +856,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::<Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -875,7 +874,7 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = FileEngine::<Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 

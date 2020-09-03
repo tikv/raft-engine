@@ -655,12 +655,12 @@ mod tests {
         let entries = Entries::new(pb_entries, None);
 
         let mut encoded = vec![];
-        entries.encode_to(&mut encoded).unwrap();
+        entries.encode_to::<Entry>(&mut encoded).unwrap();
         for idx in entries.entries_index.borrow_mut().iter_mut() {
             idx.file_num = file_num;
         }
         let mut s = encoded.as_slice();
-        let decode_entries = Entries::from_bytes(&mut s, file_num, 0, 0).unwrap();
+        let decode_entries = Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0).unwrap();
         assert_eq!(s.len(), 0);
         assert_eq!(entries.entries, decode_entries.entries);
         assert_eq!(entries.entries_index, decode_entries.entries_index);
@@ -705,9 +705,9 @@ mod tests {
 
         for item in items {
             let mut encoded = vec![];
-            item.encode_to(&mut encoded).unwrap();
+            item.encode_to::<Entry>(&mut encoded).unwrap();
             let mut s = encoded.as_slice();
-            let decoded_item = LogItem::from_bytes(&mut s, file_num, 0, 0).unwrap();
+            let decoded_item = LogItem::from_bytes::<Entry>(&mut s, file_num, 0, 0).unwrap();
             assert_eq!(s.len(), 0);
 
             if let LogItemContent::Entries(ref entries) = item.content {
@@ -721,7 +721,7 @@ mod tests {
     fn test_log_batch_enc_dec() {
         let region_id = 8;
         let file_num = 1;
-        let mut batch = LogBatch::new();
+        let mut batch = LogBatch::<Entry, Entry>::new();
         batch.add_entries(region_id, vec![Entry::new(); 10]);
         batch.add_command(region_id, Command::Clean);
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
