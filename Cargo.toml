@@ -32,4 +32,4 @@ features = ["nightly"]
 git = "https://github.com/pingcap/raft-rs"
 branch = "master"
 default-features = false
-features = ["protobuf-codec", "prost-codec"]
+features = ["protobuf-codec"]

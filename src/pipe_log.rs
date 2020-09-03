@@ -345,7 +345,6 @@ impl PipeLog {
         Ok((file_num, offset))
     }
 
-
     pub fn write<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
