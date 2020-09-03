@@ -8,7 +8,7 @@ use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::PipeLog;
+use crate::pipe_log::{PipeLog, PipeLogImpl};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use protobuf::Message;
 
@@ -129,7 +129,7 @@ where
     chunk_limit: usize,
     valid_cache_chunks: VecDeque<CacheChunk>,
     memtables: MemTableAccessor<E, W>,
-    pipe_log: PipeLog,
+    pipe_log: PipeLogImpl,
 }
 
 impl<E, W> Runner<E, W>
@@ -142,7 +142,7 @@ where
         cache_stats: Arc<SharedCacheStats>,
         chunk_limit: usize,
         memtables: MemTableAccessor<E, W>,
-        pipe_log: PipeLog,
+        pipe_log: PipeLogImpl,
     ) -> Runner<E, W> {
         Runner {
             cache_limit,

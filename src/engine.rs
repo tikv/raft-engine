@@ -13,7 +13,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{PipeLog, PipeLogImpl, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
 use protobuf::Message;
@@ -118,7 +118,7 @@ where
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
-    pipe_log: PipeLog,
+    pipe_log: PipeLogImpl,
     cache_stats: Arc<SharedCacheStats>,
 
     workers: Arc<RwLock<Workers>>,
@@ -134,7 +134,7 @@ where
 {
     // recover from disk.
     fn recover(
-        pipe_log: &mut PipeLog,
+        pipe_log: &mut PipeLogImpl,
         memtables: &MemTableAccessor<E, W>,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -502,7 +502,7 @@ where
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut pipe_log = PipeLog::open(
+        let mut pipe_log = PipeLogImpl::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,

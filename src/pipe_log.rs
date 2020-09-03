@@ -219,7 +219,7 @@ impl LogManager {
 }
 
 #[derive(Clone)]
-pub struct PipeLog {
+pub struct PipeLogImpl {
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
@@ -232,11 +232,54 @@ pub struct PipeLog {
     current_read_file_num: u64,
 }
 
-impl PipeLog {
-    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLog {
+pub trait PipeLog {
+    fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
+
+    fn fread_from_rewrite(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
+
+    fn close(&self) -> Result<()>;
+
+    fn append(&self, content: &[u8], sync: bool) -> Result<(u64, u64)>;
+
+    fn write<E: Message, W: EntryExt<E>>(
+        &self,
+        batch: &LogBatch<E, W>,
+        sync: bool,
+        file_num: &mut u64,
+    ) -> Result<usize>;
+
+    fn purge_to(&self, file_num: u64) -> Result<usize>;
+
+    fn truncate_active_log(&self, offset: usize) -> Result<()>;
+
+    fn sync(&self) -> Result<()>;
+
+    fn active_file_num(&self) -> u64;
+
+    fn first_file_num(&self) -> u64;
+
+    fn total_size(&self) -> usize;
+
+    // For recovery.
+    fn read_next_file_impl(&mut self, name_suffix: &'static str) -> Result<Option<Vec<u8>>>;
+
+    fn read_next_file(&mut self) -> Result<Option<Vec<u8>>>;
+
+    fn read_next_rewrite_file(&mut self) -> Result<Option<Vec<u8>>>;
+
+    /// Return the last file number before `total - size`. `0` means no such files.
+    fn latest_file_before(&self, size: usize) -> u64;
+
+    fn file_len(&self, file_num: u64) -> u64;
+
+    fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
+}
+
+impl PipeLogImpl {
+    pub fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLogImpl {
         let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
-        PipeLog {
+        PipeLogImpl {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
@@ -247,7 +290,7 @@ impl PipeLog {
         }
     }
 
-    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLog> {
+    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLogImpl> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -257,7 +300,7 @@ impl PipeLog {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let pipe_log = PipeLog::new(cfg, cache_submitor);
+        let pipe_log = PipeLogImpl::new(cfg, cache_submitor);
 
         let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
@@ -318,17 +361,29 @@ impl PipeLog {
         Ok(pipe_log)
     }
 
-    pub fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    pub fn active_log_size(&self) -> usize {
+        self.appender.rl().active_log_size
+    }
+
+    #[cfg(test)]
+    pub fn active_log_capacity(&self) -> usize {
+        self.appender.rl().active_log_capacity
+    }
+}
+
+impl PipeLog for PipeLogImpl {
+    fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
         let fd = self.appender.rl().get_fd(file_num)?;
         pread_exact(fd.0, offset, len as usize)
     }
 
-    pub fn fread_from_rewrite(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+    fn fread_from_rewrite(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
         let fd = self.rewriter.rl().get_fd(file_num)?;
         pread_exact(fd.0, offset, len as usize)
     }
 
-    pub fn close(&self) -> Result<()> {
+    fn close(&self) -> Result<()> {
         let _write_lock = self.cache_submitor.lock().unwrap();
 
         self.appender.wl().truncate_active_log(None)?;
@@ -345,7 +400,7 @@ impl PipeLog {
         Ok((file_num, offset))
     }
 
-    pub fn write<E: Message, W: EntryExt<E>>(
+    fn write<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
         sync: bool,
@@ -378,7 +433,7 @@ impl PipeLog {
         Ok(0)
     }
 
-    pub fn purge_to(&self, file_num: u64) -> Result<usize> {
+    fn purge_to(&self, file_num: u64) -> Result<usize> {
         let purge_count = self.appender.wl().purge_to(file_num)?;
         for file_num in (file_num - purge_count as u64)..file_num {
             let mut path = PathBuf::from(&self.dir);
@@ -390,36 +445,26 @@ impl PipeLog {
         Ok(purge_count)
     }
 
-    pub fn truncate_active_log(&self, offset: usize) -> Result<()> {
+    fn truncate_active_log(&self, offset: usize) -> Result<()> {
         self.appender.wl().truncate_active_log(Some(offset))
     }
 
-    pub fn sync(&self) -> Result<()> {
+    fn sync(&self) -> Result<()> {
         if let Some(fd) = self.appender.rl().get_active_fd() {
             fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
         }
         Ok(())
     }
 
-    #[cfg(test)]
-    fn active_log_size(&self) -> usize {
-        self.appender.rl().active_log_size
-    }
-
-    #[cfg(test)]
-    fn active_log_capacity(&self) -> usize {
-        self.appender.rl().active_log_capacity
-    }
-
-    pub fn active_file_num(&self) -> u64 {
+    fn active_file_num(&self) -> u64 {
         self.appender.rl().active_file_num
     }
 
-    pub fn first_file_num(&self) -> u64 {
+    fn first_file_num(&self) -> u64 {
         self.appender.rl().first_file_num
     }
 
-    pub fn total_size(&self) -> usize {
+    fn total_size(&self) -> usize {
         let manager = self.appender.rl();
         (manager.active_file_num - manager.first_file_num) as usize * self.rotate_size
             + manager.active_log_size
@@ -453,16 +498,16 @@ impl PipeLog {
         Ok(Some(vec))
     }
 
-    pub fn read_next_file(&mut self) -> Result<Option<Vec<u8>>> {
+    fn read_next_file(&mut self) -> Result<Option<Vec<u8>>> {
         self.read_next_file_impl(LOG_SUFFIX)
     }
 
-    pub fn read_next_rewrite_file(&mut self) -> Result<Option<Vec<u8>>> {
+    fn read_next_rewrite_file(&mut self) -> Result<Option<Vec<u8>>> {
         self.read_next_file_impl(REWRITE_SUFFIX)
     }
 
     /// Return the last file number before `total - size`. `0` means no such files.
-    pub fn latest_file_before(&self, size: usize) -> u64 {
+    fn latest_file_before(&self, size: usize) -> u64 {
         let cur_size = self.total_size();
         if cur_size <= size {
             return 0;
@@ -472,12 +517,12 @@ impl PipeLog {
         manager.first_file_num + count as u64
     }
 
-    pub fn file_len(&self, file_num: u64) -> u64 {
+    fn file_len(&self, file_num: u64) -> u64 {
         let fd = self.appender.rl().get_fd(file_num).unwrap();
         file_len(fd.0).unwrap() as u64
     }
 
-    pub fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {
+    fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {
         self.cache_submitor.lock().unwrap()
     }
 }
@@ -591,7 +636,7 @@ mod tests {
         path: &str,
         bytes_per_sync: usize,
         rotate_size: usize,
-    ) -> (PipeLog, Receiver<Option<CacheTask>>) {
+    ) -> (PipeLogImpl, Receiver<Option<CacheTask>>) {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
@@ -600,7 +645,7 @@ mod tests {
         let mut worker = Worker::new("test".to_owned(), None);
         let stats = Arc::new(SharedCacheStats::default());
         let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
-        let log = PipeLog::open(&cfg, submitor).unwrap();
+        let log = PipeLogImpl::open(&cfg, submitor).unwrap();
         (log, worker.take_receiver())
     }
 
