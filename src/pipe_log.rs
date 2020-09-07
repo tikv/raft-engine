@@ -219,7 +219,7 @@ impl LogManager {
 }
 
 #[derive(Clone)]
-pub struct MemPipeLog {
+pub struct FilePipeLog {
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
@@ -275,11 +275,11 @@ pub trait PipeLog: Sized + Clone + Send {
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
 }
 
-impl MemPipeLog {
-    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> MemPipeLog {
+impl FilePipeLog {
+    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> FilePipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
-        MemPipeLog {
+        FilePipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
@@ -289,7 +289,7 @@ impl MemPipeLog {
             current_read_file_num: 0,
         }
     }
-    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<MemPipeLog> {
+    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<FilePipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -299,7 +299,7 @@ impl MemPipeLog {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let pipe_log = MemPipeLog::new(cfg, cache_submitor);
+        let pipe_log = FilePipeLog::new(cfg, cache_submitor);
 
         let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
@@ -371,7 +371,7 @@ impl MemPipeLog {
     }
 }
 
-impl PipeLog for MemPipeLog {
+impl PipeLog for FilePipeLog {
     fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
         let fd = self.appender.rl().get_fd(file_num)?;
         pread_exact(fd.0, offset, len as usize)
@@ -635,7 +635,7 @@ mod tests {
         path: &str,
         bytes_per_sync: usize,
         rotate_size: usize,
-    ) -> (MemPipeLog, Receiver<Option<CacheTask>>) {
+    ) -> (FilePipeLog, Receiver<Option<CacheTask>>) {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
@@ -644,7 +644,7 @@ mod tests {
         let mut worker = Worker::new("test".to_owned(), None);
         let stats = Arc::new(SharedCacheStats::default());
         let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
-        let log = MemPipeLog::open(&cfg, submitor).unwrap();
+        let log = FilePipeLog::open(&cfg, submitor).unwrap();
         (log, worker.take_receiver())
     }
 
