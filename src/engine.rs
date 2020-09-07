@@ -13,7 +13,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{PipeLog, PipeLogImpl, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
 use protobuf::Message;
@@ -494,19 +494,18 @@ where
     }
 }
 
-impl<E, W, P> FileEngine<E, W, P>
+impl<E, W> FileEngine<E, W, PipeLogImpl>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: PipeLog + 'static,
 {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W, P> {
+    pub fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W, PipeLogImpl> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut pipe_log = P::open(
+        let mut pipe_log = PipeLogImpl::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
@@ -550,10 +549,17 @@ where
         }
     }
 
-    pub fn new(cfg: Config) -> FileEngine<E, W, P> {
+    pub fn new(cfg: Config) -> FileEngine<E, W, PipeLogImpl> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
+}
 
+impl<E, W, P> FileEngine<E, W, P>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+    P: PipeLog + 'static,
+{
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
         self.pipe_log.sync()
