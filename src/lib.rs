@@ -35,8 +35,7 @@ pub mod pipe_log;
 pub mod util;
 
 pub use self::config::Config;
-pub use self::engine::Engine as RaftLogEngine;
-pub type FileEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
+pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
 
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
