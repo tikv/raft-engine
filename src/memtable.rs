@@ -3,12 +3,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::{cmp, u64};
 
+use protobuf::Message;
+
 use crate::cache_evict::CacheTracker;
 use crate::engine::SharedCacheStats;
 use crate::log_batch::{CompressionType, EntryExt};
+use crate::pipe_log::LogQueue;
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, Result};
-use protobuf::Message;
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
@@ -18,6 +20,7 @@ pub struct EntryIndex {
     pub index: u64,
 
     // Log batch physical position in file.
+    pub queue: LogQueue,
     pub file_num: u64,
     pub base_offset: u64,
     pub compression_type: CompressionType,
@@ -36,6 +39,7 @@ impl Default for EntryIndex {
     fn default() -> EntryIndex {
         EntryIndex {
             index: 0,
+            queue: LogQueue::Append,
             file_num: 0,
             base_offset: 0,
             compression_type: CompressionType::None,

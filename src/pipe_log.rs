@@ -218,6 +218,12 @@ impl LogManager {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LogQueue {
+    Append,
+    Rewrite,
+}
+
 #[derive(Clone)]
 pub struct PipeLog {
     dir: String,
@@ -318,13 +324,11 @@ impl PipeLog {
         Ok(pipe_log)
     }
 
-    pub fn fread(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let fd = self.appender.rl().get_fd(file_num)?;
-        pread_exact(fd.0, offset, len as usize)
-    }
-
-    pub fn fread_from_rewrite(&self, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let fd = self.rewriter.rl().get_fd(file_num)?;
+    pub fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let fd = match queue {
+            LogQueue::Append => self.appender.rl().get_fd(file_num)?,
+            LogQueue::Rewrite => self.rewriter.rl().get_fd(file_num)?,
+        };
         pread_exact(fd.0, offset, len as usize)
     }
 
@@ -336,8 +340,11 @@ impl PipeLog {
         Ok(())
     }
 
-    fn append(&self, content: &[u8], sync: bool) -> Result<(u64, u64)> {
-        let (file_num, offset, sync, fd) = self.appender.wl().on_append(content.len(), sync)?;
+    fn append(&self, queue: LogQueue, content: &[u8], sync: bool) -> Result<(u64, u64)> {
+        let (file_num, offset, sync, fd) = match queue {
+            LogQueue::Append => self.appender.wl().on_append(content.len(), sync)?,
+            LogQueue::Rewrite => self.rewriter.wl().on_append(content.len(), sync)?,
+        };
         pwrite_exact(fd.0, offset, content)?;
         if sync {
             fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
@@ -358,7 +365,7 @@ impl PipeLog {
             // And theoretically, 2 log batches can be written to disks concurrently
             // because we use `pwrite` instead of `write(append)`.
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
-            let (cur_file_num, offset) = self.append(&content, sync)?;
+            let (cur_file_num, offset) = self.append(LogQueue::Append, &content, sync)?;
             let entries_size = batch.entries_size();
             let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
             drop(cache_submitor);
@@ -411,12 +418,18 @@ impl PipeLog {
         self.appender.rl().active_log_capacity
     }
 
-    pub fn active_file_num(&self) -> u64 {
-        self.appender.rl().active_file_num
+    pub fn active_file_num(&self, queue: LogQueue) -> u64 {
+        match queue {
+            LogQueue::Append => self.appender.rl().active_file_num,
+            LogQueue::Rewrite => self.rewriter.rl().active_file_num,
+        }
     }
 
-    pub fn first_file_num(&self) -> u64 {
-        self.appender.rl().first_file_num
+    pub fn first_file_num(&self, queue: LogQueue) -> u64 {
+        match queue {
+            LogQueue::Append => self.appender.rl().first_file_num,
+            LogQueue::Rewrite => self.rewriter.rl().first_file_num,
+        }
     }
 
     pub fn total_size(&self) -> usize {
@@ -426,39 +439,21 @@ impl PipeLog {
     }
 
     // For recovery.
-    fn read_next_file_impl(&mut self, name_suffix: &'static str) -> Result<Option<Vec<u8>>> {
-        let manager = match name_suffix {
-            LOG_SUFFIX => self.appender.rl(),
-            REWRITE_SUFFIX => self.rewriter.rl(),
-            _ => unreachable!(),
+    pub fn read_whole_file(&self, queue: LogQueue, file_num: u64) -> Result<Vec<u8>> {
+        let name_suffix = match queue {
+            LogQueue::Append => LOG_SUFFIX,
+            LogQueue::Rewrite => REWRITE_SUFFIX,
         };
 
-        if self.current_read_file_num == 0 {
-            self.current_read_file_num = manager.first_file_num;
-        }
-        if self.current_read_file_num > manager.active_file_num {
-            return Ok(None);
-        }
-
         let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(self.current_read_file_num, name_suffix));
+        path.push(generate_file_name(file_num, name_suffix));
         let meta = fs::metadata(&path)?;
         let mut vec = Vec::with_capacity(meta.len() as usize);
 
         // Read the whole file.
         let mut file = File::open(&path)?;
         file.read_to_end(&mut vec)?;
-
-        self.current_read_file_num += 1;
-        Ok(Some(vec))
-    }
-
-    pub fn read_next_file(&mut self) -> Result<Option<Vec<u8>>> {
-        self.read_next_file_impl(LOG_SUFFIX)
-    }
-
-    pub fn read_next_rewrite_file(&mut self) -> Result<Option<Vec<u8>>> {
-        self.read_next_file_impl(REWRITE_SUFFIX)
+        Ok(vec)
     }
 
     /// Return the last file number before `total - size`. `0` means no such files.

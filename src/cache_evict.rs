@@ -8,7 +8,7 @@ use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::PipeLog;
+use crate::pipe_log::{LogQueue, PipeLog};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use protobuf::Message;
 
@@ -192,7 +192,7 @@ where
             };
             let chunk_content = self
                 .pipe_log
-                .fread(file_num, chunk.base_offset, read_len)
+                .fread(LogQueue::Append, file_num, chunk.base_offset, read_len)
                 .unwrap();
 
             let mut reader: &[u8] = chunk_content.as_ref();

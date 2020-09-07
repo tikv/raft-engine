@@ -13,7 +13,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
 use protobuf::Message;
@@ -132,53 +132,46 @@ where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    // recover from disk.
+    // Recover from disk.
     fn recover(
-        pipe_log: &mut PipeLog,
+        queue: LogQueue,
+        pipe_log: &PipeLog,
         memtables: &MemTableAccessor<E, W>,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
         // Get first file number and last file number.
-        let first_file_num = pipe_log.first_file_num();
-        let active_file_num = pipe_log.active_file_num();
+        let first_file_num = pipe_log.first_file_num(queue);
+        let active_file_num = pipe_log.active_file_num(queue);
 
+        // Iterate and recover from files one by one.
         let start = Instant::now();
+        for file_num in first_file_num..=active_file_num {
+            // Read a file.
+            let content = pipe_log.read_whole_file(queue, file_num)?;
 
-        // Iterate files one by one
-        let mut current_read_file = first_file_num;
-        while current_read_file <= active_file_num {
-            // Read a file
-            let content = pipe_log
-                .read_next_file()
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "Read content of file {} failed, error {:?}",
-                        current_read_file, e
-                    )
-                })
-                .unwrap_or_else(|| panic!("Expect has content, but get None"));
-
-            // Verify file header
+            // Verify file header.
             let mut buf = content.as_slice();
             if buf.len() < FILE_MAGIC_HEADER.len() || !buf.starts_with(FILE_MAGIC_HEADER) {
-                if current_read_file != active_file_num {
-                    panic!("Raft log file {} is corrupted.", current_read_file);
+                if file_num != active_file_num {
+                    error!("Raft log header is corrupted at {:?}.{}", queue, file_num);
+                    return Err(box_err!("Raft log file header is corrupted"));
                 } else {
+                    // FIXME: write header.
                     pipe_log.truncate_active_log(0).unwrap();
                     break;
                 }
             }
 
-            // Iterate all LogBatch in one file
+            // Iterate all LogBatch in one file.
             let start_ptr = buf.as_ptr();
             buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
             let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
             loop {
-                match LogBatch::from_bytes(&mut buf, current_read_file, offset) {
+                match LogBatch::from_bytes(&mut buf, file_num, offset) {
                     Ok(Some(log_batch)) => {
                         let entries_size = log_batch.entries_size();
                         if let Some(tracker) = pipe_log.cache_submitor().get_cache_tracker(
-                            current_read_file,
+                            file_num,
                             offset,
                             entries_size,
                         ) {
@@ -188,49 +181,34 @@ where
                                 }
                             }
                         }
-                        Self::apply_to_memtable(memtables, log_batch, current_read_file);
+                        Self::apply_to_memtable(memtables, log_batch, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
                     Ok(None) => {
-                        info!("Recovered raft log file {}.", current_read_file);
+                        info!("Recovered raft log {:?}.{}.", queue, file_num);
                         break;
                     }
                     Err(e) => {
                         // There may be a pre-allocated space at the tail of the active log.
-                        if current_read_file == active_file_num {
-                            match recovery_mode {
-                                RecoveryMode::TolerateCorruptedTailRecords => {
-                                    warn!(
-                                        "Encounter err {:?}, incomplete batch in last log file {}, \
-                                         offset {}, truncate it in TolerateCorruptedTailRecords \
-                                         recovery mode.",
-                                        e,
-                                        current_read_file,
-                                        offset
-                                    );
-                                    pipe_log.truncate_active_log(offset as usize).unwrap();
-                                    break;
-                                }
-                                RecoveryMode::AbsoluteConsistency => {
-                                    panic!(
-                                        "Encounter err {:?}, incomplete batch in last log file {}, \
-                                         offset {}, panic in AbsoluteConsistency recovery mode.",
-                                        e,
-                                        current_read_file,
-                                        offset
-                                    );
-                                }
-                            }
-                        } else {
-                            panic!("Corruption occur in middle log file {}", current_read_file);
+                        if file_num == active_file_num
+                            && recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
+                        {
+                            warn!(
+                                "Raft log content is corrupted at {:?}.{}:{}, error: {}",
+                                queue, file_num, offset, e
+                            );
+                            pipe_log.truncate_active_log(offset as usize).unwrap();
+                            break;
                         }
+                        error!(
+                            "Raft log content is corrupted at {:?}.{}:{}, error: {}",
+                            queue, file_num, offset, e
+                        );
+                        return Err(box_err!("Raft log content is corrupted"));
                     }
                 }
             }
-
-            current_read_file += 1;
         }
-
         info!("Recover raft log takes {:?}", start.elapsed());
         Ok(())
     }
@@ -401,6 +379,7 @@ where
         entry_index: &EntryIndex,
         _: Option<&mut HashMap<(u64, u64), Vec<u8>>>,
     ) -> Result<E> {
+        let queue = entry_index.queue;
         let file_num = entry_index.file_num;
         let base_offset = entry_index.base_offset;
         let batch_len = entry_index.batch_len;
@@ -410,11 +389,13 @@ where
         let entry_content = match entry_index.compression_type {
             CompressionType::None => {
                 let offset = base_offset + offset;
-                self.pipe_log.fread(file_num, offset, len)?
+                self.pipe_log.fread(queue, file_num, offset, len)?
             }
             CompressionType::Lz4 => {
                 let read_len = batch_len + HEADER_LEN as u64;
-                let compressed = self.pipe_log.fread(file_num, base_offset, read_len)?;
+                let compressed = self
+                    .pipe_log
+                    .fread(queue, file_num, base_offset, read_len)?;
                 let mut reader = compressed.as_ref();
                 let header = codec::decode_u64(&mut reader)?;
                 assert_eq!(header >> 8, batch_len);
@@ -498,13 +479,13 @@ where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W> {
+    fn new_impl(cfg: Config, chunk_limit: usize) -> Result<FileEngine<E, W>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut pipe_log = PipeLog::open(
+        let pipe_log = PipeLog::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
@@ -533,10 +514,16 @@ where
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
-        FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
+        FileEngine::recover(
+            LogQueue::Rewrite,
+            &pipe_log,
+            &memtables,
+            RecoveryMode::TolerateCorruptedTailRecords,
+        )?;
+        FileEngine::recover(LogQueue::Append, &pipe_log, &memtables, recovery_mode)?;
         pipe_log.cache_submitor().nonblock_on_full();
 
-        FileEngine {
+        Ok(FileEngine {
             cfg: Arc::new(cfg),
             memtables,
             pipe_log,
@@ -545,11 +532,11 @@ where
                 cache_evict: cache_evict_worker,
             })),
             purge_mutex: Arc::new(Mutex::new(())),
-        }
+        })
     }
 
     pub fn new(cfg: Config) -> FileEngine<E, W> {
-        Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
+        Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE).unwrap()
     }
 
     /// Synchronize the Raft engine.
