@@ -290,7 +290,9 @@ where
         assert!(compact_latest_file_num <= rewrite_latest_file_num);
         let memtables = self.memtables.collect(|t| {
             let min_file_num = t.min_file_num().unwrap_or(u64::MAX);
-            if min_file_num <= compact_latest_file_num {
+            if min_file_num <= compact_latest_file_num
+                && t.entries_count() > REWRITE_ENTRY_COUNT_THRESHOLD
+            {
                 will_force_compact.push(t.region_id());
                 return false;
             }
