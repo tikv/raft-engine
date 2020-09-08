@@ -34,8 +34,10 @@ pub mod metrics;
 pub mod pipe_log;
 pub mod util;
 
+use crate::pipe_log::PipeLog;
+
 pub use self::config::Config;
-pub use self::engine::FileEngine as RaftLogEngine;
+pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
 

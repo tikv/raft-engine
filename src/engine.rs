@@ -13,7 +13,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
 use protobuf::Message;
@@ -111,14 +111,15 @@ where
 }
 
 #[derive(Clone)]
-pub struct FileEngine<E, W>
+pub struct Engine<E, W, P>
 where
     E: Message,
     W: EntryExt<E>,
+    P: GenericPipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
-    pipe_log: PipeLog,
+    pipe_log: P,
     cache_stats: Arc<SharedCacheStats>,
 
     workers: Arc<RwLock<Workers>>,
@@ -127,15 +128,16 @@ where
     purge_mutex: Arc<Mutex<()>>,
 }
 
-impl<E, W> FileEngine<E, W>
+impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
+    P: GenericPipeLog,
 {
     // Recover from disk.
     fn recover(
         queue: LogQueue,
-        pipe_log: &PipeLog,
+        pipe_log: &P,
         memtables: &MemTableAccessor<E, W>,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -156,8 +158,7 @@ where
                     error!("Raft log header is corrupted at {:?}.{}", queue, file_num);
                     return Err(box_err!("Raft log file header is corrupted"));
                 } else {
-                    // FIXME: write header.
-                    pipe_log.truncate_active_log(0).unwrap();
+                    pipe_log.truncate_active_log(queue, Some(0)).unwrap();
                     break;
                 }
             }
@@ -197,7 +198,7 @@ where
                                 "Raft log content is corrupted at {:?}.{}:{}, error: {}",
                                 queue, file_num, offset, e
                             );
-                            pipe_log.truncate_active_log(offset as usize).unwrap();
+                            pipe_log.truncate_active_log(queue, Some(offset as usize))?;
                             break;
                         }
                         error!(
@@ -464,22 +465,23 @@ struct Workers {
     cache_evict: Worker<CacheTask>,
 }
 
-impl<E, W> fmt::Debug for FileEngine<E, W>
+impl<E, W, P> fmt::Debug for Engine<E, W, P>
 where
     E: Message,
     W: EntryExt<E>,
+    P: GenericPipeLog,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FileEngine dir: {}", self.cfg.dir)
+        write!(f, "Engine dir: {}", self.cfg.dir)
     }
 }
 
-impl<E, W> FileEngine<E, W>
+impl<E, W> Engine<E, W, PipeLog>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> Result<FileEngine<E, W>> {
+    fn new_impl(cfg: Config, chunk_limit: usize) -> Result<Engine<E, W, PipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
@@ -514,16 +516,16 @@ where
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
-        FileEngine::recover(
+        Engine::recover(
             LogQueue::Rewrite,
             &pipe_log,
             &memtables,
             RecoveryMode::TolerateCorruptedTailRecords,
         )?;
-        FileEngine::recover(LogQueue::Append, &pipe_log, &memtables, recovery_mode)?;
+        Engine::recover(LogQueue::Append, &pipe_log, &memtables, recovery_mode)?;
         pipe_log.cache_submitor().nonblock_on_full();
 
-        Ok(FileEngine {
+        Ok(Engine {
             cfg: Arc::new(cfg),
             memtables,
             pipe_log,
@@ -535,13 +537,20 @@ where
         })
     }
 
-    pub fn new(cfg: Config) -> FileEngine<E, W> {
+    pub fn new(cfg: Config) -> Engine<E, W, PipeLog> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE).unwrap()
     }
+}
 
+impl<E, W, P> Engine<E, W, P>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+    P: GenericPipeLog + 'static,
+{
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
-        self.pipe_log.sync()
+        self.pipe_log.sync(LogQueue::Append)
     }
 
     pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
@@ -710,7 +719,7 @@ mod tests {
         }
     }
 
-    type RaftLogEngine = FileEngine<Entry, Entry>;
+    type RaftLogEngine = Engine<Entry, Entry>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
@@ -736,7 +745,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+            let engine = Engine::<Entry, Entry>::new(cfg.clone());
             let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size]);
             for i in 10..20 {
@@ -759,7 +768,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+            let engine = Engine::<Entry, Entry>::new(cfg.clone());
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -783,7 +792,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+        let engine = Engine::<Entry, Entry>::new(cfg.clone());
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
@@ -845,7 +854,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = Engine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -863,7 +872,7 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = Engine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
