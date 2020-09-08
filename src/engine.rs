@@ -13,7 +13,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{FilePipeLog, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
 use protobuf::Message;
@@ -111,14 +111,15 @@ where
 }
 
 #[derive(Clone)]
-pub struct FileEngine<E, W>
+pub struct Engine<E, W, P>
 where
     E: Message,
     W: EntryExt<E>,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
-    pipe_log: PipeLog,
+    pipe_log: P,
     cache_stats: Arc<SharedCacheStats>,
 
     workers: Arc<RwLock<Workers>>,
@@ -127,14 +128,15 @@ where
     purge_mutex: Arc<Mutex<()>>,
 }
 
-impl<E, W> FileEngine<E, W>
+impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
+    P: PipeLog,
 {
     // recover from disk.
     fn recover(
-        pipe_log: &mut PipeLog,
+        pipe_log: &mut P,
         memtables: &MemTableAccessor<E, W>,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -483,28 +485,29 @@ struct Workers {
     cache_evict: Worker<CacheTask>,
 }
 
-impl<E, W> fmt::Debug for FileEngine<E, W>
+impl<E, W, P> fmt::Debug for Engine<E, W, P>
 where
     E: Message,
     W: EntryExt<E>,
+    P: PipeLog,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FileEngine dir: {}", self.cfg.dir)
     }
 }
 
-impl<E, W> FileEngine<E, W>
+impl<E, W> Engine<E, W, FilePipeLog>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> FileEngine<E, W> {
+    pub fn new_impl(cfg: Config, chunk_limit: usize) -> Engine<E, W, FilePipeLog> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut pipe_log = PipeLog::open(
+        let mut pipe_log = FilePipeLog::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
@@ -533,10 +536,10 @@ where
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
-        FileEngine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
+        Engine::recover(&mut pipe_log, &memtables, recovery_mode).unwrap();
         pipe_log.cache_submitor().nonblock_on_full();
 
-        FileEngine {
+        Engine {
             cfg: Arc::new(cfg),
             memtables,
             pipe_log,
@@ -548,10 +551,17 @@ where
         }
     }
 
-    pub fn new(cfg: Config) -> FileEngine<E, W> {
+    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE)
     }
+}
 
+impl<E, W, P> Engine<E, W, P>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + 'static,
+    P: PipeLog + 'static,
+{
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
         self.pipe_log.sync()
@@ -714,6 +724,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe_log::FilePipeLog;
     use crate::util::ReadableSize;
     use raft::eraftpb::Entry;
 
@@ -723,7 +734,7 @@ mod tests {
         }
     }
 
-    type RaftLogEngine = FileEngine<Entry, Entry>;
+    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
@@ -749,7 +760,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+            let engine = Engine::<Entry, Entry, FilePipeLog>::new(cfg.clone());
             let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size]);
             for i in 10..20 {
@@ -772,7 +783,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+            let engine = Engine::<Entry, Entry, FilePipeLog>::new(cfg.clone());
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -796,7 +807,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = FileEngine::<Entry, Entry>::new(cfg.clone());
+        let engine = Engine::<Entry, Entry, FilePipeLog>::new(cfg.clone());
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
@@ -858,7 +869,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = Engine::<Entry, Entry, FilePipeLog>::new_impl(cfg.clone(), 512 * 1024);
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -876,7 +887,7 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = FileEngine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = Engine::<Entry, Entry, FilePipeLog>::new_impl(cfg.clone(), 512 * 1024);
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
