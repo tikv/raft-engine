@@ -13,6 +13,7 @@ use protobuf::Message;
 use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
+use crate::pipe_log::LogQueue;
 use crate::{Error, Result};
 
 pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
@@ -213,13 +214,12 @@ impl<E: Message> Entries<E> {
         Ok(())
     }
 
-    pub fn update_offset_when_needed(&self, file_num: u64, base: u64) {
+    pub fn update_position(&self, queue: LogQueue, file_num: u64, base: u64) {
         for idx in self.entries_index.borrow_mut().iter_mut() {
-            if idx.file_num == 0 {
-                debug_assert_eq!(idx.base_offset, 0);
-                idx.file_num = file_num;
-                idx.base_offset = base;
-            }
+            debug_assert!(idx.file_num == 0 && idx.base_offset == 0);
+            idx.queue = queue;
+            idx.file_num = file_num;
+            idx.base_offset = base;
         }
     }
 
@@ -691,7 +691,6 @@ mod tests {
     #[test]
     fn test_log_item_enc_dec() {
         let region_id = 8;
-        let file_num = 1;
         let items = vec![
             LogItem::from_entries(region_id, vec![Entry::new(); 10]),
             LogItem::from_command(region_id, Command::Clean),
@@ -707,12 +706,8 @@ mod tests {
             let mut encoded = vec![];
             item.encode_to::<Entry>(&mut encoded).unwrap();
             let mut s = encoded.as_slice();
-            let decoded_item = LogItem::from_bytes::<Entry>(&mut s, file_num, 0, 0).unwrap();
+            let decoded_item = LogItem::from_bytes::<Entry>(&mut s, 0, 0, 0).unwrap();
             assert_eq!(s.len(), 0);
-
-            if let LogItemContent::Entries(ref entries) = item.content {
-                entries.update_offset_when_needed(file_num, 0);
-            }
             assert_eq!(item, decoded_item);
         }
     }
@@ -720,7 +715,6 @@ mod tests {
     #[test]
     fn test_log_batch_enc_dec() {
         let region_id = 8;
-        let file_num = 1;
         let mut batch = LogBatch::<Entry, Entry>::new();
         batch.add_entries(region_id, vec![Entry::new(); 10]);
         batch.add_command(region_id, Command::Clean);
@@ -729,14 +723,8 @@ mod tests {
 
         let encoded = batch.encode_to_bytes().unwrap();
         let mut s = encoded.as_slice();
-        let decoded_batch = LogBatch::from_bytes(&mut s, file_num, 0).unwrap().unwrap();
+        let decoded_batch = LogBatch::from_bytes(&mut s, 0, 0).unwrap().unwrap();
         assert_eq!(s.len(), 0);
-
-        for item in batch.items.iter_mut() {
-            if let LogItemContent::Entries(ref entries) = item.content {
-                entries.update_offset_when_needed(file_num, 0);
-            }
-        }
         assert_eq!(batch, decoded_batch);
     }
 }

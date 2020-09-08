@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
 use nix::errno::Errno;
@@ -73,20 +73,22 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Read whole file into buffer, used for recovery.
     fn read_whole_file(&self, queue: LogQueue, file_num: u64) -> Result<Vec<u8>>;
 
-    fn active_file_num(&self, queue: LogQueue) -> u64;
-
-    fn first_file_num(&self, queue: LogQueue) -> u64;
-
     /// Purge the append queue to the given file number.
-    fn purge_to(&self, file_num: u64) -> Result<usize>;
+    fn purge_to(&self, queue: LogQueue, file_num: u64) -> Result<usize>;
 
     /// Total size of the append queue.
-    fn total_size(&self) -> usize;
+    fn total_size(&self, queue: LogQueue) -> usize;
+
+    /// Active file number in the given queue.
+    fn active_file_num(&self, queue: LogQueue) -> u64;
+
+    /// First file number in the given queue.
+    fn first_file_num(&self, queue: LogQueue) -> u64;
 
     /// Return the last file number before `total - size`. `0` means no such files.
-    fn latest_file_before(&self, size: usize) -> u64;
+    fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64;
 
-    fn file_len(&self, file_num: u64) -> u64;
+    fn file_len(&self, queue: LogQueue, file_num: u64) -> u64;
 
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
 }
@@ -190,7 +192,7 @@ impl LogManager {
     }
 
     fn truncate_active_log(&mut self, offset: Option<usize>) -> Result<()> {
-        let offset = offset.unwrap_or(self.active_log_size);
+        let mut offset = offset.unwrap_or(self.active_log_size);
         match offset.cmp(&self.active_log_size) {
             cmp::Ordering::Greater => {
                 let io_error = IoError::new(IoErrorKind::UnexpectedEof, "truncate");
@@ -201,6 +203,10 @@ impl LogManager {
         }
         let active_fd = self.get_active_fd().unwrap();
         ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
+        if offset == 0 {
+            // After truncate to 0, write header is necessary.
+            offset = write_file_header(active_fd.0)?;
+        }
         fsync(active_fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
         self.active_log_size = offset;
         self.active_log_capacity = offset;
@@ -291,7 +297,7 @@ pub struct PipeLog {
 impl PipeLog {
     fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
-        let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
+        let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, REWRITE_SUFFIX)));
         PipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -339,14 +345,15 @@ impl PipeLog {
                     Err(_) => continue,
                 };
                 min_rewrite_num = cmp::min(min_rewrite_num, file_num);
-                max_rewrite_num = cmp::min(max_rewrite_num, file_num);
+                max_rewrite_num = cmp::max(max_rewrite_num, file_num);
                 rewrite_files.push(file_name.to_string());
             }
         }
 
         if log_files.is_empty() {
             // New created pipe log, open the first log file.
-            pipe_log.appender.wl().new_log_file()?;
+            pipe_log.mut_queue(LogQueue::Append).new_log_file()?;
+            pipe_log.mut_queue(LogQueue::Rewrite).new_log_file()?;
             return Ok(pipe_log);
         }
 
@@ -362,42 +369,50 @@ impl PipeLog {
         }
 
         pipe_log
-            .appender
-            .wl()
+            .mut_queue(LogQueue::Append)
             .open_files(log_files, min_file_num, max_file_num)?;
-        pipe_log
-            .rewriter
-            .wl()
-            .open_files(rewrite_files, min_rewrite_num, max_rewrite_num)?;
+        pipe_log.mut_queue(LogQueue::Rewrite).open_files(
+            rewrite_files,
+            min_rewrite_num,
+            max_rewrite_num,
+        )?;
 
         Ok(pipe_log)
     }
 
-    #[cfg(test)]
-    fn active_log_size(&self) -> usize {
-        self.appender.rl().active_log_size
+    fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager> {
+        match queue {
+            LogQueue::Append => self.appender.rl(),
+            LogQueue::Rewrite => self.rewriter.rl(),
+        }
+    }
+
+    fn mut_queue(&self, queue: LogQueue) -> RwLockWriteGuard<LogManager> {
+        match queue {
+            LogQueue::Append => self.appender.wl(),
+            LogQueue::Rewrite => self.rewriter.wl(),
+        }
     }
 
     #[cfg(test)]
-    fn active_log_capacity(&self) -> usize {
-        self.appender.rl().active_log_capacity
+    fn active_log_size(&self, queue: LogQueue) -> usize {
+        self.get_queue(queue).active_log_size
+    }
+
+    #[cfg(test)]
+    fn active_log_capacity(&self, queue: LogQueue) -> usize {
+        self.get_queue(queue).active_log_capacity
     }
 }
 
 impl GenericPipeLog for PipeLog {
     fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let fd = match queue {
-            LogQueue::Append => self.appender.rl().get_fd(file_num)?,
-            LogQueue::Rewrite => self.rewriter.rl().get_fd(file_num)?,
-        };
+        let fd = self.get_queue(queue).get_fd(file_num)?;
         pread_exact(fd.0, offset, len as usize)
     }
 
     fn append(&self, queue: LogQueue, content: &[u8], sync: bool) -> Result<(u64, u64)> {
-        let (file_num, offset, sync, fd) = match queue {
-            LogQueue::Append => self.appender.wl().on_append(content.len(), sync)?,
-            LogQueue::Rewrite => self.rewriter.wl().on_append(content.len(), sync)?,
-        };
+        let (file_num, offset, sync, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
         pwrite_exact(fd.0, offset, content)?;
         if sync {
             fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
@@ -419,8 +434,6 @@ impl GenericPipeLog for PipeLog {
         file_num: &mut u64,
     ) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
-            let bytes = content.len();
-
             // TODO: `write` holds a big lock. Move the lock to log manager.
             // And theoretically, 2 log batches can be written to disks concurrently
             // because we use `pwrite` instead of `write(append)`.
@@ -433,14 +446,14 @@ impl GenericPipeLog for PipeLog {
             if let Some(tracker) = tracker {
                 for item in &batch.items {
                     if let LogItemContent::Entries(ref entries) = item.content {
-                        entries.update_offset_when_needed(cur_file_num, offset);
+                        entries.update_position(LogQueue::Append, cur_file_num, offset);
                         entries.attach_cache_tracker(tracker.clone());
                     }
                 }
             }
 
             *file_num = cur_file_num;
-            return Ok(bytes);
+            return Ok(content.len());
         }
         Ok(0)
     }
@@ -451,7 +464,16 @@ impl GenericPipeLog for PipeLog {
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        // FIXME: implement it.
+        if let Some(content) = batch.encode_to_bytes() {
+            let (cur_file_num, offset) = self.append(LogQueue::Rewrite, &content, sync)?;
+            for item in &batch.items {
+                if let LogItemContent::Entries(ref entries) = item.content {
+                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset);
+                }
+            }
+            *file_num = cur_file_num;
+            return Ok(content.len());
+        }
         Ok(0)
     }
 
@@ -490,6 +512,30 @@ impl GenericPipeLog for PipeLog {
         Ok(vec)
     }
 
+    fn purge_to(&self, queue: LogQueue, file_num: u64) -> Result<usize> {
+        let (mut manager, name_suffix) = match queue {
+            LogQueue::Append => (self.appender.wl(), LOG_SUFFIX),
+            LogQueue::Rewrite => (self.rewriter.wl(), REWRITE_SUFFIX),
+        };
+        let purge_count = manager.purge_to(file_num)?;
+        drop(manager);
+
+        for file_num in (file_num - purge_count as u64)..file_num {
+            let mut path = PathBuf::from(&self.dir);
+            path.push(generate_file_name(file_num, name_suffix));
+            if let Err(e) = fs::remove_file(&path) {
+                warn!("Remove purged log file {:?} fail: {}", path, e);
+            }
+        }
+        Ok(purge_count)
+    }
+
+    fn total_size(&self, queue: LogQueue) -> usize {
+        let manager = self.get_queue(queue);
+        (manager.active_file_num - manager.first_file_num) as usize * self.rotate_size
+            + manager.active_log_size
+    }
+
     fn active_file_num(&self, queue: LogQueue) -> u64 {
         match queue {
             LogQueue::Append => self.appender.rl().active_file_num,
@@ -504,36 +550,17 @@ impl GenericPipeLog for PipeLog {
         }
     }
 
-    fn purge_to(&self, file_num: u64) -> Result<usize> {
-        let purge_count = self.appender.wl().purge_to(file_num)?;
-        for file_num in (file_num - purge_count as u64)..file_num {
-            let mut path = PathBuf::from(&self.dir);
-            path.push(generate_file_name(file_num, LOG_SUFFIX));
-            if let Err(e) = fs::remove_file(&path) {
-                warn!("Remove purged log file {:?} fail: {}", path, e);
-            }
-        }
-        Ok(purge_count)
-    }
-
-    fn total_size(&self) -> usize {
-        let manager = self.appender.rl();
-        (manager.active_file_num - manager.first_file_num) as usize * self.rotate_size
-            + manager.active_log_size
-    }
-
-    fn latest_file_before(&self, size: usize) -> u64 {
-        let cur_size = self.total_size();
+    fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64 {
+        let cur_size = self.total_size(queue);
         if cur_size <= size {
             return 0;
         }
         let count = (cur_size - size) / self.rotate_size;
-        let manager = self.appender.rl();
-        manager.first_file_num + count as u64
+        self.get_queue(queue).first_file_num + count as u64
     }
 
-    fn file_len(&self, file_num: u64) -> u64 {
-        let fd = self.appender.rl().get_fd(file_num).unwrap();
+    fn file_len(&self, queue: LogQueue, file_num: u64) -> u64 {
+        let fd = self.get_queue(queue).get_fd(file_num).unwrap();
         file_len(fd.0).unwrap() as u64
     }
 
@@ -679,78 +706,80 @@ mod tests {
         assert!(extract_file_num(invalid_file_name, REWRITE_NUM_LEN).is_err());
     }
 
-    #[test]
-    fn test_pipe_log() {
+    fn test_pipe_log_impl(queue: LogQueue) {
         let dir = Builder::new().prefix("test_pipe_log").tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
 
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
-        let (mut pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.first_file_num(), INIT_FILE_NUM);
-        assert_eq!(pipe_log.active_file_num(), INIT_FILE_NUM);
+        let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        assert_eq!(pipe_log.first_file_num(queue), INIT_FILE_NUM);
+        assert_eq!(pipe_log.active_file_num(queue), INIT_FILE_NUM);
 
         let header_size = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
         assert_eq!(
-            pipe_log.append(content.as_slice(), false).unwrap(),
+            pipe_log.append(queue, content.as_slice(), false).unwrap(),
             (1, header_size)
         );
-        assert_eq!(pipe_log.active_file_num(), 1);
+        assert_eq!(pipe_log.active_file_num(queue), 1);
 
         assert_eq!(
-            pipe_log.append(content.as_slice(), false).unwrap(),
+            pipe_log.append(queue, content.as_slice(), false).unwrap(),
             (2, header_size)
         );
-        assert_eq!(pipe_log.active_file_num(), 2);
+        assert_eq!(pipe_log.active_file_num(queue), 2);
 
         // purge file 1
-        assert_eq!(pipe_log.purge_to(2).unwrap(), 1);
-        assert_eq!(pipe_log.first_file_num(), 2);
+        assert_eq!(pipe_log.purge_to(queue, 2).unwrap(), 1);
+        assert_eq!(pipe_log.first_file_num(queue), 2);
 
         // cannot purge active file
-        assert!(pipe_log.purge_to(3).is_err());
+        assert!(pipe_log.purge_to(queue, 3).is_err());
 
         // append position
         let s_content = b"short content";
         assert_eq!(
-            pipe_log.append(s_content.as_ref(), false).unwrap(),
+            pipe_log.append(queue, s_content.as_ref(), false).unwrap(),
             (3, header_size)
         );
         assert_eq!(
-            pipe_log.append(s_content.as_ref(), false).unwrap(),
+            pipe_log.append(queue, s_content.as_ref(), false).unwrap(),
             (3, header_size + s_content.len() as u64)
         );
         assert_eq!(
-            pipe_log.active_log_size(),
+            pipe_log.active_log_size(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len() + 2 * s_content.len()
         );
 
         // fread
         let content_readed = pipe_log
-            .fread(3, header_size, s_content.len() as u64)
+            .fread(queue, 3, header_size, s_content.len() as u64)
             .unwrap();
         assert_eq!(content_readed.as_slice(), s_content.as_ref());
 
         // leave only 1 file to truncate
-        assert!(pipe_log.purge_to(3).is_ok());
-        assert_eq!(pipe_log.first_file_num(), 3);
-        assert_eq!(pipe_log.active_file_num(), 3);
+        assert!(pipe_log.purge_to(queue, 3).is_ok());
+        assert_eq!(pipe_log.first_file_num(queue), 3);
+        assert_eq!(pipe_log.active_file_num(queue), 3);
 
         // truncate file
         pipe_log
-            .truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len())
+            .truncate_active_log(queue, Some(FILE_MAGIC_HEADER.len() + VERSION.len()))
             .unwrap();
         assert_eq!(
-            pipe_log.active_log_size(),
+            pipe_log.active_log_size(queue,),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
-        let trunc_big_offset =
-            pipe_log.truncate_active_log(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len());
+        let trunc_big_offset = pipe_log.truncate_active_log(
+            queue,
+            Some(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len()),
+        );
         assert!(trunc_big_offset.is_err());
 
+        /**************************
         // read next file
         let mut header: Vec<u8> = vec![];
         header.extend(FILE_MAGIC_HEADER);
@@ -758,20 +787,31 @@ mod tests {
         let content = pipe_log.read_next_file().unwrap().unwrap();
         assert_eq!(header, content);
         assert!(pipe_log.read_next_file().unwrap().is_none());
+        **************************/
 
         pipe_log.close().unwrap();
 
         // reopen
         let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.active_file_num(), 3);
+        assert_eq!(pipe_log.active_file_num(queue), 3);
         assert_eq!(
-            pipe_log.active_log_size(),
+            pipe_log.active_log_size(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
         assert_eq!(
-            pipe_log.active_log_capacity(),
+            pipe_log.active_log_capacity(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
+    }
+
+    #[test]
+    fn test_pipe_log_append() {
+        test_pipe_log_impl(LogQueue::Append)
+    }
+
+    #[test]
+    fn test_pipe_log_rewrite() {
+        test_pipe_log_impl(LogQueue::Rewrite)
     }
 
     #[test]

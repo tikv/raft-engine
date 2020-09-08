@@ -1,6 +1,6 @@
 use std::io::BufRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::{cmp, fmt, u64};
 
@@ -9,8 +9,8 @@ use crate::cache_evict::{
 };
 use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{
-    self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
-    HEADER_LEN,
+    self, Command, CompressionType, EntryExt, LogBatch, LogItem, LogItemContent, OpType,
+    CHECKSUM_LEN, HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
@@ -155,7 +155,7 @@ where
             let mut buf = content.as_slice();
             if buf.len() < FILE_MAGIC_HEADER.len() || !buf.starts_with(FILE_MAGIC_HEADER) {
                 if file_num != active_file_num {
-                    error!("Raft log header is corrupted at {:?}.{}", queue, file_num);
+                    warn!("Raft log header is corrupted at {:?}.{}", queue, file_num);
                     return Err(box_err!("Raft log file header is corrupted"));
                 } else {
                     pipe_log.truncate_active_log(queue, Some(0)).unwrap();
@@ -190,21 +190,17 @@ where
                         break;
                     }
                     Err(e) => {
+                        warn!(
+                            "Raft log content is corrupted at {:?}.{}:{}, error: {}",
+                            queue, file_num, offset, e
+                        );
                         // There may be a pre-allocated space at the tail of the active log.
                         if file_num == active_file_num
                             && recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
                         {
-                            warn!(
-                                "Raft log content is corrupted at {:?}.{}:{}, error: {}",
-                                queue, file_num, offset, e
-                            );
                             pipe_log.truncate_active_log(queue, Some(offset as usize))?;
                             break;
                         }
-                        error!(
-                            "Raft log content is corrupted at {:?}.{}:{}, error: {}",
-                            queue, file_num, offset, e
-                        );
                         return Err(box_err!("Raft log content is corrupted"));
                     }
                 }
@@ -215,27 +211,47 @@ where
     }
 
     fn apply_log_item_to_memtable(
-        content: LogItemContent<E>,
-        memtable: &mut MemTable<E, W>,
+        memtables: &MemTableAccessor<E, W>,
+        item: LogItem<E>,
         file_num: u64,
     ) {
-        match content {
+        let memtable = memtables.get_or_insert(item.raft_group_id);
+        match item.content {
             LogItemContent::Entries(entries_to_add) => {
-                memtable.append(
-                    entries_to_add.entries,
-                    entries_to_add.entries_index.into_inner(),
-                );
+                let entries = entries_to_add.entries;
+                let entries_index = entries_to_add.entries_index.into_inner();
+                memtable.wl().append(entries, entries_index);
             }
             LogItemContent::Command(Command::Clean) => {
-                memtable.remove();
+                memtable.wl().remove();
             }
             LogItemContent::Command(Command::Compact { index }) => {
-                memtable.compact_to(index);
+                memtable.wl().compact_to(index);
             }
             LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => memtable.put(kv.key, kv.value.unwrap(), file_num),
-                OpType::Del => memtable.delete(kv.key.as_slice()),
+                OpType::Put => memtable.wl().put(kv.key, kv.value.unwrap(), file_num),
+                OpType::Del => memtable.wl().delete(kv.key.as_slice()),
             },
+        }
+    }
+
+    fn rewrite_log_item_to_memtable(
+        memtables: &MemTableAccessor<E, W>,
+        item: LogItem<E>,
+        file_num: u64,
+        latest_rewrite: u64,
+    ) {
+        let memtable = memtables.get_or_insert(item.raft_group_id);
+        match item.content {
+            LogItemContent::Entries(entries_to_add) => {
+                let entries_index = entries_to_add.entries_index.into_inner();
+                memtable.wl().rewrite(entries_index, latest_rewrite);
+            }
+            LogItemContent::Kv(kv) => match kv.op_type {
+                OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
         }
     }
 
@@ -245,64 +261,83 @@ where
         file_num: u64,
     ) {
         for item in log_batch.items {
-            let m = memtables.get_or_insert(item.raft_group_id);
-            Self::apply_log_item_to_memtable(item.content, &mut *m.wl(), file_num);
+            Self::apply_log_item_to_memtable(memtables, item, file_num);
         }
     }
 
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
     fn latest_inactive_file_num(&self) -> (u64, u64) {
-        let total_size = self.pipe_log.total_size() as f64;
+        let queue = LogQueue::Append;
+        let total_size = self.pipe_log.total_size(queue) as f64;
         let rewrite_limit = (total_size * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
         let compact_limit = (total_size * (1.0 - FORCE_COMPACT_RATIO)) as usize;
-        let latest_needs_rewrite = self.pipe_log.latest_file_before(rewrite_limit);
-        let latest_needs_compact = self.pipe_log.latest_file_before(compact_limit);
+        let latest_needs_rewrite = self.pipe_log.latest_file_before(queue, rewrite_limit);
+        let latest_needs_compact = self.pipe_log.latest_file_before(queue, compact_limit);
         (latest_needs_rewrite, latest_needs_compact)
     }
 
     fn regions_rewrite_or_force_compact(
         &self,
-        rewrite_latest_file_num: u64,
-        compact_latest_file_num: u64,
+        latest_rewrite: u64,
+        latest_compact: u64,
         will_force_compact: &mut Vec<u64>,
     ) {
-        assert!(compact_latest_file_num <= rewrite_latest_file_num);
+        assert!(latest_compact <= latest_rewrite);
         let memtables = self.memtables.collect(|t| {
-            let min_file_num = t.min_file_num().unwrap_or(u64::MAX);
-            if min_file_num <= compact_latest_file_num
-                && t.entries_count() > REWRITE_ENTRY_COUNT_THRESHOLD
-            {
+            let min_file_num = t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX);
+            let count = t.entries_count();
+            if min_file_num <= latest_compact && count > REWRITE_ENTRY_COUNT_THRESHOLD {
                 will_force_compact.push(t.region_id());
                 return false;
             }
-            min_file_num <= rewrite_latest_file_num
+            min_file_num <= latest_rewrite && count <= REWRITE_ENTRY_COUNT_THRESHOLD
         });
 
-        let mut cache = HashMap::default();
-        for m in memtables {
-            let memtable = m.wl();
-            let region_id = memtable.region_id();
+        for memtable in memtables {
+            let region_id = memtable.rl().region_id();
 
-            let entries_count = memtable.entries_count();
-            if entries_count > REWRITE_ENTRY_COUNT_THRESHOLD {
-                continue;
-            }
-
-            // TODO: maybe it's not necessary to rewrite all logs for a region.
-            let mut ents = Vec::with_capacity(entries_count);
-            let mut ents_idx = Vec::with_capacity(entries_count);
-            memtable.fetch_all(&mut ents, &mut ents_idx);
-            let mut all_ents = Vec::with_capacity(entries_count);
-            for ei in ents_idx {
-                let e = self.read_entry_from_file(&ei, Some(&mut cache)).unwrap();
-                all_ents.push(e);
-            }
-            all_ents.extend(ents.into_iter());
+            let entries_count = memtable.rl().entries_count();
+            let mut entries = Vec::with_capacity(entries_count);
+            self.fetch_entries(
+                &memtable,
+                &mut entries,
+                entries_count,
+                |t, ents, ents_idx| t.fetch_rewrite_entries(latest_rewrite, ents, ents_idx),
+            )
+            .unwrap();
 
             let mut kvs = Vec::new();
-            memtable.fetch_all_kvs(&mut kvs);
-            self.rewrite(region_id, all_ents, kvs, memtable).unwrap();
+            memtable.rl().fetch_rewrite_kvs(latest_rewrite, &mut kvs);
+
+            let mut log_batch = LogBatch::<E, W>::new();
+            log_batch.add_entries(region_id, entries);
+            for (k, v) in kvs {
+                log_batch.put(region_id, k, v);
+            }
+
+            self.rewrite_impl(&mut log_batch, latest_rewrite).unwrap();
         }
+    }
+
+    fn fetch_entries<F>(
+        &self,
+        memtable: &RwLock<MemTable<E, W>>,
+        vec: &mut Vec<E>,
+        count: usize,
+        mut fetch: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()>,
+    {
+        let mut ents = Vec::with_capacity(count);
+        let mut ents_idx = Vec::with_capacity(count);
+        fetch(&*memtable.rl(), &mut ents, &mut ents_idx)?;
+
+        for ei in ents_idx {
+            vec.push(self.read_entry_from_file(&ei)?);
+        }
+        vec.extend(ents.into_iter());
+        Ok(())
     }
 
     // Write a batch needs 3 steps:
@@ -315,71 +350,28 @@ where
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
     fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        let mut rafts = Vec::with_capacity(log_batch.items.len());
-        for raft in log_batch.items.iter().map(|item| item.raft_group_id) {
-            rafts.push(raft);
-        }
-        rafts.sort();
-        rafts.dedup();
-
-        let mut memtables = Vec::with_capacity(rafts.len());
-        let mut locked = Vec::with_capacity(rafts.len());
-        for raft in &rafts {
-            memtables.push(self.memtables.get_or_insert(*raft));
-            let x = memtables.last_mut().unwrap().wl();
-            unsafe {
-                // Unsafe block because `locked` has mutable references to `memtables`.
-                let x: RwLockWriteGuard<'static, MemTable<E, W>> = std::mem::transmute(x);
-                locked.push(x);
-            }
-        }
-
         let mut file_num = 0;
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             for item in log_batch.items.drain(..) {
-                let offset = rafts.binary_search(&item.raft_group_id).unwrap();
-                let m = &mut locked[offset];
-                Self::apply_log_item_to_memtable(item.content, &mut *m, file_num);
-            }
-        }
-        for memtable in locked {
-            if memtable.uninitialized() {
-                self.memtables.remove(memtable.region_id());
+                Self::apply_log_item_to_memtable(&self.memtables, item, file_num);
             }
         }
         Ok(bytes)
     }
 
-    fn rewrite(
-        &self,
-        raft_group_id: u64,
-        entries: Vec<E>,
-        kvs: Vec<(Vec<u8>, Vec<u8>)>,
-        mut m: RwLockWriteGuard<MemTable<E, W>>,
-    ) -> Result<()> {
-        let mut log_batch = LogBatch::<E, W>::new();
-        log_batch.add_command(raft_group_id, Command::Clean);
-        log_batch.add_entries(raft_group_id, entries);
-        for (k, v) in kvs {
-            log_batch.put(raft_group_id, k, v);
-        }
-
+    fn rewrite_impl(&self, log_batch: &mut LogBatch<E, W>, latest_rewrite: u64) -> Result<()> {
         let mut file_num = 0;
-        self.pipe_log.write(&log_batch, false, &mut file_num)?;
+        self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
         if file_num > 0 {
-            for item in log_batch.items {
-                Self::apply_log_item_to_memtable(item.content, &mut *m, file_num);
+            for item in log_batch.items.drain(..) {
+                Self::rewrite_log_item_to_memtable(&self.memtables, item, file_num, latest_rewrite);
             }
         }
         Ok(())
     }
 
-    fn read_entry_from_file(
-        &self,
-        entry_index: &EntryIndex,
-        _: Option<&mut HashMap<(u64, u64), Vec<u8>>>,
-    ) -> Result<E> {
+    fn read_entry_from_file(&self, entry_index: &EntryIndex) -> Result<E> {
         let queue = entry_index.queue;
         let file_num = entry_index.file_num;
         let base_offset = entry_index.base_offset;
@@ -416,7 +408,7 @@ where
     }
 
     fn needs_purge_log_files(&self) -> bool {
-        let total_size = self.pipe_log.total_size();
+        let total_size = self.pipe_log.total_size(LogQueue::Append);
         let purge_threshold = self.cfg.purge_threshold.0 as usize;
         total_size > purge_threshold
     }
@@ -596,7 +588,7 @@ where
         };
 
         // Read from file
-        let entry = self.read_entry_from_file(&entry_idx, None)?;
+        let entry = self.read_entry_from_file(&entry_idx)?;
         Ok(Some(entry))
     }
 
@@ -617,9 +609,9 @@ where
         );
 
         let min_file_num = self.memtables.fold(u64::MAX, |min, t| {
-            cmp::min(min, t.min_file_num().unwrap_or(u64::MAX))
+            cmp::min(min, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX))
         });
-        let purged = self.pipe_log.purge_to(min_file_num)?;
+        let purged = self.pipe_log.purge_to(LogQueue::Append, min_file_num)?;
         info!("purged {} expired log files", purged);
 
         Ok(will_force_compact)
@@ -635,17 +627,14 @@ where
         vec: &mut Vec<E>,
     ) -> Result<usize> {
         if let Some(memtable) = self.memtables.get(region_id) {
-            let memtable = memtable.rl();
-            let mut entries = Vec::with_capacity((end - begin) as usize);
-            let mut entries_idx = Vec::with_capacity((end - begin) as usize);
-            memtable.fetch_entries_to(begin, end, max_size, &mut entries, &mut entries_idx)?;
-            let count = entries.len() + entries_idx.len();
-            for idx in &entries_idx {
-                let e = self.read_entry_from_file(idx, None)?;
-                vec.push(e);
-            }
-            vec.extend(entries.into_iter());
-            return Ok(count);
+            let old_len = vec.len();
+            self.fetch_entries(
+                &memtable,
+                vec,
+                (end - begin) as usize,
+                |t, ents, ents_idx| t.fetch_entries_to(begin, end, max_size, ents, ents_idx),
+            )?;
+            return Ok(vec.len() - old_len);
         }
         Ok(0)
     }
@@ -719,7 +708,7 @@ mod tests {
         }
     }
 
-    type RaftLogEngine = Engine<Entry, Entry>;
+    type RaftLogEngine = Engine<Entry, Entry, PipeLog>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
@@ -730,6 +719,13 @@ mod tests {
 
     fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
         engine.append(raft, vec![entry.clone()]).unwrap();
+        let last_index = format!("{}", entry.index).into_bytes();
+        engine.put(raft, b"last_index", &last_index).unwrap();
+    }
+
+    fn last_index(engine: &RaftLogEngine, raft: u64) -> u64 {
+        let s = engine.get(raft, b"last_index").unwrap().unwrap();
+        std::str::from_utf8(&s).unwrap().parse().unwrap()
     }
 
     #[test]
@@ -745,7 +741,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = Engine::<Entry, Entry>::new(cfg.clone());
+            let engine = RaftLogEngine::new(cfg.clone());
             let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size]);
             for i in 10..20 {
@@ -768,7 +764,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = Engine::<Entry, Entry>::new(cfg.clone());
+            let engine = RaftLogEngine::new(cfg.clone());
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -792,7 +788,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = Engine::<Entry, Entry>::new(cfg.clone());
+        let engine = RaftLogEngine::new(cfg.clone());
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         for i in 0..100 {
@@ -817,9 +813,9 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
 
-        let old_min_file_num = engine.pipe_log.first_file_num();
+        let old_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_num = engine.pipe_log.first_file_num();
+        let new_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         // Some entries are rewritten.
         assert!(new_min_file_num > old_min_file_num);
         // No regions need to be force compacted because the threshold is not reached.
@@ -831,9 +827,9 @@ mod tests {
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.needs_purge_log_files());
-        let old_min_file_num = engine.pipe_log.first_file_num();
+        let old_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_num = engine.pipe_log.first_file_num();
+        let new_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         // No entries are rewritten.
         assert_eq!(new_min_file_num, old_min_file_num);
         // The region needs to be force compacted because the threshold is reached.
@@ -854,7 +850,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = Engine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = RaftLogEngine::new_impl(cfg.clone(), 512 * 1024).unwrap();
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -872,7 +868,7 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = Engine::<Entry, Entry>::new_impl(cfg.clone(), 512 * 1024);
+        let engine = RaftLogEngine::new_impl(cfg.clone(), 512 * 1024).unwrap();
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
@@ -881,13 +877,60 @@ mod tests {
             engine.compact_to(raft_id, 8);
         }
         let ret = engine.purge_expired_files().unwrap();
-        if !ret.is_empty() {
-            for x in ret.iter() {
-                println!("region: {}", *x);
-            }
-        }
         assert!(ret.is_empty());
         let cache_size = engine.cache_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_rewrite_and_recover() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_rewrite_and_recover")
+            .tempdir()
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.target_file_size = ReadableSize::kb(5);
+        cfg.purge_threshold = ReadableSize::kb(80);
+        let engine = RaftLogEngine::new(cfg.clone());
+
+        // Put 100 entries into 10 regions.
+        let mut entry = Entry::new();
+        entry.set_data(vec![b'x'; 1024]);
+        for i in 1..=10 {
+            for j in 1..=10 {
+                entry.set_index(i);
+                append_log(&engine, j, &entry);
+            }
+        }
+
+        // The engine needs purge, and all old entries should be rewritten.
+        assert!(engine.needs_purge_log_files());
+        assert!(engine.purge_expired_files().unwrap().is_empty());
+        assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
+
+        let active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
+        let active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
+        assert!(active_num > 1 || active_len > 59); // The rewrite queue isn't empty.
+
+        for i in 1..=10 {
+            for j in 1..=10 {
+                let e = engine.get_entry(j, i).unwrap().unwrap();
+                assert_eq!(e.get_data(), entry.get_data());
+                assert_eq!(last_index(&engine, j), 10);
+            }
+        }
+
+        // Recover with rewrite queue and append queue.
+        drop(engine);
+        let engine = RaftLogEngine::new(cfg.clone());
+        for i in 1..=10 {
+            for j in 1..=10 {
+                let e = engine.get_entry(j, i).unwrap().unwrap();
+                assert_eq!(e.get_data(), entry.get_data());
+                assert_eq!(last_index(&engine, j), 10);
+            }
+        }
     }
 }

@@ -188,7 +188,7 @@ where
 
             let file_num = chunk.file_num;
             let read_len = if chunk.end_offset == u64::MAX {
-                self.pipe_log.file_len(file_num) - chunk.base_offset
+                self.pipe_log.file_len(LogQueue::Append, file_num) - chunk.base_offset
             } else {
                 chunk.end_offset - chunk.base_offset
             };
