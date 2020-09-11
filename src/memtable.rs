@@ -139,6 +139,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             return;
         };
         self.entries_index.truncate(conflict);
+        self.rewrite_count = cmp::min(self.rewrite_count, self.entries_index.len());
     }
 
     fn shrink_entries_cache(&mut self) {
@@ -185,6 +186,18 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let first_index_to_add = W::index(&entries[0]);
         self.cut_entries_cache(first_index_to_add);
         self.cut_entries_index(first_index_to_add);
+
+        if let Some((queue, index)) = self.entries_index.back().map(|e| (e.queue, e.index)) {
+            if first_index_to_add > index + 1 {
+                assert_eq!(
+                    queue,
+                    LogQueue::Rewrite,
+                    "memtable {} has a hole",
+                    self.region_id
+                );
+                self.compact_to(index + 1);
+            }
+        }
 
         let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len as usize);
         self.entries_index.extend(entries_index);
@@ -247,6 +260,10 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
     }
 
+    pub fn put_rewrite(&mut self, key: Vec<u8>, value: Vec<u8>, file_num: u64) {
+        self.kvs.insert(key, (value, LogQueue::Rewrite, file_num));
+    }
+
     pub fn delete(&mut self, key: &[u8]) {
         self.kvs.remove(key);
     }
@@ -255,10 +272,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
-    /// # Panics
-    ///
-    /// This method will panic if `idx` is greater than `last_idx + 1`.
-    pub fn compact_to(&mut self, idx: u64) -> u64 {
+    pub fn compact_to(&mut self, mut idx: u64) -> u64 {
         self.compact_cache_to(idx);
 
         let first_idx = match self.entries_index.front() {
@@ -266,25 +280,23 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             _ => return 0,
         };
         let last_idx = self.entries_index.back().unwrap().index;
-        assert!(idx <= last_idx + 1);
-        let drain_end = (idx - first_idx) as usize;
+        idx = cmp::min(last_idx + 1, idx);
 
+        let drain_end = (idx - first_idx) as usize;
         self.entries_index.drain(..drain_end);
         self.shrink_entries_index();
+        self.rewrite_count -= cmp::min(drain_end, self.rewrite_count);
         drain_end as u64
     }
 
-    /// # Panics
-    ///
-    /// This method will panic if `idx` is greater than `last_idx + 1`.
-    pub fn compact_cache_to(&mut self, idx: u64) {
+    pub fn compact_cache_to(&mut self, mut idx: u64) {
         let first_idx = match self.entries_cache.front() {
             Some(e) if W::index(e) < idx => W::index(e),
             _ => return,
         };
         let last_index = W::index(self.entries_cache.back().unwrap());
-        assert!(idx <= last_index + 1);
         assert!(last_index == self.entries_index.back().unwrap().index);
+        idx = cmp::min(last_index + 1, idx);
 
         let distance = self.cache_distance();
         let drain_end = (idx - first_idx) as usize;
@@ -999,6 +1011,32 @@ mod tests {
         assert_eq!(memtable.max_file_num(LogQueue::Rewrite).unwrap(), 102);
         assert_eq!(memtable.rewrite_count, 25);
         assert_eq!(memtable.get(b"kk2"), Some(b"vv4".to_vec()));
+
+        // Rewrite after compact.
+        memtable.append(generate_ents(36, 50), generate_ents_index(36, 50, 6));
+        memtable.compact_to(30);
+        assert_eq!(memtable.rewrite_count, 5);
+        memtable.compact_to(40);
+        assert_eq!(memtable.rewrite_count, 0);
+
+        assert_eq!(memtable.cache_size, 10);
+        assert_eq!(memtable.entries_index.back().unwrap().index, 49);
+        memtable.rewrite(generate_rewrite_ents_index(30, 36, 103), 5);
+        memtable.rewrite_key(b"kk2".to_vec(), 5, 103);
+        assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 6);
+        assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 6);
+        assert_eq!(memtable.min_file_num(LogQueue::Rewrite).unwrap(), 100);
+        assert_eq!(memtable.max_file_num(LogQueue::Rewrite).unwrap(), 103);
+        assert_eq!(memtable.rewrite_count, 0);
+
+        // Rewrite after cut.
+        memtable.append(generate_ents(50, 55), generate_ents_index(50, 55, 7));
+        memtable.rewrite(generate_rewrite_ents_index(30, 50, 104), 6);
+        assert_eq!(memtable.rewrite_count, 10);
+        memtable.append(generate_ents(45, 50), generate_ents_index(45, 50, 7));
+        assert_eq!(memtable.rewrite_count, 5);
+        memtable.append(generate_ents(40, 50), generate_ents_index(40, 50, 7));
+        assert_eq!(memtable.rewrite_count, 0);
     }
 
     fn generate_ents(begin_idx: u64, end_idx: u64) -> Vec<Entry> {

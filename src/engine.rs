@@ -182,7 +182,7 @@ where
                                 }
                             }
                         }
-                        Self::apply_to_memtable(memtables, log_batch, file_num);
+                        Self::apply_to_memtable(memtables, log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
                     Ok(None) => {
@@ -213,13 +213,18 @@ where
     fn apply_log_item_to_memtable(
         memtables: &MemTableAccessor<E, W>,
         item: LogItem<E>,
+        queue: LogQueue,
         file_num: u64,
     ) {
         let memtable = memtables.get_or_insert(item.raft_group_id);
         match item.content {
             LogItemContent::Entries(entries_to_add) => {
                 let entries = entries_to_add.entries;
-                let entries_index = entries_to_add.entries_index.into_inner();
+                let mut entries_index = entries_to_add.entries_index.into_inner();
+                if queue == LogQueue::Rewrite {
+                    // By default the queue is for appending.
+                    entries_index.iter_mut().for_each(|ei| ei.queue = queue);
+                }
                 memtable.wl().append(entries, entries_index);
             }
             LogItemContent::Command(Command::Clean) => {
@@ -229,7 +234,13 @@ where
                 memtable.wl().compact_to(index);
             }
             LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => memtable.wl().put(kv.key, kv.value.unwrap(), file_num),
+                OpType::Put => {
+                    let (key, value) = (kv.key, kv.value.unwrap());
+                    match queue {
+                        LogQueue::Append => memtable.wl().put(key, value, file_num),
+                        LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
+                    }
+                }
                 OpType::Del => memtable.wl().delete(kv.key.as_slice()),
             },
         }
@@ -258,10 +269,11 @@ where
     fn apply_to_memtable(
         memtables: &MemTableAccessor<E, W>,
         log_batch: LogBatch<E, W>,
+        queue: LogQueue,
         file_num: u64,
     ) {
         for item in log_batch.items {
-            Self::apply_log_item_to_memtable(memtables, item, file_num);
+            Self::apply_log_item_to_memtable(memtables, item, queue, file_num);
         }
     }
 
@@ -350,11 +362,12 @@ where
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
     fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
+        let queue = LogQueue::Append;
         let mut file_num = 0;
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             for item in log_batch.items.drain(..) {
-                Self::apply_log_item_to_memtable(&self.memtables, item, file_num);
+                Self::apply_log_item_to_memtable(&self.memtables, item, queue, file_num);
             }
         }
         Ok(bytes)
