@@ -523,20 +523,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         count
     }
 
-    pub fn remove(&mut self) {
-        // All raft logs should be treated as compacted.
-        self.entries_index.clear();
-        self.kvs.clear();
-
-        self.entries_cache.clear();
-        self.cache_stats.sub_mem_change(self.cache_size as usize);
-        self.cache_size = 0;
-    }
-
-    pub fn uninitialized(&self) -> bool {
-        self.entries_index.is_empty() && self.kvs.is_empty()
-    }
-
     #[cfg(test)]
     fn entries_size(&self) -> usize {
         self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
@@ -553,6 +539,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
             _ => return,
         }
+    }
+}
+
+impl<E: Message, W: EntryExt<E>> Drop for MemTable<E, W> {
+    fn drop(&mut self) {
+        // Drop `cache_tracker`s and sub mem change.
+        self.entries_index.clear();
+        self.cache_stats.sub_mem_change(self.cache_size as usize);
     }
 }
 

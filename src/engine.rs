@@ -223,7 +223,7 @@ where
                 memtable.wl().append(entries, entries_index);
             }
             LogItemContent::Command(Command::Clean) => {
-                memtable.wl().remove();
+                memtables.remove(item.raft_group_id);
             }
             LogItemContent::Command(Command::Compact { index }) => {
                 memtable.wl().compact_to(index);
@@ -726,6 +726,29 @@ mod tests {
     fn last_index(engine: &RaftLogEngine, raft: u64) -> u64 {
         let s = engine.get(raft, b"last_index").unwrap().unwrap();
         std::str::from_utf8(&s).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn test_clean_memtable() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_clean_memtable")
+            .tempdir()
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.target_file_size = ReadableSize::kb(5);
+        cfg.purge_threshold = ReadableSize::kb(80);
+        let engine = RaftLogEngine::new(cfg.clone());
+
+        // Put 100 entries into 10 regions.
+        append_log(&engine, 1, &Entry::new());
+        assert!(engine.memtables.get(1).is_some());
+
+        let mut log_batch = LogBatch::new();
+        log_batch.clean_region(1);
+        engine.write(&mut log_batch, false).unwrap();
+        assert!(engine.memtables.get(1).is_none());
     }
 
     #[test]
