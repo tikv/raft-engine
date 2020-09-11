@@ -222,14 +222,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let back = self.entries_index.back().unwrap().index;
         let len = (cmp::min(last, back) - entries_index[distance].index + 1) as usize;
 
-        for j in distance..(distance + len) {
+        for ei in entries_index.iter().skip(distance).take(len) {
             if self.entries_index[self.rewrite_count].file_num > latest_rewrite {
                 // Some entries are overwritten by new appends.
                 break;
             }
-            self.entries_index[self.rewrite_count].queue = entries_index[j].queue;
-            self.entries_index[self.rewrite_count].file_num = entries_index[j].file_num;
-            self.entries_index[self.rewrite_count].base_offset = entries_index[j].base_offset;
+            self.entries_index[self.rewrite_count].queue = ei.queue;
+            self.entries_index[self.rewrite_count].file_num = ei.file_num;
+            self.entries_index[self.rewrite_count].base_offset = ei.base_offset;
             self.rewrite_count += 1;
         }
     }
@@ -417,14 +417,12 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let begin = self
             .entries_index
             .iter()
-            .skip_while(|e| e.queue == LogQueue::Rewrite)
-            .next();
+            .find(|e| e.queue == LogQueue::Append);
         let end = self
             .entries_index
             .iter()
             .rev()
-            .skip_while(|e| e.file_num > latest_rewrite)
-            .next();
+            .find(|e| e.file_num <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
             self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx)
         } else {

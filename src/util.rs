@@ -281,8 +281,8 @@ impl<T: Clone> Worker<T> {
     }
 
     pub fn stop(&mut self) {
-        let _ = self.scheduler.sender.send(None);
         if let Some(handle) = self.handle.take() {
+            let _ = self.scheduler.sender.send(None);
             return handle.join().unwrap();
         }
     }
