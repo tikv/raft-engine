@@ -394,6 +394,13 @@ impl PipeLog {
         }
     }
 
+    fn get_name_suffix(&self, queue: LogQueue) -> &'static str {
+        match queue {
+            LogQueue::Append => LOG_SUFFIX,
+            LogQueue::Rewrite => REWRITE_SUFFIX,
+        }
+    }
+
     #[cfg(test)]
     fn active_log_size(&self, queue: LogQueue) -> usize {
         self.get_queue(queue).active_log_size
@@ -478,31 +485,19 @@ impl GenericPipeLog for PipeLog {
     }
 
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
-        match queue {
-            LogQueue::Append => self.appender.wl().truncate_active_log(offset),
-            LogQueue::Rewrite => self.rewriter.wl().truncate_active_log(offset),
-        }
+        self.mut_queue(queue).truncate_active_log(offset)
     }
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
-        let manager = match queue {
-            LogQueue::Append => self.appender.rl(),
-            LogQueue::Rewrite => self.rewriter.rl(),
-        };
-        if let Some(fd) = manager.get_active_fd() {
+        if let Some(fd) = self.get_queue(queue).get_active_fd() {
             fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
         }
         Ok(())
     }
 
     fn read_whole_file(&self, queue: LogQueue, file_num: u64) -> Result<Vec<u8>> {
-        let name_suffix = match queue {
-            LogQueue::Append => LOG_SUFFIX,
-            LogQueue::Rewrite => REWRITE_SUFFIX,
-        };
-
         let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(file_num, name_suffix));
+        path.push(generate_file_name(file_num, self.get_name_suffix(queue)));
         let meta = fs::metadata(&path)?;
         let mut vec = Vec::with_capacity(meta.len() as usize);
 
@@ -537,17 +532,11 @@ impl GenericPipeLog for PipeLog {
     }
 
     fn active_file_num(&self, queue: LogQueue) -> u64 {
-        match queue {
-            LogQueue::Append => self.appender.rl().active_file_num,
-            LogQueue::Rewrite => self.rewriter.rl().active_file_num,
-        }
+        self.get_queue(queue).active_file_num
     }
 
     fn first_file_num(&self, queue: LogQueue) -> u64 {
-        match queue {
-            LogQueue::Append => self.appender.rl().first_file_num,
-            LogQueue::Rewrite => self.rewriter.rl().first_file_num,
-        }
+        self.get_queue(queue).first_file_num
     }
 
     fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64 {
