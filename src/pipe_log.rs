@@ -43,7 +43,12 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
 
     /// Append some bytes to the given queue.
-    fn append(&self, queue: LogQueue, content: &[u8], sync: bool) -> Result<(u64, u64)>;
+    fn append(
+        &self,
+        queue: LogQueue,
+        content: &[u8],
+        sync: &mut bool,
+    ) -> Result<(u64, u64, Arc<LogFd>)>;
 
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
@@ -93,7 +98,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
 }
 
-struct LogFd(RawFd);
+pub struct LogFd(RawFd);
 
 impl LogFd {
     fn close(&self) -> Result<()> {
@@ -239,11 +244,7 @@ impl LogManager {
         self.active_log_size - self.last_sync_size >= self.bytes_per_sync
     }
 
-    fn on_append(
-        &mut self,
-        content_len: usize,
-        mut sync: bool,
-    ) -> Result<(u64, u64, bool, Arc<LogFd>)> {
+    fn on_append(&mut self, content_len: usize, sync: &mut bool) -> Result<(u64, u64, Arc<LogFd>)> {
         if self.active_log_size >= self.rotate_size {
             self.new_log_file()?;
         }
@@ -269,11 +270,11 @@ impl LogManager {
             self.active_log_capacity += alloc_size;
         }
 
-        if sync || self.reach_sync_limit() {
+        if *sync || self.reach_sync_limit() {
             self.last_sync_size = self.active_log_size;
-            sync = true;
+            *sync = true;
         }
-        Ok((active_file_num, active_log_size as u64, sync, fd))
+        Ok((active_file_num, active_log_size as u64, fd))
     }
 }
 
@@ -418,13 +419,15 @@ impl GenericPipeLog for PipeLog {
         pread_exact(fd.0, offset, len as usize)
     }
 
-    fn append(&self, queue: LogQueue, content: &[u8], sync: bool) -> Result<(u64, u64)> {
-        let (file_num, offset, sync, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+    fn append(
+        &self,
+        queue: LogQueue,
+        content: &[u8],
+        sync: &mut bool,
+    ) -> Result<(u64, u64, Arc<LogFd>)> {
+        let (file_num, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
         pwrite_exact(fd.0, offset, content)?;
-        if sync {
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
-        }
-        Ok((file_num, offset))
+        Ok((file_num, offset, fd))
     }
 
     fn close(&self) -> Result<()> {
@@ -437,18 +440,20 @@ impl GenericPipeLog for PipeLog {
     fn write<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
-        sync: bool,
+        mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
-            // TODO: `write` holds a big lock. Move the lock to log manager.
-            // And theoretically, 2 log batches can be written to disks concurrently
-            // because we use `pwrite` instead of `write(append)`.
-            let mut cache_submitor = self.cache_submitor.lock().unwrap();
-            let (cur_file_num, offset) = self.append(LogQueue::Append, &content, sync)?;
             let entries_size = batch.entries_size();
+
+            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
+            let mut cache_submitor = self.cache_submitor.lock().unwrap();
+            let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
             let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
             drop(cache_submitor);
+            if sync {
+                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            }
 
             if let Some(tracker) = tracker {
                 for item in &batch.items {
@@ -468,11 +473,14 @@ impl GenericPipeLog for PipeLog {
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
-        sync: bool,
+        mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
-            let (cur_file_num, offset) = self.append(LogQueue::Rewrite, &content, sync)?;
+            let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
+            if sync {
+                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            }
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
                     entries.update_position(LogQueue::Rewrite, cur_file_num, offset);
