@@ -754,7 +754,6 @@ mod tests {
         cfg.purge_threshold = ReadableSize::kb(80);
         let engine = RaftLogEngine::new(cfg.clone());
 
-        // Put 100 entries into 10 regions.
         append_log(&engine, 1, &Entry::new());
         assert!(engine.memtables.get(1).is_some());
 

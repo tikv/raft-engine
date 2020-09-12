@@ -523,11 +523,12 @@ impl GenericPipeLog for PipeLog {
         let purge_count = manager.purge_to(file_num)?;
         drop(manager);
 
-        for file_num in (file_num - purge_count as u64)..file_num {
+        for cur_file_num in (file_num - purge_count as u64)..file_num {
             let mut path = PathBuf::from(&self.dir);
-            path.push(generate_file_name(file_num, name_suffix));
+            path.push(generate_file_name(cur_file_num, name_suffix));
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
+                return Ok((cur_file_num + purge_count as u64 - file_num) as usize);
             }
         }
         Ok(purge_count)
