@@ -718,16 +718,14 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        assert_eq!(
-            pipe_log.append(queue, content.as_slice(), false).unwrap(),
-            (1, header_size)
-        );
+        let (file_num, offset, _) = pipe_log.append(queue, &content, &mut false).unwrap();
+        assert_eq!(file_num, 1);
+        assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_num(queue), 1);
 
-        assert_eq!(
-            pipe_log.append(queue, content.as_slice(), false).unwrap(),
-            (2, header_size)
-        );
+        let (file_num, offset, _) = pipe_log.append(queue, &content, &mut false).unwrap();
+        assert_eq!(file_num, 2);
+        assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_num(queue), 2);
 
         // purge file 1
@@ -738,15 +736,15 @@ mod tests {
         assert!(pipe_log.purge_to(queue, 3).is_err());
 
         // append position
-        let s_content = b"short content";
-        assert_eq!(
-            pipe_log.append(queue, s_content.as_ref(), false).unwrap(),
-            (3, header_size)
-        );
-        assert_eq!(
-            pipe_log.append(queue, s_content.as_ref(), false).unwrap(),
-            (3, header_size + s_content.len() as u64)
-        );
+        let s_content = b"short content".to_vec();
+        let (file_num, offset, _) = pipe_log.append(queue, &s_content, &mut false).unwrap();
+        assert_eq!(file_num, 3);
+        assert_eq!(offset, header_size);
+
+        let (file_num, offset, _) = pipe_log.append(queue, &s_content, &mut false).unwrap();
+        assert_eq!(file_num, 3);
+        assert_eq!(offset, header_size + s_content.len() as u64);
+
         assert_eq!(
             pipe_log.active_log_size(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len() + 2 * s_content.len()
@@ -756,7 +754,7 @@ mod tests {
         let content_readed = pipe_log
             .fread(queue, 3, header_size, s_content.len() as u64)
             .unwrap();
-        assert_eq!(content_readed.as_slice(), s_content.as_ref());
+        assert_eq!(content_readed, s_content);
 
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(queue, 3).is_ok());
