@@ -1,16 +1,5 @@
 #![feature(shrink_to)]
 
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate quick_error;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate prometheus;
-
 #[macro_export]
 macro_rules! box_err {
     ($e:expr) => ({

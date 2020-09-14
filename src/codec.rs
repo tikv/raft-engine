@@ -1,29 +1,23 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
 use std::io::{self, ErrorKind, Write};
 use std::mem;
 
+use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
+use thiserror::Error;
+
 pub type BytesSlice<'a> = &'a [u8];
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum Error {
-        Io(err: io::Error) {
-            from()
-            cause(err)
-            display("{}", err)
-        }
-        KeyLength {
-            display("bad format key(length)")
-        }
-        KeyPadding {
-            display("bad format key(padding)")
-        }
-        KeyNotFound {
-            display("key not found")
-        }
-    }
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("{0}")]
+    Io(#[from] io::Error),
+    #[error("bad format key(length)")]
+    KeyLength,
+    #[error("bad format key(padding)")]
+    KeyPadding,
+    #[error("key not found")]
+    KeyNotFound,
 }
 
 impl Error {

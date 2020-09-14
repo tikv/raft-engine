@@ -11,7 +11,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use prometheus::{exponential_buckets, Counter, Gauge, Histogram};
+use lazy_static::lazy_static;
+use prometheus::{
+    exponential_buckets, register_counter, register_gauge, register_histogram, Counter, Gauge,
+    Histogram,
+};
 
 lazy_static! {
     pub static ref RAFTENGINE_MEMORY_USAGE_GAUGE: Gauge = register_gauge!(
