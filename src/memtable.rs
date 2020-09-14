@@ -64,7 +64,7 @@ impl Default for EntryIndex {
  *                 first entry                               last entry
  */
 
-pub struct MemTable<E: Message, W: EntryExt<E>> {
+pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     region_id: u64,
 
     // latest N entries
@@ -552,7 +552,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     }
 }
 
-impl<E: Message, W: EntryExt<E>> Drop for MemTable<E, W> {
+impl<E: Message + Clone, W: EntryExt<E>> Drop for MemTable<E, W> {
     fn drop(&mut self) {
         // Drop `cache_tracker`s and sub mem change.
         self.entries_index.clear();

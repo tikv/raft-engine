@@ -1,8 +1,10 @@
 use std::io::BufRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use std::{cmp, fmt, u64};
+use std::{fmt, u64};
+
+use protobuf::Message;
 
 use crate::cache_evict::{
     CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
@@ -15,28 +17,23 @@ use crate::log_batch::{
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::util::{HandyRwLock, HashMap, Worker};
+use crate::PurgeManager;
 use crate::{codec, CacheStats, Result};
-use protobuf::Message;
 
 const SLOTS_COUNT: usize = 128;
-
-// If a region has some very old raft logs less than this threshold,
-// rewrite them to clean stale log files ASAP.
-const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
-const REWRITE_INACTIVE_RATIO: f64 = 0.7;
-const FORCE_COMPACT_RATIO: f64 = 0.2;
 
 // When add/delete a memtable, a write lock is required.
 // We can use LRU cache or slots to reduce conflicts.
 type MemTables<E, W> = HashMap<u64, Arc<RwLock<MemTable<E, W>>>>;
-pub struct MemTableAccessor<E: Message, W: EntryExt<E>> {
+
+pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>> {
     slots: Vec<Arc<RwLock<MemTables<E, W>>>>,
     creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>,
 }
 
 impl<E, W> Clone for MemTableAccessor<E, W>
 where
-    E: Message,
+    E: Message + Clone,
     W: EntryExt<E>,
 {
     fn clone(&self) -> Self {
@@ -49,7 +46,7 @@ where
 
 impl<E, W> MemTableAccessor<E, W>
 where
-    E: Message,
+    E: Message + Clone,
     W: EntryExt<E>,
 {
     fn new(creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>) -> MemTableAccessor<E, W> {
@@ -113,7 +110,7 @@ where
 #[derive(Clone)]
 pub struct Engine<E, W, P>
 where
-    E: Message,
+    E: Message + Clone,
     W: EntryExt<E>,
     P: GenericPipeLog,
 {
@@ -121,11 +118,9 @@ where
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
     cache_stats: Arc<SharedCacheStats>,
+    purge_manager: PurgeManager<E, W, P>,
 
     workers: Arc<RwLock<Workers>>,
-
-    // To protect concurrent calls of `purge_expired_files`.
-    purge_mutex: Arc<Mutex<()>>,
 }
 
 impl<E, W, P> Engine<E, W, P>
@@ -182,7 +177,7 @@ where
                                 }
                             }
                         }
-                        Self::apply_to_memtable(memtables, log_batch, queue, file_num);
+                        apply_to_memtable(memtables, log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
                     Ok(None) => {
@@ -210,148 +205,6 @@ where
         Ok(())
     }
 
-    fn apply_log_item_to_memtable(
-        memtables: &MemTableAccessor<E, W>,
-        item: LogItem<E>,
-        queue: LogQueue,
-        file_num: u64,
-    ) {
-        let memtable = memtables.get_or_insert(item.raft_group_id);
-        match item.content {
-            LogItemContent::Entries(entries_to_add) => {
-                let entries = entries_to_add.entries;
-                let mut entries_index = entries_to_add.entries_index.into_inner();
-                if queue == LogQueue::Rewrite {
-                    // By default the queue is for appending.
-                    entries_index.iter_mut().for_each(|ei| ei.queue = queue);
-                }
-                memtable.wl().append(entries, entries_index);
-            }
-            LogItemContent::Command(Command::Clean) => {
-                memtables.remove(item.raft_group_id);
-            }
-            LogItemContent::Command(Command::Compact { index }) => {
-                memtable.wl().compact_to(index);
-            }
-            LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => {
-                    let (key, value) = (kv.key, kv.value.unwrap());
-                    match queue {
-                        LogQueue::Append => memtable.wl().put(key, value, file_num),
-                        LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
-                    }
-                }
-                OpType::Del => memtable.wl().delete(kv.key.as_slice()),
-            },
-        }
-    }
-
-    fn rewrite_log_item_to_memtable(
-        memtables: &MemTableAccessor<E, W>,
-        item: LogItem<E>,
-        file_num: u64,
-        latest_rewrite: u64,
-    ) {
-        let memtable = memtables.get_or_insert(item.raft_group_id);
-        match item.content {
-            LogItemContent::Entries(entries_to_add) => {
-                let entries_index = entries_to_add.entries_index.into_inner();
-                memtable.wl().rewrite(entries_index, latest_rewrite);
-            }
-            LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
-        }
-    }
-
-    fn apply_to_memtable(
-        memtables: &MemTableAccessor<E, W>,
-        log_batch: LogBatch<E, W>,
-        queue: LogQueue,
-        file_num: u64,
-    ) {
-        for item in log_batch.items {
-            Self::apply_log_item_to_memtable(memtables, item, queue, file_num);
-        }
-    }
-
-    // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
-    fn latest_inactive_file_num(&self) -> (u64, u64) {
-        let queue = LogQueue::Append;
-        let total_size = self.pipe_log.total_size(queue) as f64;
-        let rewrite_limit = (total_size * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
-        let compact_limit = (total_size * (1.0 - FORCE_COMPACT_RATIO)) as usize;
-        let latest_needs_rewrite = self.pipe_log.latest_file_before(queue, rewrite_limit);
-        let latest_needs_compact = self.pipe_log.latest_file_before(queue, compact_limit);
-        (latest_needs_rewrite, latest_needs_compact)
-    }
-
-    fn regions_rewrite_or_force_compact(
-        &self,
-        latest_rewrite: u64,
-        latest_compact: u64,
-        will_force_compact: &mut Vec<u64>,
-    ) {
-        assert!(latest_compact <= latest_rewrite);
-        let memtables = self.memtables.collect(|t| {
-            let min_file_num = t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX);
-            let count = t.entries_count();
-            if min_file_num <= latest_compact && count > REWRITE_ENTRY_COUNT_THRESHOLD {
-                will_force_compact.push(t.region_id());
-                return false;
-            }
-            min_file_num <= latest_rewrite && count <= REWRITE_ENTRY_COUNT_THRESHOLD
-        });
-
-        for memtable in memtables {
-            let region_id = memtable.rl().region_id();
-
-            let entries_count = memtable.rl().entries_count();
-            let mut entries = Vec::with_capacity(entries_count);
-            self.fetch_entries(
-                &memtable,
-                &mut entries,
-                entries_count,
-                |t, ents, ents_idx| t.fetch_rewrite_entries(latest_rewrite, ents, ents_idx),
-            )
-            .unwrap();
-
-            let mut kvs = Vec::new();
-            memtable.rl().fetch_rewrite_kvs(latest_rewrite, &mut kvs);
-
-            let mut log_batch = LogBatch::<E, W>::new();
-            log_batch.add_entries(region_id, entries);
-            for (k, v) in kvs {
-                log_batch.put(region_id, k, v);
-            }
-
-            self.rewrite_impl(&mut log_batch, latest_rewrite).unwrap();
-        }
-    }
-
-    fn fetch_entries<F>(
-        &self,
-        memtable: &RwLock<MemTable<E, W>>,
-        vec: &mut Vec<E>,
-        count: usize,
-        mut fetch: F,
-    ) -> Result<()>
-    where
-        F: FnMut(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()>,
-    {
-        let mut ents = Vec::with_capacity(count);
-        let mut ents_idx = Vec::with_capacity(count);
-        fetch(&*memtable.rl(), &mut ents, &mut ents_idx)?;
-
-        for ei in ents_idx {
-            vec.push(self.read_entry_from_file(&ei)?);
-        }
-        vec.extend(ents.into_iter());
-        Ok(())
-    }
-
     // Write a batch needs 3 steps:
     // 1. find all involved raft groups and then lock their memtables;
     // 2. append the log batch to pipe log;
@@ -367,63 +220,21 @@ where
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             for item in log_batch.items.drain(..) {
-                Self::apply_log_item_to_memtable(&self.memtables, item, queue, file_num);
+                apply_log_item_to_memtable(&self.memtables, item, queue, file_num);
             }
         }
         Ok(bytes)
     }
+}
 
-    fn rewrite_impl(&self, log_batch: &mut LogBatch<E, W>, latest_rewrite: u64) -> Result<()> {
-        let mut file_num = 0;
-        self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
-        if file_num > 0 {
-            for item in log_batch.items.drain(..) {
-                Self::rewrite_log_item_to_memtable(&self.memtables, item, file_num, latest_rewrite);
-            }
-        }
-        Ok(())
-    }
-
-    fn read_entry_from_file(&self, entry_index: &EntryIndex) -> Result<E> {
-        let queue = entry_index.queue;
-        let file_num = entry_index.file_num;
-        let base_offset = entry_index.base_offset;
-        let batch_len = entry_index.batch_len;
-        let offset = entry_index.offset;
-        let len = entry_index.len;
-
-        let entry_content = match entry_index.compression_type {
-            CompressionType::None => {
-                let offset = base_offset + offset;
-                self.pipe_log.fread(queue, file_num, offset, len)?
-            }
-            CompressionType::Lz4 => {
-                let read_len = batch_len + HEADER_LEN as u64;
-                let compressed = self
-                    .pipe_log
-                    .fread(queue, file_num, base_offset, read_len)?;
-                let mut reader = compressed.as_ref();
-                let header = codec::decode_u64(&mut reader)?;
-                assert_eq!(header >> 8, batch_len);
-
-                log_batch::test_batch_checksum(reader)?;
-                let buf = log_batch::decompress(&reader[..batch_len as usize - CHECKSUM_LEN]);
-                let start = offset as usize - HEADER_LEN;
-                let end = (offset + len) as usize - HEADER_LEN;
-                buf[start..end].to_vec()
-            }
-        };
-
-        let mut e = E::new();
-        e.merge_from_bytes(&entry_content)?;
-        assert_eq!(W::index(&e), entry_index.index);
-        Ok(e)
-    }
-
-    fn needs_purge_log_files(&self) -> bool {
-        let total_size = self.pipe_log.total_size(LogQueue::Append);
-        let purge_threshold = self.cfg.purge_threshold.0 as usize;
-        total_size > purge_threshold
+impl<E, W, P> fmt::Debug for Engine<E, W, P>
+where
+    E: Message + Clone,
+    W: EntryExt<E>,
+    P: GenericPipeLog,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Engine dir: {}", self.cfg.dir)
     }
 }
 
@@ -468,17 +279,6 @@ impl SharedCacheStats {
 
 struct Workers {
     cache_evict: Worker<CacheTask>,
-}
-
-impl<E, W, P> fmt::Debug for Engine<E, W, P>
-where
-    E: Message,
-    W: EntryExt<E>,
-    P: GenericPipeLog,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Engine dir: {}", self.cfg.dir)
-    }
 }
 
 impl<E, W> Engine<E, W, PipeLog>
@@ -530,15 +330,18 @@ where
         Engine::recover(LogQueue::Append, &pipe_log, &memtables, recovery_mode)?;
         pipe_log.cache_submitor().nonblock_on_full();
 
+        let cfg = Arc::new(cfg);
+        let purge_manager = PurgeManager::new(cfg.clone(), memtables.clone(), pipe_log.clone());
+
         Ok(Engine {
-            cfg: Arc::new(cfg),
+            cfg,
             memtables,
             pipe_log,
             cache_stats,
+            purge_manager,
             workers: Arc::new(RwLock::new(Workers {
                 cache_evict: cache_evict_worker,
             })),
-            purge_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -601,33 +404,14 @@ where
         };
 
         // Read from file
-        let entry = self.read_entry_from_file(&entry_idx)?;
+        let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &entry_idx)?;
         Ok(Some(entry))
     }
 
     /// Purge expired logs files and return a set of Raft group ids
     /// which needs to be compacted ASAP.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let _purge_mutex = match self.purge_mutex.try_lock() {
-            Ok(locked) if self.needs_purge_log_files() => locked,
-            _ => return Ok(vec![]),
-        };
-
-        let (rewrite_limit, compact_limit) = self.latest_inactive_file_num();
-        let mut will_force_compact = Vec::new();
-        self.regions_rewrite_or_force_compact(
-            rewrite_limit,
-            compact_limit,
-            &mut will_force_compact,
-        );
-
-        let min_file_num = self.memtables.fold(u64::MAX, |min, t| {
-            cmp::min(min, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX))
-        });
-        let purged = self.pipe_log.purge_to(LogQueue::Append, min_file_num)?;
-        info!("purged {} expired log files", purged);
-
-        Ok(will_force_compact)
+        self.purge_manager.purge_expired_files()
     }
 
     /// Return count of fetched entries.
@@ -641,7 +425,8 @@ where
     ) -> Result<usize> {
         if let Some(memtable) = self.memtables.get(region_id) {
             let old_len = vec.len();
-            self.fetch_entries(
+            fetch_entries(
+                &self.pipe_log,
                 &memtable,
                 vec,
                 (end - begin) as usize,
@@ -706,6 +491,122 @@ where
     pub fn stop(&self) {
         let mut workers = self.workers.wl();
         workers.cache_evict.stop();
+    }
+}
+
+pub fn fetch_entries<E, W, P, F>(
+    pipe_log: &P,
+    memtable: &RwLock<MemTable<E, W>>,
+    vec: &mut Vec<E>,
+    count: usize,
+    mut fetch: F,
+) -> Result<()>
+where
+    E: Message + Clone,
+    W: EntryExt<E>,
+    P: GenericPipeLog,
+    F: FnMut(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()>,
+{
+    let mut ents = Vec::with_capacity(count);
+    let mut ents_idx = Vec::with_capacity(count);
+    fetch(&*memtable.rl(), &mut ents, &mut ents_idx)?;
+
+    for ei in ents_idx {
+        vec.push(read_entry_from_file::<_, W, _>(pipe_log, &ei)?);
+    }
+    vec.extend(ents.into_iter());
+    Ok(())
+}
+
+pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex) -> Result<E>
+where
+    E: Message + Clone,
+    W: EntryExt<E>,
+    P: GenericPipeLog,
+{
+    let queue = entry_index.queue;
+    let file_num = entry_index.file_num;
+    let base_offset = entry_index.base_offset;
+    let batch_len = entry_index.batch_len;
+    let offset = entry_index.offset;
+    let len = entry_index.len;
+
+    let entry_content = match entry_index.compression_type {
+        CompressionType::None => {
+            let offset = base_offset + offset;
+            pipe_log.fread(queue, file_num, offset, len)?
+        }
+        CompressionType::Lz4 => {
+            let read_len = batch_len + HEADER_LEN as u64;
+            let compressed = pipe_log.fread(queue, file_num, base_offset, read_len)?;
+            let mut reader = compressed.as_ref();
+            let header = codec::decode_u64(&mut reader)?;
+            assert_eq!(header >> 8, batch_len);
+
+            log_batch::test_batch_checksum(reader)?;
+            let buf = log_batch::decompress(&reader[..batch_len as usize - CHECKSUM_LEN]);
+            let start = offset as usize - HEADER_LEN;
+            let end = (offset + len) as usize - HEADER_LEN;
+            buf[start..end].to_vec()
+        }
+    };
+
+    let mut e = E::new();
+    e.merge_from_bytes(&entry_content)?;
+    assert_eq!(W::index(&e), entry_index.index);
+    Ok(e)
+}
+
+fn apply_log_item_to_memtable<E, W>(
+    memtables: &MemTableAccessor<E, W>,
+    item: LogItem<E>,
+    queue: LogQueue,
+    file_num: u64,
+) where
+    E: Message + Clone,
+    W: EntryExt<E>,
+{
+    let memtable = memtables.get_or_insert(item.raft_group_id);
+    match item.content {
+        LogItemContent::Entries(entries_to_add) => {
+            let entries = entries_to_add.entries;
+            let mut entries_index = entries_to_add.entries_index.into_inner();
+            if queue == LogQueue::Rewrite {
+                // By default the queue is for appending.
+                entries_index.iter_mut().for_each(|ei| ei.queue = queue);
+            }
+            memtable.wl().append(entries, entries_index);
+        }
+        LogItemContent::Command(Command::Clean) => {
+            memtables.remove(item.raft_group_id);
+        }
+        LogItemContent::Command(Command::Compact { index }) => {
+            memtable.wl().compact_to(index);
+        }
+        LogItemContent::Kv(kv) => match kv.op_type {
+            OpType::Put => {
+                let (key, value) = (kv.key, kv.value.unwrap());
+                match queue {
+                    LogQueue::Append => memtable.wl().put(key, value, file_num),
+                    LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
+                }
+            }
+            OpType::Del => memtable.wl().delete(kv.key.as_slice()),
+        },
+    }
+}
+
+fn apply_to_memtable<E, W>(
+    memtables: &MemTableAccessor<E, W>,
+    log_batch: LogBatch<E, W>,
+    queue: LogQueue,
+    file_num: u64,
+) where
+    E: Message + Clone,
+    W: EntryExt<E>,
+{
+    for item in log_batch.items {
+        apply_log_item_to_memtable(memtables, item, queue, file_num);
     }
 }
 
@@ -834,7 +735,7 @@ mod tests {
         // GC all log entries. Won't trigger purge because total size is not enough.
         let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
-        assert!(!engine.needs_purge_log_files());
+        assert!(!engine.purge_manager.needs_purge_log_files());
 
         // Append more logs to make total size greater than `purge_threshold`.
         for i in 100..250 {
@@ -846,7 +747,7 @@ mod tests {
         let count = engine.compact_to(1, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files());
 
         let old_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
@@ -861,7 +762,7 @@ mod tests {
         let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files());
         let old_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
         let new_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
@@ -941,7 +842,7 @@ mod tests {
         }
 
         // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files());
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
 

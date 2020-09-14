@@ -32,9 +32,11 @@ pub mod log_batch;
 pub mod memtable;
 pub mod metrics;
 pub mod pipe_log;
+mod purge;
 pub mod util;
 
 use crate::pipe_log::PipeLog;
+use crate::purge::PurgeManager;
 
 pub use self::config::Config;
 pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;

@@ -121,7 +121,7 @@ impl CacheSubmitor {
 
 pub struct Runner<E, W, P>
 where
-    E: Message,
+    E: Message + Clone,
     W: EntryExt<E> + 'static,
     P: GenericPipeLog,
 {
