@@ -208,7 +208,7 @@ impl LogManager {
         }
         let active_fd = self.get_active_fd().unwrap();
         ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
-        if offset == 0 {
+        if offset < FILE_MAGIC_HEADER.len() + VERSION.len() {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }

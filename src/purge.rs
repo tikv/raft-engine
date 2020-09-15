@@ -5,7 +5,7 @@ use protobuf::Message;
 
 use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
-use crate::log_batch::{EntryExt, LogBatch, LogItem, LogItemContent, OpType};
+use crate::log_batch::{EntryExt, LogBatch, LogItemContent, OpType};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::HandyRwLock;
 use crate::Result;
@@ -143,33 +143,33 @@ where
         let mut file_num = 0;
         self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
         if file_num > 0 {
-            for item in log_batch.items.drain(..) {
-                rewrite_log_item_to_memtable(&self.memtables, item, file_num, latest_rewrite);
-            }
+            rewrite_to_memtable(&self.memtables, log_batch, file_num, latest_rewrite);
         }
         Ok(())
     }
 }
 
-fn rewrite_log_item_to_memtable<E, W>(
+fn rewrite_to_memtable<E, W>(
     memtables: &MemTableAccessor<E, W>,
-    item: LogItem<E>,
+    log_batch: &mut LogBatch<E, W>,
     file_num: u64,
     latest_rewrite: u64,
 ) where
     E: Message + Clone,
     W: EntryExt<E>,
 {
-    let memtable = memtables.get_or_insert(item.raft_group_id);
-    match item.content {
-        LogItemContent::Entries(entries_to_add) => {
-            let entries_index = entries_to_add.entries_index.into_inner();
-            memtable.wl().rewrite(entries_index, latest_rewrite);
-        }
-        LogItemContent::Kv(kv) => match kv.op_type {
-            OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+    for item in log_batch.items.drain(..) {
+        let memtable = memtables.get_or_insert(item.raft_group_id);
+        match item.content {
+            LogItemContent::Entries(entries_to_add) => {
+                let entries_index = entries_to_add.entries_index.into_inner();
+                memtable.wl().rewrite(entries_index, latest_rewrite);
+            }
+            LogItemContent::Kv(kv) => match kv.op_type {
+                OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
-        },
-        _ => unreachable!(),
+        }
     }
 }

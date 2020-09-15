@@ -11,8 +11,8 @@ use crate::cache_evict::{
 };
 use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{
-    self, Command, CompressionType, EntryExt, LogBatch, LogItem, LogItemContent, OpType,
-    CHECKSUM_LEN, HEADER_LEN,
+    self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
+    HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
@@ -148,7 +148,7 @@ where
 
             // Verify file header.
             let mut buf = content.as_slice();
-            if buf.len() < FILE_MAGIC_HEADER.len() || !buf.starts_with(FILE_MAGIC_HEADER) {
+            if !buf.starts_with(FILE_MAGIC_HEADER) {
                 if file_num != active_file_num {
                     warn!("Raft log header is corrupted at {:?}.{}", queue, file_num);
                     return Err(box_err!("Raft log file header is corrupted"));
@@ -164,7 +164,7 @@ where
             let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
             loop {
                 match LogBatch::from_bytes(&mut buf, file_num, offset) {
-                    Ok(Some(log_batch)) => {
+                    Ok(Some(mut log_batch)) => {
                         let entries_size = log_batch.entries_size();
                         if let Some(tracker) = pipe_log.cache_submitor().get_cache_tracker(
                             file_num,
@@ -177,7 +177,7 @@ where
                                 }
                             }
                         }
-                        apply_to_memtable(memtables, log_batch, queue, file_num);
+                        apply_to_memtable(memtables, &mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
                     Ok(None) => {
@@ -219,9 +219,7 @@ where
         let mut file_num = 0;
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
-            for item in log_batch.items.drain(..) {
-                apply_log_item_to_memtable(&self.memtables, item, queue, file_num);
-            }
+            apply_to_memtable(&self.memtables, log_batch, queue, file_num);
         }
         Ok(bytes)
     }
@@ -557,56 +555,44 @@ where
     Ok(e)
 }
 
-fn apply_log_item_to_memtable<E, W>(
-    memtables: &MemTableAccessor<E, W>,
-    item: LogItem<E>,
-    queue: LogQueue,
-    file_num: u64,
-) where
-    E: Message + Clone,
-    W: EntryExt<E>,
-{
-    let memtable = memtables.get_or_insert(item.raft_group_id);
-    match item.content {
-        LogItemContent::Entries(entries_to_add) => {
-            let entries = entries_to_add.entries;
-            let mut entries_index = entries_to_add.entries_index.into_inner();
-            if queue == LogQueue::Rewrite {
-                // By default the queue is for appending.
-                entries_index.iter_mut().for_each(|ei| ei.queue = queue);
-            }
-            memtable.wl().append(entries, entries_index);
-        }
-        LogItemContent::Command(Command::Clean) => {
-            memtables.remove(item.raft_group_id);
-        }
-        LogItemContent::Command(Command::Compact { index }) => {
-            memtable.wl().compact_to(index);
-        }
-        LogItemContent::Kv(kv) => match kv.op_type {
-            OpType::Put => {
-                let (key, value) = (kv.key, kv.value.unwrap());
-                match queue {
-                    LogQueue::Append => memtable.wl().put(key, value, file_num),
-                    LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
-                }
-            }
-            OpType::Del => memtable.wl().delete(kv.key.as_slice()),
-        },
-    }
-}
-
 fn apply_to_memtable<E, W>(
     memtables: &MemTableAccessor<E, W>,
-    log_batch: LogBatch<E, W>,
+    log_batch: &mut LogBatch<E, W>,
     queue: LogQueue,
     file_num: u64,
 ) where
     E: Message + Clone,
     W: EntryExt<E>,
 {
-    for item in log_batch.items {
-        apply_log_item_to_memtable(memtables, item, queue, file_num);
+    for item in log_batch.items.drain(..) {
+        let memtable = memtables.get_or_insert(item.raft_group_id);
+        match item.content {
+            LogItemContent::Entries(entries_to_add) => {
+                let entries = entries_to_add.entries;
+                let mut entries_index = entries_to_add.entries_index.into_inner();
+                if queue == LogQueue::Rewrite {
+                    // By default the queue is for appending.
+                    entries_index.iter_mut().for_each(|ei| ei.queue = queue);
+                }
+                memtable.wl().append(entries, entries_index);
+            }
+            LogItemContent::Command(Command::Clean) => {
+                memtables.remove(item.raft_group_id);
+            }
+            LogItemContent::Command(Command::Compact { index }) => {
+                memtable.wl().compact_to(index);
+            }
+            LogItemContent::Kv(kv) => match kv.op_type {
+                OpType::Put => {
+                    let (key, value) = (kv.key, kv.value.unwrap());
+                    match queue {
+                        LogQueue::Append => memtable.wl().put(key, value, file_num),
+                        LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
+                    }
+                }
+                OpType::Del => memtable.wl().delete(kv.key.as_slice()),
+            },
+        }
     }
 }
 
