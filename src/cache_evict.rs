@@ -8,7 +8,7 @@ use crossbeam::channel::{bounded, Sender};
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::PipeLog;
+use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use protobuf::Message;
 
@@ -121,9 +121,9 @@ impl CacheSubmitor {
 
 pub struct Runner<E, W, P>
 where
-    E: Message,
+    E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: PipeLog,
+    P: GenericPipeLog,
 {
     cache_limit: usize,
     cache_stats: Arc<SharedCacheStats>,
@@ -137,7 +137,7 @@ impl<E, W, P> Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: PipeLog,
+    P: GenericPipeLog,
 {
     pub fn new(
         cache_limit: usize,
@@ -188,13 +188,13 @@ where
 
             let file_num = chunk.file_num;
             let read_len = if chunk.end_offset == u64::MAX {
-                self.pipe_log.file_len(file_num) - chunk.base_offset
+                self.pipe_log.file_len(LogQueue::Append, file_num) - chunk.base_offset
             } else {
                 chunk.end_offset - chunk.base_offset
             };
             let chunk_content = self
                 .pipe_log
-                .fread(file_num, chunk.base_offset, read_len)
+                .fread(LogQueue::Append, file_num, chunk.base_offset, read_len)
                 .unwrap();
 
             let mut reader: &[u8] = chunk_content.as_ref();
@@ -223,7 +223,7 @@ impl<E, W, P> Runnable<CacheTask> for Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: PipeLog,
+    P: GenericPipeLog,
 {
     fn run(&mut self, task: CacheTask) -> bool {
         match task {

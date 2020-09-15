@@ -246,7 +246,7 @@ impl<T> Scheduler<T> {
     }
 }
 
-pub struct Worker<T> {
+pub struct Worker<T: Clone> {
     scheduler: Scheduler<T>,
     receiver: Option<Receiver<Option<T>>>,
     handle: Option<JoinHandle<()>>,
@@ -279,9 +279,16 @@ impl<T: Clone> Worker<T> {
     pub fn take_receiver(&mut self) -> Receiver<Option<T>> {
         self.receiver.take().unwrap()
     }
+
+    pub fn stop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = self.scheduler.sender.send(None);
+            return handle.join().unwrap();
+        }
+    }
 }
 
-impl<T: Send + 'static> Worker<T> {
+impl<T: Clone + Send + 'static> Worker<T> {
     pub fn start<R>(&mut self, runner: R, tick: Option<Duration>) -> bool
     where
         R: Runnable<T> + Send + 'static,
@@ -299,13 +306,6 @@ impl<T: Send + 'static> Worker<T> {
         self.handle = Some(th);
         true
     }
-
-    pub fn stop(&mut self) {
-        let _ = self.scheduler.sender.send(None);
-        if let Some(handle) = self.handle.take() {
-            return handle.join().unwrap();
-        }
-    }
 }
 
 fn poll<T, R: Runnable<T>>(mut runner: R, receiver: Receiver<Option<T>>, tick: Duration) {
@@ -319,5 +319,11 @@ fn poll<T, R: Runnable<T>>(mut runner: R, receiver: Receiver<Option<T>>, tick: D
             }
             Err(RecvTimeoutError::Timeout) => runner.on_tick(),
         }
+    }
+}
+
+impl<T: Clone> Drop for Worker<T> {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
