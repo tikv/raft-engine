@@ -77,11 +77,21 @@ where
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
     fn latest_inactive_file_num(&self) -> (u64, u64) {
         let queue = LogQueue::Append;
+
+        let first_file_num = self.pipe_log.first_file_num(queue);
+        let active_file_num = self.pipe_log.active_file_num(queue);
+        if active_file_num == first_file_num {
+            // Can't rewrite or force compact the active file.
+            return (0, 0);
+        }
+
         let total_size = self.pipe_log.total_size(queue) as f64;
         let rewrite_limit = (total_size * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
         let compact_limit = (total_size * (1.0 - FORCE_COMPACT_RATIO)) as usize;
-        let latest_needs_rewrite = self.pipe_log.latest_file_before(queue, rewrite_limit);
-        let latest_needs_compact = self.pipe_log.latest_file_before(queue, compact_limit);
+        let mut latest_needs_rewrite = self.pipe_log.latest_file_before(queue, rewrite_limit);
+        let mut latest_needs_compact = self.pipe_log.latest_file_before(queue, compact_limit);
+        latest_needs_rewrite = cmp::min(latest_needs_rewrite, active_file_num);
+        latest_needs_compact = cmp::min(latest_needs_compact, active_file_num);
         (latest_needs_rewrite, latest_needs_compact)
     }
 

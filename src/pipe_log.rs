@@ -554,7 +554,9 @@ impl GenericPipeLog for PipeLog {
             return 0;
         }
         let count = (cur_size - size) / self.rotate_size;
-        self.get_queue(queue).first_file_num + count as u64
+        let file_num = self.get_queue(queue).first_file_num + count as u64;
+        assert!(file_num <= self.active_file_num(queue));
+        file_num
     }
 
     fn file_len(&self, queue: LogQueue, file_num: u64) -> u64 {
