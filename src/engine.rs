@@ -50,10 +50,7 @@ where
     W: EntryExt<E>,
 {
     fn new(creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>) -> MemTableAccessor<E, W> {
-        let mut slots = Vec::with_capacity(SLOTS_COUNT);
-        for _ in 0..SLOTS_COUNT {
-            slots.push(Arc::new(RwLock::new(MemTables::default())));
-        }
+        let slots = vec![Arc::new(RwLock::new(MemTables::default())); SLOTS_COUNT];
         MemTableAccessor { slots, creator }
     }
 
