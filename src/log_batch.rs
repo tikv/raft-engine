@@ -450,6 +450,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
+    entires_size: usize,
     _phantom: PhantomData<W>,
 }
 
@@ -461,6 +462,7 @@ where
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(16),
+            entires_size: 0,
             _phantom: PhantomData,
         }
     }
@@ -478,11 +480,15 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
+            entires_size: 0,
             _phantom: PhantomData,
         }
     }
 
     pub fn add_entries(&mut self, region_id: u64, entries: Vec<E>) {
+        for e in entries.iter() {
+            self.entires_size += e.compute_size() as usize
+        }
         let item = LogItem::from_entries(region_id, entries);
         self.items.push(item);
     }
@@ -562,6 +568,9 @@ where
 
         for item in &log_batch.items {
             if let LogItemContent::Entries(ref entries) = item.content {
+                for e in &entries.entries {
+                    log_batch.entires_size += e.compute_size() as usize;
+                }
                 entries.update_compression_type(batch_type, batch_len as u64);
             }
         }
@@ -609,16 +618,9 @@ where
         Some(vec)
     }
 
+    #[inline]
     pub fn entries_size(&self) -> usize {
-        let mut size = 0;
-        for item in &self.items {
-            if let LogItemContent::Entries(ref entries) = item.content {
-                for entry in entries.entries_index.borrow().iter() {
-                    size += entry.len as usize;
-                }
-            }
-        }
-        size
+        self.entires_size
     }
 }
 
