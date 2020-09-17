@@ -441,10 +441,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .rev()
             .find(|e| e.file_num <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
-            self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx)
-        } else {
-            Ok(())
+            if begin.index < end.index {
+                return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
+            }
         }
+        Ok(())
     }
 
     pub fn fetch_rewrite_kvs(&self, latest_rewrite: u64, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
