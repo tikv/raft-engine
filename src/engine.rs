@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
 
+use log::{info, warn};
 use protobuf::Message;
 
 use crate::cache_evict::{

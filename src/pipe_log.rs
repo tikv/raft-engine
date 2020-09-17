@@ -6,19 +6,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
+use log::{info, warn};
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
+use protobuf::Message;
 
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
-use protobuf::Message;
 
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;

@@ -1,6 +1,7 @@
 use std::cmp;
 use std::sync::Arc;
 
+use log::info;
 use protobuf::Message;
 
 use crate::config::Config;
