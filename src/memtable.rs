@@ -71,7 +71,7 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     entries_cache: VecDeque<E>,
 
     // All entries index
-    pub entries_index: VecDeque<EntryIndex>,
+    entries_index: VecDeque<EntryIndex>,
     rewrite_count: usize,
 
     // Region scope key/value pairs
@@ -216,6 +216,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.cache_size -= entry_index.len as usize;
             self.cache_stats.sub_mem_change(entry_index.len as usize);
         }
+    }
+
+    pub fn append_rewrite(&mut self, entries: Vec<E>, mut entries_index: Vec<EntryIndex>) {
+        for ei in &mut entries_index {
+            ei.queue = LogQueue::Rewrite;
+        }
+        self.append(entries, entries_index);
+        self.rewrite_count = self.entries_index.len();
     }
 
     pub fn rewrite(&mut self, entries_index: Vec<EntryIndex>, latest_rewrite: u64) {
@@ -436,10 +444,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .rev()
             .find(|e| e.file_num <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
-            self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx)
-        } else {
-            Ok(())
+            if begin.index < end.index {
+                return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
+            }
         }
+        Ok(())
     }
 
     pub fn fetch_rewrite_kvs(&self, latest_rewrite: u64, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
