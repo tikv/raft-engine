@@ -441,7 +441,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .rev()
             .find(|e| e.file_num <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
-            if begin.index < end.index {
+            if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
             }
         }
