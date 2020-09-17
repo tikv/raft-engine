@@ -1,4 +1,5 @@
 #![feature(shrink_to)]
+#![feature(cell_update)]
 
 #[macro_use]
 extern crate log;

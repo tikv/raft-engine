@@ -443,9 +443,8 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes() {
-            let entries_size = batch.entries_size();
-
+        let mut entries_size = 0;
+        if let Some(content) = batch.encode_to_bytes(&mut entries_size) {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
@@ -455,12 +454,9 @@ impl GenericPipeLog for PipeLog {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
             }
 
-            if let Some(tracker) = tracker {
-                for item in &batch.items {
-                    if let LogItemContent::Entries(ref entries) = item.content {
-                        entries.update_position(LogQueue::Append, cur_file_num, offset);
-                        entries.attach_cache_tracker(tracker.clone());
-                    }
+            for item in &batch.items {
+                if let LogItemContent::Entries(ref entries) = item.content {
+                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
                 }
             }
 
@@ -476,14 +472,15 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes() {
+        let mut encoded_size = 0;
+        if let Some(content) = batch.encode_to_bytes(&mut encoded_size) {
             let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
             }
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset);
+                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
                 }
             }
             *file_num = cur_file_num;
