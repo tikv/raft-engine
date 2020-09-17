@@ -569,12 +569,12 @@ fn apply_to_memtable<E, W>(
         match item.content {
             LogItemContent::Entries(entries_to_add) => {
                 let entries = entries_to_add.entries;
-                let mut entries_index = entries_to_add.entries_index.into_inner();
+                let entries_index = entries_to_add.entries_index.into_inner();
                 if queue == LogQueue::Rewrite {
-                    // By default the queue is for appending.
-                    entries_index.iter_mut().for_each(|ei| ei.queue = queue);
+                    memtable.wl().append_rewrite(entries, entries_index);
+                } else {
+                    memtable.wl().append(entries, entries_index);
                 }
-                memtable.wl().append(entries, entries_index);
             }
             LogItemContent::Command(Command::Clean) => {
                 memtables.remove(item.raft_group_id);
