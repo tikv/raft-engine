@@ -71,7 +71,7 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     entries_cache: VecDeque<E>,
 
     // All entries index
-    pub entries_index: VecDeque<EntryIndex>,
+    entries_index: VecDeque<EntryIndex>,
     rewrite_count: usize,
 
     // Region scope key/value pairs
@@ -189,12 +189,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
         if let Some((queue, index)) = self.entries_index.back().map(|e| (e.queue, e.index)) {
             if first_index_to_add > index + 1 {
-                assert_eq!(
-                    queue,
-                    LogQueue::Rewrite,
-                    "memtable {} has a hole",
-                    self.region_id
-                );
+                if queue != LogQueue::Rewrite {
+                    panic!("memtable {} has a hole", self.region_id);
+                }
                 self.compact_to(index + 1);
             }
         }
@@ -216,6 +213,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.cache_size -= entry_index.len as usize;
             self.cache_stats.sub_mem_change(entry_index.len as usize);
         }
+    }
+
+    pub fn append_rewrite(&mut self, entries: Vec<E>, mut entries_index: Vec<EntryIndex>) {
+        for ei in &mut entries_index {
+            ei.queue = LogQueue::Rewrite;
+        }
+        self.append(entries, entries_index);
+        self.rewrite_count = self.entries_index.len();
     }
 
     pub fn rewrite(&mut self, entries_index: Vec<EntryIndex>, latest_rewrite: u64) {
