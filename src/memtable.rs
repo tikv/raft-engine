@@ -189,12 +189,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
         if let Some((queue, index)) = self.entries_index.back().map(|e| (e.queue, e.index)) {
             if first_index_to_add > index + 1 {
-                assert_eq!(
-                    queue,
-                    LogQueue::Rewrite,
-                    "memtable {} has a hole",
-                    self.region_id
-                );
+                if queue != LogQueue::Rewrite {
+                    panic!("memtable {} has a hole", self.region_id);
+                }
                 self.compact_to(index + 1);
             }
         }
@@ -444,7 +441,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .rev()
             .find(|e| e.file_num <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
-            if begin.index < end.index {
+            if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
             }
         }

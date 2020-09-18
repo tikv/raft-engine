@@ -166,11 +166,17 @@ where
             loop {
                 match LogBatch::from_bytes(&mut buf, file_num, offset) {
                     Ok(Some(mut log_batch)) => {
-                        let entries_size = log_batch.entries_size();
+                        let mut encoded_size = 0;
+                        for item in &log_batch.items {
+                            if let LogItemContent::Entries(ref entries) = item.content {
+                                encoded_size += entries.encoded_size.get();
+                            }
+                        }
+
                         if let Some(tracker) = pipe_log.cache_submitor().get_cache_tracker(
                             file_num,
                             offset,
-                            entries_size,
+                            encoded_size,
                         ) {
                             for item in &log_batch.items {
                                 if let LogItemContent::Entries(ref entries) = item.content {
