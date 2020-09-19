@@ -63,7 +63,6 @@ impl Default for EntryIndex {
  *                      |                                        |
  *                 first entry                               last entry
  */
-
 pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     region_id: u64,
 
@@ -344,7 +343,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
     }
 
-    pub(crate) fn fetch_entries_to(
+    pub fn fetch_entries_to(
         &self,
         begin: u64,
         end: u64,
@@ -408,23 +407,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         Ok(())
     }
 
-    pub fn fetch_all(&self, vec: &mut Vec<E>, vec_idx: &mut Vec<EntryIndex>) {
-        if self.entries_index.is_empty() {
-            return;
-        }
-
-        let begin = self.entries_index.front().unwrap().index;
-        let end = self.entries_index.back().unwrap().index + 1;
-        self.fetch_entries_to(begin, end, None, vec, vec_idx)
-            .unwrap();
-    }
-
-    pub fn fetch_all_kvs(&self, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
-        for (key, value) in &self.kvs {
-            vec.push((key.clone(), value.0.clone()));
-        }
-    }
-
     pub fn fetch_rewrite_entries(
         &self,
         latest_rewrite: u64,
@@ -472,27 +454,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
     }
 
-    pub fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
-        let entry = match queue {
-            LogQueue::Append => self.entries_index.back(),
-            LogQueue::Rewrite if self.rewrite_count == 0 => None,
-            _ => self.entries_index.get(self.rewrite_count - 1),
-        };
-        let ents_max = entry.map(|e| e.file_num);
-
-        let kvs_max = self.kvs_max_file_num(queue);
-        match (ents_max, kvs_max) {
-            (Some(ents_max), Some(kvs_max)) => Some(cmp::max(ents_max, kvs_max)),
-            (Some(ents_max), None) => Some(ents_max),
-            (None, Some(kvs_max)) => Some(kvs_max),
-            (None, None) => None,
-        }
-    }
-
-    pub fn kvs_total_count(&self) -> usize {
-        self.kvs.len()
-    }
-
     pub fn entries_count(&self) -> usize {
         self.entries_index.len()
     }
@@ -516,13 +477,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .fold(None, |min, v| Some(cmp::min(min.unwrap_or(u64::MAX), v.2)))
     }
 
-    fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
-        self.kvs
-            .values()
-            .filter(|v| v.1 == queue)
-            .fold(None, |max, v| Some(cmp::max(max.unwrap_or(0), v.2)))
-    }
-
     fn count_limit(&self, start_idx: usize, end_idx: usize, max_size: usize) -> usize {
         assert!(start_idx < end_idx);
         let (first, second) = slices_in_range(&self.entries_index, start_idx, end_idx);
@@ -538,24 +492,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
         count
     }
-
-    #[cfg(test)]
-    fn entries_size(&self) -> usize {
-        self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
-    }
-
-    #[cfg(test)]
-    fn check_entries_index_and_cache(&self) {
-        match (self.entries_index.back(), self.entries_cache.back()) {
-            (Some(ei), Some(ec)) if ei.index != W::index(ec) => panic!(
-                "entries_index.last = {}, entries_cache.last = {}",
-                ei.index,
-                W::index(ec)
-            ),
-            (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
-            _ => return,
-        }
-    }
 }
 
 impl<E: Message + Clone, W: EntryExt<E>> Drop for MemTable<E, W> {
@@ -569,8 +505,59 @@ impl<E: Message + Clone, W: EntryExt<E>> Drop for MemTable<E, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use raft::eraftpb::Entry;
+
+    impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
+        fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
+            let entry = match queue {
+                LogQueue::Append => self.entries_index.back(),
+                LogQueue::Rewrite if self.rewrite_count == 0 => None,
+                _ => self.entries_index.get(self.rewrite_count - 1),
+            };
+            let ents_max = entry.map(|e| e.file_num);
+
+            let kvs_max = self.kvs_max_file_num(queue);
+            match (ents_max, kvs_max) {
+                (Some(ents_max), Some(kvs_max)) => Some(cmp::max(ents_max, kvs_max)),
+                (Some(ents_max), None) => Some(ents_max),
+                (None, Some(kvs_max)) => Some(kvs_max),
+                (None, None) => None,
+            }
+        }
+        fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
+            self.kvs
+                .values()
+                .filter(|v| v.1 == queue)
+                .fold(None, |max, v| Some(cmp::max(max.unwrap_or(0), v.2)))
+        }
+
+        pub fn fetch_all(&self, vec: &mut Vec<E>, vec_idx: &mut Vec<EntryIndex>) {
+            if self.entries_index.is_empty() {
+                return;
+            }
+
+            let begin = self.entries_index.front().unwrap().index;
+            let end = self.entries_index.back().unwrap().index + 1;
+            self.fetch_entries_to(begin, end, None, vec, vec_idx)
+                .unwrap();
+        }
+
+        fn entries_size(&self) -> usize {
+            self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
+        }
+
+        fn check_entries_index_and_cache(&self) {
+            match (self.entries_index.back(), self.entries_cache.back()) {
+                (Some(ei), Some(ec)) if ei.index != W::index(ec) => panic!(
+                    "entries_index.last = {}, entries_cache.last = {}",
+                    ei.index,
+                    W::index(ec)
+                ),
+                (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
+                _ => return,
+            }
+        }
+    }
 
     #[test]
     fn test_memtable_append() {

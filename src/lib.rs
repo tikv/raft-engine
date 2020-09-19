@@ -1,7 +1,6 @@
 #![feature(shrink_to)]
 #![feature(cell_update)]
 
-#[macro_export]
 macro_rules! box_err {
     ($e:expr) => ({
         use std::error::Error;
@@ -13,25 +12,24 @@ macro_rules! box_err {
     });
 }
 
-mod cache_evict;
 pub mod codec;
-pub mod config;
-pub mod engine;
+
+mod cache_evict;
+mod config;
+mod engine;
 mod errors;
-pub mod log_batch;
-pub mod memtable;
-pub mod metrics;
-pub mod pipe_log;
+mod log_batch;
+mod memtable;
+mod pipe_log;
 mod purge;
-pub mod util;
+mod util;
 
 use crate::pipe_log::PipeLog;
-use crate::purge::PurgeManager;
 
 pub use self::config::Config;
-pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
+pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
 
 #[derive(Clone, Copy, Default)]
 pub struct CacheStats {

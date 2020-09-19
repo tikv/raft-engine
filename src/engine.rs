@@ -17,8 +17,8 @@ use crate::log_batch::{
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
-use crate::PurgeManager;
 use crate::{codec, CacheStats, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -843,6 +843,7 @@ mod tests {
         let active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
         assert!(active_num > 1 || active_len > 59); // The rewrite queue isn't empty.
 
+        // All entries should be available.
         for i in 1..=10 {
             for j in 1..=10 {
                 let e = engine.get_entry(j, i).unwrap().unwrap();
@@ -861,5 +862,23 @@ mod tests {
                 assert_eq!(last_index(&engine, j), 10);
             }
         }
+
+        // Rewrite again to check the rewrite queue is healthy.
+        for i in 11..=20 {
+            for j in 1..=10 {
+                entry.set_index(i);
+                append_log(&engine, j, &entry);
+            }
+        }
+
+        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_expired_files().unwrap().is_empty());
+
+        let new_active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
+        let new_active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
+        assert!(
+            new_active_num > active_num
+                || (new_active_num == active_num && new_active_len > active_len)
+        );
     }
 }

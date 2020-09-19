@@ -1,19 +1,22 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::collections::{HashMap as StdHashMap, HashSet as StdHashSet, VecDeque};
+pub use std::collections::hash_map::Entry as HashMapEntry;
+use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
 use std::ops::{Div, Mul};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::Duration;
 
+use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub use crossbeam::channel::SendError as ScheduleError;
 pub type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<fxhash::FxHasher>>;
-pub type HashSet<T> = StdHashSet<T, BuildHasherDefault<fxhash::FxHasher>>;
-pub use std::collections::hash_map::Entry as HashMapEntry;
 
 const UNIT: u64 = 1;
 const DATA_MAGNITUDE: u64 = 1024;
@@ -199,13 +202,6 @@ pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T]
     }
 }
 
-/// Converts Duration to seconds.
-pub fn duration_to_sec(d: Duration) -> f64 {
-    let nanos = f64::from(d.subsec_nanos());
-    // Most of case, we can't have so large Duration, so here just panic if overflow now.
-    d.as_secs() as f64 + (nanos / 1_000_000_000.0)
-}
-
 pub trait HandyRwLock<T> {
     fn wl(&self) -> RwLockWriteGuard<'_, T>;
     fn rl(&self) -> RwLockReadGuard<'_, T>;
@@ -219,11 +215,6 @@ impl<T> HandyRwLock<T> for RwLock<T> {
         self.read().unwrap()
     }
 }
-
-pub use crossbeam::channel::SendError as ScheduleError;
-use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
-use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 pub trait Runnable<T> {
     fn run(&mut self, task: T) -> bool;
