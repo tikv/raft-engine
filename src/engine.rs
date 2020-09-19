@@ -17,8 +17,8 @@ use crate::log_batch::{
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
-use crate::PurgeManager;
 use crate::{codec, CacheStats, Result};
 
 const SLOTS_COUNT: usize = 128;
