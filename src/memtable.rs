@@ -6,11 +6,10 @@ use std::{cmp, u64};
 use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
-use crate::engine::SharedCacheStats;
 use crate::log_batch::{CompressionType, EntryExt};
 use crate::pipe_log::LogQueue;
 use crate::util::{slices_in_range, HashMap};
-use crate::{Error, Result};
+use crate::{Error, Result, GlobalStats};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
@@ -79,7 +78,7 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
 
     cache_size: usize,
     cache_limit: usize,
-    cache_stats: Arc<SharedCacheStats>,
+    global_stats: Arc<GlobalStats>,
     _phantom: PhantomData<W>,
 }
 
@@ -118,7 +117,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             let entry_index = &mut self.entries_index[distance + offset];
             entry_index.cache_tracker.take();
             self.cache_size -= entry_index.len as usize;
-            self.cache_stats.sub_mem_change(entry_index.len as usize);
+            self.global_stats.sub_mem_change(entry_index.len as usize);
         }
 
         self.entries_cache.truncate(conflict);
@@ -160,7 +159,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     pub fn new(
         region_id: u64,
         cache_limit: usize,
-        cache_stats: Arc<SharedCacheStats>,
+        global_stats: Arc<GlobalStats>,
     ) -> MemTable<E, W> {
         MemTable::<E, W> {
             region_id,
@@ -171,7 +170,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
             cache_size: 0,
             cache_limit,
-            cache_stats,
+            global_stats,
             _phantom: PhantomData,
         }
     }
@@ -210,7 +209,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             entry_index.cache_tracker.take();
 
             self.cache_size -= entry_index.len as usize;
-            self.cache_stats.sub_mem_change(entry_index.len as usize);
+            self.global_stats.sub_mem_change(entry_index.len as usize);
         }
     }
 
@@ -310,7 +309,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             let entry_index = &mut self.entries_index[distance + i];
             entry_index.cache_tracker.take();
             self.cache_size -= entry_index.len as usize;
-            self.cache_stats.sub_mem_change(entry_index.len as usize);
+            self.global_stats.sub_mem_change(entry_index.len as usize);
         }
         self.shrink_entries_cache();
     }
@@ -332,11 +331,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let ioffset = (index - first_index) as usize;
         let cache_distance = self.cache_distance();
         if ioffset < cache_distance {
-            self.cache_stats.miss_cache(1);
+            self.global_stats.add_cache_miss(1);
             let entry_index = self.entries_index[ioffset].clone();
             (None, Some(entry_index))
         } else {
-            self.cache_stats.hit_cache(1);
+            self.global_stats.add_cache_hit(1);
             let coffset = ioffset - cache_distance;
             let entry = self.entries_cache[coffset].clone();
             (Some(entry), None)
@@ -402,8 +401,8 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
         }
-        self.cache_stats.hit_cache(vec.len() - vec_len);
-        self.cache_stats.miss_cache(vec_idx.len() - vec_idx_len);
+        self.global_stats.add_cache_hit(vec.len() - vec_len);
+        self.global_stats.add_cache_miss(vec_idx.len() - vec_idx_len);
         Ok(())
     }
 
@@ -498,7 +497,7 @@ impl<E: Message + Clone, W: EntryExt<E>> Drop for MemTable<E, W> {
     fn drop(&mut self) {
         // Drop `cache_tracker`s and sub mem change.
         self.entries_index.clear();
-        self.cache_stats.sub_mem_change(self.cache_size as usize);
+        self.global_stats.sub_mem_change(self.cache_size as usize);
     }
 }
 
@@ -563,7 +562,7 @@ mod tests {
     fn test_memtable_append() {
         let region_id = 8;
         let cache_limit = 15;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // Append entries [10, 20) file_num = 1 not over cache size limitation.
@@ -652,7 +651,7 @@ mod tests {
         memtable.check_entries_index_and_cache();
 
         // Cache with size limit 0.
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, 0, stats);
         memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 1));
         assert_eq!(memtable.cache_size, 0);
@@ -668,7 +667,7 @@ mod tests {
     fn test_memtable_compact() {
         let region_id = 8;
         let cache_limit = 10;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // After appending:
@@ -731,7 +730,7 @@ mod tests {
     fn test_memtable_compact_cache() {
         let region_id = 8;
         let cache_limit = 10;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // After appending:
@@ -771,7 +770,7 @@ mod tests {
     fn test_memtable_fetch() {
         let region_id = 8;
         let cache_limit = 10;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats.clone());
 
         // After appending:
@@ -794,8 +793,8 @@ mod tests {
         assert_eq!(ents_idx.len(), 15);
         assert_eq!(ents_idx[0].index, 0);
         assert_eq!(ents_idx[14].index, 14);
-        assert_eq!(stats.hit_times(), 10);
-        assert_eq!(stats.miss_times(), 15);
+        assert_eq!(stats.cache_hit(), 10);
+        assert_eq!(stats.cache_miss(), 15);
 
         // After compact:
         // [10, 15) file_num = 2, not in cache
@@ -820,7 +819,7 @@ mod tests {
         // All needed entries are in cache.
         ents.clear();
         ents_idx.clear();
-        stats.reset();
+        stats.reset_cache();
         memtable
             .fetch_entries_to(20, 25, None, &mut ents, &mut ents_idx)
             .unwrap();
@@ -828,12 +827,12 @@ mod tests {
         assert_eq!(ents[0].get_index(), 20);
         assert_eq!(ents[4].get_index(), 24);
         assert!(ents_idx.is_empty());
-        assert_eq!(stats.hit_times(), 5);
+        assert_eq!(stats.cache_hit(), 5);
 
         // All needed entries are not in cache.
         ents.clear();
         ents_idx.clear();
-        stats.reset();
+        stats.reset_cache();
         memtable
             .fetch_entries_to(10, 15, None, &mut ents, &mut ents_idx)
             .unwrap();
@@ -841,12 +840,12 @@ mod tests {
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
-        assert_eq!(stats.miss_times(), 5);
+        assert_eq!(stats.cache_miss(), 5);
 
         // Some needed entries are in cache, the others are not.
         ents.clear();
         ents_idx.clear();
-        stats.reset();
+        stats.reset_cache();
         memtable
             .fetch_entries_to(10, 25, None, &mut ents, &mut ents_idx)
             .unwrap();
@@ -856,8 +855,8 @@ mod tests {
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
-        assert_eq!(stats.hit_times(), 10);
-        assert_eq!(stats.miss_times(), 5);
+        assert_eq!(stats.cache_hit(), 10);
+        assert_eq!(stats.cache_miss(), 5);
 
         // Max size limitation range fetching.
         // Only can fetch [10, 20) because of size limitation,
@@ -865,7 +864,7 @@ mod tests {
         ents.clear();
         ents_idx.clear();
         let max_size = Some(10);
-        stats.reset();
+        stats.reset_cache();
         memtable
             .fetch_entries_to(10, 25, max_size, &mut ents, &mut ents_idx)
             .unwrap();
@@ -875,27 +874,27 @@ mod tests {
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
-        assert_eq!(stats.hit_times(), 5);
-        assert_eq!(stats.miss_times(), 5);
+        assert_eq!(stats.cache_hit(), 5);
+        assert_eq!(stats.cache_miss(), 5);
 
         // Even max size limitation is 0, at least fetch one entry.
         ents.clear();
         ents_idx.clear();
-        stats.reset();
+        stats.reset_cache();
         memtable
             .fetch_entries_to(20, 25, Some(0), &mut ents, &mut ents_idx)
             .unwrap();
         assert_eq!(ents.len(), 1);
         assert_eq!(ents[0].get_index(), 20);
         assert!(ents_idx.is_empty());
-        assert_eq!(stats.hit_times(), 1);
+        assert_eq!(stats.cache_hit(), 1);
     }
 
     #[test]
     fn test_memtable_kv_operations() {
         let region_id = 8;
         let cache_limit = 1024;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         let (k1, v1) = (b"key1", b"value1");
@@ -915,7 +914,7 @@ mod tests {
     fn test_memtable_get_entry() {
         let region_id = 8;
         let cache_limit = 10;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // [5, 10) file_num = 1, not in cache
@@ -940,7 +939,7 @@ mod tests {
     fn test_memtable_rewrite() {
         let region_id = 8;
         let cache_limit = 15;
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
 
         // after appending

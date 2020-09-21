@@ -669,7 +669,7 @@ mod tests {
 
     use super::*;
     use crate::cache_evict::{CacheSubmitor, CacheTask};
-    use crate::engine::SharedCacheStats;
+    use crate::GlobalStats;
     use crate::util::{ReadableSize, Worker};
 
     fn new_test_pipe_log(
@@ -683,7 +683,7 @@ mod tests {
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
         let mut worker = Worker::new("test".to_owned(), None);
-        let stats = Arc::new(SharedCacheStats::default());
+        let stats = Arc::new(GlobalStats::default());
         let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
         let log = PipeLog::open(&cfg, submitor).unwrap();
         (log, worker.take_receiver())
