@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
 use log::{info, warn};
@@ -15,7 +15,6 @@ use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use protobuf::Message;
 
-use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::util::HandyRwLock;
@@ -44,17 +43,10 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
 
     /// Check whether the size of current write log has reached the rotate limit.
-    fn switch_log_file(
-        &self,
-        queue: LogQueue,
-    ) -> Result<(u64, Arc<LogFd>)>;
+    fn switch_log_file(&self, queue: LogQueue) -> Result<(u64, Arc<LogFd>)>;
 
     /// Append some bytes to the given queue.
-    fn append(
-        &self,
-        queue: LogQueue,
-        content: &[u8],
-    ) -> Result<u64>;
+    fn append(&self, queue: LogQueue, content: &[u8]) -> Result<u64>;
 
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
@@ -123,7 +115,6 @@ impl Drop for LogFd {
 
 struct LogManager {
     dir: String,
-    rotate_size: usize,
     name_suffix: &'static str,
 
     pub first_file_num: u64,
@@ -140,8 +131,6 @@ impl LogManager {
     fn new(cfg: &Config, name_suffix: &'static str) -> Self {
         Self {
             dir: cfg.dir.clone(),
-            rotate_size: cfg.target_file_size.0 as usize,
-            bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             name_suffix,
 
             first_file_num: INIT_FILE_NUM,
@@ -249,7 +238,6 @@ impl LogManager {
     }
 
     fn on_append(&mut self, content_len: usize) -> Result<(u64, Arc<LogFd>)> {
-
         let active_log_size = self.active_log_size;
         let fd = self.get_active_fd().unwrap();
 
@@ -413,10 +401,7 @@ impl GenericPipeLog for PipeLog {
         pread_exact(fd.0, offset, len as usize)
     }
 
-    fn switch_log_file(
-        &self,
-        queue: LogQueue,
-    ) -> Result<(u64, Arc<LogFd>)> {
+    fn switch_log_file(&self, queue: LogQueue) -> Result<(u64, Arc<LogFd>)> {
         let mut writer = self.mut_queue(queue);
         if writer.active_log_size >= self.rotate_size {
             writer.new_log_file()?;
@@ -426,11 +411,7 @@ impl GenericPipeLog for PipeLog {
         Ok((writer.active_file_num, fd))
     }
 
-    fn append(
-        &self,
-        queue: LogQueue,
-        content: &[u8],
-    ) -> Result<u64> {
+    fn append(&self, queue: LogQueue, content: &[u8]) -> Result<u64> {
         let (offset, fd) = self.mut_queue(queue).on_append(content.len())?;
         pwrite_exact(fd.0, offset, content)?;
         Ok(offset)
@@ -445,7 +426,7 @@ impl GenericPipeLog for PipeLog {
     fn write<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
-        mut sync: bool,
+        sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
         let mut entries_size = 0;
@@ -471,7 +452,7 @@ impl GenericPipeLog for PipeLog {
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
-        mut sync: bool,
+        sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
         let mut encoded_size = 0;

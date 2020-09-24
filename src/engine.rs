@@ -1,10 +1,10 @@
 use std::io::BufRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, RwLock};
-use std::sync::mpsc::{channel, Sender, SendError};
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
-use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 use futures::channel as future_channel;
 use futures::executor::block_on;
@@ -12,16 +12,19 @@ use futures::executor::block_on;
 use log::{info, warn};
 use protobuf::Message;
 
-use crate::cache_evict::{CacheSubmitor, CacheTask, Runner as CacheEvictRunner};
+use crate::cache_evict::{CacheChunk, CacheSubmitor, Runner as CacheEvictRunner};
 use crate::config::{Config, RecoveryMode};
-use crate::log_batch::{self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN, HEADER_LEN, LogItem};
+use crate::errors::Error;
+use crate::log_batch::{
+    self, Command, CompressionType, EntryExt, LogBatch, LogItem, LogItemContent, OpType,
+    CHECKSUM_LEN, HEADER_LEN,
+};
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
+use crate::wal::{LogMsg, WalRunner, WriteTask};
 use crate::{codec, CacheStats, Result};
-use crate::wal::{WriteTask, LogMsg, WalRunner};
-use crate::errors::Error;
 
 const SLOTS_COUNT: usize = 128;
 
@@ -177,14 +180,17 @@ where
                             }
                         }
 
-                        if let Some(tracker) = cache_submitor
-                            .get_cache_tracker(file_num)
-                        {
+                        if let Some(tracker) = cache_submitor.get_cache_tracker(file_num) {
+                            let mut group_infos = vec![];
                             for item in &log_batch.items {
                                 if let LogItemContent::Entries(ref entries) = item.content {
                                     entries.attach_cache_tracker(tracker.clone());
+                                    entries.entries.last().map(|e| {
+                                        group_infos.push((item.raft_group_id, W::index(e)))
+                                    });
                                 }
                             }
+                            cache_submitor.fill_cache(encoded_size, &mut group_infos);
                         }
                         apply_to_memtable(memtables, &mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
@@ -228,7 +234,10 @@ where
         let mut group_infos = vec![];
         for item in log_batch.items.iter() {
             if let LogItemContent::Entries(ref entries) = item.content {
-                group_infos.push((item.raft_group_id, W::index(entries.entries.last().unwrap())));
+                group_infos.push((
+                    item.raft_group_id,
+                    W::index(entries.entries.last().unwrap()),
+                ));
             }
         }
         if let Some(content) = log_batch.encode_to_bytes(&mut entries_size) {
@@ -241,7 +250,9 @@ where
                 group_infos,
                 sender,
             };
-            self.wal_sender.send(LogMsg::Write(task)).map_err(|_| Error::Stop)?;
+            self.wal_sender
+                .send(LogMsg::Write(task))
+                .map_err(|_| Error::Stop)?;
             let (file_num, offset, tracker) = r.await?;
             if file_num > 0 {
                 for item in log_batch.items.drain(..) {
@@ -308,8 +319,8 @@ impl SharedCacheStats {
 }
 
 struct Workers {
-    cache_evict: Worker<CacheTask>,
-    wal: JoinHandle<()>,
+    cache_evict: Worker<CacheChunk>,
+    wal: Option<JoinHandle<()>>,
 }
 
 impl<E, W> Engine<E, W, PipeLog>
@@ -323,10 +334,7 @@ where
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let pipe_log = PipeLog::open(
-            &cfg,
-        )
-        .expect("Open raft log");
+        let pipe_log = PipeLog::open(&cfg).expect("Open raft log");
 
         let memtables = {
             let stats = cache_stats.clone();
@@ -357,7 +365,13 @@ where
             &mut cache_submitor,
             RecoveryMode::TolerateCorruptedTailRecords,
         )?;
-        Engine::recover(LogQueue::Append, &pipe_log, &memtables, &mut cache_submitor, recovery_mode)?;
+        Engine::recover(
+            LogQueue::Append,
+            &pipe_log,
+            &memtables,
+            &mut cache_submitor,
+            recovery_mode,
+        )?;
         cache_submitor.nonblock_on_full();
 
         let cfg = Arc::new(cfg);
@@ -367,7 +381,11 @@ where
         let mut wal_runner = WalRunner::new(cache_submitor, pipe_log.clone(), wal_receiver);
         let th = ThreadBuilder::new()
             .name("wal".to_string())
-            .spawn(move || wal_runner.run().unwrap_or_else(|e| warn!("run error because: {}", e)))
+            .spawn(move || {
+                wal_runner
+                    .run()
+                    .unwrap_or_else(|e| warn!("run error because: {}", e))
+            })
             .unwrap();
 
         Ok(Engine {
@@ -379,7 +397,7 @@ where
             wal_sender,
             workers: Arc::new(RwLock::new(Workers {
                 cache_evict: cache_evict_worker,
-                wal: th,
+                wal: Some(th),
             })),
         })
     }
@@ -533,7 +551,11 @@ where
     /// Stop background thread which will keep trying evict caching.
     pub fn stop(&self) {
         let mut workers = self.workers.wl();
+        self.wal_sender.send(LogMsg::Stop).unwrap();
         workers.cache_evict.stop();
+        if let Some(wal) = workers.wal.take() {
+            wal.join().unwrap();
+        }
     }
 }
 

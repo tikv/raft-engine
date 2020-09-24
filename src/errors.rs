@@ -1,6 +1,6 @@
+use futures::channel::oneshot::Canceled;
 use std::error;
 use std::io::Error as IoError;
-use futures::channel::oneshot::Canceled;
 
 use thiserror::Error;
 
@@ -37,7 +37,7 @@ pub enum Error {
 }
 
 impl From<Canceled> for Error {
-    fn from(c: Canceled) -> Error {
+    fn from(_: Canceled) -> Error {
         Error::Wal
     }
 }

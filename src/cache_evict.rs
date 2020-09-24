@@ -4,7 +4,6 @@ use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crossbeam::channel::{bounded, Sender};
 use protobuf::Message;
 
 use crate::engine::{MemTableAccessor, SharedCacheStats};
@@ -21,7 +20,7 @@ pub struct CacheSubmitor {
     size_tracker: Arc<AtomicUsize>,
     group_infos: Vec<(u64, u64)>,
 
-    scheduler: Scheduler<CacheTask>,
+    scheduler: Scheduler<CacheChunk>,
     cache_limit: usize,
     cache_stats: Arc<SharedCacheStats>,
     block_on_full: bool,
@@ -30,7 +29,7 @@ pub struct CacheSubmitor {
 impl CacheSubmitor {
     pub fn new(
         cache_limit: usize,
-        scheduler: Scheduler<CacheTask>,
+        scheduler: Scheduler<CacheChunk>,
         cache_stats: Arc<SharedCacheStats>,
     ) -> Self {
         CacheSubmitor {
@@ -65,7 +64,7 @@ impl CacheSubmitor {
                     size_tracker: self.size_tracker.clone(),
                     group_infos,
                 };
-                let _ = self.scheduler.schedule(CacheTask::NewChunk(task));
+                let _ = self.scheduler.schedule(task);
             }
             self.reset(file_num);
         }
@@ -159,20 +158,13 @@ where
     }
 }
 
-impl<E, W> Runnable<CacheTask> for Runner<E, W>
+impl<E, W> Runnable<CacheChunk> for Runner<E, W>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    fn run(&mut self, task: CacheTask) -> bool {
-        match task {
-            CacheTask::NewChunk(chunk) => self.valid_cache_chunks.push_back(chunk),
-            CacheTask::EvictOldest(tx) => {
-                assert!(self.evict_oldest_cache());
-                let _ = tx.send(());
-                return false;
-            }
-        }
+    fn run(&mut self, chunk: CacheChunk) -> bool {
+        self.valid_cache_chunks.push_back(chunk);
         true
     }
     fn on_tick(&mut self) {
@@ -181,12 +173,6 @@ where
             self.evict_oldest_cache();
         }
     }
-}
-
-#[derive(Clone)]
-pub enum CacheTask {
-    NewChunk(CacheChunk),
-    EvictOldest(Sender<()>),
 }
 
 #[derive(Clone)]
