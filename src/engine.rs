@@ -1,23 +1,27 @@
 use std::io::BufRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::sync::mpsc::{channel, Sender, SendError};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
+
+use futures::channel as future_channel;
+use futures::executor::block_on;
 
 use log::{info, warn};
 use protobuf::Message;
 
 use crate::cache_evict::{CacheSubmitor, CacheTask, Runner as CacheEvictRunner};
 use crate::config::{Config, RecoveryMode};
-use crate::log_batch::{
-    self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
-    HEADER_LEN,
-};
+use crate::log_batch::{self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN, HEADER_LEN, LogItem};
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, Result};
+use crate::wal::{WriteTask, LogMsg, WalRunner};
+use crate::errors::Error;
 
 const SLOTS_COUNT: usize = 128;
 
@@ -118,6 +122,7 @@ where
     pipe_log: P,
     cache_stats: Arc<SharedCacheStats>,
     purge_manager: PurgeManager<E, W, P>,
+    wal_sender: Sender<LogMsg>,
 
     workers: Arc<RwLock<Workers>>,
 }
@@ -133,6 +138,7 @@ where
         queue: LogQueue,
         pipe_log: &P,
         memtables: &MemTableAccessor<E, W>,
+        cache_submitor: &mut CacheSubmitor,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
         // Get first file number and last file number.
@@ -171,9 +177,8 @@ where
                             }
                         }
 
-                        if let Some(tracker) = pipe_log
-                            .cache_submitor()
-                            .get_cache_tracker(file_num, encoded_size)
+                        if let Some(tracker) = cache_submitor
+                            .get_cache_tracker(file_num)
                         {
                             for item in &log_batch.items {
                                 if let LogItemContent::Entries(ref entries) = item.content {
@@ -218,14 +223,37 @@ where
     // 2. Users can call `append` on one raft group concurrently.
     // Maybe we can improve the implement of "inactive log rewrite" and
     // forbid concurrent `append` to remove locks here.
-    fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        let queue = LogQueue::Append;
-        let mut file_num = 0;
-        let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
-        if file_num > 0 {
-            apply_to_memtable(&self.memtables, log_batch, queue, file_num);
+    async fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
+        let mut entries_size = 0;
+        let mut group_infos = vec![];
+        for item in log_batch.items.iter() {
+            if let LogItemContent::Entries(ref entries) = item.content {
+                group_infos.push((item.raft_group_id, W::index(entries.entries.last().unwrap())));
+            }
         }
-        Ok(bytes)
+        if let Some(content) = log_batch.encode_to_bytes(&mut entries_size) {
+            let (sender, r) = future_channel::oneshot::channel();
+            let bytes = content.len();
+            let task = WriteTask {
+                content,
+                sync,
+                entries_size,
+                group_infos,
+                sender,
+            };
+            self.wal_sender.send(LogMsg::Write(task)).map_err(|_| Error::Stop)?;
+            let (file_num, offset, tracker) = r.await?;
+            if file_num > 0 {
+                for item in log_batch.items.drain(..) {
+                    if let LogItemContent::Entries(ref entries) = item.content {
+                        entries.update_position(LogQueue::Append, file_num, offset, &tracker);
+                    }
+                    apply_item_to_memtable(&self.memtables, item, LogQueue::Append, file_num);
+                }
+            }
+            return Ok(bytes);
+        }
+        Ok(0)
     }
 }
 
@@ -281,6 +309,7 @@ impl SharedCacheStats {
 
 struct Workers {
     cache_evict: Worker<CacheTask>,
+    wal: JoinHandle<()>,
 }
 
 impl<E, W> Engine<E, W, PipeLog>
@@ -296,14 +325,8 @@ where
 
         let pipe_log = PipeLog::open(
             &cfg,
-            CacheSubmitor::new(
-                cache_limit,
-                cache_evict_worker.scheduler(),
-                cache_stats.clone(),
-            ),
         )
         .expect("Open raft log");
-        pipe_log.cache_submitor().block_on_full();
 
         let memtables = {
             let stats = cache_stats.clone();
@@ -321,17 +344,31 @@ where
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
+        let mut cache_submitor = CacheSubmitor::new(
+            cache_limit,
+            cache_evict_worker.scheduler(),
+            cache_stats.clone(),
+        );
+        cache_submitor.block_on_full();
         Engine::recover(
             LogQueue::Rewrite,
             &pipe_log,
             &memtables,
+            &mut cache_submitor,
             RecoveryMode::TolerateCorruptedTailRecords,
         )?;
-        Engine::recover(LogQueue::Append, &pipe_log, &memtables, recovery_mode)?;
-        pipe_log.cache_submitor().nonblock_on_full();
+        Engine::recover(LogQueue::Append, &pipe_log, &memtables, &mut cache_submitor, recovery_mode)?;
+        cache_submitor.nonblock_on_full();
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(cfg.clone(), memtables.clone(), pipe_log.clone());
+        let (wal_sender, wal_receiver) = channel();
+
+        let mut wal_runner = WalRunner::new(cache_submitor, pipe_log.clone(), wal_receiver);
+        let th = ThreadBuilder::new()
+            .name("wal".to_string())
+            .spawn(move || wal_runner.run().unwrap_or_else(|e| warn!("run error because: {}", e)))
+            .unwrap();
 
         Ok(Engine {
             cfg,
@@ -339,8 +376,10 @@ where
             pipe_log,
             cache_stats,
             purge_manager,
+            wal_sender,
             workers: Arc::new(RwLock::new(Workers {
                 cache_evict: cache_evict_worker,
+                wal: th,
             })),
         })
     }
@@ -475,7 +514,11 @@ where
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
     pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        self.write_impl(log_batch, sync)
+        block_on(self.write_impl(log_batch, sync))
+    }
+
+    pub async fn async_write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
+        self.write_impl(log_batch, sync).await
     }
 
     /// Flush stats about EntryCache.
@@ -557,6 +600,45 @@ where
     Ok(e)
 }
 
+fn apply_item_to_memtable<E, W>(
+    memtables: &MemTableAccessor<E, W>,
+    item: LogItem<E>,
+    queue: LogQueue,
+    file_num: u64,
+) where
+    E: Message + Clone,
+    W: EntryExt<E>,
+{
+    let memtable = memtables.get_or_insert(item.raft_group_id);
+    match item.content {
+        LogItemContent::Entries(entries_to_add) => {
+            let entries = entries_to_add.entries;
+            let entries_index = entries_to_add.entries_index.into_inner();
+            if queue == LogQueue::Rewrite {
+                memtable.wl().append_rewrite(entries, entries_index);
+            } else {
+                memtable.wl().append(entries, entries_index);
+            }
+        }
+        LogItemContent::Command(Command::Clean) => {
+            memtables.remove(item.raft_group_id);
+        }
+        LogItemContent::Command(Command::Compact { index }) => {
+            memtable.wl().compact_to(index);
+        }
+        LogItemContent::Kv(kv) => match kv.op_type {
+            OpType::Put => {
+                let (key, value) = (kv.key, kv.value.unwrap());
+                match queue {
+                    LogQueue::Append => memtable.wl().put(key, value, file_num),
+                    LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
+                }
+            }
+            OpType::Del => memtable.wl().delete(kv.key.as_slice()),
+        },
+    }
+}
+
 fn apply_to_memtable<E, W>(
     memtables: &MemTableAccessor<E, W>,
     log_batch: &mut LogBatch<E, W>,
@@ -567,34 +649,7 @@ fn apply_to_memtable<E, W>(
     W: EntryExt<E>,
 {
     for item in log_batch.items.drain(..) {
-        let memtable = memtables.get_or_insert(item.raft_group_id);
-        match item.content {
-            LogItemContent::Entries(entries_to_add) => {
-                let entries = entries_to_add.entries;
-                let entries_index = entries_to_add.entries_index.into_inner();
-                if queue == LogQueue::Rewrite {
-                    memtable.wl().append_rewrite(entries, entries_index);
-                } else {
-                    memtable.wl().append(entries, entries_index);
-                }
-            }
-            LogItemContent::Command(Command::Clean) => {
-                memtables.remove(item.raft_group_id);
-            }
-            LogItemContent::Command(Command::Compact { index }) => {
-                memtable.wl().compact_to(index);
-            }
-            LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => {
-                    let (key, value) = (kv.key, kv.value.unwrap());
-                    match queue {
-                        LogQueue::Append => memtable.wl().put(key, value, file_num),
-                        LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
-                    }
-                }
-                OpType::Del => memtable.wl().delete(kv.key.as_slice()),
-            },
-        }
+        apply_item_to_memtable(memtables, item, queue, file_num);
     }
 }
 

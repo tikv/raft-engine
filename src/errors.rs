@@ -1,5 +1,6 @@
 use std::error;
 use std::io::Error as IoError;
+use futures::channel::oneshot::Canceled;
 
 use thiserror::Error;
 
@@ -27,6 +28,18 @@ pub enum Error {
     StorageUnavailable,
     #[error("The entry acquired has been compacted")]
     StorageCompacted,
+    #[error("write wal failed")]
+    Wal,
+    #[error("wal-thread has stopped")]
+    Stop,
+    #[error("wal-channel has full")]
+    Full,
+}
+
+impl From<Canceled> for Error {
+    fn from(c: Canceled) -> Error {
+        Error::Wal
+    }
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;

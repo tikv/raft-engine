@@ -23,6 +23,7 @@ mod memtable;
 mod pipe_log;
 mod purge;
 mod util;
+mod wal;
 
 use crate::pipe_log::PipeLog;
 

@@ -43,13 +43,18 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Read some bytes from the given position.
     fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
 
+    /// Check whether the size of current write log has reached the rotate limit.
+    fn switch_log_file(
+        &self,
+        queue: LogQueue,
+    ) -> Result<(u64, Arc<LogFd>)>;
+
     /// Append some bytes to the given queue.
     fn append(
         &self,
         queue: LogQueue,
         content: &[u8],
-        sync: &mut bool,
-    ) -> Result<(u64, u64, Arc<LogFd>)>;
+    ) -> Result<u64>;
 
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
@@ -95,8 +100,6 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64;
 
     fn file_len(&self, queue: LogQueue, file_num: u64) -> u64;
-
-    fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
 }
 
 pub struct LogFd(RawFd);
@@ -104,6 +107,9 @@ pub struct LogFd(RawFd);
 impl LogFd {
     fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
+    }
+    pub fn sync(&self) -> Result<()> {
+        fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"))
     }
 }
 
@@ -118,7 +124,6 @@ impl Drop for LogFd {
 struct LogManager {
     dir: String,
     rotate_size: usize,
-    bytes_per_sync: usize,
     name_suffix: &'static str,
 
     pub first_file_num: u64,
@@ -168,7 +173,7 @@ impl LogManager {
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
             let fd = Arc::new(LogFd(open_active_file(&path)?));
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            fd.sync()?;
 
             self.active_log_size = file_len(fd.0)?;
             self.active_log_capacity = self.active_log_size;
@@ -183,7 +188,7 @@ impl LogManager {
             self.truncate_active_log(None)?;
         }
         if let Some(last_file) = self.all_files.back() {
-            fsync(last_file.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            last_file.sync()?;
         }
         self.active_file_num += 1;
 
@@ -215,7 +220,7 @@ impl LogManager {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }
-        fsync(active_fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+        active_fd.sync()?;
         self.active_log_size = offset;
         self.active_log_capacity = offset;
         self.last_sync_size = self.active_log_size;
@@ -243,16 +248,8 @@ impl LogManager {
         Ok(end_offset)
     }
 
-    fn reach_sync_limit(&self) -> bool {
-        self.active_log_size - self.last_sync_size >= self.bytes_per_sync
-    }
+    fn on_append(&mut self, content_len: usize) -> Result<(u64, Arc<LogFd>)> {
 
-    fn on_append(&mut self, content_len: usize, sync: &mut bool) -> Result<(u64, u64, Arc<LogFd>)> {
-        if self.active_log_size >= self.rotate_size {
-            self.new_log_file()?;
-        }
-
-        let active_file_num = self.active_file_num;
         let active_log_size = self.active_log_size;
         let fd = self.get_active_fd().unwrap();
 
@@ -273,11 +270,7 @@ impl LogManager {
             self.active_log_capacity += alloc_size;
         }
 
-        if *sync || self.reach_sync_limit() {
-            self.last_sync_size = self.active_log_size;
-            *sync = true;
-        }
-        Ok((active_file_num, active_log_size as u64, fd))
+        Ok((active_log_size as u64, fd))
     }
 }
 
@@ -295,11 +288,10 @@ pub struct PipeLog {
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
-    cache_submitor: Arc<Mutex<CacheSubmitor>>,
 }
 
 impl PipeLog {
-    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLog {
+    fn new(cfg: &Config) -> PipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, REWRITE_SUFFIX)));
         PipeLog {
@@ -308,11 +300,10 @@ impl PipeLog {
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             appender,
             rewriter,
-            cache_submitor: Arc::new(Mutex::new(cache_submitor)),
         }
     }
 
-    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLog> {
+    pub fn open(cfg: &Config) -> Result<PipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -322,7 +313,7 @@ impl PipeLog {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let pipe_log = PipeLog::new(cfg, cache_submitor);
+        let pipe_log = PipeLog::new(cfg);
 
         let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
@@ -422,19 +413,30 @@ impl GenericPipeLog for PipeLog {
         pread_exact(fd.0, offset, len as usize)
     }
 
+    fn switch_log_file(
+        &self,
+        queue: LogQueue,
+    ) -> Result<(u64, Arc<LogFd>)> {
+        let mut writer = self.mut_queue(queue);
+        if writer.active_log_size >= self.rotate_size {
+            writer.new_log_file()?;
+        }
+        let fd = writer.get_active_fd().unwrap();
+
+        Ok((writer.active_file_num, fd))
+    }
+
     fn append(
         &self,
         queue: LogQueue,
         content: &[u8],
-        sync: &mut bool,
-    ) -> Result<(u64, u64, Arc<LogFd>)> {
-        let (file_num, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+    ) -> Result<u64> {
+        let (offset, fd) = self.mut_queue(queue).on_append(content.len())?;
         pwrite_exact(fd.0, offset, content)?;
-        Ok((file_num, offset, fd))
+        Ok(offset)
     }
 
     fn close(&self) -> Result<()> {
-        let _write_lock = self.cache_submitor.lock().unwrap();
         self.appender.wl().truncate_active_log(None)?;
         self.rewriter.wl().truncate_active_log(None)?;
         Ok(())
@@ -449,23 +451,17 @@ impl GenericPipeLog for PipeLog {
         let mut entries_size = 0;
         if let Some(content) = batch.encode_to_bytes(&mut entries_size) {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            let mut cache_submitor = self.cache_submitor.lock().unwrap();
-            let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker = cache_submitor.get_cache_tracker(cur_file_num, entries_size);
+            let (cur_file_num, fd) = self.switch_log_file(LogQueue::Append)?;
+            let tracker = None;
+            let offset = self.append(LogQueue::Append, &content)?;
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
                     entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
-                    entries.entries.last().map(|e| {
-                        cache_submitor.fill_cache(item.raft_group_id, W::index(e));
-                    });
                 }
             }
-
-            drop(cache_submitor);
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
             }
-
             *file_num = cur_file_num;
             return Ok(content.len());
         }
@@ -480,9 +476,10 @@ impl GenericPipeLog for PipeLog {
     ) -> Result<usize> {
         let mut encoded_size = 0;
         if let Some(content) = batch.encode_to_bytes(&mut encoded_size) {
-            let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
+            let (cur_file_num, fd) = self.switch_log_file(LogQueue::Rewrite)?;
+            let offset = self.append(LogQueue::Rewrite, &content)?;
             if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+                fd.sync()?;
             }
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
@@ -501,7 +498,7 @@ impl GenericPipeLog for PipeLog {
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
         if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            fd.sync()?;
         }
         Ok(())
     }
@@ -565,10 +562,6 @@ impl GenericPipeLog for PipeLog {
     fn file_len(&self, queue: LogQueue, file_num: u64) -> u64 {
         let fd = self.get_queue(queue).get_fd(file_num).unwrap();
         file_len(fd.0).unwrap() as u64
-    }
-
-    fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {
-        self.cache_submitor.lock().unwrap()
     }
 }
 

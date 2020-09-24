@@ -17,6 +17,7 @@ nix = "0.18.0"
 crossbeam = "0.7"
 prometheus = { version = "0.10", default-features = false, features = ["nightly"] }
 thiserror = "1.0"
+futures = { version = "0.3", features = ["thread-pool", "compat"] }
 
 [dev-dependencies]
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }

@@ -52,7 +52,7 @@ impl CacheSubmitor {
         self.block_on_full = false;
     }
 
-    pub fn get_cache_tracker(&mut self, file_num: u64, size: usize) -> Option<Arc<AtomicUsize>> {
+    pub fn get_cache_tracker(&mut self, file_num: u64) -> Option<Arc<AtomicUsize>> {
         if self.cache_limit == 0 {
             return None;
         }
@@ -69,23 +69,15 @@ impl CacheSubmitor {
             }
             self.reset(file_num);
         }
-        if self.block_on_full {
-            let cache_size = self.cache_stats.cache_size();
-            if cache_size > self.cache_limit {
-                let (tx, rx) = bounded(1);
-                if self.scheduler.schedule(CacheTask::EvictOldest(tx)).is_ok() {
-                    let _ = rx.recv();
-                }
-            }
-        }
-        self.size_tracker.fetch_add(size, Ordering::Release);
-        self.cache_stats.add_mem_change(size);
+
         Some(self.size_tracker.clone())
     }
 
-    pub fn fill_cache(&mut self, group_id: u64, index: u64) {
+    pub fn fill_cache(&mut self, size: usize, group_infos: &mut Vec<(u64, u64)>) {
         if self.cache_limit != 0 {
-            self.group_infos.push((group_id, index));
+            self.size_tracker.fetch_add(size, Ordering::Release);
+            self.cache_stats.add_mem_change(size);
+            self.group_infos.append(group_infos);
         }
     }
 
