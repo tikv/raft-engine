@@ -57,7 +57,6 @@ impl CacheSubmitor {
             return None;
         }
         if self.file_num != file_num {
-            self.file_num = file_num;
             // If all entries are released from cache, the chunk can be ignored.
             if self.size_tracker.load(Ordering::Relaxed) > 0 {
                 let group_infos = std::mem::replace(&mut self.group_infos, vec![]);
@@ -85,7 +84,9 @@ impl CacheSubmitor {
     }
 
     pub fn fill_cache(&mut self, group_id: u64, index: u64) {
-        self.group_infos.push((group_id, index));
+        if self.cache_limit != 0 {
+            self.group_infos.push((group_id, index));
+        }
     }
 
     fn reset(&mut self, file_num: u64) {
