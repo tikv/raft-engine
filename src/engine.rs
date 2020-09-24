@@ -7,9 +7,7 @@ use std::{fmt, u64};
 use log::{info, warn};
 use protobuf::Message;
 
-use crate::cache_evict::{
-    CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
-};
+use crate::cache_evict::{CacheSubmitor, CacheTask, Runner as CacheEvictRunner};
 use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{
     self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
@@ -173,11 +171,10 @@ where
                             }
                         }
 
-                        if let Some(tracker) = pipe_log.cache_submitor().get_cache_tracker(
-                            file_num,
-                            offset,
-                            encoded_size,
-                        ) {
+                        if let Some(tracker) = pipe_log
+                            .cache_submitor()
+                            .get_cache_tracker(file_num, encoded_size)
+                        {
                             for item in &log_batch.items {
                                 if let LogItemContent::Entries(ref entries) = item.content {
                                     entries.attach_cache_tracker(tracker.clone());
@@ -291,7 +288,7 @@ where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    fn new_impl(cfg: Config, chunk_limit: usize) -> Result<Engine<E, W, PipeLog>> {
+    fn new_impl(cfg: Config) -> Result<Engine<E, W, PipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
@@ -301,7 +298,6 @@ where
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
-                chunk_limit,
                 cache_evict_worker.scheduler(),
                 cache_stats.clone(),
             ),
@@ -319,9 +315,8 @@ where
         let cache_evict_runner = CacheEvictRunner::new(
             cache_limit,
             cache_stats.clone(),
-            chunk_limit,
+            cfg.target_file_size.0 as usize,
             memtables.clone(),
-            pipe_log.clone(),
         );
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
@@ -351,7 +346,7 @@ where
     }
 
     pub fn new(cfg: Config) -> Engine<E, W, PipeLog> {
-        Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE).unwrap()
+        Self::new_impl(cfg).unwrap()
     }
 }
 

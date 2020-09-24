@@ -182,7 +182,9 @@ impl LogManager {
         if self.active_file_num > 0 {
             self.truncate_active_log(None)?;
         }
-
+        if let Some(last_file) = self.all_files.back() {
+            fsync(last_file.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+        }
         self.active_file_num += 1;
 
         let mut path = PathBuf::from(&self.dir);
@@ -449,16 +451,19 @@ impl GenericPipeLog for PipeLog {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
-            drop(cache_submitor);
-            if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
-            }
-
+            let tracker = cache_submitor.get_cache_tracker(cur_file_num, entries_size);
             for item in &batch.items {
                 if let LogItemContent::Entries(ref entries) = item.content {
                     entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
+                    entries.entries.last().map(|e| {
+                        cache_submitor.fill_cache(item.raft_group_id, W::index(e));
+                    });
                 }
+            }
+
+            drop(cache_submitor);
+            if sync {
+                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
             }
 
             *file_num = cur_file_num;
