@@ -73,7 +73,7 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     rewrite_count: usize,
 
     // Region scope key/value pairs
-    // key -> (value, file_num)
+    // key -> (value, queue, file_num)
     kvs: HashMap<Vec<u8>, (Vec<u8>, LogQueue, u64)>,
 
     cache_size: usize,
@@ -246,7 +246,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let back = self.entries_index.back().unwrap().index;
         let len = (cmp::min(last, back) - entries_index[distance].index + 1) as usize;
 
-        let mut rewrite_add = 0;
+        let old_rewrite_count = 0;
         for ei in entries_index.iter().skip(distance).take(len) {
             if self.entries_index[self.rewrite_count].file_num > latest_rewrite {
                 // Some entries are overwritten by new appends.
@@ -255,9 +255,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.entries_index[self.rewrite_count].queue = ei.queue;
             self.entries_index[self.rewrite_count].file_num = ei.file_num;
             self.entries_index[self.rewrite_count].base_offset = ei.base_offset;
-            rewrite_add += 1;
+            self.rewrite_count += 1;
         }
-        self.rewrite_count += rewrite_add;
+        let rewrite_add = self.rewrite_count - old_rewrite_count;
         self.global_stats.add_rewrite(rewrite_add);
     }
 
@@ -271,9 +271,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
     pub fn rewrite_key(&mut self, key: Vec<u8>, latest_rewrite: u64, file_num: u64) {
         if let Some(value) = self.kvs.get_mut(&key) {
-            if value.1 == LogQueue::Rewrite {
-                return;
-            }
             if value.2 <= latest_rewrite {
                 value.1 = LogQueue::Rewrite;
                 value.2 = file_num;
@@ -470,7 +467,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let entry = match queue {
             LogQueue::Append => self.entries_index.get(self.rewrite_count),
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
-            _ => self.entries_index.front(),
+            LogQueue::Rewrite => self.entries_index.front(),
         };
         let ents_min = entry.map(|e| e.file_num);
         let kvs_min = self.kvs_min_file_num(queue);
@@ -498,7 +495,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.entries_index.back().map(|e| e.index)
     }
 
-    fn kvs_min_file_num(&self, queue: LogQueue) -> Option<u64> {
+    pub fn kvs_min_file_num(&self, queue: LogQueue) -> Option<u64> {
         self.kvs
             .values()
             .filter(|v| v.1 == queue)
@@ -536,11 +533,12 @@ mod tests {
     use raft::eraftpb::Entry;
 
     impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
-        fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
+        pub fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
             let entry = match queue {
+                LogQueue::Append if self.rewrite_count == self.entries_index.len() => None,
                 LogQueue::Append => self.entries_index.back(),
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
-                _ => self.entries_index.get(self.rewrite_count - 1),
+                LogQueue::Rewrite => self.entries_index.get(self.rewrite_count - 1),
             };
             let ents_max = entry.map(|e| e.file_num);
 
@@ -552,7 +550,8 @@ mod tests {
                 (None, None) => None,
             }
         }
-        fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
+
+        pub fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
             self.kvs
                 .values()
                 .filter(|v| v.1 == queue)

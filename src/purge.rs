@@ -1,12 +1,13 @@
-use std::cmp;
-use std::sync::Arc;
+use std::cmp::{self, Reverse};
+use std::collections::BinaryHeap;
+use std::sync::{Arc, Mutex};
 
 use log::info;
 use protobuf::Message;
 
 use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
-use crate::log_batch::{EntryExt, LogBatch, LogItemContent, OpType};
+use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::HandyRwLock;
 use crate::Result;
@@ -27,6 +28,8 @@ where
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
+    // Vector of (file_num, raft_group_id).
+    removed_memtables: Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>,
 }
 
 impl<E, W, P> PurgeManager<E, W, P>
@@ -44,6 +47,7 @@ where
             cfg,
             memtables,
             pipe_log,
+            removed_memtables: Default::default(),
         }
     }
 
@@ -75,6 +79,11 @@ where
         total_size > purge_threshold
     }
 
+    pub fn remove_memtable(&self, file_num: u64, raft_group_id: u64) {
+        let mut tables = self.removed_memtables.lock().unwrap();
+        tables.push((Reverse(file_num), raft_group_id));
+    }
+
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
     fn latest_inactive_file_num(&self) -> (u64, u64) {
         let queue = LogQueue::Append;
@@ -96,6 +105,8 @@ where
         (latest_needs_rewrite, latest_needs_compact)
     }
 
+    // FIXME: We need to ensure that all operations before `latest_rewrite` (included) are written
+    // into memtables.
     fn regions_rewrite_or_force_compact(
         &self,
         latest_rewrite: u64,
@@ -103,6 +114,17 @@ where
         will_force_compact: &mut Vec<u64>,
     ) {
         assert!(latest_compact <= latest_rewrite);
+        let mut log_batch = LogBatch::<E, W>::new();
+
+        while let Some(item) = self.removed_memtables.lock().unwrap().pop() {
+            let (file_num, raft_id) = ((item.0).0, item.1);
+            if file_num > latest_rewrite {
+                self.removed_memtables.lock().unwrap().push(item);
+                break;
+            }
+            log_batch.clean_region(raft_id);
+        }
+
         let memtables = self.memtables.collect(|t| {
             let min_file_num = t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX);
             let count = t.entries_count();
@@ -126,51 +148,84 @@ where
                 |t, ents, ents_idx| t.fetch_rewrite_entries(latest_rewrite, ents, ents_idx),
             )
             .unwrap();
+            log_batch.add_entries(region_id, entries);
 
             let mut kvs = Vec::new();
             memtable.rl().fetch_rewrite_kvs(latest_rewrite, &mut kvs);
-
-            let mut log_batch = LogBatch::<E, W>::new();
-            log_batch.add_entries(region_id, entries);
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }
-
-            self.rewrite_impl(&mut log_batch, latest_rewrite).unwrap();
         }
+        self.rewrite_impl(&mut log_batch, latest_rewrite).unwrap();
     }
 
     fn rewrite_impl(&self, log_batch: &mut LogBatch<E, W>, latest_rewrite: u64) -> Result<()> {
         let mut file_num = 0;
         self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
         if file_num > 0 {
-            rewrite_to_memtable(&self.memtables, log_batch, file_num, latest_rewrite);
+            self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
         }
         Ok(())
     }
+
+    fn rewrite_to_memtable(
+        &self,
+        log_batch: &mut LogBatch<E, W>,
+        file_num: u64,
+        latest_rewrite: u64,
+    ) {
+        for item in log_batch.items.drain(..) {
+            let memtable = self.memtables.get_or_insert(item.raft_group_id);
+            match item.content {
+                LogItemContent::Entries(entries_to_add) => {
+                    let entries_index = entries_to_add.entries_index.into_inner();
+                    memtable.wl().rewrite(entries_index, latest_rewrite);
+                }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+                    _ => unreachable!(),
+                },
+                LogItemContent::Command(Command::Clean) => {
+                    // Nothing need to do.
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
-fn rewrite_to_memtable<E, W>(
-    memtables: &MemTableAccessor<E, W>,
-    log_batch: &mut LogBatch<E, W>,
-    file_num: u64,
-    latest_rewrite: u64,
-) where
-    E: Message + Clone,
-    W: EntryExt<E>,
-{
-    for item in log_batch.items.drain(..) {
-        let memtable = memtables.get_or_insert(item.raft_group_id);
-        match item.content {
-            LogItemContent::Entries(entries_to_add) => {
-                let entries_index = entries_to_add.entries_index.into_inner();
-                memtable.wl().rewrite(entries_index, latest_rewrite);
-            }
-            LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Engine;
+    use crate::pipe_log::PipeLog;
+    use raft::eraftpb::Entry;
+
+    type RaftLogEngine = Engine<Entry, Entry, PipeLog>;
+
+    #[test]
+    fn test_remove_memtable() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_remove_memtable")
+            .tempdir()
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        let engine = RaftLogEngine::new(cfg.clone());
+
+        engine.purge_manager().remove_memtable(3, 10);
+        engine.purge_manager().remove_memtable(3, 9);
+        engine.purge_manager().remove_memtable(3, 11);
+        engine.purge_manager().remove_memtable(2, 9);
+        engine.purge_manager().remove_memtable(4, 4);
+        engine.purge_manager().remove_memtable(4, 3);
+
+        let mut tables = engine.purge_manager().removed_memtables.lock().unwrap();
+        for (file_num, raft_id) in vec![(2, 9), (3, 11), (3, 10), (3, 9), (4, 4), (4, 3)] {
+            let item = tables.pop().unwrap();
+            assert_eq!((item.0).0, file_num);
+            assert_eq!(item.1, raft_id);
         }
     }
 }
