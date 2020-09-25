@@ -642,12 +642,12 @@ mod tests {
     fn test_entries_enc_dec() {
         let pb_entries = vec![Entry::new(); 10];
         let file_num = 1;
-        let entries = Entries::new(pb_entries, None);
+        let mut entries = Entries::new(pb_entries, None);
 
         let mut encoded = vec![];
         entries.encode_to::<Entry>(&mut encoded).unwrap();
-        for idx in entries.entries_index.borrow_mut().iter_mut() {
-            idx.file_num = file_num;
+        for idx in entries.entries_index.iter_mut() {
+            idx.file_position.file_num = file_num;
         }
         let mut s = encoded.as_slice();
         let decode_entries = Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0).unwrap();
@@ -692,7 +692,7 @@ mod tests {
             ),
         ];
 
-        for item in items {
+        for mut item in items.into_iter() {
             let mut encoded = vec![];
             item.encode_to::<Entry>(&mut encoded).unwrap();
             let mut s = encoded.as_slice();
@@ -723,9 +723,7 @@ mod tests {
         assert_eq!(batch, decoded_batch);
 
         match &decoded_batch.items[0].content {
-            LogItemContent::Entries(entries) => {
-                assert_eq!(entries.encoded_size.get(), encoded_size)
-            }
+            LogItemContent::Entries(entries) => assert_eq!(entries.encoded_size, encoded_size),
             _ => unreachable!(),
         }
     }

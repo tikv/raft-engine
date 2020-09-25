@@ -846,9 +846,9 @@ mod tests {
         // After 4 batches are written into pipe log, no `CacheTask::NewChunk`
         // task should be triggered. However the last batch will trigger it.
         for i in 0..5 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 4 {
@@ -861,9 +861,9 @@ mod tests {
         // Write more 2 batches into pipe log. A `CacheTask::NewChunk` will be
         // emit on the second batch because log file is switched.
         for i in 5..7 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 6 {
@@ -877,9 +877,9 @@ mod tests {
         // `CacheTracker`s accociated in `EntryIndex`s are droped.
         drop(log_batches);
         for _ in 7..20 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
             drop(log_batch);
             assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
         }

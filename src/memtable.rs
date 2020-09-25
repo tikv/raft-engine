@@ -532,7 +532,7 @@ mod tests {
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
                 _ => self.entries_index.get(self.rewrite_count - 1),
             };
-            let ents_max = entry.map(|e| e.file_num);
+            let ents_max = entry.map(|e| e.file_position.file_num);
 
             let kvs_max = self.kvs_max_file_num(queue);
             match (ents_max, kvs_max) {
@@ -1067,7 +1067,7 @@ mod tests {
         for idx in begin_idx..end_idx {
             let mut ent_idx = EntryIndex::default();
             ent_idx.index = idx;
-            ent_idx.file_num = file_num;
+            ent_idx.file_position.file_num = file_num;
             ent_idx.offset = idx; // fake offset
             ent_idx.len = 1; // fake size
             ents_idx.push(ent_idx);
@@ -1081,8 +1081,8 @@ mod tests {
         for idx in begin_idx..end_idx {
             let mut ent_idx = EntryIndex::default();
             ent_idx.index = idx;
-            ent_idx.queue = LogQueue::Rewrite;
-            ent_idx.file_num = file_num;
+            ent_idx.file_position.queue = LogQueue::Rewrite;
+            ent_idx.file_position.file_num = file_num;
             ent_idx.offset = idx; // fake offset
             ent_idx.len = 1; // fake size
             ents_idx.push(ent_idx);
