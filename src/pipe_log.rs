@@ -669,8 +669,8 @@ mod tests {
 
     use super::*;
     use crate::cache_evict::{CacheSubmitor, CacheTask};
-    use crate::GlobalStats;
     use crate::util::{ReadableSize, Worker};
+    use crate::GlobalStats;
 
     fn new_test_pipe_log(
         path: &str,
