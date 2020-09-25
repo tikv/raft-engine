@@ -189,6 +189,7 @@ where
                                 }
                             }
                         }
+                        cache_submitor.fill_chunk(encoded_size);
                         apply_to_memtable(memtables, &mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }

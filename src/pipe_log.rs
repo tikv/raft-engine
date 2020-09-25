@@ -647,8 +647,7 @@ mod tests {
     use tempfile::Builder;
 
     use super::*;
-    use crate::cache_evict::{CacheSubmitor, CacheTask};
-    use crate::engine::SharedCacheStats;
+    use crate::cache_evict::CacheTask;
     use crate::util::{ReadableSize, Worker};
 
     fn new_test_pipe_log(
@@ -662,8 +661,6 @@ mod tests {
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
         let mut worker = Worker::new("test".to_owned(), None);
-        let stats = Arc::new(SharedCacheStats::default());
-        let submitor = CacheSubmitor::new(4096, worker.scheduler(), stats);
         let log = PipeLog::open(&cfg).unwrap();
         (log, worker.take_receiver())
     }
@@ -697,12 +694,14 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let (file_num, offset, _) = pipe_log.append(queue, &content, &mut false).unwrap();
+        let (file_num, _) = pipe_log.switch_log_file(queue).unwrap();
+        let offset = pipe_log.append(queue, &content).unwrap();
         assert_eq!(file_num, 1);
         assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_num(queue), 1);
 
-        let (file_num, offset, _) = pipe_log.append(queue, &content, &mut false).unwrap();
+        let (file_num, _) = pipe_log.switch_log_file(queue).unwrap();
+        let offset = pipe_log.append(queue, &content).unwrap();
         assert_eq!(file_num, 2);
         assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_num(queue), 2);
@@ -716,11 +715,13 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let (file_num, offset, _) = pipe_log.append(queue, &s_content, &mut false).unwrap();
+        let (file_num, _) = pipe_log.switch_log_file(queue).unwrap();
+        let offset = pipe_log.append(queue, &s_content).unwrap();
         assert_eq!(file_num, 3);
         assert_eq!(offset, header_size);
 
-        let (file_num, offset, _) = pipe_log.append(queue, &s_content, &mut false).unwrap();
+        let (file_num, _) = pipe_log.switch_log_file(queue).unwrap();
+        let offset = pipe_log.append(queue, &s_content).unwrap();
         assert_eq!(file_num, 3);
         assert_eq!(offset, header_size + s_content.len() as u64);
 
