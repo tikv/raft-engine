@@ -168,15 +168,6 @@ where
         }
     }
 
-    // Write a batch needs 3 steps:
-    // 1. find all involved raft groups and then lock their memtables;
-    // 2. append the log batch to pipe log;
-    // 3. update all involved memtables.
-    // The lock logic is a little complex. However it's necessary because
-    // 1. "Inactive log rewrite" needs to keep logs on pipe log order;
-    // 2. Users can call `append` on one raft group concurrently.
-    // Maybe we can improve the implement of "inactive log rewrite" and
-    // forbid concurrent `append` to remove locks here.
     async fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         let mut entries_size = 0;
         if let Some(content) = log_batch.encode_to_bytes(&mut entries_size) {
