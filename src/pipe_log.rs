@@ -663,8 +663,8 @@ mod tests {
 
         let mut worker = Worker::new("test".to_owned(), None);
         let stats = Arc::new(SharedCacheStats::default());
-        let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
-        let log = PipeLog::open(&cfg, submitor).unwrap();
+        let submitor = CacheSubmitor::new(4096, worker.scheduler(), stats);
+        let log = PipeLog::open(&cfg).unwrap();
         (log, worker.take_receiver())
     }
 

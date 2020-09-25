@@ -10,7 +10,6 @@ use log::warn;
 
 pub struct WriteTask {
     pub content: Vec<u8>,
-    pub group_infos: Vec<(u64, u64)>,
     pub entries_size: usize,
     pub sync: bool,
     pub sender: Sender<(u64, u64, Option<Arc<AtomicUsize>>)>,
@@ -47,7 +46,7 @@ where
 {
     pub fn run(&mut self) -> Result<()> {
         let mut write_ret = vec![];
-        while let Ok(LogMsg::Write(mut task)) = self.receiver.recv() {
+        while let Ok(LogMsg::Write(task)) = self.receiver.recv() {
             let mut sync = task.sync;
             let (file_num, fd) = self.pipe_log.switch_log_file(LogQueue::Append).unwrap();
             let offset = self
@@ -55,11 +54,10 @@ where
                 .append(LogQueue::Append, &task.content)
                 .unwrap();
             write_ret.push((offset, task.sender));
-            let tracker = self.cache_submitter.get_cache_tracker(file_num);
-            self.cache_submitter
-                .fill_cache(task.entries_size, &mut task.group_infos);
+            let tracker = self.cache_submitter.get_cache_tracker(file_num, offset);
+            self.cache_submitter.fill_chunk(task.entries_size);
             while let Ok(msg) = self.receiver.try_recv() {
-                let mut task = match msg {
+                let task = match msg {
                     LogMsg::Write(task) => task,
                     LogMsg::Stop => {
                         return Ok(());
@@ -68,8 +66,7 @@ where
                 if task.sync {
                     sync = true;
                 }
-                self.cache_submitter
-                    .fill_cache(task.entries_size, &mut task.group_infos);
+                self.cache_submitter.fill_chunk(task.entries_size);
                 let offset = self
                     .pipe_log
                     .append(LogQueue::Append, &task.content)

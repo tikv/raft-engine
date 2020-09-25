@@ -12,7 +12,9 @@ use futures::executor::block_on;
 use log::{info, warn};
 use protobuf::Message;
 
-use crate::cache_evict::{CacheChunk, CacheSubmitor, Runner as CacheEvictRunner};
+use crate::cache_evict::{
+    CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
+};
 use crate::config::{Config, RecoveryMode};
 use crate::errors::Error;
 use crate::log_batch::{
@@ -180,17 +182,12 @@ where
                             }
                         }
 
-                        if let Some(tracker) = cache_submitor.get_cache_tracker(file_num) {
-                            let mut group_infos = vec![];
+                        if let Some(tracker) = cache_submitor.get_cache_tracker(file_num, offset) {
                             for item in &log_batch.items {
                                 if let LogItemContent::Entries(ref entries) = item.content {
                                     entries.attach_cache_tracker(tracker.clone());
-                                    entries.entries.last().map(|e| {
-                                        group_infos.push((item.raft_group_id, W::index(e)))
-                                    });
                                 }
                             }
-                            cache_submitor.fill_cache(encoded_size, &mut group_infos);
                         }
                         apply_to_memtable(memtables, &mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
@@ -231,15 +228,6 @@ where
     // forbid concurrent `append` to remove locks here.
     async fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         let mut entries_size = 0;
-        let mut group_infos = vec![];
-        for item in log_batch.items.iter() {
-            if let LogItemContent::Entries(ref entries) = item.content {
-                group_infos.push((
-                    item.raft_group_id,
-                    W::index(entries.entries.last().unwrap()),
-                ));
-            }
-        }
         if let Some(content) = log_batch.encode_to_bytes(&mut entries_size) {
             let (sender, r) = future_channel::oneshot::channel();
             let bytes = content.len();
@@ -247,7 +235,6 @@ where
                 content,
                 sync,
                 entries_size,
-                group_infos,
                 sender,
             };
             self.wal_sender
@@ -319,7 +306,7 @@ impl SharedCacheStats {
 }
 
 struct Workers {
-    cache_evict: Worker<CacheChunk>,
+    cache_evict: Worker<CacheTask>,
     wal: Option<JoinHandle<()>>,
 }
 
@@ -328,7 +315,7 @@ where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
 {
-    fn new_impl(cfg: Config) -> Result<Engine<E, W, PipeLog>> {
+    fn new_impl(cfg: Config, chunk_limit: usize) -> Result<Engine<E, W, PipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let cache_stats = Arc::new(SharedCacheStats::default());
 
@@ -346,14 +333,16 @@ where
         let cache_evict_runner = CacheEvictRunner::new(
             cache_limit,
             cache_stats.clone(),
-            cfg.target_file_size.0 as usize,
+            chunk_limit,
             memtables.clone(),
+            pipe_log.clone(),
         );
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let recovery_mode = cfg.recovery_mode;
         let mut cache_submitor = CacheSubmitor::new(
             cache_limit,
+            chunk_limit,
             cache_evict_worker.scheduler(),
             cache_stats.clone(),
         );
@@ -403,7 +392,7 @@ where
     }
 
     pub fn new(cfg: Config) -> Engine<E, W, PipeLog> {
-        Self::new_impl(cfg).unwrap()
+        Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE).unwrap()
     }
 }
 
