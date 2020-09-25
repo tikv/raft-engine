@@ -7,11 +7,11 @@ use std::sync::Arc;
 use crossbeam::channel::{bounded, Sender};
 use protobuf::Message;
 
-use crate::engine::{MemTableAccessor};
-use crate::GlobalStats;
+use crate::engine::MemTableAccessor;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
+use crate::GlobalStats;
 
 pub const DEFAULT_CACHE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 

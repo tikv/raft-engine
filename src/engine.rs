@@ -18,7 +18,7 @@ use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
-use crate::{codec, GlobalStats, CacheStats, Result};
+use crate::{codec, CacheStats, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -285,14 +285,13 @@ where
         );
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
-        let recovery_mode = cfg.recovery_mode;
         Engine::recover(
             LogQueue::Rewrite,
             &pipe_log,
             &memtables,
             RecoveryMode::TolerateCorruptedTailRecords,
         )?;
-        Engine::recover(LogQueue::Append, &pipe_log, &memtables, recovery_mode)?;
+        Engine::recover(LogQueue::Append, &pipe_log, &memtables, cfg.recovery_mode)?;
         pipe_log.cache_submitor().nonblock_on_full();
 
         let cfg = Arc::new(cfg);

@@ -9,7 +9,7 @@ use crate::cache_evict::CacheTracker;
 use crate::log_batch::{CompressionType, EntryExt};
 use crate::pipe_log::LogQueue;
 use crate::util::{slices_in_range, HashMap};
-use crate::{Error, Result, GlobalStats};
+use crate::{Error, GlobalStats, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
@@ -137,7 +137,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             return;
         };
         self.entries_index.truncate(conflict);
+
+        let old_rewrite_count = self.rewrite_count;
         self.rewrite_count = cmp::min(self.rewrite_count, self.entries_index.len());
+        let rewrite_sub = old_rewrite_count - self.rewrite_count;
+        self.global_stats.add_compacted_rewrite(rewrite_sub);
     }
 
     fn shrink_entries_cache(&mut self) {
@@ -218,7 +222,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             ei.queue = LogQueue::Rewrite;
         }
         self.append(entries, entries_index);
+
+        let old_rewrite_count = self.rewrite_count;
         self.rewrite_count = self.entries_index.len();
+        let rewrite_add = self.rewrite_count - old_rewrite_count;
+        self.global_stats.add_rewrite(rewrite_add);
     }
 
     pub fn rewrite(&mut self, entries_index: Vec<EntryIndex>, latest_rewrite: u64) {
@@ -238,6 +246,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let back = self.entries_index.back().unwrap().index;
         let len = (cmp::min(last, back) - entries_index[distance].index + 1) as usize;
 
+        let mut rewrite_add = 0;
         for ei in entries_index.iter().skip(distance).take(len) {
             if self.entries_index[self.rewrite_count].file_num > latest_rewrite {
                 // Some entries are overwritten by new appends.
@@ -246,29 +255,44 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.entries_index[self.rewrite_count].queue = ei.queue;
             self.entries_index[self.rewrite_count].file_num = ei.file_num;
             self.entries_index[self.rewrite_count].base_offset = ei.base_offset;
-            self.rewrite_count += 1;
+            rewrite_add += 1;
         }
+        self.rewrite_count += rewrite_add;
+        self.global_stats.add_rewrite(rewrite_add);
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_num: u64) {
-        self.kvs.insert(key, (value, LogQueue::Append, file_num));
+        if let Some(origin) = self.kvs.insert(key, (value, LogQueue::Append, file_num)) {
+            if origin.1 == LogQueue::Rewrite {
+                self.global_stats.add_compacted_rewrite(1);
+            }
+        }
     }
 
     pub fn rewrite_key(&mut self, key: Vec<u8>, latest_rewrite: u64, file_num: u64) {
         if let Some(value) = self.kvs.get_mut(&key) {
+            if value.1 == LogQueue::Rewrite {
+                return;
+            }
             if value.2 <= latest_rewrite {
                 value.1 = LogQueue::Rewrite;
                 value.2 = file_num;
+                self.global_stats.add_rewrite(1);
             }
         }
     }
 
     pub fn put_rewrite(&mut self, key: Vec<u8>, value: Vec<u8>, file_num: u64) {
         self.kvs.insert(key, (value, LogQueue::Rewrite, file_num));
+        self.global_stats.add_rewrite(1);
     }
 
     pub fn delete(&mut self, key: &[u8]) {
-        self.kvs.remove(key);
+        if let Some(value) = self.kvs.remove(key) {
+            if value.1 == LogQueue::Rewrite {
+                self.global_stats.add_compacted_rewrite(1);
+            }
+        }
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -288,7 +312,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let drain_end = (idx - first_idx) as usize;
         self.entries_index.drain(..drain_end);
         self.shrink_entries_index();
-        self.rewrite_count -= cmp::min(drain_end, self.rewrite_count);
+
+        let rewrite_sub = cmp::min(drain_end, self.rewrite_count);
+        self.rewrite_count -= rewrite_sub;
+        self.global_stats.add_compacted_rewrite(rewrite_sub);
+
         drain_end as u64
     }
 
@@ -401,8 +429,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
         }
-        self.global_stats.add_cache_hit(vec.len() - vec_len);
-        self.global_stats.add_cache_miss(vec_idx.len() - vec_idx_len);
+        let (hit, miss) = (vec.len() - vec_len, vec_idx.len() - vec_idx_len);
+        self.global_stats.add_cache_hit(hit);
+        self.global_stats.add_cache_miss(miss);
         Ok(())
     }
 
