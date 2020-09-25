@@ -9,19 +9,33 @@ use crate::cache_evict::CacheTracker;
 use crate::log_batch::{CompressionType, EntryExt};
 use crate::pipe_log::LogQueue;
 use crate::util::{slices_in_range, HashMap};
-use crate::{Error, Result, GlobalStats};
+use crate::{Error, GlobalStats, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FileIndex {
+    // Log batch physical position in file.
+    pub queue: LogQueue,
+    pub file_num: u64,
+    pub base_offset: u64,
+}
+impl Default for FileIndex {
+    fn default() -> FileIndex {
+        FileIndex {
+            queue: LogQueue::Append,
+            file_num: 0,
+            base_offset: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryIndex {
     pub index: u64,
 
-    // Log batch physical position in file.
-    pub queue: LogQueue,
-    pub file_num: u64,
-    pub base_offset: u64,
+    pub file_position: FileIndex,
     pub compression_type: CompressionType,
     pub batch_len: u64,
 
@@ -37,9 +51,7 @@ impl Default for EntryIndex {
     fn default() -> EntryIndex {
         EntryIndex {
             index: 0,
-            queue: LogQueue::Append,
-            file_num: 0,
-            base_offset: 0,
+            file_position: FileIndex::default(),
             compression_type: CompressionType::None,
             batch_len: 0,
             offset: 0,
@@ -185,7 +197,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.cut_entries_cache(first_index_to_add);
         self.cut_entries_index(first_index_to_add);
 
-        if let Some((queue, index)) = self.entries_index.back().map(|e| (e.queue, e.index)) {
+        if let Some((queue, index)) = self
+            .entries_index
+            .back()
+            .map(|e| (e.file_position.queue, e.index))
+        {
             if first_index_to_add > index + 1 {
                 if queue != LogQueue::Rewrite {
                     panic!("memtable {} has a hole", self.region_id);
@@ -215,7 +231,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
     pub fn append_rewrite(&mut self, entries: Vec<E>, mut entries_index: Vec<EntryIndex>) {
         for ei in &mut entries_index {
-            ei.queue = LogQueue::Rewrite;
+            ei.file_position.queue = LogQueue::Rewrite;
         }
         self.append(entries, entries_index);
         self.rewrite_count = self.entries_index.len();
@@ -239,13 +255,15 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let len = (cmp::min(last, back) - entries_index[distance].index + 1) as usize;
 
         for ei in entries_index.iter().skip(distance).take(len) {
-            if self.entries_index[self.rewrite_count].file_num > latest_rewrite {
+            if self.entries_index[self.rewrite_count]
+                .file_position
+                .file_num
+                > latest_rewrite
+            {
                 // Some entries are overwritten by new appends.
                 break;
             }
-            self.entries_index[self.rewrite_count].queue = ei.queue;
-            self.entries_index[self.rewrite_count].file_num = ei.file_num;
-            self.entries_index[self.rewrite_count].base_offset = ei.base_offset;
+            self.entries_index[self.rewrite_count].file_position = ei.file_position;
             self.rewrite_count += 1;
         }
     }
@@ -402,7 +420,8 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             vec_idx.extend_from_slice(second);
         }
         self.global_stats.add_cache_hit(vec.len() - vec_len);
-        self.global_stats.add_cache_miss(vec_idx.len() - vec_idx_len);
+        self.global_stats
+            .add_cache_miss(vec_idx.len() - vec_idx_len);
         Ok(())
     }
 
@@ -415,12 +434,12 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let begin = self
             .entries_index
             .iter()
-            .find(|e| e.queue == LogQueue::Append);
+            .find(|e| e.file_position.queue == LogQueue::Append);
         let end = self
             .entries_index
             .iter()
             .rev()
-            .find(|e| e.file_num <= latest_rewrite);
+            .find(|e| e.file_position.file_num <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
             if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
@@ -443,7 +462,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
             _ => self.entries_index.front(),
         };
-        let ents_min = entry.map(|e| e.file_num);
+        let ents_min = entry.map(|e| e.file_position.file_num);
         let kvs_min = self.kvs_min_file_num(queue);
         match (ents_min, kvs_min) {
             (Some(ents_min), Some(kvs_min)) => Some(cmp::min(ents_min, kvs_min)),

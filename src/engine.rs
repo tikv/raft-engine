@@ -18,7 +18,7 @@ use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
-use crate::{codec, GlobalStats, CacheStats, Result};
+use crate::{codec, CacheStats, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -168,7 +168,7 @@ where
                         let mut encoded_size = 0;
                         for item in &log_batch.items {
                             if let LogItemContent::Entries(ref entries) = item.content {
-                                encoded_size += entries.encoded_size.get();
+                                encoded_size += entries.encoded_size;
                             }
                         }
 
@@ -177,8 +177,8 @@ where
                             offset,
                             encoded_size,
                         ) {
-                            for item in &log_batch.items {
-                                if let LogItemContent::Entries(ref entries) = item.content {
+                            for item in log_batch.items.iter_mut() {
+                                if let LogItemContent::Entries(entries) = &mut item.content {
                                     entries.attach_cache_tracker(tracker.clone());
                                 }
                             }
@@ -485,9 +485,9 @@ where
     W: EntryExt<E>,
     P: GenericPipeLog,
 {
-    let queue = entry_index.queue;
-    let file_num = entry_index.file_num;
-    let base_offset = entry_index.base_offset;
+    let queue = entry_index.file_position.queue;
+    let file_num = entry_index.file_position.file_num;
+    let base_offset = entry_index.file_position.base_offset;
     let batch_len = entry_index.batch_len;
     let offset = entry_index.offset;
     let len = entry_index.len;
@@ -532,7 +532,7 @@ fn apply_to_memtable<E, W>(
         match item.content {
             LogItemContent::Entries(entries_to_add) => {
                 let entries = entries_to_add.entries;
-                let entries_index = entries_to_add.entries_index.into_inner();
+                let entries_index = entries_to_add.entries_index;
                 if queue == LogQueue::Rewrite {
                     memtable.wl().append_rewrite(entries, entries_index);
                 } else {

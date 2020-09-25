@@ -18,6 +18,7 @@ use protobuf::Message;
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
+use crate::memtable::FileIndex;
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
 
@@ -57,7 +58,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Write a batch into the append queue.
     fn write<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize>;
@@ -65,7 +66,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Rewrite a batch into the rewrite queue.
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize>;
@@ -440,7 +441,7 @@ impl GenericPipeLog for PipeLog {
 
     fn write<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
@@ -454,10 +455,15 @@ impl GenericPipeLog for PipeLog {
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
             }
+            let file_position = FileIndex {
+                file_num: cur_file_num,
+                base_offset: offset,
+                queue: LogQueue::Append,
+            };
 
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
+            for item in batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
+                    entries.update_position(file_position, &tracker);
                 }
             }
 
@@ -469,7 +475,7 @@ impl GenericPipeLog for PipeLog {
 
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
@@ -479,9 +485,14 @@ impl GenericPipeLog for PipeLog {
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
             }
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
+            let file_position = FileIndex {
+                queue: LogQueue::Rewrite,
+                file_num: cur_file_num,
+                base_offset: offset,
+            };
+            for item in batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
+                    entries.update_position(file_position, &None);
                 }
             }
             *file_num = cur_file_num;
@@ -669,8 +680,8 @@ mod tests {
 
     use super::*;
     use crate::cache_evict::{CacheSubmitor, CacheTask};
-    use crate::GlobalStats;
     use crate::util::{ReadableSize, Worker};
+    use crate::GlobalStats;
 
     fn new_test_pipe_log(
         path: &str,
