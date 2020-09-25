@@ -51,14 +51,6 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
 
-    /// Write a batch into the append queue.
-    fn write<E: Message, W: EntryExt<E>>(
-        &self,
-        batch: &LogBatch<E, W>,
-        sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize>;
-
     /// Rewrite a batch into the rewrite queue.
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
@@ -423,32 +415,6 @@ impl GenericPipeLog for PipeLog {
         Ok(())
     }
 
-    fn write<E: Message, W: EntryExt<E>>(
-        &self,
-        batch: &LogBatch<E, W>,
-        sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize> {
-        let mut entries_size = 0;
-        if let Some(content) = batch.encode_to_bytes(&mut entries_size) {
-            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            let (cur_file_num, fd) = self.switch_log_file(LogQueue::Append)?;
-            let tracker = None;
-            let offset = self.append(LogQueue::Append, &content)?;
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
-                }
-            }
-            if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
-            }
-            *file_num = cur_file_num;
-            return Ok(content.len());
-        }
-        Ok(0)
-    }
-
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
         batch: &LogBatch<E, W>,
@@ -642,27 +608,22 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 mod tests {
     use std::time::Duration;
 
-    use crossbeam::channel::Receiver;
     use raft::eraftpb::Entry;
     use tempfile::Builder;
 
     use super::*;
-    use crate::cache_evict::CacheTask;
+    use crate::cache_evict::{CacheSubmitor, CacheTask};
     use crate::util::{ReadableSize, Worker};
+    use crate::GlobalStats;
 
-    fn new_test_pipe_log(
-        path: &str,
-        bytes_per_sync: usize,
-        rotate_size: usize,
-    ) -> (PipeLog, Receiver<Option<CacheTask>>) {
+    fn new_test_pipe_log(path: &str, bytes_per_sync: usize, rotate_size: usize) -> PipeLog {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        let mut worker = Worker::new("test".to_owned(), None);
         let log = PipeLog::open(&cfg).unwrap();
-        (log, worker.take_receiver())
+        log
     }
 
     #[test]
@@ -686,7 +647,7 @@ mod tests {
 
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
-        let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.first_file_num(queue), INIT_FILE_NUM);
         assert_eq!(pipe_log.active_file_num(queue), INIT_FILE_NUM);
 
@@ -768,7 +729,7 @@ mod tests {
         pipe_log.close().unwrap();
 
         // reopen
-        let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.active_file_num(queue), 3);
         assert_eq!(
             pipe_log.active_log_size(queue),
@@ -790,6 +751,29 @@ mod tests {
         test_pipe_log_impl(LogQueue::Rewrite)
     }
 
+    fn write_to_log(
+        log: &mut PipeLog,
+        submitor: &mut CacheSubmitor,
+        batch: &LogBatch<Entry, Entry>,
+        file_num: &mut u64,
+    ) {
+        let mut entries_size = 0;
+        if let Some(content) = batch.encode_to_bytes(&mut entries_size) {
+            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
+            let (cur_file_num, fd) = log.switch_log_file(LogQueue::Append).unwrap();
+            let offset = log.append(LogQueue::Append, &content).unwrap();
+            let tracker = submitor.get_cache_tracker(cur_file_num, offset);
+            submitor.fill_chunk(entries_size);
+            for item in &batch.items {
+                if let LogItemContent::Entries(ref entries) = item.content {
+                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
+                }
+            }
+            fd.sync().unwrap();
+            *file_num = cur_file_num;
+        }
+    }
+
     #[test]
     fn test_cache_submitor() {
         let dir = Builder::new().prefix("test_pipe_log").tempdir().unwrap();
@@ -797,7 +781,11 @@ mod tests {
 
         let rotate_size = 6 * 1024; // 6K to rotate.
         let bytes_per_sync = 32 * 1024;
-        let (pipe_log, receiver) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let mut worker = Worker::new("test".to_owned(), None);
+        let mut pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let receiver = worker.take_receiver();
+        let stats = Arc::new(GlobalStats::default());
+        let mut submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
 
         let get_1m_batch = || {
             let mut entry = Entry::new();
@@ -817,7 +805,7 @@ mod tests {
         for i in 0..5 {
             let log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            write_to_log(&mut pipe_log, &mut submitor, &log_batch, &mut file_num);
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 4 {
@@ -832,7 +820,7 @@ mod tests {
         for i in 5..7 {
             let log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            write_to_log(&mut pipe_log, &mut submitor, &log_batch, &mut file_num);
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 6 {
@@ -848,7 +836,7 @@ mod tests {
         for _ in 7..20 {
             let log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            write_to_log(&mut pipe_log, &mut submitor, &log_batch, &mut file_num);
             drop(log_batch);
             assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
         }
