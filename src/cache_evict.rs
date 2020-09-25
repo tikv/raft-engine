@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crossbeam::channel::{bounded, Sender};
 use protobuf::Message;
 
-use crate::engine::{MemTableAccessor, SharedCacheStats};
+use crate::engine::{MemTableAccessor};
+use crate::GlobalStats;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
@@ -30,7 +31,7 @@ pub struct CacheSubmitor {
     scheduler: Scheduler<CacheTask>,
     cache_limit: usize,
     chunk_limit: usize,
-    cache_stats: Arc<SharedCacheStats>,
+    global_stats: Arc<GlobalStats>,
     block_on_full: bool,
 }
 
@@ -39,7 +40,7 @@ impl CacheSubmitor {
         cache_limit: usize,
         chunk_limit: usize,
         scheduler: Scheduler<CacheTask>,
-        cache_stats: Arc<SharedCacheStats>,
+        global_stats: Arc<GlobalStats>,
     ) -> Self {
         CacheSubmitor {
             file_num: 0,
@@ -49,7 +50,7 @@ impl CacheSubmitor {
             scheduler,
             cache_limit,
             chunk_limit,
-            cache_stats,
+            global_stats,
             block_on_full: false,
         }
     }
@@ -96,7 +97,7 @@ impl CacheSubmitor {
         }
 
         if self.block_on_full {
-            let cache_size = self.cache_stats.cache_size();
+            let cache_size = self.global_stats.cache_size();
             if cache_size > self.cache_limit {
                 let (tx, rx) = bounded(1);
                 if self.scheduler.schedule(CacheTask::EvictOldest(tx)).is_ok() {
@@ -107,7 +108,7 @@ impl CacheSubmitor {
 
         self.chunk_size += size;
         self.size_tracker.fetch_add(size, Ordering::Release);
-        self.cache_stats.add_mem_change(size);
+        self.global_stats.add_mem_change(size);
         Some(self.size_tracker.clone())
     }
 
@@ -126,7 +127,7 @@ where
     P: GenericPipeLog,
 {
     cache_limit: usize,
-    cache_stats: Arc<SharedCacheStats>,
+    global_stats: Arc<GlobalStats>,
     chunk_limit: usize,
     valid_cache_chunks: VecDeque<CacheChunk>,
     memtables: MemTableAccessor<E, W>,
@@ -141,14 +142,14 @@ where
 {
     pub fn new(
         cache_limit: usize,
-        cache_stats: Arc<SharedCacheStats>,
+        global_stats: Arc<GlobalStats>,
         chunk_limit: usize,
         memtables: MemTableAccessor<E, W>,
         pipe_log: P,
     ) -> Runner<E, W, P> {
         Runner {
             cache_limit,
-            cache_stats,
+            global_stats,
             chunk_limit,
             valid_cache_chunks: Default::default(),
             memtables,
@@ -157,7 +158,7 @@ where
     }
 
     fn retain_valid_cache(&mut self) {
-        let cache_size = self.cache_stats.cache_size();
+        let cache_size = self.global_stats.cache_size();
         if self.valid_cache_chunks.len() * self.chunk_limit >= cache_size * 3 {
             // There could be many empty chunks.
             self.valid_cache_chunks
@@ -169,12 +170,12 @@ where
     }
 
     fn cache_reach_high_water(&self) -> bool {
-        let cache_size = self.cache_stats.cache_size();
+        let cache_size = self.global_stats.cache_size();
         cache_size > (self.cache_limit as f64 * HIGH_WATER_RATIO) as usize
     }
 
     fn cache_reach_low_water(&self) -> bool {
-        let cache_size = self.cache_stats.cache_size();
+        let cache_size = self.global_stats.cache_size();
         cache_size <= (self.cache_limit as f64 * LOW_WATER_RATIO) as usize
     }
 

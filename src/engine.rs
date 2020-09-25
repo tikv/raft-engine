@@ -1,5 +1,4 @@
 use std::io::BufRead;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
@@ -19,7 +18,7 @@ use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
-use crate::{codec, CacheStats, Result};
+use crate::{codec, GlobalStats, CacheStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -118,7 +117,7 @@ where
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
-    cache_stats: Arc<SharedCacheStats>,
+    global_stats: Arc<GlobalStats>,
     purge_manager: PurgeManager<E, W, P>,
 
     workers: Arc<RwLock<Workers>>,
@@ -243,45 +242,6 @@ where
     }
 }
 
-#[derive(Default)]
-pub struct SharedCacheStats {
-    hit: AtomicUsize,
-    miss: AtomicUsize,
-    cache_size: AtomicUsize,
-}
-
-impl SharedCacheStats {
-    pub fn sub_mem_change(&self, bytes: usize) {
-        self.cache_size.fetch_sub(bytes, Ordering::Release);
-    }
-    pub fn add_mem_change(&self, bytes: usize) {
-        self.cache_size.fetch_add(bytes, Ordering::Release);
-    }
-    pub fn hit_cache(&self, count: usize) {
-        self.hit.fetch_add(count, Ordering::Relaxed);
-    }
-    pub fn miss_cache(&self, count: usize) {
-        self.miss.fetch_add(count, Ordering::Relaxed);
-    }
-
-    pub fn hit_times(&self) -> usize {
-        self.hit.load(Ordering::Relaxed)
-    }
-    pub fn miss_times(&self) -> usize {
-        self.miss.load(Ordering::Relaxed)
-    }
-    pub fn cache_size(&self) -> usize {
-        self.cache_size.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    pub fn reset(&self) {
-        self.hit.store(0, Ordering::Relaxed);
-        self.miss.store(0, Ordering::Relaxed);
-        self.cache_size.store(0, Ordering::Relaxed);
-    }
-}
-
 struct Workers {
     cache_evict: Worker<CacheTask>,
 }
@@ -293,7 +253,7 @@ where
 {
     fn new_impl(cfg: Config, chunk_limit: usize) -> Result<Engine<E, W, PipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
-        let cache_stats = Arc::new(SharedCacheStats::default());
+        let global_stats = Arc::new(GlobalStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
@@ -303,14 +263,14 @@ where
                 cache_limit,
                 chunk_limit,
                 cache_evict_worker.scheduler(),
-                cache_stats.clone(),
+                global_stats.clone(),
             ),
         )
         .expect("Open raft log");
         pipe_log.cache_submitor().block_on_full();
 
         let memtables = {
-            let stats = cache_stats.clone();
+            let stats = global_stats.clone();
             MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| {
                 MemTable::new(id, cache_limit, stats.clone())
             }))
@@ -318,7 +278,7 @@ where
 
         let cache_evict_runner = CacheEvictRunner::new(
             cache_limit,
-            cache_stats.clone(),
+            global_stats.clone(),
             chunk_limit,
             memtables.clone(),
             pipe_log.clone(),
@@ -342,7 +302,7 @@ where
             cfg,
             memtables,
             pipe_log,
-            cache_stats,
+            global_stats,
             purge_manager,
             workers: Arc::new(RwLock::new(Workers {
                 cache_evict: cache_evict_worker,
@@ -484,12 +444,8 @@ where
     }
 
     /// Flush stats about EntryCache.
-    pub fn flush_stats(&self) -> CacheStats {
-        CacheStats {
-            hit: self.cache_stats.hit.swap(0, Ordering::SeqCst),
-            miss: self.cache_stats.miss.swap(0, Ordering::SeqCst),
-            cache_size: self.cache_stats.cache_size.load(Ordering::SeqCst),
-        }
+    pub fn flush_cache_stats(&self) -> CacheStats {
+        self.global_stats.flush_cache_stats()
     }
 
     /// Stop background thread which will keep trying evict caching.
@@ -791,14 +747,14 @@ mod tests {
             }
         }
 
-        let cache_size = engine.cache_stats.cache_size();
+        let cache_size = engine.global_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
         // Recover from log files.
         engine.stop();
         drop(engine);
         let engine = RaftLogEngine::new_impl(cfg.clone(), 512 * 1024).unwrap();
-        let cache_size = engine.cache_stats.cache_size();
+        let cache_size = engine.global_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
         // Rewrite inactive logs.
@@ -807,7 +763,7 @@ mod tests {
         }
         let ret = engine.purge_expired_files().unwrap();
         assert!(ret.is_empty());
-        let cache_size = engine.cache_stats.cache_size();
+        let cache_size = engine.global_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
     }
 
