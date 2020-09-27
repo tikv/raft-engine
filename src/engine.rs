@@ -527,10 +527,10 @@ where
 
     pub fn async_write(
         &self,
-        log_batch: &mut LogBatch<E, W>,
+        mut log_batch: LogBatch<E, W>,
         sync: bool,
     ) -> BoxFuture<'static, Result<usize>> {
-        self.write_impl(log_batch, sync)
+        self.write_impl(&mut log_batch, sync)
     }
 
     /// Flush stats about EntryCache.
