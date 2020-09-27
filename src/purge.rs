@@ -144,33 +144,30 @@ where
         let mut file_num = 0;
         self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
         if file_num > 0 {
-            rewrite_to_memtable(&self.memtables, log_batch, file_num, latest_rewrite);
+            self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
         }
         Ok(())
     }
-}
 
-fn rewrite_to_memtable<E, W>(
-    memtables: &MemTableAccessor<E, W>,
-    log_batch: &mut LogBatch<E, W>,
-    file_num: u64,
-    latest_rewrite: u64,
-) where
-    E: Message + Clone,
-    W: EntryExt<E>,
-{
-    for item in log_batch.items.drain(..) {
-        let memtable = memtables.get_or_insert(item.raft_group_id);
-        match item.content {
-            LogItemContent::Entries(entries_to_add) => {
-                let entries_index = entries_to_add.entries_index.into_inner();
-                memtable.wl().rewrite(entries_index, latest_rewrite);
-            }
-            LogItemContent::Kv(kv) => match kv.op_type {
-                OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+    fn rewrite_to_memtable(
+        &self,
+        log_batch: &mut LogBatch<E, W>,
+        file_num: u64,
+        latest_rewrite: u64,
+    ) {
+        for item in log_batch.items.drain(..) {
+            let memtable = self.memtables.get_or_insert(item.raft_group_id);
+            match item.content {
+                LogItemContent::Entries(entries_to_add) => {
+                    let entries_index = entries_to_add.entries_index.into_inner();
+                    memtable.wl().rewrite(entries_index, latest_rewrite);
+                }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+                    _ => unreachable!(),
+                },
                 _ => unreachable!(),
-            },
-            _ => unreachable!(),
+            }
         }
     }
 }
