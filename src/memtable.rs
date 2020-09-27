@@ -73,7 +73,7 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     rewrite_count: usize,
 
     // Region scope key/value pairs
-    // key -> (value, file_num)
+    // key -> (value, queue, file_num)
     kvs: HashMap<Vec<u8>, (Vec<u8>, LogQueue, u64)>,
 
     cache_size: usize,
@@ -401,9 +401,10 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
         }
-        self.global_stats.add_cache_hit(vec.len() - vec_len);
-        self.global_stats
-            .add_cache_miss(vec_idx.len() - vec_idx_len);
+
+        let (hit, miss) = (vec.len() - vec_len, vec_idx.len() - vec_idx_len);
+        self.global_stats.add_cache_hit(hit);
+        self.global_stats.add_cache_miss(miss);
         Ok(())
     }
 
@@ -442,7 +443,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let entry = match queue {
             LogQueue::Append => self.entries_index.get(self.rewrite_count),
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
-            _ => self.entries_index.front(),
+            LogQueue::Rewrite => self.entries_index.front(),
         };
         let ents_min = entry.map(|e| e.file_num);
         let kvs_min = self.kvs_min_file_num(queue);
@@ -470,7 +471,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.entries_index.back().map(|e| e.index)
     }
 
-    fn kvs_min_file_num(&self, queue: LogQueue) -> Option<u64> {
+    pub fn kvs_min_file_num(&self, queue: LogQueue) -> Option<u64> {
         self.kvs
             .values()
             .filter(|v| v.1 == queue)
@@ -508,11 +509,12 @@ mod tests {
     use raft::eraftpb::Entry;
 
     impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
-        fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
+        pub fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
             let entry = match queue {
+                LogQueue::Append if self.rewrite_count == self.entries_index.len() => None,
                 LogQueue::Append => self.entries_index.back(),
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
-                _ => self.entries_index.get(self.rewrite_count - 1),
+                LogQueue::Rewrite => self.entries_index.get(self.rewrite_count - 1),
             };
             let ents_max = entry.map(|e| e.file_num);
 
@@ -524,7 +526,8 @@ mod tests {
                 (None, None) => None,
             }
         }
-        fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
+
+        pub fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
             self.kvs
                 .values()
                 .filter(|v| v.1 == queue)

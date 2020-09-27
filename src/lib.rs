@@ -87,3 +87,15 @@ impl GlobalStats {
         self.cache_size.store(0, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::log_batch::EntryExt;
+    use raft::eraftpb::Entry;
+
+    impl EntryExt<Entry> for Entry {
+        fn index(e: &Entry) -> u64 {
+            e.get_index()
+        }
+    }
+}

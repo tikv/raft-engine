@@ -57,7 +57,9 @@ where
     E: Message + Clone,
     W: EntryExt<E>,
 {
-    fn new(creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>) -> MemTableAccessor<E, W> {
+    pub fn new(
+        creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>,
+    ) -> MemTableAccessor<E, W> {
         let mut slots = Vec::with_capacity(SLOTS_COUNT);
         for _ in 0..SLOTS_COUNT {
             slots.push(Arc::new(RwLock::new(MemTables::default())));
@@ -82,11 +84,11 @@ where
         memtables.get(&raft_group_id).cloned()
     }
 
-    pub fn remove(&self, raft_group_id: u64) {
+    pub fn remove(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<E, W>>>> {
         let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
             .write()
             .unwrap();
-        memtables.remove(&raft_group_id);
+        memtables.remove(&raft_group_id)
     }
 
     pub fn fold<B, F: Fn(B, &MemTable<E, W>) -> B>(&self, mut init: B, fold: F) -> B {
@@ -291,6 +293,7 @@ where
                 wal: None,
             })),
         };
+
         cache_submitor.block_on_full();
         engine.recover(
             &mut cache_submitor,
@@ -617,12 +620,6 @@ mod tests {
     use super::*;
     use crate::util::ReadableSize;
     use raft::eraftpb::Entry;
-
-    impl EntryExt<Entry> for Entry {
-        fn index(e: &Entry) -> u64 {
-            e.get_index()
-        }
-    }
 
     type RaftLogEngine = Engine<Entry, Entry, PipeLog>;
     impl RaftLogEngine {
