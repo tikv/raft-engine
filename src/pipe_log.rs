@@ -54,7 +54,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Rewrite a batch into the rewrite queue.
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize>;
@@ -417,7 +417,7 @@ impl GenericPipeLog for PipeLog {
 
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
@@ -428,8 +428,8 @@ impl GenericPipeLog for PipeLog {
             if sync {
                 fd.sync()?;
             }
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
+            for item in batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
                     entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
                 }
             }

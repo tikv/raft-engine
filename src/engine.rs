@@ -142,7 +142,7 @@ where
         match item.content {
             LogItemContent::Entries(entries_to_add) => {
                 let entries = entries_to_add.entries;
-                let entries_index = entries_to_add.entries_index.into_inner();
+                let entries_index = entries_to_add.entries_index;
                 if queue == LogQueue::Rewrite {
                     memtable.wl().append_rewrite(entries, entries_index);
                 } else {
@@ -184,8 +184,8 @@ where
                 .map_err(|_| Error::Stop)?;
             let (file_num, offset, tracker) = r.await?;
             if file_num > 0 {
-                for item in log_batch.items.drain(..) {
-                    if let LogItemContent::Entries(ref entries) = item.content {
+                for mut item in log_batch.items.drain(..) {
+                    if let LogItemContent::Entries(entries) = &mut item.content {
                         entries.update_position(LogQueue::Append, file_num, offset, &tracker);
                     }
                     self.apply_to_memtable(item, LogQueue::Append, file_num);
@@ -332,13 +332,13 @@ where
                         let mut encoded_size = 0;
                         for item in &log_batch.items {
                             if let LogItemContent::Entries(ref entries) = item.content {
-                                encoded_size += entries.encoded_size.get();
+                                encoded_size += entries.encoded_size;
                             }
                         }
 
                         if let Some(tracker) = cache_submitor.get_cache_tracker(file_num, offset) {
-                            for item in &log_batch.items {
-                                if let LogItemContent::Entries(ref entries) = item.content {
+                            for item in log_batch.items.iter_mut() {
+                                if let LogItemContent::Entries(entries) = &mut item.content {
                                     entries.attach_cache_tracker(tracker.clone());
                                 }
                             }
