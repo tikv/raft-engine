@@ -145,10 +145,7 @@ impl<E: Message> Entries<E> {
     pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
         let len = entries.len();
         let (encoded_size, entries_index) = match entries_index {
-            Some(index) => (
-                index.iter().fold(0, |acc, x| acc + x.len as usize),
-                index,
-            ),
+            Some(index) => (index.iter().fold(0, |acc, x| acc + x.len as usize), index),
             None => (0, vec![EntryIndex::default(); len]),
         };
         Entries {
