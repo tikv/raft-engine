@@ -837,14 +837,34 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.target_file_size = ReadableSize::kb(5);
-        cfg.purge_threshold = ReadableSize::kb(80);
+        cfg.target_file_size = ReadableSize::kb(128);
+        cfg.purge_threshold = ReadableSize::kb(512);
         let engine = RaftLogEngine::new(cfg.clone());
 
-        // Put 100 entries into 10 regions.
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
-        for i in 1..=10 {
+
+        // Layout of region 1 in file 1:
+        // entries[1..10], Clean, entries[2..11]
+        for j in 1..=10 {
+            entry.set_index(j);
+            append_log(&engine, 1, &entry);
+        }
+        let mut log_batch = LogBatch::with_capacity(1);
+        log_batch.clean_region(1);
+        engine.write(&mut log_batch, false).unwrap();
+        assert!(engine.memtables.get(1).is_none());
+
+        entry.set_data(vec![b'y'; 1024]);
+        for j in 2..=11 {
+            entry.set_index(j);
+            append_log(&engine, 1, &entry);
+        }
+
+        assert_eq!(engine.pipe_log.active_file_num(LogQueue::Append), 1);
+
+        // Put more raft logs to trigger purge.
+        for i in 2..64 {
             for j in 1..=10 {
                 entry.set_index(j);
                 append_log(&engine, i, &entry);
@@ -860,19 +880,22 @@ mod tests {
         let memtable_1 = engine.memtables.get(1).unwrap();
         assert!(memtable_1.rl().max_file_num(LogQueue::Append).is_none());
         assert!(memtable_1.rl().kvs_max_file_num(LogQueue::Append).is_none());
+        // Entries of region 1 after the clean command should be still valid.
+        for j in 2..=11 {
+            let entry_j = engine.get_entry(1, j).unwrap().unwrap();
+            assert_eq!(entry_j.get_data(), entry.get_data());
+        }
 
-        // Clean a raft group.
+        // Clean the raft group again.
         let mut log_batch = LogBatch::with_capacity(1);
         log_batch.clean_region(1);
         engine.write(&mut log_batch, false).unwrap();
         assert!(engine.memtables.get(1).is_none());
 
-        // Put 100 entries into another 10 regions, and then purge again.
+        // Put more raft logs and then recover.
         let active_file_num = engine.pipe_log.active_file_num(LogQueue::Append);
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024]);
-        for i in 10..=20 {
-            for j in 10..=20 {
+        for i in 64..=128 {
+            for j in 1..=10 {
                 entry.set_index(j);
                 append_log(&engine, i, &entry);
             }
