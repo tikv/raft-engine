@@ -28,7 +28,9 @@ where
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
+
     // Vector of (file_num, raft_group_id).
+    #[allow(clippy::type_complexity)]
     removed_memtables: Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>,
 }
 
