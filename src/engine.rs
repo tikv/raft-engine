@@ -145,7 +145,10 @@ where
                     }
                 }
                 LogItemContent::Command(Command::Clean) => {
-                    if self.memtables.remove(item.raft_group_id).is_some() {}
+                    if self.memtables.remove(item.raft_group_id).is_some() {
+                        self.purge_manager
+                            .remove_memtable(file_num, item.raft_group_id);
+                    }
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
                     memtable.wl().compact_to(index);
@@ -545,6 +548,17 @@ mod tests {
     use crate::util::ReadableSize;
     use raft::eraftpb::Entry;
 
+    impl<E, W, P> Engine<E, W, P>
+    where
+        E: Message + Clone,
+        W: EntryExt<E> + 'static,
+        P: GenericPipeLog,
+    {
+        pub fn purge_manager(&self) -> &PurgeManager<E, W, P> {
+            &self.purge_manager
+        }
+    }
+
     type RaftLogEngine = Engine<Entry, Entry, PipeLog>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
@@ -810,5 +824,88 @@ mod tests {
             new_active_num > active_num
                 || (new_active_num == active_num && new_active_len > active_len)
         );
+    }
+
+    // Raft groups can be removed when they only have entries in the rewrite queue.
+    // We need to ensure that these raft groups won't appear again after recover.
+    #[test]
+    fn test_clean_raft_with_rewrite() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_clean_raft_with_rewrite")
+            .tempdir()
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.target_file_size = ReadableSize::kb(128);
+        cfg.purge_threshold = ReadableSize::kb(512);
+        let engine = RaftLogEngine::new(cfg.clone());
+
+        let mut entry = Entry::new();
+        entry.set_data(vec![b'x'; 1024]);
+
+        // Layout of region 1 in file 1:
+        // entries[1..10], Clean, entries[2..11]
+        for j in 1..=10 {
+            entry.set_index(j);
+            append_log(&engine, 1, &entry);
+        }
+        let mut log_batch = LogBatch::with_capacity(1);
+        log_batch.clean_region(1);
+        engine.write(&mut log_batch, false).unwrap();
+        assert!(engine.memtables.get(1).is_none());
+
+        entry.set_data(vec![b'y'; 1024]);
+        for j in 2..=11 {
+            entry.set_index(j);
+            append_log(&engine, 1, &entry);
+        }
+
+        assert_eq!(engine.pipe_log.active_file_num(LogQueue::Append), 1);
+
+        // Put more raft logs to trigger purge.
+        for i in 2..64 {
+            for j in 1..=10 {
+                entry.set_index(j);
+                append_log(&engine, i, &entry);
+            }
+        }
+
+        // The engine needs purge, and all old entries should be rewritten.
+        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_expired_files().unwrap().is_empty());
+        assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
+
+        // All entries of region 1 has been rewritten.
+        let memtable_1 = engine.memtables.get(1).unwrap();
+        assert!(memtable_1.rl().max_file_num(LogQueue::Append).is_none());
+        assert!(memtable_1.rl().kvs_max_file_num(LogQueue::Append).is_none());
+        // Entries of region 1 after the clean command should be still valid.
+        for j in 2..=11 {
+            let entry_j = engine.get_entry(1, j).unwrap().unwrap();
+            assert_eq!(entry_j.get_data(), entry.get_data());
+        }
+
+        // Clean the raft group again.
+        let mut log_batch = LogBatch::with_capacity(1);
+        log_batch.clean_region(1);
+        engine.write(&mut log_batch, false).unwrap();
+        assert!(engine.memtables.get(1).is_none());
+
+        // Put more raft logs and then recover.
+        let active_file_num = engine.pipe_log.active_file_num(LogQueue::Append);
+        for i in 64..=128 {
+            for j in 1..=10 {
+                entry.set_index(j);
+                append_log(&engine, i, &entry);
+            }
+        }
+        assert!(engine.purge_expired_files().unwrap().is_empty());
+        assert!(engine.pipe_log.first_file_num(LogQueue::Append) > active_file_num);
+
+        // After the engine recovers, the removed raft group shouldn't appear again.
+        drop(engine);
+        let engine = RaftLogEngine::new(cfg.clone());
+        assert!(engine.memtables.get(1).is_none());
     }
 }
