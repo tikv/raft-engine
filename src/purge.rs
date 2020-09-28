@@ -10,7 +10,7 @@ use crate::engine::{fetch_entries, MemTableAccessor};
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::HandyRwLock;
-use crate::Result;
+use crate::{GlobalStats, Result};
 
 // If a region has some very old raft logs less than this threshold,
 // rewrite them to clean stale log files ASAP.
@@ -28,10 +28,14 @@ where
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
+    global_stats: Arc<GlobalStats>,
 
     // Vector of (file_num, raft_group_id).
     #[allow(clippy::type_complexity)]
     removed_memtables: Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>,
+
+    // Only one thread can run `purge_expired_files` at a time.
+    purge_mutex: Arc<Mutex<()>>,
 }
 
 impl<E, W, P> PurgeManager<E, W, P>
@@ -44,17 +48,25 @@ where
         cfg: Arc<Config>,
         memtables: MemTableAccessor<E, W>,
         pipe_log: P,
+        global_stats: Arc<GlobalStats>,
     ) -> PurgeManager<E, W, P> {
         PurgeManager {
             cfg,
             memtables,
             pipe_log,
+            global_stats,
             removed_memtables: Default::default(),
+            purge_mutex: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        if !self.needs_purge_log_files() {
+        let purge_mutex = match self.purge_mutex.try_lock() {
+            Ok(context) => context,
+            _ => return Ok(vec![]),
+        };
+
+        if !self.needs_purge_log_files(LogQueue::Append) {
             return Ok(vec![]);
         }
 
@@ -66,19 +78,46 @@ where
             &mut will_force_compact,
         );
 
-        let min_file_num = self.memtables.fold(u64::MAX, |min, t| {
-            cmp::min(min, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX))
-        });
-        let purged = self.pipe_log.purge_to(LogQueue::Append, min_file_num)?;
-        info!("purged {} expired log files", purged);
+        let rewrite_operations = self.global_stats.rewrite_operations();
+        let compacted_rewrite_operations = self.global_stats.compacted_rewrite_operations();
+        if compacted_rewrite_operations as f64 / rewrite_operations as f64 > 0.75
+            && self.needs_purge_log_files(LogQueue::Rewrite)
+        {
+            self.squeeze_rewrite_queue();
+        }
 
+        let (min_file_1, min_file_2) =
+            self.memtables
+                .fold((u64::MAX, u64::MAX), |(mut min1, mut min2), t| {
+                    min1 = cmp::min(min1, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX));
+                    min2 = cmp::min(min2, t.min_file_num(LogQueue::Rewrite).unwrap_or(u64::MAX));
+                    (min1, min2)
+                });
+        let purged_1 = self.pipe_log.purge_to(LogQueue::Append, min_file_1)?;
+        info!("purged {} expired log files", purged_1);
+
+        if min_file_2 < self.pipe_log.active_file_num(LogQueue::Rewrite) {
+            let purged_2 = self.pipe_log.purge_to(LogQueue::Rewrite, min_file_2)?;
+            info!("purged {} expired rewrite files", purged_2);
+        }
+
+        drop(purge_mutex);
         Ok(will_force_compact)
     }
 
-    pub fn needs_purge_log_files(&self) -> bool {
-        let total_size = self.pipe_log.total_size(LogQueue::Append);
+    pub fn needs_purge_log_files(&self, queue: LogQueue) -> bool {
+        let active_file_num = self.pipe_log.active_file_num(queue);
+        let first_file_num = self.pipe_log.first_file_num(queue);
+        if active_file_num == first_file_num {
+            return false;
+        }
+
+        let total_size = self.pipe_log.total_size(queue);
         let purge_threshold = self.cfg.purge_threshold.0 as usize;
-        total_size > purge_threshold
+        match queue {
+            LogQueue::Append => total_size > purge_threshold,
+            LogQueue::Rewrite => total_size * 10 > purge_threshold,
+        }
     }
 
     pub fn remove_memtable(&self, file_num: u64, raft_group_id: u64) {
@@ -158,10 +197,15 @@ where
                 log_batch.put(region_id, k, v);
             }
         }
-        self.rewrite_impl(&mut log_batch, latest_rewrite).unwrap();
+        self.rewrite_impl(&mut log_batch, Some(latest_rewrite))
+            .unwrap();
     }
 
-    fn rewrite_impl(&self, log_batch: &mut LogBatch<E, W>, latest_rewrite: u64) -> Result<()> {
+    fn rewrite_impl(
+        &self,
+        log_batch: &mut LogBatch<E, W>,
+        latest_rewrite: Option<u64>,
+    ) -> Result<()> {
         let mut file_num = 0;
         self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
         if file_num > 0 {
@@ -174,7 +218,7 @@ where
         &self,
         log_batch: &mut LogBatch<E, W>,
         file_num: u64,
-        latest_rewrite: u64,
+        latest_rewrite: Option<u64>,
     ) {
         for item in log_batch.items.drain(..) {
             let memtable = self.memtables.get_or_insert(item.raft_group_id);
@@ -193,6 +237,35 @@ where
                 _ => unreachable!(),
             }
         }
+    }
+
+    fn squeeze_rewrite_queue(&self) {
+        let memtables = self
+            .memtables
+            .collect(|t| t.min_file_num(LogQueue::Rewrite).unwrap_or_default() > 0);
+
+        let mut log_batch = LogBatch::<E, W>::new();
+        for memtable in memtables {
+            let region_id = memtable.rl().region_id();
+
+            let mut entries = Vec::new();
+            fetch_entries(
+                &self.pipe_log,
+                &memtable,
+                &mut entries,
+                0,
+                |t, ents, ents_idx| t.fetch_entries_from_rewrite(ents, ents_idx),
+            )
+            .unwrap();
+            log_batch.add_entries(region_id, entries);
+
+            let mut kvs = Vec::new();
+            memtable.rl().fetch_kvs_from_rewrite(&mut kvs);
+            for (k, v) in kvs {
+                log_batch.put(region_id, k, v);
+            }
+        }
+        self.rewrite_impl(&mut log_batch, None).unwrap();
     }
 }
 
