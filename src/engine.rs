@@ -236,7 +236,12 @@ where
         cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let cfg = Arc::new(cfg);
-        let purge_manager = PurgeManager::new(cfg.clone(), memtables.clone(), pipe_log.clone());
+        let purge_manager = PurgeManager::new(
+            cfg.clone(),
+            memtables.clone(),
+            pipe_log.clone(),
+            global_stats.clone(),
+        );
 
         let engine = Engine {
             cfg,
@@ -672,7 +677,7 @@ mod tests {
         // GC all log entries. Won't trigger purge because total size is not enough.
         let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
-        assert!(!engine.purge_manager.needs_purge_log_files());
+        assert!(!engine.purge_manager.needs_purge_log_files(LogQueue::Append));
 
         // Append more logs to make total size greater than `purge_threshold`.
         for i in 100..250 {
@@ -684,7 +689,7 @@ mod tests {
         let count = engine.compact_to(1, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
 
         let old_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
@@ -699,7 +704,7 @@ mod tests {
         let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         let old_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
         let new_min_file_num = engine.pipe_log.first_file_num(LogQueue::Append);
@@ -779,7 +784,7 @@ mod tests {
         }
 
         // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
 
@@ -815,7 +820,7 @@ mod tests {
             }
         }
 
-        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
 
         let new_active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
@@ -872,7 +877,7 @@ mod tests {
         }
 
         // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine.purge_manager.needs_purge_log_files());
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
 
