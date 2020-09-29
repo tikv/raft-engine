@@ -28,7 +28,7 @@ mod util;
 
 use crate::pipe_log::PipeLog;
 
-pub use self::config::Config;
+pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
 pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
