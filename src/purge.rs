@@ -61,7 +61,7 @@ where
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let purge_mutex = match self.purge_mutex.try_lock() {
+        let _purge_mutex = match self.purge_mutex.try_lock() {
             Ok(context) => context,
             _ => return Ok(vec![]),
         };
@@ -78,11 +78,7 @@ where
             &mut will_force_compact,
         );
 
-        let rewrite_operations = self.global_stats.rewrite_operations();
-        let compacted_rewrite_operations = self.global_stats.compacted_rewrite_operations();
-        if compacted_rewrite_operations as f64 / rewrite_operations as f64 > 0.75
-            && self.needs_purge_log_files(LogQueue::Rewrite)
-        {
+        if self.rewrite_queue_needs_squeeze() && self.needs_purge_log_files(LogQueue::Rewrite) {
             self.squeeze_rewrite_queue();
         }
 
@@ -101,7 +97,6 @@ where
             info!("purged {} expired rewrite files", purged_2);
         }
 
-        drop(purge_mutex);
         Ok(will_force_compact)
     }
 
@@ -144,6 +139,13 @@ where
         latest_needs_rewrite = cmp::min(latest_needs_rewrite, active_file_num);
         latest_needs_compact = cmp::min(latest_needs_compact, active_file_num);
         (latest_needs_rewrite, latest_needs_compact)
+    }
+
+    fn rewrite_queue_needs_squeeze(&self) -> bool {
+        // Squeeze the rewrite queue if its garbage ratio reaches 50%.
+        let rewrite_operations = self.global_stats.rewrite_operations();
+        let compacted_rewrite_operations = self.global_stats.compacted_rewrite_operations();
+        compacted_rewrite_operations as f64 / rewrite_operations as f64 > 0.5
     }
 
     // FIXME: We need to ensure that all operations before `latest_rewrite` (included) are written
