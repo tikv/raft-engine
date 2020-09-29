@@ -242,6 +242,8 @@ where
     }
 
     fn squeeze_rewrite_queue(&self) {
+        self.pipe_log.new_log_file(LogQueue::Rewrite).unwrap();
+
         let memtables = self
             .memtables
             .collect(|t| t.min_file_num(LogQueue::Rewrite).unwrap_or_default() > 0);
