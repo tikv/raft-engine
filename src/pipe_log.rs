@@ -62,6 +62,8 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Truncate the active log file of `queue`.
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()>;
 
+    fn new_log_file(&self, queue: LogQueue) -> Result<()>;
+
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
 
@@ -441,6 +443,10 @@ impl GenericPipeLog for PipeLog {
 
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
         self.mut_queue(queue).truncate_active_log(offset)
+    }
+
+    fn new_log_file(&self, queue: LogQueue) -> Result<()> {
+        self.mut_queue(queue).new_log_file()
     }
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
