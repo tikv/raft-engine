@@ -22,7 +22,7 @@ use crate::log_batch::{
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
-use crate::purge::PurgeManager;
+use crate::purge::{PurgeManager, RemovedMemtables};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::wal::{LogMsg, WalRunner, WriteTask};
 use crate::{codec, CacheStats, GlobalStats, Result};
@@ -136,6 +136,7 @@ where
 
 fn apply_item<E, W>(
     memtables: &MemTableAccessor<E, W>,
+    removed_memtables: &RemovedMemtables,
     item: LogItem<E>,
     queue: LogQueue,
     file_num: u64,
@@ -155,9 +156,8 @@ fn apply_item<E, W>(
             }
         }
         LogItemContent::Command(Command::Clean) => {
-            if self.memtables.remove(item.raft_group_id).is_some() {
-                self.purge_manager
-                     .remove_memtable(file_num, item.raft_group_id);
+            if memtables.remove(item.raft_group_id).is_some() {
+                removed_memtables.remove_memtable(file_num, item.raft_group_id);
             }
         }
         LogItemContent::Command(Command::Compact { index }) => {
@@ -183,8 +183,9 @@ where
     P: GenericPipeLog,
 {
     fn apply_to_memtable(&self, log_batch: &mut LogBatch<E, W>, queue: LogQueue, file_num: u64) {
+        let removed = self.purge_manager.get_removed_memtables();
         for item in log_batch.items.drain(..) {
-            apply_item(&self.memtables, item, queue, file_num);
+            apply_item(&self.memtables, &removed, item, queue, file_num);
         }
     }
 
@@ -208,6 +209,7 @@ where
             }
             let memtables = self.memtables.clone();
             let items = std::mem::replace(&mut log_batch.items, vec![]);
+            let removed_memtables = self.purge_manager.get_removed_memtables();
             return Box::pin(async move {
                 let (file_num, offset, tracker) = r.await?;
                 if file_num > 0 {
@@ -215,7 +217,13 @@ where
                         if let LogItemContent::Entries(entries) = &mut item.content {
                             entries.update_position(LogQueue::Append, file_num, offset, &tracker);
                         }
-                        apply_item(&memtables, item, LogQueue::Append, file_num);
+                        apply_item(
+                            &memtables,
+                            &removed_memtables,
+                            item,
+                            LogQueue::Append,
+                            file_num,
+                        );
                     }
                 }
                 return Ok(bytes);
@@ -282,7 +290,12 @@ where
         );
 
         let cfg = Arc::new(cfg);
-        let purge_manager = PurgeManager::new(cfg.clone(), memtables.clone(), pipe_log.clone());
+        let purge_manager = PurgeManager::new(
+            cfg.clone(),
+            memtables.clone(),
+            pipe_log.clone(),
+            global_stats.clone(),
+        );
         let (wal_sender, wal_receiver) = channel();
         let engine = Engine {
             cfg,

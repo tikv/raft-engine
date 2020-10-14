@@ -591,12 +591,7 @@ where
             item.encode_to::<W>(&mut vec).unwrap();
         }
 
-        let compression_type = if vec.len() > COMPRESSION_SIZE {
-            vec = lz4::encode_block(&vec[HEADER_LEN..], HEADER_LEN, 4);
-            CompressionType::Lz4
-        } else {
-            CompressionType::None
-        };
+        let compression_type = CompressionType::None;
 
         let checksum = crc32(&vec[8..]);
         vec.encode_u32_le(checksum).unwrap();
@@ -697,7 +692,7 @@ mod tests {
             ),
         ];
 
-        for item in items {
+        for mut item in items {
             let mut encoded = vec![];
             item.encode_to::<Entry>(&mut encoded).unwrap();
             let mut s = encoded.as_slice();
@@ -728,9 +723,7 @@ mod tests {
         assert_eq!(batch, decoded_batch);
 
         match &decoded_batch.items[0].content {
-            LogItemContent::Entries(entries) => {
-                assert_eq!(entries.encoded_size.get(), encoded_size)
-            }
+            LogItemContent::Entries(entries) => assert_eq!(entries.encoded_size, encoded_size),
             _ => unreachable!(),
         }
     }

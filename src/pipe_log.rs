@@ -760,7 +760,7 @@ mod tests {
     fn write_to_log(
         log: &mut PipeLog,
         submitor: &mut CacheSubmitor,
-        batch: &LogBatch<Entry, Entry>,
+        batch: &mut LogBatch<Entry, Entry>,
         file_num: &mut u64,
     ) {
         let mut entries_size = 0;
@@ -770,8 +770,8 @@ mod tests {
             let offset = log.append(LogQueue::Append, &content).unwrap();
             let tracker = submitor.get_cache_tracker(cur_file_num, offset);
             submitor.fill_chunk(entries_size);
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
+            for item in &mut batch.items {
+                if let LogItemContent::Entries(entries) = &mut item.content {
                     entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
                 }
             }
@@ -809,9 +809,9 @@ mod tests {
         // After 4 batches are written into pipe log, no `CacheTask::NewChunk`
         // task should be triggered. However the last batch will trigger it.
         for i in 0..5 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            write_to_log(&mut pipe_log, &mut submitor, &log_batch, &mut file_num);
+            write_to_log(&mut pipe_log, &mut submitor, &mut log_batch, &mut file_num);
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 4 {
@@ -824,9 +824,9 @@ mod tests {
         // Write more 2 batches into pipe log. A `CacheTask::NewChunk` will be
         // emit on the second batch because log file is switched.
         for i in 5..7 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            write_to_log(&mut pipe_log, &mut submitor, &log_batch, &mut file_num);
+            write_to_log(&mut pipe_log, &mut submitor, &mut log_batch, &mut file_num);
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 6 {
@@ -840,9 +840,9 @@ mod tests {
         // `CacheTracker`s accociated in `EntryIndex`s are droped.
         drop(log_batches);
         for _ in 7..20 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            write_to_log(&mut pipe_log, &mut submitor, &log_batch, &mut file_num);
+            write_to_log(&mut pipe_log, &mut submitor, &mut log_batch, &mut file_num);
             drop(log_batch);
             assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
         }

@@ -303,6 +303,8 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.entries_index[i + distance].base_offset = ei.base_offset;
             self.entries_index[i + distance].compression_type = ei.compression_type;
             self.entries_index[i + distance].batch_len = ei.batch_len;
+            self.entries_index[i + distance].offset = ei.offset;
+            self.entries_index[i + distance].len = ei.len;
         }
         compacted_rewrite_operations
     }
