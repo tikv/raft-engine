@@ -769,6 +769,7 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.cache_limit = ReadableSize::kb(0);
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(80);
         let engine = RaftLogEngine::new(cfg.clone());
@@ -842,6 +843,7 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.cache_limit = ReadableSize::kb(0);
         cfg.target_file_size = ReadableSize::kb(128);
         cfg.purge_threshold = ReadableSize::kb(512);
         let engine = RaftLogEngine::new(cfg.clone());
