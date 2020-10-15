@@ -35,8 +35,6 @@ pub struct Config {
     pub purge_threshold: ReadableSize,
 
     /// Total size limit to cache log entries.
-    ///
-    /// FIXME: it doesn't make effect currently.
     pub cache_limit: ReadableSize,
 }
 
