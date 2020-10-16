@@ -120,8 +120,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let distance = self.cache_distance();
         for offset in conflict..self.entries_cache.len() {
             let entry_index = &mut self.entries_index[distance + offset];
-            let _x = entry_index.cache_tracker.take();
-            debug_assert!(_x.unwrap().sub_on_drop > 0);
+            entry_index.cache_tracker.take();
         }
 
         self.entries_cache.truncate(conflict);
@@ -375,8 +374,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
         for i in 0..drain_end {
             let entry_index = &mut self.entries_index[distance + i];
-            let _x = entry_index.cache_tracker.take();
-            debug_assert!(_x.unwrap().sub_on_drop > 0);
+            entry_index.cache_tracker.take();
         }
         self.shrink_entries_cache();
     }
