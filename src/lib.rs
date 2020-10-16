@@ -20,12 +20,14 @@ mod cache_evict;
 mod config;
 mod engine;
 mod errors;
+mod iovec;
 mod log_batch;
 mod memtable;
 mod pipe_log;
 mod purge;
 mod util;
 
+use crate::iovec::LengthFixedIoVec;
 use crate::pipe_log::PipeLog;
 
 pub use self::config::{Config, RecoveryMode};

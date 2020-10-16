@@ -12,9 +12,8 @@ use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
 use crate::pipe_log::LogQueue;
-use crate::{Error, Result};
+use crate::{Error, LengthFixedIoVec, Result};
 
-pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
 pub const HEADER_LEN: usize = 8;
 pub const CHECKSUM_LEN: usize = 4;
 
@@ -25,7 +24,9 @@ const TYPE_KV: u8 = 0x3;
 const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
-const COMPRESSION_SIZE: usize = 4096;
+const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
+const COMPRESSION_THRESHOLD: usize = 4096;
+const COMPRESSION_BLOCK: usize = 32 * 1024;
 
 #[inline]
 fn crc32(data: &[u8]) -> u32 {
@@ -603,7 +604,7 @@ where
         }
 
         // layout = { 8 bytes len | item count | multiple items | 4 bytes checksum }
-        let mut vec = Vec::with_capacity(4096);
+        let mut vec = LengthFixedIoVec::new(COMPRESSION_BLOCK);
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
         for item in &self.items {
@@ -611,7 +612,7 @@ where
                 .unwrap();
         }
 
-        let compression_type = if vec.len() > COMPRESSION_SIZE {
+        let compression_type = if vec.len() > COMPRESSION_THRESHOLD {
             vec = lz4::encode_block(&vec[HEADER_LEN..], HEADER_LEN, 4);
             CompressionType::Lz4
         } else {
