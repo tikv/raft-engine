@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crossbeam::channel::{bounded, Sender};
+use log::info;
 use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
-use crate::GlobalStats;
+use crate::{GlobalStats, Result};
 
 pub const DEFAULT_CACHE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
@@ -65,6 +66,7 @@ impl CacheSubmitor {
 
     pub fn get_cache_tracker(
         &mut self,
+        queue: LogQueue,
         file_num: u64,
         offset: u64,
         size: usize,
@@ -82,6 +84,7 @@ impl CacheSubmitor {
             // If all entries are released from cache, the chunk can be ignored.
             if self.size_tracker.load(Ordering::Relaxed) > 0 {
                 let mut task = CacheChunk {
+                    queue,
                     file_num: self.file_num,
                     base_offset: self.offset,
                     end_offset: offset,
@@ -187,19 +190,16 @@ where
                 _ => return false,
             };
 
-            let file_num = chunk.file_num;
-            let read_len = if chunk.end_offset == u64::MAX {
-                self.pipe_log.file_len(LogQueue::Append, file_num) - chunk.base_offset
-            } else {
-                chunk.end_offset - chunk.base_offset
+            let (read_len, chunk_content) = match self.read_chunk(&chunk) {
+                Ok((len, content)) => (len, content),
+                Err(e) => {
+                    info!("Evictor read chunk {:?} fail: {}", chunk, e);
+                    continue;
+                }
             };
-            let chunk_content = self
-                .pipe_log
-                .fread(LogQueue::Append, file_num, chunk.base_offset, read_len)
-                .unwrap();
 
             let mut reader: &[u8] = chunk_content.as_ref();
-            let mut offset = chunk.base_offset;
+            let (file_num, mut offset) = (chunk.file_num, chunk.base_offset);
             while let Some(b) = LogBatch::<E, W>::from_bytes(&mut reader, file_num, offset).unwrap()
             {
                 offset += read_len - reader.len() as u64;
@@ -217,6 +217,20 @@ where
             }
         }
         true
+    }
+
+    fn read_chunk(&self, chunk: &CacheChunk) -> Result<(u64, Vec<u8>)> {
+        let read_len = if chunk.end_offset == u64::MAX {
+            let file_len = self.pipe_log.file_len(chunk.queue, chunk.file_num)?;
+            file_len - chunk.base_offset
+        } else {
+            chunk.end_offset - chunk.base_offset
+        };
+
+        let content =
+            self.pipe_log
+                .fread(chunk.queue, chunk.file_num, chunk.base_offset, read_len)?;
+        Ok((read_len, content))
     }
 }
 
@@ -251,8 +265,9 @@ pub enum CacheTask {
     EvictOldest(Sender<()>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CacheChunk {
+    queue: LogQueue,
     file_num: u64,
     base_offset: u64,
     end_offset: u64,

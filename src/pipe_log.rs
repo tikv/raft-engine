@@ -96,7 +96,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Return the last file number before `total - size`. `0` means no such files.
     fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64;
 
-    fn file_len(&self, queue: LogQueue, file_num: u64) -> u64;
+    fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64>;
 
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
 }
@@ -224,7 +224,10 @@ impl LogManager {
 
     fn get_fd(&self, file_num: u64) -> Result<Arc<LogFd>> {
         if file_num < self.first_file_num || file_num > self.active_file_num {
-            return Err(box_err!("File {} not exist", file_num));
+            return Err(Error::Io(IoError::new(
+                IoErrorKind::NotFound,
+                "file_num out of range",
+            )));
         }
         Ok(self.all_files[(file_num - self.first_file_num) as usize].clone())
     }
@@ -451,7 +454,12 @@ impl GenericPipeLog for PipeLog {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
+            let tracker = cache_submitor.get_cache_tracker(
+                LogQueue::Append,
+                cur_file_num,
+                offset,
+                entries_size,
+            );
             drop(cache_submitor);
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
@@ -563,9 +571,10 @@ impl GenericPipeLog for PipeLog {
         file_num
     }
 
-    fn file_len(&self, queue: LogQueue, file_num: u64) -> u64 {
-        let fd = self.get_queue(queue).get_fd(file_num).unwrap();
-        file_len(fd.0).unwrap() as u64
+    fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64> {
+        self.get_queue(queue)
+            .get_fd(file_num)
+            .map(|fd| file_len(fd.0).unwrap() as u64)
     }
 
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {

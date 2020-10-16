@@ -279,13 +279,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
 
         let distance = (first - front) as usize;
-        let len = (cmp::min(last, back) - first + 1) as usize;
+        let mut len = (cmp::min(last, back) - first + 1) as usize;
         for (i, ei) in entries_index.iter().take(len).enumerate() {
             if let Some(latest_rewrite) = latest_rewrite {
                 debug_assert_eq!(self.entries_index[i + distance].queue, LogQueue::Append);
                 if self.entries_index[i + distance].file_num > latest_rewrite {
                     // Some entries are overwritten by new appends.
                     compacted_rewrite_operations += entries_index.len() - i;
+                    len = i;
                     break;
                 }
             } else {
@@ -306,6 +307,13 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.entries_index[i + distance].offset = ei.offset;
             self.entries_index[i + distance].len = ei.len;
         }
+
+        // For rewritten entries, clean the cache.
+        if distance + len > 1 {
+            let rewritten_cache = self.entries_index[distance + len - 1].index;
+            self.compact_cache_to(rewritten_cache);
+        }
+
         compacted_rewrite_operations
     }
 
@@ -1138,7 +1146,7 @@ mod tests {
         // Rewrite vaild entries, some of them are in cache.
         memtable.rewrite(generate_rewrite_ents_index(20, 30, 101), Some(3));
         memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
-        assert_eq!(memtable.cache_size, 15);
+        assert_eq!(memtable.cache_size, 11); // Clean rewritten entries from cache.
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.min_file_num(LogQueue::Rewrite).unwrap(), 100);
@@ -1151,7 +1159,7 @@ mod tests {
         // Rewrite valid + overwritten entries.
         memtable.append(generate_ents(35, 36), generate_ents_index(35, 36, 5));
         memtable.put(b"kk2".to_vec(), b"vv4".to_vec(), 5);
-        assert_eq!(memtable.cache_size, 11);
+        assert_eq!(memtable.cache_size, 7);
         assert_eq!(memtable.entries_index.back().unwrap().index, 35);
         assert_eq!(memtable.global_stats.rewrite_operations(), 43);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);

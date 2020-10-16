@@ -304,6 +304,7 @@ where
                         }
 
                         if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
+                            queue,
                             file_num,
                             offset,
                             encoded_size,
@@ -790,7 +791,10 @@ mod tests {
         assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
 
         let active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
-        let active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
+        let active_len = engine
+            .pipe_log
+            .file_len(LogQueue::Rewrite, active_num)
+            .unwrap();
         assert!(active_num > 1 || active_len > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
@@ -825,7 +829,10 @@ mod tests {
         assert!(engine.purge_expired_files().unwrap().is_empty());
 
         let new_active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
-        let new_active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
+        let new_active_len = engine
+            .pipe_log
+            .file_len(LogQueue::Rewrite, active_num)
+            .unwrap();
         assert!(
             new_active_num > active_num
                 || (new_active_num == active_num && new_active_len > active_len)
