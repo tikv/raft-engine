@@ -303,18 +303,20 @@ where
                             }
                         }
 
-                        if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
-                            queue,
-                            file_num,
-                            offset,
-                            encoded_size,
-                        ) {
-                            for item in &log_batch.items {
-                                if let LogItemContent::Entries(ref entries) = item.content {
-                                    entries.attach_cache_tracker(tracker.clone());
+                        if queue == LogQueue::Append {
+                            if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
+                                file_num,
+                                offset,
+                                encoded_size,
+                            ) {
+                                for item in &log_batch.items {
+                                    if let LogItemContent::Entries(ref entries) = item.content {
+                                        entries.attach_cache_tracker(tracker.clone());
+                                    }
                                 }
                             }
                         }
+
                         self.apply_to_memtable(&mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }

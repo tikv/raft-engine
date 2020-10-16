@@ -66,7 +66,6 @@ impl CacheSubmitor {
 
     pub fn get_cache_tracker(
         &mut self,
-        queue: LogQueue,
         file_num: u64,
         offset: u64,
         size: usize,
@@ -84,7 +83,6 @@ impl CacheSubmitor {
             // If all entries are released from cache, the chunk can be ignored.
             if self.size_tracker.load(Ordering::Relaxed) > 0 {
                 let mut task = CacheChunk {
-                    queue,
                     file_num: self.file_num,
                     base_offset: self.offset,
                     end_offset: offset,
@@ -221,15 +219,18 @@ where
 
     fn read_chunk(&self, chunk: &CacheChunk) -> Result<(u64, Vec<u8>)> {
         let read_len = if chunk.end_offset == u64::MAX {
-            let file_len = self.pipe_log.file_len(chunk.queue, chunk.file_num)?;
+            let file_len = self.pipe_log.file_len(LogQueue::Append, chunk.file_num)?;
             file_len - chunk.base_offset
         } else {
             chunk.end_offset - chunk.base_offset
         };
 
-        let content =
-            self.pipe_log
-                .fread(chunk.queue, chunk.file_num, chunk.base_offset, read_len)?;
+        let content = self.pipe_log.fread(
+            LogQueue::Append,
+            chunk.file_num,
+            chunk.base_offset,
+            read_len,
+        )?;
         Ok((read_len, content))
     }
 }
@@ -267,7 +268,6 @@ pub enum CacheTask {
 
 #[derive(Clone, Debug)]
 pub struct CacheChunk {
-    queue: LogQueue,
     file_num: u64,
     base_offset: u64,
     end_offset: u64,

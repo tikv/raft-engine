@@ -454,12 +454,7 @@ impl GenericPipeLog for PipeLog {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker = cache_submitor.get_cache_tracker(
-                LogQueue::Append,
-                cur_file_num,
-                offset,
-                entries_size,
-            );
+            let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
             drop(cache_submitor);
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;

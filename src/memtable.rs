@@ -227,11 +227,16 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
     }
 
+    // Only used for recovering from the rewrite queue.
     pub fn append_rewrite(&mut self, entries: Vec<E>, mut entries_index: Vec<EntryIndex>) {
         for ei in &mut entries_index {
             ei.queue = LogQueue::Rewrite;
         }
         self.append(entries, entries_index);
+        if let Some(index) = self.entries_index.back().map(|ei| ei.index) {
+            // Things in rewrite queue won't appear in cache.
+            self.compact_cache_to(index);
+        }
 
         let new_rewrite_count = self.entries_index.len();
         self.adjust_rewrite_count(new_rewrite_count);
@@ -308,8 +313,8 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.entries_index[i + distance].len = ei.len;
         }
 
-        // For rewritten entries, clean the cache.
         if distance + len > 1 {
+            // For rewritten entries, clean the cache.
             let rewritten_cache = self.entries_index[distance + len - 1].index;
             self.compact_cache_to(rewritten_cache);
         }
