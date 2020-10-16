@@ -221,9 +221,7 @@ where
 
         let memtables = {
             let stats = global_stats.clone();
-            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| {
-                MemTable::new(id, cache_limit, stats.clone())
-            }))
+            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| MemTable::new(id, stats.clone())))
         };
 
         let cache_evict_runner = CacheEvictRunner::new(

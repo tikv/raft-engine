@@ -2,8 +2,6 @@ use std::borrow::{Borrow, Cow};
 use std::cell::{Cell, RefCell};
 use std::io::BufRead;
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -223,28 +221,27 @@ impl<E: Message> Entries<E> {
         queue: LogQueue,
         file_num: u64,
         base: u64,
-        chunk_size: &Option<Arc<AtomicUsize>>,
+        tracker: &Option<CacheTracker>,
     ) {
         for idx in self.entries_index.borrow_mut().iter_mut() {
             debug_assert!(idx.file_num == 0 && idx.base_offset == 0);
+            debug_assert!(idx.cache_tracker.is_none());
             idx.queue = queue;
             idx.file_num = file_num;
             idx.base_offset = base;
-            if let Some(ref chunk_size) = chunk_size {
-                idx.cache_tracker = Some(CacheTracker {
-                    chunk_size: chunk_size.clone(),
-                    sub_on_drop: idx.len as usize,
-                });
+            if let Some(ref xtracker) = tracker {
+                let mut xtracker = xtracker.clone();
+                xtracker.sub_on_drop = idx.len as usize;
+                idx.cache_tracker = Some(xtracker);
             }
         }
     }
 
-    pub fn attach_cache_tracker(&self, chunk_size: Arc<AtomicUsize>) {
+    pub fn attach_cache_tracker(&self, tracker: CacheTracker) {
         for idx in self.entries_index.borrow_mut().iter_mut() {
-            idx.cache_tracker = Some(CacheTracker {
-                chunk_size: chunk_size.clone(),
-                sub_on_drop: idx.len as usize,
-            });
+            let mut xtracker = tracker.clone();
+            xtracker.sub_on_drop = idx.len as usize;
+            idx.cache_tracker = Some(xtracker);
         }
     }
 

@@ -69,8 +69,8 @@ impl CacheSubmitor {
         file_num: u64,
         offset: u64,
         size: usize,
-    ) -> Option<Arc<AtomicUsize>> {
-        if self.cache_limit == 0 {
+    ) -> Option<CacheTracker> {
+        if self.cache_limit == 0 || size == 0 {
             return None;
         }
 
@@ -92,6 +92,7 @@ impl CacheSubmitor {
                     // Log file is switched, use `u64::MAX` as the end.
                     task.end_offset = u64::MAX;
                 }
+                self.global_stats.add_mem_change(self.chunk_size);
                 let _ = self.scheduler.schedule(CacheTask::NewChunk(task));
             }
             self.reset(file_num, offset);
@@ -109,8 +110,10 @@ impl CacheSubmitor {
 
         self.chunk_size += size;
         self.size_tracker.fetch_add(size, Ordering::Release);
-        self.global_stats.add_mem_change(size);
-        Some(self.size_tracker.clone())
+        Some(CacheTracker::new(
+            self.global_stats.clone(),
+            self.size_tracker.clone(),
+        ))
     }
 
     fn reset(&mut self, file_num: u64, offset: u64) {
@@ -276,14 +279,28 @@ pub struct CacheChunk {
 
 #[derive(Clone)]
 pub struct CacheTracker {
+    pub global_stats: Arc<GlobalStats>,
     pub chunk_size: Arc<AtomicUsize>,
     pub sub_on_drop: usize,
 }
 
+impl CacheTracker {
+    pub fn new(global_stats: Arc<GlobalStats>, chunk_size: Arc<AtomicUsize>) -> Self {
+        CacheTracker {
+            global_stats,
+            chunk_size,
+            sub_on_drop: 0,
+        }
+    }
+}
+
 impl Drop for CacheTracker {
     fn drop(&mut self) {
-        self.chunk_size
-            .fetch_sub(self.sub_on_drop, Ordering::SeqCst);
+        if self.sub_on_drop > 0 {
+            self.global_stats.sub_mem_change(self.sub_on_drop);
+            self.chunk_size
+                .fetch_sub(self.sub_on_drop, Ordering::Release);
+        }
     }
 }
 
