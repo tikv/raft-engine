@@ -85,7 +85,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Return the last file number before `total - size`. `0` means no such files.
     fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64;
 
-    fn file_len(&self, queue: LogQueue, file_num: u64) -> u64;
+    fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64>;
 }
 
 pub struct LogFd(RawFd);
@@ -512,9 +512,10 @@ impl GenericPipeLog for PipeLog {
         file_num
     }
 
-    fn file_len(&self, queue: LogQueue, file_num: u64) -> u64 {
-        let fd = self.get_queue(queue).get_fd(file_num).unwrap();
-        file_len(fd.0).unwrap() as u64
+    fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64> {
+        self.get_queue(queue)
+            .get_fd(file_num)
+            .map(|fd| file_len(fd.0).unwrap() as u64)
     }
 }
 

@@ -232,6 +232,10 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             ei.queue = LogQueue::Rewrite;
         }
         self.append(entries, entries_index);
+        if let Some(index) = self.entries_index.back().map(|ei| ei.index) {
+            // Things in rewrite queue won't appear in cache.
+            self.compact_cache_to(index);
+        }
 
         let new_rewrite_count = self.entries_index.len();
         self.adjust_rewrite_count(new_rewrite_count);

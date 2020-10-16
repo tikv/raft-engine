@@ -46,42 +46,57 @@ where
 {
     pub fn run(&mut self) -> Result<()> {
         let mut write_ret = vec![];
+        const MAX_WRITE_BUFFER: usize = 2 * 1024 * 1024; // 2MB
+        let mut write_buffer = Vec::with_capacity(MAX_WRITE_BUFFER);
         while let Ok(LogMsg::Write(task)) = self.receiver.recv() {
             let mut sync = task.sync;
+            let mut entries_size = task.entries_size;
             let (file_num, fd) = self.pipe_log.switch_log_file(LogQueue::Append).unwrap();
-            let offset = self
-                .pipe_log
-                .append(LogQueue::Append, &task.content)
-                .unwrap();
-            write_ret.push((offset, task.sender));
-            let tracker = self.cache_submitter.get_cache_tracker(file_num, offset);
-            self.cache_submitter.fill_chunk(task.entries_size);
+            write_ret.push((0, task.sender));
+
             while let Ok(msg) = self.receiver.try_recv() {
+                if write_buffer.is_empty() {
+                    write_buffer.extend_from_slice(&task.content);
+                }
                 let task = match msg {
                     LogMsg::Write(task) => task,
                     LogMsg::Stop => {
                         return Ok(());
                     }
                 };
-                if task.sync {
+                if task.sync && !sync {
                     sync = true;
                 }
-                self.cache_submitter.fill_chunk(task.entries_size);
-                let offset = self
-                    .pipe_log
-                    .append(LogQueue::Append, &task.content)
-                    .unwrap();
-                write_ret.push((offset, task.sender));
+                entries_size += task.entries_size;
+                write_ret.push((write_buffer.len() as u64, task.sender));
+                write_buffer.extend_from_slice(&task.content);
+                if write_buffer.len() >= MAX_WRITE_BUFFER {
+                    break;
+                }
             }
+            let base_offset = if write_buffer.is_empty() {
+                self.pipe_log
+                    .append(LogQueue::Append, &task.content)
+                    .unwrap()
+            } else {
+                self.pipe_log
+                    .append(LogQueue::Append, &write_buffer)
+                    .unwrap()
+            };
             if sync {
                 if let Err(e) = fd.sync() {
                     warn!("write wal failed because of: {} ", e);
                     write_ret.clear();
                 }
             }
+            let tracker = self
+                .cache_submitter
+                .get_cache_tracker(file_num, base_offset);
+            self.cache_submitter.fill_chunk(entries_size);
             for (offset, sender) in write_ret.drain(..) {
-                let _ = sender.send((file_num, offset, tracker.clone()));
+                let _ = sender.send((file_num, base_offset + offset, tracker.clone()));
             }
+            write_buffer.clear();
         }
         Ok(())
     }
