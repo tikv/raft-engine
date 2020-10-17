@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crossbeam::channel::{bounded, Sender};
+use log::{info, warn};
 use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
-use crate::GlobalStats;
+use crate::{GlobalStats, Result};
 
 pub const DEFAULT_CACHE_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
@@ -68,8 +69,8 @@ impl CacheSubmitor {
         file_num: u64,
         offset: u64,
         size: usize,
-    ) -> Option<Arc<AtomicUsize>> {
-        if self.cache_limit == 0 {
+    ) -> Option<CacheTracker> {
+        if self.cache_limit == 0 || size == 0 {
             return None;
         }
 
@@ -91,7 +92,9 @@ impl CacheSubmitor {
                     // Log file is switched, use `u64::MAX` as the end.
                     task.end_offset = u64::MAX;
                 }
-                let _ = self.scheduler.schedule(CacheTask::NewChunk(task));
+                if let Err(e) = self.scheduler.schedule(CacheTask::NewChunk(task)) {
+                    warn!("Failed to schedule cache chunk to evictor: {}", e);
+                }
             }
             self.reset(file_num, offset);
         }
@@ -108,8 +111,10 @@ impl CacheSubmitor {
 
         self.chunk_size += size;
         self.size_tracker.fetch_add(size, Ordering::Release);
-        self.global_stats.add_mem_change(size);
-        Some(self.size_tracker.clone())
+        Some(CacheTracker::new(
+            self.global_stats.clone(),
+            self.size_tracker.clone(),
+        ))
     }
 
     fn reset(&mut self, file_num: u64, offset: u64) {
@@ -187,19 +192,16 @@ where
                 _ => return false,
             };
 
-            let file_num = chunk.file_num;
-            let read_len = if chunk.end_offset == u64::MAX {
-                self.pipe_log.file_len(LogQueue::Append, file_num) - chunk.base_offset
-            } else {
-                chunk.end_offset - chunk.base_offset
+            let (read_len, chunk_content) = match self.read_chunk(&chunk) {
+                Ok((len, content)) => (len, content),
+                Err(e) => {
+                    info!("Evictor read chunk {:?} fail: {}", chunk, e);
+                    continue;
+                }
             };
-            let chunk_content = self
-                .pipe_log
-                .fread(LogQueue::Append, file_num, chunk.base_offset, read_len)
-                .unwrap();
 
             let mut reader: &[u8] = chunk_content.as_ref();
-            let mut offset = chunk.base_offset;
+            let (file_num, mut offset) = (chunk.file_num, chunk.base_offset);
             while let Some(b) = LogBatch::<E, W>::from_bytes(&mut reader, file_num, offset).unwrap()
             {
                 offset += read_len - reader.len() as u64;
@@ -217,6 +219,23 @@ where
             }
         }
         true
+    }
+
+    fn read_chunk(&self, chunk: &CacheChunk) -> Result<(u64, Vec<u8>)> {
+        let read_len = if chunk.end_offset == u64::MAX {
+            let file_len = self.pipe_log.file_len(LogQueue::Append, chunk.file_num)?;
+            file_len - chunk.base_offset
+        } else {
+            chunk.end_offset - chunk.base_offset
+        };
+
+        let content = self.pipe_log.fread(
+            LogQueue::Append,
+            chunk.file_num,
+            chunk.base_offset,
+            read_len,
+        )?;
+        Ok((read_len, content))
     }
 }
 
@@ -251,7 +270,7 @@ pub enum CacheTask {
     EvictOldest(Sender<()>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CacheChunk {
     file_num: u64,
     base_offset: u64,
@@ -261,14 +280,28 @@ pub struct CacheChunk {
 
 #[derive(Clone)]
 pub struct CacheTracker {
+    pub global_stats: Arc<GlobalStats>,
     pub chunk_size: Arc<AtomicUsize>,
     pub sub_on_drop: usize,
 }
 
+impl CacheTracker {
+    pub fn new(global_stats: Arc<GlobalStats>, chunk_size: Arc<AtomicUsize>) -> Self {
+        CacheTracker {
+            global_stats,
+            chunk_size,
+            sub_on_drop: 0,
+        }
+    }
+}
+
 impl Drop for CacheTracker {
     fn drop(&mut self) {
-        self.chunk_size
-            .fetch_sub(self.sub_on_drop, Ordering::SeqCst);
+        if self.sub_on_drop > 0 {
+            self.global_stats.sub_mem_change(self.sub_on_drop);
+            self.chunk_size
+                .fetch_sub(self.sub_on_drop, Ordering::Release);
+        }
     }
 }
 
@@ -289,7 +322,7 @@ impl CacheChunk {
     #[cfg(test)]
     pub fn self_check(&self, expected_chunk_size: usize) {
         assert!(self.end_offset > self.base_offset);
-        let chunk_size = self.size_tracker.load(Ordering::Relaxed);
+        let chunk_size = self.size_tracker.load(Ordering::Acquire);
         assert_eq!(chunk_size, expected_chunk_size);
     }
 }

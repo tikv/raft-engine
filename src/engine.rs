@@ -221,9 +221,7 @@ where
 
         let memtables = {
             let stats = global_stats.clone();
-            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| {
-                MemTable::new(id, cache_limit, stats.clone())
-            }))
+            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| MemTable::new(id, stats.clone())))
         };
 
         let cache_evict_runner = CacheEvictRunner::new(
@@ -296,24 +294,20 @@ where
             loop {
                 match LogBatch::from_bytes(&mut buf, file_num, offset) {
                     Ok(Some(mut log_batch)) => {
-                        let mut encoded_size = 0;
-                        for item in &log_batch.items {
-                            if let LogItemContent::Entries(ref entries) = item.content {
-                                encoded_size += entries.encoded_size.get();
-                            }
-                        }
-
-                        if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
-                            file_num,
-                            offset,
-                            encoded_size,
-                        ) {
-                            for item in &log_batch.items {
-                                if let LogItemContent::Entries(ref entries) = item.content {
-                                    entries.attach_cache_tracker(tracker.clone());
+                        if queue == LogQueue::Append {
+                            if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
+                                file_num,
+                                offset,
+                                log_batch.entries_size(),
+                            ) {
+                                for item in &log_batch.items {
+                                    if let LogItemContent::Entries(ref entries) = item.content {
+                                        entries.attach_cache_tracker(tracker.clone());
+                                    }
                                 }
                             }
                         }
+
                         self.apply_to_memtable(&mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
@@ -790,7 +784,10 @@ mod tests {
         assert!(engine.pipe_log.first_file_num(LogQueue::Append) > 1);
 
         let active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
-        let active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
+        let active_len = engine
+            .pipe_log
+            .file_len(LogQueue::Rewrite, active_num)
+            .unwrap();
         assert!(active_num > 1 || active_len > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
@@ -825,7 +822,10 @@ mod tests {
         assert!(engine.purge_expired_files().unwrap().is_empty());
 
         let new_active_num = engine.pipe_log.active_file_num(LogQueue::Rewrite);
-        let new_active_len = engine.pipe_log.file_len(LogQueue::Rewrite, active_num);
+        let new_active_len = engine
+            .pipe_log
+            .file_len(LogQueue::Rewrite, active_num)
+            .unwrap();
         assert!(
             new_active_num > active_num
                 || (new_active_num == active_num && new_active_len > active_len)
