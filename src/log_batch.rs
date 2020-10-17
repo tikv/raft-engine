@@ -140,8 +140,9 @@ impl<E: Message + PartialEq> PartialEq for Entries<E> {
 
 impl<E: Message> Entries<E> {
     pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
-        let entries_index =
-            RefCell::new(entries_index.unwrap_or_else(|| Vec::with_capacity(entries.len())));
+        let entries_index = RefCell::new(
+            entries_index.unwrap_or_else(|| vec![EntryIndex::default(); entries.len()]),
+        );
         Entries {
             entries,
             entries_index,
@@ -153,6 +154,7 @@ impl<E: Message> Entries<E> {
         file_num: u64,
         base_offset: u64,  // Offset of the batch from its log file.
         batch_offset: u64, // Offset of the item from in its batch.
+        entries_size: &mut usize,
     ) -> Result<Entries<E>> {
         let content_len = buf.len() as u64;
         let mut count = codec::decode_var_u64(buf)? as usize;
@@ -169,6 +171,7 @@ impl<E: Message> Entries<E> {
             entry_index.base_offset = base_offset;
             entry_index.offset = batch_offset + content_len - buf.len() as u64;
             entry_index.len = len as u64;
+            *entries_size += entry_index.len as usize;
 
             buf.consume(len);
             entries.push(e);
@@ -179,7 +182,10 @@ impl<E: Message> Entries<E> {
         Ok(Entries::new(entries, Some(entries_index)))
     }
 
-    pub fn encode_to<W: EntryExt<E>>(&self, vec: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_to<W>(&self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
+    where
+        W: EntryExt<E>,
+    {
         if self.entries.is_empty() {
             return Ok(());
         }
@@ -199,6 +205,7 @@ impl<E: Message> Entries<E> {
                 // This offset doesn't count the header.
                 entries_index[i].offset = vec.len() as u64;
                 entries_index[i].len = content.len() as u64;
+                *entries_size += entries_index[i].len as usize;
             }
 
             vec.extend_from_slice(&content);
@@ -392,13 +399,16 @@ impl<E: Message> LogItem<E> {
         }
     }
 
-    pub fn encode_to<W: EntryExt<E>>(&self, vec: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_to<W>(&self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
+    where
+        W: EntryExt<E>,
+    {
         // layout = { 8 byte id | 1 byte type | item layout }
         vec.encode_var_u64(self.raft_group_id)?;
         match self.content {
             LogItemContent::Entries(ref entries) => {
                 vec.push(TYPE_ENTRIES);
-                entries.encode_to::<W>(vec)?;
+                entries.encode_to::<W>(vec, entries_size)?;
             }
             LogItemContent::Command(ref command) => {
                 vec.push(TYPE_COMMAND);
@@ -417,6 +427,7 @@ impl<E: Message> LogItem<E> {
         file_num: u64,
         base_offset: u64,      // Offset of the batch from its log file.
         mut batch_offset: u64, // Offset of the item from in its batch.
+        entries_size: &mut usize,
     ) -> Result<LogItem<E>> {
         let buf_len = buf.len();
         let raft_group_id = codec::decode_var_u64(buf)?;
@@ -425,7 +436,13 @@ impl<E: Message> LogItem<E> {
         batch_offset += 1;
         let content = match item_type {
             TYPE_ENTRIES => {
-                let entries = Entries::from_bytes::<W>(buf, file_num, base_offset, batch_offset)?;
+                let entries = Entries::from_bytes::<W>(
+                    buf,
+                    file_num,
+                    base_offset,
+                    batch_offset,
+                    entries_size,
+                )?;
                 LogItemContent::Entries(entries)
             }
             TYPE_COMMAND => {
@@ -452,6 +469,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
+    entries_size: RefCell<usize>,
     _phantom: PhantomData<W>,
 }
 
@@ -463,6 +481,7 @@ where
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(16),
+            entries_size: RefCell::new(0),
             _phantom: PhantomData,
         }
     }
@@ -480,6 +499,7 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
+            entries_size: RefCell::new(0),
             _phantom: PhantomData,
         }
     }
@@ -554,8 +574,13 @@ where
         let mut log_batch = LogBatch::with_capacity(items_count);
         while items_count > 0 {
             let content_offset = (content_len - reader.len()) as u64;
-            let item =
-                LogItem::from_bytes::<W>(&mut reader, file_num, base_offset, content_offset)?;
+            let item = LogItem::from_bytes::<W>(
+                &mut reader,
+                file_num,
+                base_offset,
+                content_offset,
+                &mut log_batch.entries_size.borrow_mut(),
+            )?;
             log_batch.items.push(item);
             items_count -= 1;
         }
@@ -582,7 +607,8 @@ where
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
         for item in &self.items {
-            item.encode_to::<W>(&mut vec).unwrap();
+            item.encode_to::<W>(&mut vec, &mut *self.entries_size.borrow_mut())
+                .unwrap();
         }
 
         let compression_type = if vec.len() > COMPRESSION_SIZE {
@@ -607,6 +633,10 @@ where
         }
 
         Some(vec)
+    }
+
+    pub fn entries_size(&self) -> usize {
+        *self.entries_size.borrow()
     }
 }
 
@@ -642,13 +672,16 @@ mod tests {
         let file_num = 1;
         let entries = Entries::new(pb_entries, None);
 
-        let mut encoded = vec![];
-        entries.encode_to::<Entry>(&mut encoded).unwrap();
+        let (mut encoded, mut entries_size1) = (vec![], 0);
+        entries
+            .encode_to::<Entry>(&mut encoded, &mut entries_size1)
+            .unwrap();
         for idx in entries.entries_index.borrow_mut().iter_mut() {
             idx.file_num = file_num;
         }
-        let mut s = encoded.as_slice();
-        let decode_entries = Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0).unwrap();
+        let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
+        let decode_entries =
+            Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2).unwrap();
         assert_eq!(s.len(), 0);
         assert_eq!(entries.entries, decode_entries.entries);
         assert_eq!(entries.entries_index, decode_entries.entries_index);
@@ -691,10 +724,12 @@ mod tests {
         ];
 
         for item in items {
-            let mut encoded = vec![];
-            item.encode_to::<Entry>(&mut encoded).unwrap();
-            let mut s = encoded.as_slice();
-            let decoded_item = LogItem::from_bytes::<Entry>(&mut s, 0, 0, 0).unwrap();
+            let (mut encoded, mut entries_size1) = (vec![], 0);
+            item.encode_to::<Entry>(&mut encoded, &mut entries_size1)
+                .unwrap();
+            let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
+            let decoded_item =
+                LogItem::from_bytes::<Entry>(&mut s, 0, 0, 0, &mut entries_size2).unwrap();
             assert_eq!(s.len(), 0);
             assert_eq!(item, decoded_item);
         }

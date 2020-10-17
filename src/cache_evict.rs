@@ -322,7 +322,7 @@ impl CacheChunk {
     #[cfg(test)]
     pub fn self_check(&self, expected_chunk_size: usize) {
         assert!(self.end_offset > self.base_offset);
-        let chunk_size = self.size_tracker.load(Ordering::Relaxed);
+        let chunk_size = self.size_tracker.load(Ordering::Acquire);
         assert_eq!(chunk_size, expected_chunk_size);
     }
 }
