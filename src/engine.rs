@@ -294,19 +294,15 @@ where
             loop {
                 match LogBatch::from_bytes(&mut buf, file_num, offset) {
                     Ok(Some(mut log_batch)) => {
-                        let mut encoded_size = 0;
-                        for item in &log_batch.items {
-                            if let LogItemContent::Entries(ref entries) = item.content {
-                                encoded_size += entries.encoded_size.get();
-                            }
-                        }
+                        let new_offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
 
                         if queue == LogQueue::Append {
-                            if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
-                                file_num,
-                                offset,
-                                encoded_size,
-                            ) {
+                            let consumed = (new_offset - offset) as usize;
+                            if let Some(tracker) = self
+                                .pipe_log
+                                .cache_submitor()
+                                .get_cache_tracker(file_num, offset, consumed)
+                            {
                                 for item in &log_batch.items {
                                     if let LogItemContent::Entries(ref entries) = item.content {
                                         entries.attach_cache_tracker(tracker.clone());
@@ -316,7 +312,7 @@ where
                         }
 
                         self.apply_to_memtable(&mut log_batch, queue, file_num);
-                        offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
+                        offset = new_offset;
                     }
                     Ok(None) => {
                         info!("Recovered raft log {:?}.{}.", queue, file_num);

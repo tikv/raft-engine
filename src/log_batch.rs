@@ -1,5 +1,5 @@
 use std::borrow::{Borrow, Cow};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::io::BufRead;
 use std::marker::PhantomData;
 use std::{mem, u64};
@@ -130,8 +130,6 @@ where
     pub entries: Vec<E>,
     // EntryIndex may be update after write to file.
     pub entries_index: RefCell<Vec<EntryIndex>>,
-
-    pub encoded_size: Cell<usize>,
 }
 
 impl<E: Message + PartialEq> PartialEq for Entries<E> {
@@ -142,18 +140,11 @@ impl<E: Message + PartialEq> PartialEq for Entries<E> {
 
 impl<E: Message> Entries<E> {
     pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
-        let len = entries.len();
-        let (encoded_size, entries_index) = match entries_index {
-            Some(index) => (
-                index.iter().fold(0, |acc, x| acc + x.len as usize),
-                RefCell::new(index),
-            ),
-            None => (0, RefCell::new(vec![EntryIndex::default(); len])),
-        };
+        let entries_index =
+            RefCell::new(entries_index.unwrap_or_else(|| Vec::with_capacity(entries.len())));
         Entries {
             entries,
             entries_index,
-            encoded_size: Cell::new(encoded_size),
         }
     }
 
@@ -208,7 +199,6 @@ impl<E: Message> Entries<E> {
                 // This offset doesn't count the header.
                 entries_index[i].offset = vec.len() as u64;
                 entries_index[i].len = content.len() as u64;
-                self.encoded_size.update(|x| x + content.len());
             }
 
             vec.extend_from_slice(&content);
@@ -229,19 +219,21 @@ impl<E: Message> Entries<E> {
             idx.queue = queue;
             idx.file_num = file_num;
             idx.base_offset = base;
-            if let Some(ref xtracker) = tracker {
-                let mut xtracker = xtracker.clone();
-                xtracker.sub_on_drop = idx.len as usize;
-                idx.cache_tracker = Some(xtracker);
+            if let Some(ref tkr) = tracker {
+                let mut tkr = tkr.clone();
+                tkr.global_stats.add_mem_change(idx.len as usize);
+                tkr.sub_on_drop = idx.len as usize;
+                idx.cache_tracker = Some(tkr);
             }
         }
     }
 
     pub fn attach_cache_tracker(&self, tracker: CacheTracker) {
         for idx in self.entries_index.borrow_mut().iter_mut() {
-            let mut xtracker = tracker.clone();
-            xtracker.sub_on_drop = idx.len as usize;
-            idx.cache_tracker = Some(xtracker);
+            let mut tkr = tracker.clone();
+            tkr.global_stats.add_mem_change(idx.len as usize);
+            tkr.sub_on_drop = idx.len as usize;
+            idx.cache_tracker = Some(tkr);
         }
     }
 
@@ -580,7 +572,7 @@ where
     }
 
     // TODO: avoid to write a large batch into one compressed chunk.
-    pub fn encode_to_bytes(&self, encoded_size: &mut usize) -> Option<Vec<u8>> {
+    pub fn encode_to_bytes(&self) -> Option<Vec<u8>> {
         if self.items.is_empty() {
             return None;
         }
@@ -610,7 +602,6 @@ where
         let batch_len = (vec.len() - 8) as u64;
         for item in &self.items {
             if let LogItemContent::Entries(ref entries) = item.content {
-                *encoded_size += entries.encoded_size.get();
                 entries.update_compression_type(compression_type, batch_len as u64);
             }
         }
@@ -720,20 +711,10 @@ mod tests {
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
         batch.delete(region_id, b"key2".to_vec());
 
-        let mut encoded_size = 0;
-        let encoded = batch.encode_to_bytes(&mut encoded_size).unwrap();
-        assert_eq!(encoded_size, 10270);
-
+        let encoded = batch.encode_to_bytes().unwrap();
         let mut s = encoded.as_slice();
         let decoded_batch = LogBatch::from_bytes(&mut s, 0, 0).unwrap().unwrap();
         assert_eq!(s.len(), 0);
         assert_eq!(batch, decoded_batch);
-
-        match &decoded_batch.items[0].content {
-            LogItemContent::Entries(entries) => {
-                assert_eq!(entries.encoded_size.get(), encoded_size)
-            }
-            _ => unreachable!(),
-        }
     }
 }

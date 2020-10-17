@@ -449,12 +449,11 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        let mut entries_size = 0;
-        if let Some(content) = batch.encode_to_bytes(&mut entries_size) {
+        if let Some(content) = batch.encode_to_bytes() {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
+            let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, content.len());
             drop(cache_submitor);
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
@@ -478,8 +477,7 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        let mut encoded_size = 0;
-        if let Some(content) = batch.encode_to_bytes(&mut encoded_size) {
+        if let Some(content) = batch.encode_to_bytes() {
             let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
             if sync {
                 fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;

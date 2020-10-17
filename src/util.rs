@@ -12,6 +12,7 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::Duration;
 
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
+use log::warn;
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -274,7 +275,9 @@ impl<T: Clone> Worker<T> {
     pub fn stop(&mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = self.scheduler.sender.send(None);
-            return handle.join().unwrap();
+            if let Err(e) = handle.join() {
+                warn!("Cache evictor aborts with {:?}", e);
+            }
         }
     }
 }

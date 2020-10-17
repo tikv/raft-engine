@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crossbeam::channel::{bounded, Sender};
-use log::info;
+use log::{info, warn};
 use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
@@ -92,8 +92,9 @@ impl CacheSubmitor {
                     // Log file is switched, use `u64::MAX` as the end.
                     task.end_offset = u64::MAX;
                 }
-                self.global_stats.add_mem_change(self.chunk_size);
-                let _ = self.scheduler.schedule(CacheTask::NewChunk(task));
+                if let Err(e) = self.scheduler.schedule(CacheTask::NewChunk(task)) {
+                    warn!("Failed to schedule cache chunk to evictor: {}", e);
+                }
             }
             self.reset(file_num, offset);
         }
