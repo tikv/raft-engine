@@ -17,6 +17,7 @@ macro_rules! box_err {
 pub mod codec;
 
 mod cache_evict;
+mod compression;
 mod config;
 mod engine;
 mod errors;
@@ -27,7 +28,7 @@ mod pipe_log;
 mod purge;
 mod util;
 
-use crate::iovec::LengthFixedIoVec;
+use crate::iovec::{IoVecs, LengthFixedIoVecs};
 use crate::pipe_log::PipeLog;
 
 pub use self::config::{Config, RecoveryMode};
@@ -112,6 +113,11 @@ impl GlobalStats {
 mod tests {
     use crate::log_batch::EntryExt;
     use raft::eraftpb::Entry;
+
+    #[ctor::ctor]
+    fn init() {
+        env_logger::init();
+    }
 
     impl EntryExt<Entry> for Entry {
         fn index(e: &Entry) -> u64 {

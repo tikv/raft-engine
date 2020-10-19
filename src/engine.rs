@@ -9,6 +9,7 @@ use protobuf::Message;
 use crate::cache_evict::{
     CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
 };
+use crate::compression::{decode_block, decode_blocks};
 use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{
     self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
@@ -520,15 +521,19 @@ where
             let offset = base_offset + offset;
             pipe_log.fread(queue, file_num, offset, len)?
         }
-        CompressionType::Lz4 => {
-            let read_len = batch_len + HEADER_LEN as u64;
+        c_type @ CompressionType::Lz4 | c_type @ CompressionType::Lz4Blocks => {
+            let read_len = batch_len + HEADER_LEN as u64 + CHECKSUM_LEN as u64;
             let compressed = pipe_log.fread(queue, file_num, base_offset, read_len)?;
-            let mut reader = compressed.as_ref();
+            log_batch::test_batch_checksum(compressed.as_slice())?;
+
+            let mut reader = compressed.as_slice();
             let header = codec::decode_u64(&mut reader)?;
             assert_eq!(header >> 8, batch_len);
-
-            log_batch::test_batch_checksum(reader)?;
-            let buf = log_batch::decompress(&reader[..batch_len as usize - CHECKSUM_LEN]);
+            let buf = match c_type {
+                CompressionType::Lz4 => decode_block(&reader[..batch_len as usize]),
+                CompressionType::Lz4Blocks => decode_blocks(&reader[..batch_len as usize]),
+                _ => unreachable!(),
+            };
             let start = offset as usize - HEADER_LEN;
             let end = (offset + len) as usize - HEADER_LEN;
             buf[start..end].to_vec()

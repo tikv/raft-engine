@@ -10,7 +10,7 @@ use log::{info, warn};
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
-use nix::sys::uio::{pread, pwrite};
+use nix::sys::uio::{pread, pwrite, pwritev, IoVec as NixIoVec};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use protobuf::Message;
@@ -19,7 +19,7 @@ use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::util::HandyRwLock;
-use crate::{Error, Result};
+use crate::{Error, IoVecs, LengthFixedIoVecs, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
 const LOG_SUFFIX_LEN: usize = 8;
@@ -39,6 +39,8 @@ const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
+const IO_VEC_SIZE: usize = 32 * 1024;
+
 pub trait GenericPipeLog: Sized + Clone + Send {
     /// Read some bytes from the given position.
     fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
@@ -48,6 +50,13 @@ pub trait GenericPipeLog: Sized + Clone + Send {
         &self,
         queue: LogQueue,
         content: &[u8],
+        sync: &mut bool,
+    ) -> Result<(u64, u64, Arc<LogFd>)>;
+
+    fn appendv(
+        &self,
+        queue: LogQueue,
+        content: LengthFixedIoVecs,
         sync: &mut bool,
     ) -> Result<(u64, u64, Arc<LogFd>)>;
 
@@ -431,8 +440,25 @@ impl GenericPipeLog for PipeLog {
         content: &[u8],
         sync: &mut bool,
     ) -> Result<(u64, u64, Arc<LogFd>)> {
-        let (file_num, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+        let len = content.len();
+        let (file_num, offset, fd) = self.mut_queue(queue).on_append(len, sync)?;
         pwrite_exact(fd.0, offset, content)?;
+        Ok((file_num, offset, fd))
+    }
+
+    fn appendv(
+        &self,
+        queue: LogQueue,
+        content: LengthFixedIoVecs,
+        sync: &mut bool,
+    ) -> Result<(u64, u64, Arc<LogFd>)> {
+        if content.has_single_iovec() {
+            let content = content.into_vec();
+            return self.append(queue, &content, sync);
+        }
+        let len = content.content_len();
+        let (file_num, offset, fd) = self.mut_queue(queue).on_append(len, sync)?;
+        pwritev_exact(fd.0, offset, &mut content.to_nix_iovecs())?;
         Ok((file_num, offset, fd))
     }
 
@@ -449,27 +475,30 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes() {
-            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            let mut cache_submitor = self.cache_submitor.lock().unwrap();
-            let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker =
-                cache_submitor.get_cache_tracker(cur_file_num, offset, batch.entries_size());
-            drop(cache_submitor);
-            if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
-            }
-
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
-                }
-            }
-
-            *file_num = cur_file_num;
-            return Ok(content.len());
+        let mut content = LengthFixedIoVecs::new(IO_VEC_SIZE);
+        if !batch.encode_to_bytes(&mut content) {
+            return Ok(0);
         }
-        Ok(0)
+        let entries_size = batch.entries_size();
+        let content_len = content.content_len();
+
+        // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
+        let mut cache_submitor = self.cache_submitor.lock().unwrap();
+        let (cur_file_num, offset, fd) = self.appendv(LogQueue::Append, content, &mut sync)?;
+        let tracker = cache_submitor.get_cache_tracker(cur_file_num, offset, entries_size);
+        drop(cache_submitor);
+        if sync {
+            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+        }
+
+        for item in &batch.items {
+            if let LogItemContent::Entries(ref entries) = item.content {
+                entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
+            }
+        }
+
+        *file_num = cur_file_num;
+        Ok(content_len)
     }
 
     fn rewrite<E: Message, W: EntryExt<E>>(
@@ -478,20 +507,23 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes() {
-            let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
-            if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
-            }
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
-                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
-                }
-            }
-            *file_num = cur_file_num;
-            return Ok(content.len());
+        let mut content = LengthFixedIoVecs::new(IO_VEC_SIZE);
+        if !batch.encode_to_bytes(&mut content) {
+            return Ok(0);
         }
-        Ok(0)
+        let content_len = content.content_len();
+
+        let (cur_file_num, offset, fd) = self.appendv(LogQueue::Rewrite, content, &mut sync)?;
+        if sync {
+            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+        }
+        for item in &batch.items {
+            if let LogItemContent::Entries(ref entries) = item.content {
+                entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
+            }
+        }
+        *file_num = cur_file_num;
+        Ok(content_len)
     }
 
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
@@ -655,6 +687,45 @@ fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
         };
         written += bytes;
         offset += bytes as u64;
+    }
+    Ok(())
+}
+
+fn pwritev_exact<'a>(
+    fd: RawFd,
+    mut offset: u64,
+    mut vecs: &'a mut [NixIoVec<&'a [u8]>],
+) -> Result<()> {
+    fn consume<'a>(
+        mut vecs: &'a mut [NixIoVec<&'a [u8]>],
+        mut bytes: usize,
+    ) -> &'a mut [NixIoVec<&'a [u8]>] {
+        debug_assert!(!vecs.is_empty());
+        loop {
+            if bytes == 0 {
+                return vecs;
+            }
+            let buf_len = vecs[0].as_slice().len();
+            if buf_len > bytes {
+                break;
+            }
+            bytes -= buf_len;
+            vecs = &mut vecs[1..];
+        }
+        let buf: NixIoVec<&'a [u8]> = std::mem::replace(&mut vecs[0], NixIoVec::from_slice(&[]));
+        let buf: &'a [u8] = unsafe { std::mem::transmute(buf.as_slice()) };
+        vecs[0] = NixIoVec::from_slice(&buf[bytes..]);
+        vecs
+    }
+
+    while !vecs.is_empty() {
+        let bytes = match pwritev(fd, vecs, offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pwrite")),
+        };
+        offset += bytes as u64;
+        vecs = consume(vecs, bytes);
     }
     Ok(())
 }
