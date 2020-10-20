@@ -10,7 +10,7 @@ use log::{info, warn};
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
-use nix::sys::uio::{pread, pwrite, pwritev, IoVec as NixIoVec};
+use nix::sys::uio::{pread, pwrite, IoVec as NixIoVec};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use protobuf::Message;
@@ -39,7 +39,7 @@ const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
-const IO_VEC_SIZE: usize = 32 * 1024;
+const IO_VEC_SIZE: usize = 64 * 1024;
 
 pub trait GenericPipeLog: Sized + Clone + Send {
     /// Read some bytes from the given position.
@@ -691,6 +691,7 @@ fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn pwritev_exact<'a>(
     fd: RawFd,
     mut offset: u64,
@@ -719,13 +720,24 @@ fn pwritev_exact<'a>(
     }
 
     while !vecs.is_empty() {
-        let bytes = match pwritev(fd, vecs, offset as _) {
+        let bytes = match nix::sys::uio::pwritev(fd, vecs, offset as _) {
             Ok(bytes) => bytes,
             Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
             Err(e) => return Err(parse_nix_error(e, "pwrite")),
         };
         offset += bytes as u64;
         vecs = consume(vecs, bytes);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn pwritev_exact<'a>(fd: RawFd, mut offset: u64, vecs: &'a [NixIoVec<&'a [u8]>]) -> Result<()> {
+    for vec in vecs {
+        let content = vec.as_slice();
+        let len = content.len();
+        pwrite_exact(fd, offset, content)?;
+        offset += len as u64;
     }
     Ok(())
 }
