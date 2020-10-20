@@ -32,6 +32,7 @@ use crate::pipe_log::PipeLog;
 pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
+pub use self::util::Statistic;
 pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
 
 #[derive(Clone, Copy, Default)]

@@ -5,8 +5,8 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
 
-use futures::channel as future_channel;
 use futures::executor::block_on;
+use futures::{channel as future_channel, TryFutureExt};
 
 use log::{info, warn};
 use protobuf::Message;
@@ -23,7 +23,7 @@ use crate::log_batch::{
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::{PurgeManager, RemovedMemtables};
-use crate::util::{HandyRwLock, HashMap, Worker};
+use crate::util::{HandyRwLock, HashMap, Statistic, Worker};
 use crate::wal::{LogMsg, WalRunner, WriteTask};
 use crate::{codec, CacheStats, GlobalStats, Result};
 use futures::future::{err, ok, BoxFuture};
@@ -569,6 +569,14 @@ where
         if let Some(wal) = workers.wal.take() {
             wal.join().unwrap();
         }
+    }
+
+    pub fn async_get_metric(&self) -> BoxFuture<'static, Result<Statistic>> {
+        let (sender, r) = future_channel::oneshot::channel();
+        if let Err(_) = self.wal_sender.send(LogMsg::Metric(sender)) {
+            return Box::pin(err(Error::Stop));
+        }
+        return Box::pin(r.map_err(|_| Error::Stop));
     }
 }
 

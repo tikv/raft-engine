@@ -318,3 +318,67 @@ impl<T: Clone> Drop for Worker<T> {
         self.stop();
     }
 }
+
+#[derive(Clone, Debug, Copy, PartialEq, Default)]
+pub struct Statistic {
+    pub wal_cost: f64,
+    pub sync_cost: f64,
+    pub write_cost: f64,
+    pub max_wal_cost: f64,
+    pub max_sync_cost: f64,
+    pub max_write_cost: f64,
+    pub freq: usize,
+}
+
+fn max(left: f64, right: f64) -> f64 {
+    if left > right {
+        left
+    } else {
+        right
+    }
+}
+
+impl Statistic {
+    pub fn add(&mut self, other: &Self) {
+        self.wal_cost += other.wal_cost;
+        self.sync_cost += other.sync_cost;
+        self.write_cost += other.write_cost;
+        self.freq += other.freq;
+        self.max_wal_cost = max(self.max_wal_cost, other.max_wal_cost);
+        self.max_write_cost = max(self.max_write_cost, other.max_write_cost);
+        self.max_sync_cost = max(self.max_sync_cost, other.max_sync_cost);
+    }
+
+    pub fn clear(&mut self) {
+        self.wal_cost = 0.0;
+        self.sync_cost = 0.0;
+        self.write_cost = 0.0;
+        self.max_wal_cost = 0.0;
+        self.max_sync_cost = 0.0;
+        self.max_write_cost = 0.0;
+        self.freq = 0;
+    }
+
+    #[inline]
+    pub fn add_wal(&mut self, wal: f64) {
+        self.wal_cost += wal;
+        self.max_wal_cost = max(self.max_wal_cost, wal);
+    }
+
+    #[inline]
+    pub fn add_write(&mut self, write: f64) {
+        self.write_cost += write;
+        self.max_write_cost = max(self.max_write_cost, write);
+    }
+
+    #[inline]
+    pub fn add_sync(&mut self, sync: f64) {
+        self.sync_cost += sync;
+        self.max_sync_cost = max(self.max_sync_cost, sync);
+    }
+
+    #[inline]
+    pub fn add_one(&mut self) {
+        self.freq += 1;
+    }
+}

@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::cache_evict::CacheSubmitor;
 use crate::errors::Result;
 use crate::pipe_log::{GenericPipeLog, LogQueue};
+use crate::util::Statistic;
 use log::warn;
+use std::time::Instant;
 
 pub struct WriteTask {
     pub content: Vec<u8>,
@@ -17,6 +19,7 @@ pub struct WriteTask {
 
 pub enum LogMsg {
     Write(WriteTask),
+    Metric(Sender<Statistic>),
     Stop,
 }
 
@@ -24,6 +27,7 @@ pub struct WalRunner<P: GenericPipeLog> {
     cache_submitter: CacheSubmitor,
     pipe_log: P,
     receiver: Receiver<LogMsg>,
+    statistic: Statistic,
 }
 
 impl<P: GenericPipeLog> WalRunner<P> {
@@ -36,6 +40,7 @@ impl<P: GenericPipeLog> WalRunner<P> {
             pipe_log,
             cache_submitter,
             receiver,
+            statistic: Statistic::default(),
         }
     }
 }
@@ -46,9 +51,21 @@ where
 {
     pub fn run(&mut self) -> Result<()> {
         let mut write_ret = vec![];
-        const MAX_WRITE_BUFFER: usize = 2 * 1024 * 1024; // 2MB
+        const MAX_WRITE_BUFFER: usize = 1 * 1024 * 1024; // 2MB
         let mut write_buffer = Vec::with_capacity(MAX_WRITE_BUFFER);
-        while let Ok(LogMsg::Write(task)) = self.receiver.recv() {
+        while let Ok(msg) = self.receiver.recv() {
+            let task = match msg {
+                LogMsg::Write(task) => task,
+                LogMsg::Stop => {
+                    return Ok(());
+                }
+                LogMsg::Metric(cb) => {
+                    let _ = cb.send(self.statistic.clone());
+                    self.statistic.clear();
+                    continue;
+                }
+            };
+            let now = Instant::now();
             let mut sync = task.sync;
             let mut entries_size = task.entries_size;
             let (file_num, fd) = self.pipe_log.switch_log_file(LogQueue::Append).unwrap();
@@ -62,6 +79,11 @@ where
                     LogMsg::Write(task) => task,
                     LogMsg::Stop => {
                         return Ok(());
+                    }
+                    LogMsg::Metric(cb) => {
+                        let _ = cb.send(self.statistic.clone());
+                        self.statistic.clear();
+                        continue;
                     }
                 };
                 if task.sync && !sync {
@@ -83,6 +105,7 @@ where
                     .append(LogQueue::Append, &write_buffer)
                     .unwrap()
             };
+            let before_sync_cost = now.elapsed().as_secs_f64();
             if sync {
                 if let Err(e) = fd.sync() {
                     warn!("write wal failed because of: {} ", e);
@@ -93,6 +116,10 @@ where
                 .cache_submitter
                 .get_cache_tracker(file_num, base_offset);
             self.cache_submitter.fill_chunk(entries_size);
+            let wal_cost = now.elapsed().as_secs_f64();
+            self.statistic.add_wal(wal_cost);
+            self.statistic.add_sync(wal_cost - before_sync_cost);
+            self.statistic.add_one();
             for (offset, sender) in write_ret.drain(..) {
                 let _ = sender.send((file_num, base_offset + offset, tracker.clone()));
             }
