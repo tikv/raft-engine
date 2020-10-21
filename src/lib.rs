@@ -1,5 +1,7 @@
 #![feature(shrink_to)]
 #![feature(cell_update)]
+#![feature(test)]
+extern crate test;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -17,15 +19,18 @@ macro_rules! box_err {
 pub mod codec;
 
 mod cache_evict;
+mod compression;
 mod config;
 mod engine;
 mod errors;
+mod iovec;
 mod log_batch;
 mod memtable;
 mod pipe_log;
 mod purge;
 mod util;
 
+use crate::iovec::{IoVecs, LengthFixedIoVecs};
 use crate::pipe_log::PipeLog;
 
 pub use self::config::{Config, RecoveryMode};
@@ -110,6 +115,11 @@ impl GlobalStats {
 mod tests {
     use crate::log_batch::EntryExt;
     use raft::eraftpb::Entry;
+
+    #[ctor::ctor]
+    fn init() {
+        env_logger::init();
+    }
 
     impl EntryExt<Entry> for Entry {
         fn index(e: &Entry) -> u64 {

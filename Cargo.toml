@@ -16,8 +16,14 @@ fxhash = "0.2"
 nix = "0.18.0"
 crossbeam = "0.7"
 thiserror = "1.0"
+libc = "0.2"
 
 [dev-dependencies]
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 tempfile = "3.1"
 toml = "0.5"
+ctor = "0.1"
+env_logger = "0.8"
+
+[patch.crates-io]
+protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "ac10abf324a6f2b3e19e10f82b568a293ca5bd3d" }

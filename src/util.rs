@@ -11,6 +11,7 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::Duration;
 
+use crc32fast::Hasher;
 use crossbeam::channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use log::warn;
 use serde::de::{self, Unexpected, Visitor};
@@ -320,4 +321,11 @@ impl<T: Clone> Drop for Worker<T> {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+#[inline]
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
 }

@@ -1,20 +1,20 @@
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
-use std::io::BufRead;
+use std::io::{BufRead, SeekFrom};
 use std::marker::PhantomData;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use crc32fast::Hasher;
 use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
+use crate::compression::{decode_block, decode_blocks};
 use crate::memtable::EntryIndex;
 use crate::pipe_log::LogQueue;
-use crate::{Error, Result};
+use crate::util::crc32;
+use crate::{Error, IoVecs, Result};
 
-pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
 pub const HEADER_LEN: usize = 8;
 pub const CHECKSUM_LEN: usize = 4;
 
@@ -25,89 +25,20 @@ const TYPE_KV: u8 = 0x3;
 const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
-const COMPRESSION_SIZE: usize = 4096;
-
-#[inline]
-fn crc32(data: &[u8]) -> u32 {
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    hasher.finalize()
-}
-
-mod lz4 {
-    use std::{i32, ptr};
-
-    pub fn encode_block(src: &[u8], head_reserve: usize, tail_alloc: usize) -> Vec<u8> {
-        unsafe {
-            let bound = lz4_sys::LZ4_compressBound(src.len() as i32);
-            assert!(bound > 0 && src.len() <= i32::MAX as usize);
-
-            // Layout: { header | decoded_len | content | checksum }.
-            let capacity = head_reserve + 4 + bound as usize + tail_alloc;
-            let mut output: Vec<u8> = Vec::with_capacity(capacity);
-
-            let le_len = src.len().to_le_bytes();
-            ptr::copy_nonoverlapping(le_len.as_ptr(), output.as_mut_ptr().add(head_reserve), 4);
-
-            let size = lz4_sys::LZ4_compress_default(
-                src.as_ptr() as _,
-                output.as_mut_ptr().add(head_reserve + 4) as _,
-                src.len() as i32,
-                bound,
-            );
-            assert!(size > 0);
-            output.set_len(head_reserve + 4 + size as usize);
-            output
-        }
-    }
-
-    pub fn decode_block(src: &[u8]) -> Vec<u8> {
-        assert!(src.len() > 4, "data is too short: {} <= 4", src.len());
-        unsafe {
-            let len = u32::from_le(ptr::read_unaligned(src.as_ptr() as *const u32));
-            let mut dst = Vec::with_capacity(len as usize);
-            let l = lz4_sys::LZ4_decompress_safe(
-                src.as_ptr().add(4) as _,
-                dst.as_mut_ptr() as _,
-                src.len() as i32 - 4,
-                dst.capacity() as i32,
-            );
-            if l == len as i32 {
-                dst.set_len(l as usize);
-                return dst;
-            }
-            if l < 0 {
-                panic!("decompress failed: {}", l);
-            } else {
-                panic!("length of decompress result not match {} != {}", len, l);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        #[test]
-        fn test_basic() {
-            let data: Vec<&'static [u8]> = vec![b"", b"123", b"12345678910"];
-            for d in data {
-                let compressed = super::encode_block(d, 0, 0);
-                assert!(compressed.len() > 4);
-                let res = super::decode_block(&compressed);
-                assert_eq!(res, d);
-            }
-        }
-    }
-}
+const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
+const COMPRESSION_THRESHOLD: usize = 4096;
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CompressionType {
     None = 0,
     Lz4 = 1,
+    Lz4Blocks = 2,
 }
 
 impl CompressionType {
     pub fn from_byte(t: u8) -> CompressionType {
+        debug_assert!(t <= 2);
         unsafe { mem::transmute(t) }
     }
 
@@ -161,7 +92,7 @@ impl<E: Message> Entries<E> {
         let mut entries = Vec::with_capacity(count);
         let mut entries_index = Vec::with_capacity(count);
         while count > 0 {
-            let len = codec::decode_var_u64(buf)? as usize;
+            let len = codec::decode_u32(buf)? as usize;
             let mut e = E::new();
             e.merge_from_bytes(&buf[..len])?;
 
@@ -182,9 +113,10 @@ impl<E: Message> Entries<E> {
         Ok(Entries::new(entries, Some(entries_index)))
     }
 
-    pub fn encode_to<W>(&self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
+    pub fn encode_to<W, T>(&self, vec: &mut T, entries_size: &mut usize) -> Result<()>
     where
         W: EntryExt<E>,
+        T: IoVecs,
     {
         if self.entries.is_empty() {
             return Ok(());
@@ -192,23 +124,26 @@ impl<E: Message> Entries<E> {
 
         // layout = { entries count | multiple entries }
         // entries layout = { entry layout | ... | entry layout }
-        // entry layout = { len | entry content }
+        // entry layout = { len(u32) | entry content }
         vec.encode_var_u64(self.entries.len() as u64)?;
         for (i, e) in self.entries.iter().enumerate() {
-            let content = e.write_to_bytes()?;
-            vec.encode_var_u64(content.len() as u64)?;
+            let prefixed_len_offset = vec.content_len();
+            vec.encode_u32(0)?;
+            e.write_to_writer_without_buffer(vec)?;
+            let content_len = vec.content_len() - prefixed_len_offset - 4;
+            vec.seek(SeekFrom::Start(prefixed_len_offset as u64))?;
+            vec.encode_u32(content_len as u32)?;
+            vec.seek(SeekFrom::End(0))?;
 
             // file_num = 0 means entry index is not initialized.
             let mut entries_index = self.entries_index.borrow_mut();
             if entries_index[i].file_num == 0 {
                 entries_index[i].index = W::index(&e);
                 // This offset doesn't count the header.
-                entries_index[i].offset = vec.len() as u64;
-                entries_index[i].len = content.len() as u64;
+                entries_index[i].offset = prefixed_len_offset as u64 + 4;
+                entries_index[i].len = content_len as u64;
                 *entries_size += entries_index[i].len as usize;
             }
-
-            vec.extend_from_slice(&content);
         }
         Ok(())
     }
@@ -259,13 +194,13 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn encode_to(&self, vec: &mut Vec<u8>) {
+    pub fn encode_to<T: IoVecs>(&self, vec: &mut T) {
         match *self {
             Command::Clean => {
-                vec.push(CMD_CLEAN);
+                vec.write_u8(CMD_CLEAN).unwrap();
             }
             Command::Compact { index } => {
-                vec.push(CMD_COMPACT);
+                vec.write_u8(CMD_COMPACT).unwrap();
                 vec.encode_var_u64(index).unwrap();
             }
         }
@@ -291,8 +226,8 @@ pub enum OpType {
 }
 
 impl OpType {
-    pub fn encode_to(self, vec: &mut Vec<u8>) {
-        vec.push(self as u8);
+    pub fn encode_to<T: IoVecs>(self, vec: &mut T) {
+        vec.write_u8(self as u8).unwrap();
     }
 
     pub fn from_bytes(buf: &mut SliceReader<'_>) -> Result<OpType> {
@@ -337,15 +272,15 @@ impl KeyValue {
         }
     }
 
-    pub fn encode_to(&self, vec: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_to<T: IoVecs>(&self, vec: &mut T) -> Result<()> {
         // layout = { op_type | k_len | key | v_len | value }
         self.op_type.encode_to(vec);
         vec.encode_var_u64(self.key.len() as u64)?;
-        vec.extend_from_slice(self.key.as_slice());
+        vec.write_all(self.key.as_slice())?;
         match self.op_type {
             OpType::Put => {
                 vec.encode_var_u64(self.value.as_ref().unwrap().len() as u64)?;
-                vec.extend_from_slice(self.value.as_ref().unwrap().as_slice());
+                vec.write_all(self.value.as_ref().unwrap().as_slice())?;
             }
             OpType::Del => {}
         }
@@ -399,23 +334,24 @@ impl<E: Message> LogItem<E> {
         }
     }
 
-    pub fn encode_to<W>(&self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
+    pub fn encode_to<W, T>(&self, vec: &mut T, entries_size: &mut usize) -> Result<()>
     where
         W: EntryExt<E>,
+        T: IoVecs,
     {
         // layout = { 8 byte id | 1 byte type | item layout }
         vec.encode_var_u64(self.raft_group_id)?;
         match self.content {
             LogItemContent::Entries(ref entries) => {
-                vec.push(TYPE_ENTRIES);
-                entries.encode_to::<W>(vec, entries_size)?;
+                vec.write_u8(TYPE_ENTRIES)?;
+                entries.encode_to::<W, T>(vec, entries_size)?;
             }
             LogItemContent::Command(ref command) => {
-                vec.push(TYPE_COMMAND);
+                vec.write_u8(TYPE_COMMAND)?;
                 command.encode_to(vec);
             }
             LogItemContent::Kv(ref kv) => {
-                vec.push(TYPE_KV);
+                vec.write_u8(TYPE_KV)?;
                 kv.encode_to(vec)?;
             }
         }
@@ -556,14 +492,17 @@ where
             return Err(Error::TooShort);
         }
 
-        let header = codec::decode_u64(buf)? as usize;
+        let mut header_buf = *buf;
+        let header = codec::decode_u64(&mut header_buf)? as usize;
         let batch_len = header >> 8;
         let batch_type = CompressionType::from_byte(header as u8);
-        test_batch_checksum(&buf[..batch_len])?;
+        test_batch_checksum(&buf[..batch_len + HEADER_LEN + CHECKSUM_LEN])?;
+        *buf = &buf[HEADER_LEN..];
 
         let decompressed = match batch_type {
-            CompressionType::None => Cow::Borrowed(&buf[..(batch_len - CHECKSUM_LEN)]),
-            CompressionType::Lz4 => Cow::Owned(decompress(&buf[..batch_len - CHECKSUM_LEN])),
+            CompressionType::None => Cow::Borrowed(&buf[..batch_len]),
+            CompressionType::Lz4 => Cow::Owned(decode_block(&buf[..batch_len])),
+            CompressionType::Lz4Blocks => Cow::Owned(decode_blocks(&buf[..batch_len])),
         };
 
         let mut reader: SliceReader = decompressed.borrow();
@@ -585,7 +524,7 @@ where
             items_count -= 1;
         }
         assert!(reader.is_empty());
-        buf.consume(batch_len);
+        buf.consume(batch_len + CHECKSUM_LEN);
 
         for item in &log_batch.items {
             if let LogItemContent::Entries(ref entries) = item.content {
@@ -597,42 +536,44 @@ where
     }
 
     // TODO: avoid to write a large batch into one compressed chunk.
-    pub fn encode_to_bytes(&self) -> Option<Vec<u8>> {
+    pub fn encode_to_bytes<T: IoVecs>(&self, vec: &mut T) -> bool {
+        assert_eq!(vec.content_len(), 0);
         if self.items.is_empty() {
-            return None;
+            return false;
         }
 
         // layout = { 8 bytes len | item count | multiple items | 4 bytes checksum }
-        let mut vec = Vec::with_capacity(4096);
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
         for item in &self.items {
-            item.encode_to::<W>(&mut vec, &mut *self.entries_size.borrow_mut())
+            item.encode_to::<W, _>(vec, &mut *self.entries_size.borrow_mut())
                 .unwrap();
         }
 
-        let compression_type = if vec.len() > COMPRESSION_SIZE {
-            vec = lz4::encode_block(&vec[HEADER_LEN..], HEADER_LEN, 4);
-            CompressionType::Lz4
+        let compression_type = if vec.content_len() > COMPRESSION_THRESHOLD {
+            vec.compress(HEADER_LEN, HEADER_LEN, CHECKSUM_LEN)
         } else {
             CompressionType::None
         };
 
-        let checksum = crc32(&vec[8..]);
-        vec.encode_u32_le(checksum).unwrap();
-        let len = vec.len() as u64 - 8;
+        let len = (vec.content_len() - HEADER_LEN) as u64;
         let mut header = len << 8;
         header |= u64::from(compression_type.to_byte());
-        vec.as_mut_slice().write_u64::<BigEndian>(header).unwrap();
+        vec.seek(SeekFrom::Start(0)).unwrap();
+        vec.write_u64::<BigEndian>(header).unwrap();
+        vec.seek(SeekFrom::End(0)).unwrap();
 
-        let batch_len = (vec.len() - 8) as u64;
+        let checksum = vec.crc32();
+        vec.encode_u32_le(checksum).unwrap();
+
+        let batch_len = (vec.content_len() - HEADER_LEN - CHECKSUM_LEN) as u64;
         for item in &self.items {
             if let LogItemContent::Entries(ref entries) = item.content {
                 entries.update_compression_type(compression_type, batch_len as u64);
             }
         }
 
-        Some(vec)
+        true
     }
 
     pub fn entries_size(&self) -> usize {
@@ -640,6 +581,7 @@ where
     }
 }
 
+/// The passed in buf's layout: { header | content | checksum }.
 pub fn test_batch_checksum(buf: &[u8]) -> Result<()> {
     if buf.len() <= CHECKSUM_LEN {
         return Err(Error::TooShort);
@@ -655,16 +597,11 @@ pub fn test_batch_checksum(buf: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// NOTE: lz4::decode_block will truncate the output buffer first.
-pub fn decompress(buf: &[u8]) -> Vec<u8> {
-    self::lz4::decode_block(buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use raft::eraftpb::Entry;
+    use std::io::Cursor;
 
     #[test]
     fn test_entries_enc_dec() {
@@ -672,14 +609,14 @@ mod tests {
         let file_num = 1;
         let entries = Entries::new(pb_entries, None);
 
-        let (mut encoded, mut entries_size1) = (vec![], 0);
+        let (mut encoded, mut entries_size1) = (Cursor::new(vec![]), 0);
         entries
-            .encode_to::<Entry>(&mut encoded, &mut entries_size1)
+            .encode_to::<Entry, Cursor<Vec<u8>>>(&mut encoded, &mut entries_size1)
             .unwrap();
         for idx in entries.entries_index.borrow_mut().iter_mut() {
             idx.file_num = file_num;
         }
-        let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
+        let (mut s, mut entries_size2) = (encoded.get_ref().as_slice(), 0);
         let decode_entries =
             Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2).unwrap();
         assert_eq!(s.len(), 0);
@@ -690,9 +627,9 @@ mod tests {
     #[test]
     fn test_command_enc_dec() {
         let cmd = Command::Clean;
-        let mut encoded = vec![];
+        let mut encoded = Cursor::new(vec![]);
         cmd.encode_to(&mut encoded);
-        let mut bytes_slice = encoded.as_slice();
+        let mut bytes_slice = encoded.get_ref().as_slice();
         let decoded_cmd = Command::from_bytes(&mut bytes_slice).unwrap();
         assert_eq!(bytes_slice.len(), 0);
         assert_eq!(cmd, decoded_cmd);
@@ -701,9 +638,9 @@ mod tests {
     #[test]
     fn test_kv_enc_dec() {
         let kv = KeyValue::new(OpType::Put, b"key".to_vec(), Some(b"value".to_vec()));
-        let mut encoded = vec![];
+        let mut encoded = Cursor::new(vec![]);
         kv.encode_to(&mut encoded).unwrap();
-        let mut bytes_slice = encoded.as_slice();
+        let mut bytes_slice = encoded.get_ref().as_slice();
         let decoded_kv = KeyValue::from_bytes(&mut bytes_slice).unwrap();
         assert_eq!(bytes_slice.len(), 0);
         assert_eq!(kv, decoded_kv);
@@ -724,10 +661,10 @@ mod tests {
         ];
 
         for item in items {
-            let (mut encoded, mut entries_size1) = (vec![], 0);
-            item.encode_to::<Entry>(&mut encoded, &mut entries_size1)
+            let (mut encoded, mut entries_size1) = (Cursor::new(vec![]), 0);
+            item.encode_to::<Entry, Cursor<Vec<u8>>>(&mut encoded, &mut entries_size1)
                 .unwrap();
-            let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
+            let (mut s, mut entries_size2) = (encoded.get_ref().as_slice(), 0);
             let decoded_item =
                 LogItem::from_bytes::<Entry>(&mut s, 0, 0, 0, &mut entries_size2).unwrap();
             assert_eq!(s.len(), 0);
@@ -746,8 +683,9 @@ mod tests {
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
         batch.delete(region_id, b"key2".to_vec());
 
-        let encoded = batch.encode_to_bytes().unwrap();
-        let mut s = encoded.as_slice();
+        let mut encoded = Cursor::new(vec![]);
+        batch.encode_to_bytes(&mut encoded);
+        let mut s = encoded.get_ref().as_slice();
         let decoded_batch = LogBatch::from_bytes(&mut s, 0, 0).unwrap().unwrap();
         assert_eq!(s.len(), 0);
         assert_eq!(batch, decoded_batch);
