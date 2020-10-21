@@ -1,5 +1,7 @@
 #![feature(shrink_to)]
 #![feature(cell_update)]
+#![feature(test)]
+extern crate test;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

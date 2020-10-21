@@ -82,7 +82,7 @@ where
                 output.as_mut_ptr().add(offset + 4),
                 buffer.len() as i32,
                 (capacity - offset) as i32,
-                1, /* acceleration */
+                4, /* acceleration */
             );
             assert!(bytes > 0);
             copy_nonoverlapping(
@@ -142,6 +142,7 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test::{black_box, Bencher};
 
     #[test]
     fn test_basic() {
@@ -172,5 +173,40 @@ mod tests {
         let encoded = encode_blocks(|| raw_inputs.iter().map(|x| x.as_slice()), 0, 0);
         let decoded = decode_blocks(&encoded);
         assert_eq!(input, decoded);
+    }
+
+    fn gen_64k_block() -> Vec<u8> {
+        let data = b"abcdefghigklmnokqrstuvwxyz";
+        let block_size = 64 * 1024;
+        let mut block = Vec::with_capacity(block_size);
+        while block.len() < block_size {
+            if block_size - block.len() >= data.len() {
+                block.extend_from_slice(data);
+            } else {
+                block.extend_from_slice(&data[..block_size - block.len()]);
+            }
+        }
+        block
+    }
+
+    #[bench]
+    fn bench_blocks_64k_8(b: &mut Bencher) {
+        let block = gen_64k_block();
+        let blocks = vec![block; 8];
+        b.iter(|| {
+            black_box(encode_blocks(|| blocks.iter().map(|x| x.as_slice()), 0, 0));
+        })
+    }
+
+    #[bench]
+    fn bench_single_block_64k_8(b: &mut Bencher) {
+        let block = gen_64k_block();
+        let mut blocks = Vec::with_capacity(64 * 1024 * 8);
+        for _ in 0..8 {
+            blocks.extend_from_slice(&block);
+        }
+        b.iter(|| {
+            black_box(encode_block(&blocks, 0, 0));
+        })
     }
 }
