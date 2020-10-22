@@ -1,9 +1,7 @@
 use futures::channel::oneshot::Sender;
-use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
 
-use crate::cache_evict::CacheSubmitor;
+use crate::cache_evict::{CacheSubmitor, CacheTracker};
 use crate::errors::Result;
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::Statistic;
@@ -14,7 +12,7 @@ pub struct WriteTask {
     pub content: Vec<u8>,
     pub entries_size: usize,
     pub sync: bool,
-    pub sender: Sender<(u64, u64, Option<Arc<AtomicUsize>>)>,
+    pub sender: Sender<(u64, u64, Option<CacheTracker>)>,
 }
 
 pub enum LogMsg {

@@ -195,15 +195,14 @@ where
         log_batch: &mut LogBatch<E, W>,
         sync: bool,
     ) -> BoxFuture<'static, Result<usize>> {
-        let mut entries_size = 0;
         let now = Instant::now();
-        if let Some(content) = log_batch.encode_to_bytes(&mut entries_size) {
+        if let Some(content) = log_batch.encode_to_bytes() {
             let (sender, r) = future_channel::oneshot::channel();
             let bytes = content.len();
             let task = WriteTask {
                 content,
                 sync,
-                entries_size,
+                entries_size: log_batch.entries_size(),
                 sender,
             };
             if let Err(_) = self.wal_sender.send(LogMsg::Write(task)) {
@@ -378,14 +377,12 @@ where
                             if let Some(tracker) =
                                 cache_submitor.get_cache_tracker(file_num, offset)
                             {
-                                 let mut encoded_size = 0;
                                 for item in log_batch.items.iter_mut() {
                                     if let LogItemContent::Entries(entries) = &mut item.content {
                                         entries.attach_cache_tracker(tracker.clone());
-                                        encoded_size += entries.encoded_size;
                                     }
                                 }
-                                cache_submitor.fill_chunk(encoded_size);
+                                cache_submitor.fill_chunk(log_batch.entries_size());
                             }
                         }
                         self.apply_to_memtable(&mut log_batch, queue, file_num);

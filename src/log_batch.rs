@@ -139,7 +139,7 @@ impl<E: Message + PartialEq> PartialEq for Entries<E> {
 
 impl<E: Message> Entries<E> {
     pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
-        let entries_index = 
+        let entries_index =
             entries_index.unwrap_or_else(|| vec![EntryIndex::default(); entries.len()]);
         Entries {
             entries,
@@ -202,7 +202,7 @@ impl<E: Message> Entries<E> {
                 // This offset doesn't count the header.
                 self.entries_index[i].offset = vec.len() as u64;
                 self.entries_index[i].len = content.len() as u64;
-                *entries_size += entries_index[i].len as usize;
+                *entries_size += self.entries_index[i].len as usize;
             }
 
             vec.extend_from_slice(&content);
@@ -232,12 +232,12 @@ impl<E: Message> Entries<E> {
         }
     }
 
-    pub fn attach_cache_tracker(&mut self, chunk_size: Arc<AtomicUsize>) {
+    pub fn attach_cache_tracker(&mut self, tracker: CacheTracker) {
         for idx in self.entries_index.iter_mut() {
-            idx.cache_tracker = Some(CacheTracker {
-                chunk_size: chunk_size.clone(),
-                sub_on_drop: idx.len as usize,
-            });
+            let mut tkr = tracker.clone();
+            tkr.global_stats.add_mem_change(idx.len as usize);
+            tkr.sub_on_drop = idx.len as usize;
+            idx.cache_tracker = Some(tkr);
         }
     }
 
@@ -466,7 +466,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
-    entries_size: RefCell<usize>,
+    entries_size: usize,
     _phantom: PhantomData<W>,
 }
 
@@ -478,7 +478,7 @@ where
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(16),
-            entries_size: RefCell::new(0),
+            entries_size: 0,
             _phantom: PhantomData,
         }
     }
@@ -496,7 +496,7 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
-            entries_size: RefCell::new(0),
+            entries_size: 0,
             _phantom: PhantomData,
         }
     }
@@ -576,7 +576,7 @@ where
                 file_num,
                 base_offset,
                 content_offset,
-                &mut log_batch.entries_size.borrow_mut(),
+                &mut log_batch.entries_size,
             )?;
             log_batch.items.push(item);
             items_count -= 1;
@@ -603,12 +603,17 @@ where
         let mut vec = Vec::with_capacity(4096);
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
-        for item in &self.items {
-            item.encode_to::<W>(&mut vec, &mut *self.entries_size.borrow_mut())
+        for item in self.items.iter_mut() {
+            item.encode_to::<W>(&mut vec, &mut self.entries_size)
                 .unwrap();
         }
 
-        let compression_type = CompressionType::None;
+        let compression_type = if vec.len() > COMPRESSION_SIZE {
+            vec = lz4::encode_block(&vec[HEADER_LEN..], HEADER_LEN, 4);
+            CompressionType::Lz4
+        } else {
+            CompressionType::None
+        };
 
         let checksum = crc32(&vec[8..]);
         vec.encode_u32_le(checksum).unwrap();
