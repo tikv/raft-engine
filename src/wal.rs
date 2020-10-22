@@ -105,7 +105,7 @@ where
                     .append(LogQueue::Append, &write_buffer)
                     .unwrap()
             };
-            let before_sync_cost = now.elapsed().as_secs_f64();
+            let before_sync_cost = now.elapsed().as_micros();
             if sync {
                 if let Err(e) = fd.sync() {
                     warn!("write wal failed because of: {} ", e);
@@ -116,9 +116,10 @@ where
                 .cache_submitter
                 .get_cache_tracker(file_num, base_offset);
             self.cache_submitter.fill_chunk(entries_size);
-            let wal_cost = now.elapsed().as_secs_f64();
-            self.statistic.add_wal(wal_cost);
-            self.statistic.add_sync(wal_cost - before_sync_cost);
+            let wal_cost = now.elapsed().as_micros();
+            self.statistic.add_wal(wal_cost as usize);
+            self.statistic
+                .add_sync((wal_cost - before_sync_cost) as usize);
             self.statistic.add_one();
             for (offset, sender) in write_ret.drain(..) {
                 let _ = sender.send((file_num, base_offset + offset, tracker.clone()));

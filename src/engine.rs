@@ -5,8 +5,8 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
 
+use futures::channel as future_channel;
 use futures::executor::block_on;
-use futures::{channel as future_channel, TryFutureExt};
 
 use log::{info, warn};
 use protobuf::Message;
@@ -27,6 +27,7 @@ use crate::util::{HandyRwLock, HashMap, Statistic, Worker};
 use crate::wal::{LogMsg, WalRunner, WriteTask};
 use crate::{codec, CacheStats, GlobalStats, Result};
 use futures::future::{err, ok, BoxFuture};
+use std::sync::atomic::Ordering;
 
 const SLOTS_COUNT: usize = 128;
 
@@ -195,6 +196,7 @@ where
         sync: bool,
     ) -> BoxFuture<'static, Result<usize>> {
         let mut entries_size = 0;
+        let now = Instant::now();
         if let Some(content) = log_batch.encode_to_bytes(&mut entries_size) {
             let (sender, r) = future_channel::oneshot::channel();
             let bytes = content.len();
@@ -210,6 +212,7 @@ where
             let memtables = self.memtables.clone();
             let items = std::mem::replace(&mut log_batch.items, vec![]);
             let removed_memtables = self.purge_manager.get_removed_memtables();
+            let stats = self.global_stats.clone();
             return Box::pin(async move {
                 let (file_num, offset, tracker) = r.await?;
                 if file_num > 0 {
@@ -226,7 +229,9 @@ where
                         );
                     }
                 }
-                return Ok(bytes);
+                let t = now.elapsed().as_micros();
+                stats.add_write_duration_change(t as usize);
+                Ok(bytes)
             });
         }
         return Box::pin(ok(0));
@@ -576,7 +581,22 @@ where
         if let Err(_) = self.wal_sender.send(LogMsg::Metric(sender)) {
             return Box::pin(err(Error::Stop));
         }
-        return Box::pin(r.map_err(|_| Error::Stop));
+        let write_count = self.global_stats.write_count.load(Ordering::Relaxed);
+        let write_cost = self.global_stats.write_cost.load(Ordering::Relaxed);
+        let max_write_cost = self.global_stats.max_write_cost.load(Ordering::Relaxed);
+        self.global_stats
+            .write_count
+            .fetch_sub(write_count, Ordering::Relaxed);
+        self.global_stats
+            .write_cost
+            .fetch_sub(write_cost, Ordering::Relaxed);
+        return Box::pin(async move {
+            let mut stats = r.await?;
+            // transfer micro to sec
+            stats.avg_write_cost = write_cost / write_count;
+            stats.max_write_cost = max_write_cost;
+            Ok(stats)
+        });
     }
 }
 

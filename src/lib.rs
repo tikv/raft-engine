@@ -52,6 +52,9 @@ pub struct GlobalStats {
     rewrite_operations: AtomicUsize,
     // How many compacted operations in the rewrite queue.
     compacted_rewrite_operations: AtomicUsize,
+    write_count: AtomicUsize,
+    write_cost: AtomicUsize,
+    max_write_cost: AtomicUsize,
 }
 
 impl GlobalStats {
@@ -66,6 +69,13 @@ impl GlobalStats {
     }
     pub fn add_cache_miss(&self, count: usize) {
         self.cache_miss.fetch_add(count, Ordering::Relaxed);
+    }
+    pub fn add_write_duration_change(&self, dur: usize) {
+        self.write_count.fetch_add(1, Ordering::Relaxed);
+        self.write_cost.fetch_add(dur, Ordering::Relaxed);
+        if dur > self.max_write_cost.load(Ordering::Relaxed) {
+            self.max_write_cost.store(dur, Ordering::Relaxed);
+        }
     }
 
     pub fn cache_hit(&self) -> usize {
