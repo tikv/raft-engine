@@ -673,7 +673,7 @@ mod tests {
         entries
             .encode_to::<Entry>(&mut encoded, &mut entries_size1)
             .unwrap();
-        for idx in entries.entries_index.borrow_mut().iter_mut() {
+        for idx in entries.entries_index.iter_mut() {
             idx.file_num = file_num;
         }
         let (mut s, mut entries_size2) = (encoded.as_slice(), 0);

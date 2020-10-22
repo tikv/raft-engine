@@ -58,8 +58,7 @@ where
                     return Ok(());
                 }
                 LogMsg::Metric(cb) => {
-                    let _ = cb.send(self.statistic.clone());
-                    self.statistic.clear();
+                    self.report(cb);
                     continue;
                 }
             };
@@ -79,8 +78,7 @@ where
                         return Ok(());
                     }
                     LogMsg::Metric(cb) => {
-                        let _ = cb.send(self.statistic.clone());
-                        self.statistic.clear();
+                        self.report(cb);
                         continue;
                     }
                 };
@@ -118,12 +116,18 @@ where
             self.statistic.add_wal(wal_cost as usize);
             self.statistic
                 .add_sync((wal_cost - before_sync_cost) as usize);
-            self.statistic.add_one();
+            self.statistic.freq += 1;
             for (offset, sender) in write_ret.drain(..) {
                 let _ = sender.send((file_num, base_offset + offset, tracker.clone()));
             }
             write_buffer.clear();
         }
         Ok(())
+    }
+
+    pub fn report(&mut self, cb: Sender<Statistic>) {
+        self.statistic.divide();
+        let _ = cb.send(self.statistic.clone());
+        self.statistic.clear();
     }
 }

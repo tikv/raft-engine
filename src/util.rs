@@ -324,12 +324,14 @@ impl<T: Clone> Drop for Worker<T> {
 
 #[derive(Clone, Debug, Copy, PartialEq, Default)]
 pub struct Statistic {
-    pub wal_cost: usize,
-    pub sync_cost: usize,
+    pub avg_wal_cost: usize,
+    pub avg_sync_cost: usize,
     pub avg_write_cost: usize,
+    pub avg_mem_cost: usize,
     pub max_wal_cost: usize,
     pub max_sync_cost: usize,
     pub max_write_cost: usize,
+    pub max_mem_cost: usize,
     pub freq: usize,
 }
 
@@ -342,18 +344,9 @@ fn max(left: usize, right: usize) -> usize {
 }
 
 impl Statistic {
-    pub fn add(&mut self, other: &Self) {
-        self.wal_cost += other.wal_cost;
-        self.sync_cost += other.sync_cost;
-        self.freq += other.freq;
-        self.max_wal_cost = max(self.max_wal_cost, other.max_wal_cost);
-        self.max_write_cost = max(self.max_write_cost, other.max_write_cost);
-        self.max_sync_cost = max(self.max_sync_cost, other.max_sync_cost);
-    }
-
     pub fn clear(&mut self) {
-        self.wal_cost = 0;
-        self.sync_cost = 0;
+        self.avg_wal_cost = 0;
+        self.avg_sync_cost = 0;
         self.avg_write_cost = 0;
         self.max_wal_cost = 0;
         self.max_sync_cost = 0;
@@ -363,18 +356,20 @@ impl Statistic {
 
     #[inline]
     pub fn add_wal(&mut self, wal: usize) {
-        self.wal_cost += wal;
+        self.avg_wal_cost += wal;
         self.max_wal_cost = max(self.max_wal_cost, wal);
     }
 
     #[inline]
     pub fn add_sync(&mut self, sync: usize) {
-        self.sync_cost += sync;
+        self.avg_sync_cost += sync;
         self.max_sync_cost = max(self.max_sync_cost, sync);
     }
 
-    #[inline]
-    pub fn add_one(&mut self) {
-        self.freq += 1;
+    pub fn divide(&mut self) {
+        if self.freq > 0 {
+            self.avg_wal_cost /= self.freq;
+            self.avg_sync_cost /= self.freq;
+        }
     }
 }

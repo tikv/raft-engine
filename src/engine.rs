@@ -214,6 +214,8 @@ where
             let stats = self.global_stats.clone();
             return Box::pin(async move {
                 let (file_num, offset, tracker) = r.await?;
+                // cacluate memtable cost
+                let t1 = now.elapsed().as_micros();
                 if file_num > 0 {
                     for mut item in items {
                         if let LogItemContent::Entries(entries) = &mut item.content {
@@ -228,8 +230,8 @@ where
                         );
                     }
                 }
-                let t = now.elapsed().as_micros();
-                stats.add_write_duration_change(t as usize);
+                let t2 = now.elapsed().as_micros();
+                stats.add_write_duration_change((t2 - t1) as usize, t2 as usize);
                 Ok(bytes)
             });
         }
@@ -573,18 +575,27 @@ where
         }
         let write_count = self.global_stats.write_count.load(Ordering::Relaxed);
         let write_cost = self.global_stats.write_cost.load(Ordering::Relaxed);
+        let mem_cost = self.global_stats.mem_cost.load(Ordering::Relaxed);
         let max_write_cost = self.global_stats.max_write_cost.load(Ordering::Relaxed);
+        let max_mem_cost = self.global_stats.max_mem_cost.load(Ordering::Relaxed);
         self.global_stats
             .write_count
             .fetch_sub(write_count, Ordering::Relaxed);
         self.global_stats
             .write_cost
             .fetch_sub(write_cost, Ordering::Relaxed);
+        self.global_stats
+            .mem_cost
+            .fetch_sub(mem_cost, Ordering::Relaxed);
         return Box::pin(async move {
             let mut stats = r.await?;
             // transfer micro to sec
-            stats.avg_write_cost = write_cost / write_count;
+            if write_count > 0 {
+                stats.avg_write_cost = write_cost / write_count;
+                stats.avg_mem_cost = mem_cost / write_count;
+            }
             stats.max_write_cost = max_write_cost;
+            stats.max_mem_cost = max_mem_cost;
             Ok(stats)
         });
     }
