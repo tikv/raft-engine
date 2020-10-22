@@ -64,13 +64,8 @@ impl CacheSubmitor {
         self.block_on_full = false;
     }
 
-    pub fn get_cache_tracker(
-        &mut self,
-        file_num: u64,
-        offset: u64,
-        size: usize,
-    ) -> Option<CacheTracker> {
-        if self.cache_limit == 0 || size == 0 {
+    pub fn get_cache_tracker(&mut self, file_num: u64, offset: u64) -> Option<CacheTracker> {
+        if self.cache_limit == 0 {
             return None;
         }
 
@@ -109,12 +104,15 @@ impl CacheSubmitor {
             }
         }
 
-        self.chunk_size += size;
-        self.size_tracker.fetch_add(size, Ordering::Release);
         Some(CacheTracker::new(
             self.global_stats.clone(),
             self.size_tracker.clone(),
         ))
+    }
+
+    pub fn fill_chunk(&mut self, size: usize) {
+        self.chunk_size += size;
+        self.size_tracker.fetch_add(size, Ordering::Release);
     }
 
     fn reset(&mut self, file_num: u64, offset: u64) {

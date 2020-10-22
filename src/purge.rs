@@ -12,6 +12,16 @@ use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
 
+#[derive(Clone, Default)]
+pub struct RemovedMemtables(Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>);
+
+impl RemovedMemtables {
+    pub fn remove_memtable(&self, file_num: u64, raft_group_id: u64) {
+        let mut tables = self.0.lock().unwrap();
+        tables.push((Reverse(file_num), raft_group_id));
+    }
+}
+
 // If a region has some very old raft logs less than this threshold,
 // rewrite them to clean stale log files ASAP.
 const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
@@ -31,8 +41,7 @@ where
     global_stats: Arc<GlobalStats>,
 
     // Vector of (file_num, raft_group_id).
-    #[allow(clippy::type_complexity)]
-    removed_memtables: Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>,
+    removed_memtables: RemovedMemtables,
 
     // Only one thread can run `purge_expired_files` at a time.
     purge_mutex: Arc<Mutex<()>>,
@@ -115,9 +124,8 @@ where
         }
     }
 
-    pub fn remove_memtable(&self, file_num: u64, raft_group_id: u64) {
-        let mut tables = self.removed_memtables.lock().unwrap();
-        tables.push((Reverse(file_num), raft_group_id));
+    pub fn get_removed_memtables(&self) -> RemovedMemtables {
+        self.removed_memtables.clone()
     }
 
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
@@ -159,13 +167,16 @@ where
         assert!(latest_compact <= latest_rewrite);
         let mut log_batch = LogBatch::<E, W>::new();
 
-        while let Some(item) = self.removed_memtables.lock().unwrap().pop() {
-            let (file_num, raft_id) = ((item.0).0, item.1);
-            if file_num > latest_rewrite {
-                self.removed_memtables.lock().unwrap().push(item);
-                break;
+        {
+            let mut guard = self.removed_memtables.0.lock().unwrap();
+            while let Some(item) = guard.pop() {
+                let (file_num, raft_id) = ((item.0).0, item.1);
+                if file_num > latest_rewrite {
+                    guard.push(item);
+                    break;
+                }
+                log_batch.clean_region(raft_id);
             }
-            log_batch.clean_region(raft_id);
         }
 
         let memtables = self.memtables.collect(|t| {
@@ -209,7 +220,7 @@ where
         latest_rewrite: Option<u64>,
     ) -> Result<()> {
         let mut file_num = 0;
-        self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
+        self.pipe_log.rewrite(log_batch, true, &mut file_num)?;
         if file_num > 0 {
             self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
         }
@@ -226,7 +237,7 @@ where
             let memtable = self.memtables.get_or_insert(item.raft_group_id);
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
-                    let entries_index = entries_to_add.entries_index.into_inner();
+                    let entries_index = entries_to_add.entries_index;
                     memtable.wl().rewrite(entries_index, latest_rewrite);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
@@ -293,16 +304,17 @@ mod tests {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         let engine = RaftLogEngine::new(cfg.clone());
 
-        engine.purge_manager().remove_memtable(3, 10);
-        engine.purge_manager().remove_memtable(3, 9);
-        engine.purge_manager().remove_memtable(3, 11);
-        engine.purge_manager().remove_memtable(2, 9);
-        engine.purge_manager().remove_memtable(4, 4);
-        engine.purge_manager().remove_memtable(4, 3);
+        let tables = engine.purge_manager().get_removed_memtables();
+        tables.remove_memtable(3, 10);
+        tables.remove_memtable(3, 9);
+        tables.remove_memtable(3, 11);
+        tables.remove_memtable(2, 9);
+        tables.remove_memtable(4, 4);
+        tables.remove_memtable(4, 3);
 
-        let mut tables = engine.purge_manager().removed_memtables.lock().unwrap();
+        let mut guard = tables.0.lock().unwrap();
         for (file_num, raft_id) in vec![(2, 9), (3, 11), (3, 10), (3, 9), (4, 4), (4, 3)] {
-            let item = tables.pop().unwrap();
+            let item = guard.pop().unwrap();
             assert_eq!((item.0).0, file_num);
             assert_eq!(item.1, raft_id);
         }

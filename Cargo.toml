@@ -16,6 +16,7 @@ fxhash = "0.2"
 nix = "0.18.0"
 crossbeam = "0.7"
 thiserror = "1.0"
+futures = { version = "0.3", features = ["thread-pool", "compat"] }
 
 [dev-dependencies]
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }

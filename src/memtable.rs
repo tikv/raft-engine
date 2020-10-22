@@ -466,6 +466,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             vec_idx.extend_from_slice(first);
             vec_idx.extend_from_slice(second);
         }
+
         let (hit, miss) = (vec.len() - vec_len, vec_idx.len() - vec_idx_len);
         self.global_stats.add_cache_hit(hit);
         self.global_stats.add_cache_miss(miss);

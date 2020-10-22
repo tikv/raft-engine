@@ -321,3 +321,55 @@ impl<T: Clone> Drop for Worker<T> {
         self.stop();
     }
 }
+
+#[derive(Clone, Debug, Copy, PartialEq, Default)]
+pub struct Statistic {
+    pub avg_wal_cost: usize,
+    pub avg_sync_cost: usize,
+    pub avg_write_cost: usize,
+    pub avg_mem_cost: usize,
+    pub max_wal_cost: usize,
+    pub max_sync_cost: usize,
+    pub max_write_cost: usize,
+    pub max_mem_cost: usize,
+    pub freq: usize,
+}
+
+fn max(left: usize, right: usize) -> usize {
+    if left > right {
+        left
+    } else {
+        right
+    }
+}
+
+impl Statistic {
+    pub fn clear(&mut self) {
+        self.avg_wal_cost = 0;
+        self.avg_sync_cost = 0;
+        self.avg_write_cost = 0;
+        self.max_wal_cost = 0;
+        self.max_sync_cost = 0;
+        self.max_write_cost = 0;
+        self.freq = 0;
+    }
+
+    #[inline]
+    pub fn add_wal(&mut self, wal: usize) {
+        self.avg_wal_cost += wal;
+        self.max_wal_cost = max(self.max_wal_cost, wal);
+    }
+
+    #[inline]
+    pub fn add_sync(&mut self, sync: usize) {
+        self.avg_sync_cost += sync;
+        self.max_sync_cost = max(self.max_sync_cost, sync);
+    }
+
+    pub fn divide(&mut self) {
+        if self.freq > 0 {
+            self.avg_wal_cost /= self.freq;
+            self.avg_sync_cost /= self.freq;
+        }
+    }
+}

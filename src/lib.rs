@@ -25,12 +25,14 @@ mod memtable;
 mod pipe_log;
 mod purge;
 mod util;
+mod wal;
 
 use crate::pipe_log::PipeLog;
 
 pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
+pub use self::util::Statistic;
 pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
 
 #[derive(Clone, Copy, Default)]
@@ -50,6 +52,11 @@ pub struct GlobalStats {
     rewrite_operations: AtomicUsize,
     // How many compacted operations in the rewrite queue.
     compacted_rewrite_operations: AtomicUsize,
+    write_count: AtomicUsize,
+    write_cost: AtomicUsize,
+    max_write_cost: AtomicUsize,
+    mem_cost: AtomicUsize,
+    max_mem_cost: AtomicUsize,
 }
 
 impl GlobalStats {
@@ -64,6 +71,19 @@ impl GlobalStats {
     }
     pub fn add_cache_miss(&self, count: usize) {
         self.cache_miss.fetch_add(count, Ordering::Relaxed);
+    }
+    pub fn add_write_duration_change(&self, memtable_duration: usize, write_duration: usize) {
+        self.write_count.fetch_add(1, Ordering::Relaxed);
+        self.write_cost.fetch_add(write_duration, Ordering::Relaxed);
+        self.mem_cost
+            .fetch_add(memtable_duration, Ordering::Relaxed);
+        if write_duration > self.max_write_cost.load(Ordering::Relaxed) {
+            self.max_write_cost.store(write_duration, Ordering::Relaxed);
+        }
+        if memtable_duration > self.max_mem_cost.load(Ordering::Relaxed) {
+            self.max_write_cost
+                .store(memtable_duration, Ordering::Relaxed);
+        }
     }
 
     pub fn cache_hit(&self) -> usize {
