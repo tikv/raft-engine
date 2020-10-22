@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crossbeam::channel::{bounded, Sender};
-use log::info;
+use log::{info, warn};
 use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
@@ -87,7 +87,9 @@ impl CacheSubmitor {
                     // Log file is switched, use `u64::MAX` as the end.
                     task.end_offset = u64::MAX;
                 }
-                let _ = self.scheduler.schedule(CacheTask::NewChunk(task));
+                if let Err(e) = self.scheduler.schedule(CacheTask::NewChunk(task)) {
+                    warn!("Failed to schedule cache chunk to evictor: {}", e);
+                }
             }
             self.reset(file_num, offset);
         }
@@ -274,14 +276,28 @@ pub struct CacheChunk {
 
 #[derive(Clone)]
 pub struct CacheTracker {
+    pub global_stats: Arc<GlobalStats>,
     pub chunk_size: Arc<AtomicUsize>,
     pub sub_on_drop: usize,
 }
 
+impl CacheTracker {
+    pub fn new(global_stats: Arc<GlobalStats>, chunk_size: Arc<AtomicUsize>) -> Self {
+        CacheTracker {
+            global_stats,
+            chunk_size,
+            sub_on_drop: 0,
+        }
+    }
+}
+
 impl Drop for CacheTracker {
     fn drop(&mut self) {
-        self.chunk_size
-            .fetch_sub(self.sub_on_drop, Ordering::SeqCst);
+        if self.sub_on_drop > 0 {
+            self.global_stats.sub_mem_change(self.sub_on_drop);
+            self.chunk_size
+                .fetch_sub(self.sub_on_drop, Ordering::Release);
+        }
     }
 }
 
@@ -302,7 +318,7 @@ impl CacheChunk {
     #[cfg(test)]
     pub fn self_check(&self, expected_chunk_size: usize) {
         assert!(self.end_offset > self.base_offset);
-        let chunk_size = self.size_tracker.load(Ordering::Relaxed);
+        let chunk_size = self.size_tracker.load(Ordering::Acquire);
         assert_eq!(chunk_size, expected_chunk_size);
     }
 }

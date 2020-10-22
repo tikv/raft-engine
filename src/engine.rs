@@ -273,9 +273,7 @@ where
 
         let memtables = {
             let stats = global_stats.clone();
-            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| {
-                MemTable::new(id, cache_limit, stats.clone())
-            }))
+            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| MemTable::new(id, stats.clone())))
         };
 
         let cache_evict_runner = CacheEvictRunner::new(
@@ -376,25 +374,20 @@ where
             loop {
                 match LogBatch::<E, W>::from_bytes(&mut buf, file_num, offset) {
                     Ok(Some(mut log_batch)) => {
-                        let mut encoded_size = 0;
-                        for item in &log_batch.items {
-                            if let LogItemContent::Entries(ref entries) = item.content {
-                                encoded_size += entries.encoded_size;
-                            }
-                        }
-
                         if queue == LogQueue::Append {
                             if let Some(tracker) =
                                 cache_submitor.get_cache_tracker(file_num, offset)
                             {
+                                 let mut encoded_size = 0;
                                 for item in log_batch.items.iter_mut() {
                                     if let LogItemContent::Entries(entries) = &mut item.content {
                                         entries.attach_cache_tracker(tracker.clone());
+                                        encoded_size += entries.encoded_size;
                                     }
                                 }
+                                cache_submitor.fill_chunk(encoded_size);
                             }
                         }
-                        cache_submitor.fill_chunk(encoded_size);
                         self.apply_to_memtable(&mut log_batch, queue, file_num);
                         offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
                     }
@@ -885,6 +878,7 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.cache_limit = ReadableSize::kb(0);
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(80);
         let engine = RaftLogEngine::new(cfg.clone());
@@ -964,6 +958,7 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.cache_limit = ReadableSize::kb(0);
         cfg.target_file_size = ReadableSize::kb(128);
         cfg.purge_threshold = ReadableSize::kb(512);
         let engine = RaftLogEngine::new(cfg.clone());

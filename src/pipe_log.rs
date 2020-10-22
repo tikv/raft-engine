@@ -212,7 +212,10 @@ impl LogManager {
 
     fn get_fd(&self, file_num: u64) -> Result<Arc<LogFd>> {
         if file_num < self.first_file_num || file_num > self.active_file_num {
-            return Err(box_err!("File {} not exist", file_num));
+            return Err(Error::Io(IoError::new(
+                IoErrorKind::NotFound,
+                "file_num out of range",
+            )));
         }
         Ok(self.all_files[(file_num - self.first_file_num) as usize].clone())
     }
@@ -423,8 +426,7 @@ impl GenericPipeLog for PipeLog {
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        let mut encoded_size = 0;
-        if let Some(content) = batch.encode_to_bytes(&mut encoded_size) {
+        if let Some(content) = batch.encode_to_bytes() {
             let (cur_file_num, fd) = self.switch_log_file(LogQueue::Rewrite)?;
             let offset = self.append(LogQueue::Rewrite, &content)?;
             if sync {

@@ -76,8 +76,6 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
     // key -> (value, queue, file_num)
     kvs: HashMap<Vec<u8>, (Vec<u8>, LogQueue, u64)>,
 
-    cache_size: usize,
-    cache_limit: usize,
     global_stats: Arc<GlobalStats>,
     _phantom: PhantomData<W>,
 }
@@ -87,11 +85,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         if self.entries_cache.is_empty() {
             return self.entries_index.len();
         }
-        let distance = self.entries_index.len() - self.entries_cache.len();
-        let cache_first = W::index(&self.entries_cache[0]);
-        let index_first = self.entries_index[distance].index;
-        assert_eq!(cache_first, index_first);
-        distance
+        self.entries_index.len() - self.entries_cache.len()
     }
 
     fn adjust_rewrite_count(&mut self, new_rewrite_count: usize) {
@@ -127,8 +121,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         for offset in conflict..self.entries_cache.len() {
             let entry_index = &mut self.entries_index[distance + offset];
             entry_index.cache_tracker.take();
-            self.cache_size -= entry_index.len as usize;
-            self.global_stats.sub_mem_change(entry_index.len as usize);
         }
 
         self.entries_cache.truncate(conflict);
@@ -170,11 +162,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
     }
 
-    pub fn new(
-        region_id: u64,
-        cache_limit: usize,
-        global_stats: Arc<GlobalStats>,
-    ) -> MemTable<E, W> {
+    pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable<E, W> {
         MemTable::<E, W> {
             region_id,
             entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
@@ -182,8 +170,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             rewrite_count: 0,
             kvs: HashMap::default(),
 
-            cache_size: 0,
-            cache_limit,
             global_stats,
             _phantom: PhantomData,
         }
@@ -208,34 +194,21 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             }
         }
 
-        let delta_size = entries_index.iter().fold(0, |acc, i| acc + i.len as usize);
-        self.entries_index.extend(entries_index);
-        if self.cache_limit > 0 {
+        if entries_index.first().unwrap().cache_tracker.is_some() {
+            // If one item in the batch is in cache, all items should be also in.
             self.entries_cache.extend(entries);
-            self.cache_size += delta_size;
         }
-
-        // Evict front entries from cache when reaching cache size limitation.
-        while self.cache_size > self.cache_limit && !self.entries_cache.is_empty() {
-            let distance = self.cache_distance();
-            self.entries_cache.pop_front().unwrap();
-            let entry_index = &mut self.entries_index[distance];
-            entry_index.cache_tracker.take();
-
-            self.cache_size -= entry_index.len as usize;
-            self.global_stats.sub_mem_change(entry_index.len as usize);
-        }
+        self.entries_index.extend(entries_index);
     }
 
+    // Only used for recovering from the rewrite queue.
     pub fn append_rewrite(&mut self, entries: Vec<E>, mut entries_index: Vec<EntryIndex>) {
         for ei in &mut entries_index {
             ei.queue = LogQueue::Rewrite;
+            debug_assert!(ei.cache_tracker.is_none());
         }
         self.append(entries, entries_index);
-        if let Some(index) = self.entries_index.back().map(|ei| ei.index) {
-            // Things in rewrite queue won't appear in cache.
-            self.compact_cache_to(index);
-        }
+        debug_assert!(self.entries_cache.is_empty());
 
         let new_rewrite_count = self.entries_index.len();
         self.adjust_rewrite_count(new_rewrite_count);
@@ -283,13 +256,14 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
 
         let distance = (first - front) as usize;
-        let len = (cmp::min(last, back) - first + 1) as usize;
+        let mut len = (cmp::min(last, back) - first + 1) as usize;
         for (i, ei) in entries_index.iter().take(len).enumerate() {
             if let Some(latest_rewrite) = latest_rewrite {
                 debug_assert_eq!(self.entries_index[i + distance].queue, LogQueue::Append);
                 if self.entries_index[i + distance].file_num > latest_rewrite {
                     // Some entries are overwritten by new appends.
                     compacted_rewrite_operations += entries_index.len() - i;
+                    len = i + 1;
                     break;
                 }
             } else {
@@ -310,6 +284,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             self.entries_index[i + distance].offset = ei.offset;
             self.entries_index[i + distance].len = ei.len;
         }
+
+        // For rewritten entries, clean the cache.
+        let rewritten_cache = self.entries_index[distance + len - 1].index;
+        self.compact_cache_to(rewritten_cache + 1);
+
         compacted_rewrite_operations
     }
 
@@ -396,8 +375,6 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         for i in 0..drain_end {
             let entry_index = &mut self.entries_index[distance + i];
             entry_index.cache_tracker.take();
-            self.cache_size -= entry_index.len as usize;
-            self.global_stats.sub_mem_change(entry_index.len as usize);
         }
         self.shrink_entries_cache();
     }
@@ -604,18 +581,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     }
 }
 
-impl<E: Message + Clone, W: EntryExt<E>> Drop for MemTable<E, W> {
-    fn drop(&mut self) {
-        // Drop `cache_tracker`s and sub mem change.
-        self.entries_index.clear();
-        self.global_stats.sub_mem_change(self.cache_size as usize);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use raft::eraftpb::Entry;
+    use std::sync::atomic::AtomicUsize;
 
     impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         pub fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
@@ -659,14 +629,24 @@ mod tests {
         }
 
         fn check_entries_index_and_cache(&self) {
-            match (self.entries_index.back(), self.entries_cache.back()) {
-                (Some(ei), Some(ec)) if ei.index != W::index(ec) => panic!(
-                    "entries_index.last = {}, entries_cache.last = {}",
-                    ei.index,
-                    W::index(ec)
-                ),
-                (None, Some(_)) => panic!("entries_index is empty, but entries_cache isn't"),
-                _ => return,
+            if self.entries_index.is_empty() {
+                assert!(self.entries_cache.is_empty());
+                return;
+            }
+
+            let ei_first = self.entries_index.front().unwrap();
+            let ei_last = self.entries_index.back().unwrap();
+            assert_eq!(
+                ei_last.index - ei_first.index + 1,
+                self.entries_index.len() as u64
+            );
+
+            if !self.entries_cache.is_empty() {
+                let distance = self.cache_distance();
+                let cache_first = self.entries_cache.front().unwrap();
+                let cache_last = self.entries_cache.back().unwrap();
+                assert_eq!(W::index(cache_last), ei_last.index);
+                assert_eq!(self.entries_index[distance].index, W::index(cache_first));
             }
         }
     }
@@ -674,131 +654,80 @@ mod tests {
     #[test]
     fn test_memtable_append() {
         let region_id = 8;
-        let cache_limit = 15;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
-        // Append entries [10, 20) file_num = 1 not over cache size limitation.
+        // Append entries [10, 20) file_num = 1.
         // after appending
-        // [10, 20) file_num = 1, in cache
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 1));
-        assert_eq!(memtable.cache_size, 10);
+        // [10, 20) file_num = 1
+        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 1, &stats);
+        memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 10);
+        assert_eq!(stats.cache_size(), 10);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 1);
         memtable.check_entries_index_and_cache();
 
-        // Append entries [20, 30) file_num = 2, over cache size limitation 15,
+        // Append entries [20, 30) file_num = 2.
         // after appending:
-        // [10, 15) file_num = 1, not in cache
-        // [15, 20) file_num = 1, in cache
-        // [20, 30) file_num = 2, in cache
-        memtable.append(generate_ents(20, 30), generate_ents_index(20, 30, 2));
-        assert_eq!(memtable.cache_size, 15);
+        // [10, 20) file_num = 1
+        // [20, 30) file_num = 2
+        let (ents, ents_idx) = generate_ents(20, 30, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 20);
-        assert_eq!(memtable.entries_cache.len(), 15);
-        assert_eq!(memtable.entries_index.len(), 20);
-        assert_eq!(memtable.entries_cache[0].get_index(), 15);
-        assert_eq!(memtable.entries_cache[14].get_index(), 29);
-        assert_eq!(memtable.entries_index[0].index, 10);
-        assert_eq!(memtable.entries_index[19].index, 29);
+        assert_eq!(stats.cache_size(), 20);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 2);
         memtable.check_entries_index_and_cache();
 
-        // Overlap Appending, partial overlap with cache.
-        // Append entries [25, 35) file_num = 3, will truncate
-        // tail entries from cache and indices.
+        // Partial overlap Appending.
+        // Append entries [25, 35) file_num = 3.
         // After appending:
-        // [10, 20) file_num = 1, not in cache
-        // [20, 25) file_num = 2, in cache
-        // [25, 35) file_num = 3, in cache
-        memtable.append(generate_ents(25, 35), generate_ents_index(25, 35, 3));
-        assert_eq!(memtable.cache_size, 15);
+        // [10, 20) file_num = 1
+        // [20, 25) file_num = 2
+        // [25, 35) file_num = 3
+        let (ents, ents_idx) = generate_ents(25, 35, LogQueue::Append, 3, &stats);
+        memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 25);
-        assert_eq!(memtable.entries_cache.len(), 15);
-        assert_eq!(memtable.entries_index.len(), 25);
-        assert_eq!(memtable.entries_cache[0].get_index(), 20);
-        assert_eq!(memtable.entries_cache[14].get_index(), 34);
-        assert_eq!(memtable.entries_index[0].index, 10);
-        assert_eq!(memtable.entries_index[24].index, 34);
+        assert_eq!(stats.cache_size(), 25);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
-        // Overlap Appending, whole overlap with cache.
-        // Append entries [20, 40) file_num = 4.
+        // Full overlap Appending.
+        // Append entries [10, 40) file_num = 4.
         // After appending:
-        // [10, 20) file_num = 1, not in cache
-        // [20, 25) file_num = 4, not in cache
-        // [25, 40) file_num = 4, in cache
-        memtable.append(generate_ents(20, 40), generate_ents_index(20, 40, 4));
-        assert_eq!(memtable.cache_size, 15);
+        // [10, 40) file_num = 4
+        let (ents, ents_idx) = generate_ents(10, 40, LogQueue::Append, 4, &stats);
+        memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 30);
-        assert_eq!(memtable.entries_cache.len(), 15);
-        assert_eq!(memtable.entries_index.len(), 30);
-        assert_eq!(memtable.entries_cache[0].get_index(), 25);
-        assert_eq!(memtable.entries_cache[14].get_index(), 39);
-        assert_eq!(memtable.entries_index[0].index, 10);
-        assert_eq!(memtable.entries_index[29].index, 39);
-        assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
+        assert_eq!(stats.cache_size(), 30);
+        assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 4);
-        memtable.check_entries_index_and_cache();
-
-        // Overlap Appending, whole overlap with index.
-        // Append entries [10, 30) file_num = 5.
-        // After appending:
-        // [10, 15) file_num = 5, not in cache
-        // [15, 30) file_num = 5, in cache
-        memtable.append(generate_ents(10, 30), generate_ents_index(10, 30, 5));
-        assert_eq!(memtable.cache_size, 15);
-        assert_eq!(memtable.entries_size(), 20);
-        assert_eq!(memtable.entries_cache.len(), 15);
-        assert_eq!(memtable.entries_index.len(), 20);
-        assert_eq!(memtable.entries_cache[0].get_index(), 15);
-        assert_eq!(memtable.entries_cache[14].get_index(), 29);
-        assert_eq!(memtable.entries_index[0].index, 10);
-        assert_eq!(memtable.entries_index[19].index, 29);
-        assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 5);
-        assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 5);
-        memtable.check_entries_index_and_cache();
-
-        // Cache with size limit 0.
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, 0, stats);
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 1));
-        assert_eq!(memtable.cache_size, 0);
-        assert_eq!(memtable.entries_cache.len(), 0);
-        assert_eq!(memtable.entries_size(), 10);
-        assert_eq!(memtable.entries_index.len(), 10);
-        assert_eq!(memtable.entries_index[0].index, 10);
-        assert_eq!(memtable.entries_index[9].index, 19);
         memtable.check_entries_index_and_cache();
     }
 
     #[test]
     fn test_memtable_compact() {
         let region_id = 8;
-        let cache_limit = 10;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
         // After appending:
-        // [0, 10) file_num = 1, not in cache
-        // [10, 15) file_num = 2, not in cache
-        // [15, 20) file_num = 2, in cache
-        // [20, 25) file_num = 3, in cache
-        memtable.append(generate_ents(0, 10), generate_ents_index(0, 10, 1));
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
-        memtable.append(generate_ents(20, 25), generate_ents_index(20, 25, 3));
-        assert_eq!(memtable.cache_size, 10);
+        // [0, 10) file_num = 1
+        // [10, 20) file_num = 2
+        // [20, 25) file_num = 3
+        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(10, 15, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(15, 20, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        memtable.append(ents, ents_idx);
+
         assert_eq!(memtable.entries_size(), 25);
-        assert_eq!(memtable.entries_cache.len(), 10);
-        assert_eq!(memtable.entries_index.len(), 25);
-        assert_eq!(memtable.entries_cache[0].get_index(), 15);
-        assert_eq!(memtable.entries_cache[9].get_index(), 24);
-        assert_eq!(memtable.entries_index[0].index, 0);
-        assert_eq!(memtable.entries_index[24].index, 24);
+        assert_eq!(stats.cache_size(), 25);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
@@ -806,29 +735,17 @@ mod tests {
         // Compact to 5.
         // Only index is needed to compact.
         assert_eq!(memtable.compact_to(5), 5);
-        assert_eq!(memtable.cache_size, 10);
         assert_eq!(memtable.entries_size(), 20);
-        assert_eq!(memtable.entries_cache.len(), 10);
-        assert_eq!(memtable.entries_index.len(), 20);
-        assert_eq!(memtable.entries_cache[0].get_index(), 15);
-        assert_eq!(memtable.entries_cache[9].get_index(), 24);
-        assert_eq!(memtable.entries_index[0].index, 5);
-        assert_eq!(memtable.entries_index[19].index, 24);
+        assert_eq!(stats.cache_size(), 20);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
         // Compact to 20.
-        // Both index and cache  need compaction.
+        // Both index and cache need compaction.
         assert_eq!(memtable.compact_to(20), 15);
-        assert_eq!(memtable.entries_size(), memtable.cache_size);
         assert_eq!(memtable.entries_size(), 5);
-        assert_eq!(memtable.entries_cache.len(), 5);
-        assert_eq!(memtable.entries_index.len(), 5);
-        assert_eq!(memtable.entries_cache[0].get_index(), 20);
-        assert_eq!(memtable.entries_cache[4].get_index(), 24);
-        assert_eq!(memtable.entries_index[0].index, 20);
-        assert_eq!(memtable.entries_index[4].index, 24);
+        assert_eq!(stats.cache_size(), 5);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
@@ -836,64 +753,70 @@ mod tests {
         // Compact to 20 or smaller index, nothing happens.
         assert_eq!(memtable.compact_to(20), 0);
         assert_eq!(memtable.compact_to(15), 0);
+        assert_eq!(memtable.entries_size(), 5);
+        assert_eq!(stats.cache_size(), 5);
         memtable.check_entries_index_and_cache();
     }
 
     #[test]
     fn test_memtable_compact_cache() {
         let region_id = 8;
-        let cache_limit = 10;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
         // After appending:
-        // [0, 10) file_num = 1, not in cache
-        // [10, 15) file_num = 2, not in cache
-        // [15, 20) file_num = 2, in cache
-        // [20, 25) file_num = 3, in cache
-        memtable.append(generate_ents(0, 10), generate_ents_index(0, 10, 1));
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
-        memtable.append(generate_ents(20, 25), generate_ents_index(20, 25, 3));
-        assert_eq!(memtable.cache_size, 10);
+        // [0, 10) file_num = 1
+        // [10, 20) file_num = 2
+        // [20, 25) file_num = 3
+        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(10, 15, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(15, 20, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        memtable.append(ents, ents_idx);
+
         assert_eq!(memtable.entries_size(), 25);
-        assert_eq!(memtable.entries_cache.len(), 10);
-        assert_eq!(memtable.entries_index.len(), 25);
+        assert_eq!(stats.cache_size(), 25);
+        assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
-        // Compact cache to 15, nothing needs to be changed.
+        // Compact cache to 15.
         memtable.compact_cache_to(15);
-        assert_eq!(memtable.entries_cache.len(), 10);
-        assert_eq!(memtable.cache_size, 10);
+        assert_eq!(stats.cache_size(), 10);
         memtable.check_entries_index_and_cache();
 
         // Compact cache to 20.
         memtable.compact_to(20);
-        assert_eq!(memtable.entries_cache.len(), 5);
-        assert_eq!(memtable.cache_size, 5);
+        assert_eq!(stats.cache_size(), 5);
         memtable.check_entries_index_and_cache();
 
-        // Compact cache to 25
+        // Compact cache to 25.
         memtable.compact_cache_to(25);
-        assert_eq!(memtable.entries_cache.len(), 0);
-        assert_eq!(memtable.cache_size, 0);
+        assert_eq!(stats.cache_size(), 0);
         memtable.check_entries_index_and_cache();
     }
 
     #[test]
     fn test_memtable_fetch() {
         let region_id = 8;
-        let cache_limit = 10;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
-        // After appending:
+        // After appending and compact cache:
         // [0, 10) file_num = 1, not in cache
         // [10, 15) file_num = 2, not in cache
         // [15, 20) file_num = 2, in cache
         // [20, 25) file_num = 3, in cache
-        memtable.append(generate_ents(0, 10), generate_ents_index(0, 10, 1));
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
-        memtable.append(generate_ents(20, 25), generate_ents_index(20, 25, 3));
+        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        memtable.append(ents, ents_idx);
+        memtable.compact_cache_to(15);
 
         // Fetching all
         // Only latest 10 entries are in cache.
@@ -915,14 +838,14 @@ mod tests {
         // [20, 25) file_num = 3, in cache
         assert_eq!(memtable.compact_to(10), 10);
 
-        // Out of range fetching
+        // Out of range fetching.
         ents.clear();
         ents_idx.clear();
         assert!(memtable
             .fetch_entries_to(5, 15, None, &mut ents, &mut ents_idx)
             .is_err());
 
-        // Out of range fetching
+        // Out of range fetching.
         ents.clear();
         ents_idx.clear();
         assert!(memtable
@@ -1006,36 +929,42 @@ mod tests {
     #[test]
     fn test_memtable_fetch_rewrite() {
         let region_id = 8;
-        let cache_limit = 0;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
-        // [20, 30) file_num = 3
-        memtable.append(generate_ents(0, 10), generate_ents_index(0, 10, 1));
+        // [20, 25) file_num = 3
+        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        memtable.append(ents, ents_idx);
         memtable.put(b"k1".to_vec(), b"v1".to_vec(), 1);
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
+        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
         memtable.put(b"k2".to_vec(), b"v2".to_vec(), 2);
-        memtable.append(generate_ents(20, 25), generate_ents_index(20, 25, 3));
+        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        memtable.append(ents, ents_idx);
         memtable.put(b"k3".to_vec(), b"v3".to_vec(), 3);
 
         // After rewriting:
         // [0, 10) queue = rewrite, file_num = 50,
         // [10, 20) file_num = 2
-        // [20, 30) file_num = 3
-        memtable.rewrite(generate_rewrite_ents_index(0, 10, 50), Some(1));
+        // [20, 25) file_num = 3
+        let (_, ents_idx) = generate_ents(0, 10, LogQueue::Rewrite, 50, &stats);
+        memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"k1".to_vec(), Some(1), 50);
+        assert_eq!(memtable.entries_size(), 25);
+        assert_eq!(stats.cache_size(), 15);
 
+        memtable.compact_cache_to(15);
         let (mut ents, mut ents_idx) = (vec![], vec![]);
-
         assert!(memtable
             .fetch_rewrite_entries(2, &mut ents, &mut ents_idx)
             .is_ok());
-        assert_eq!(ents_idx.len(), 10);
-        assert_eq!(ents_idx.first().unwrap().index, 10);
-        assert_eq!(ents_idx.last().unwrap().index, 19);
+        assert_eq!(ents.len(), 5);
+        assert_eq!(ents_idx.len(), 5);
+        assert_eq!(ents.first().unwrap().index, 15);
+        assert_eq!(ents_idx.last().unwrap().index, 14);
 
         ents.clear();
         ents_idx.clear();
@@ -1050,9 +979,8 @@ mod tests {
     #[test]
     fn test_memtable_kv_operations() {
         let region_id = 8;
-        let cache_limit = 1024;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats);
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
@@ -1070,14 +998,16 @@ mod tests {
     #[test]
     fn test_memtable_get_entry() {
         let region_id = 8;
-        let cache_limit = 10;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
         // [5, 10) file_num = 1, not in cache
         // [10, 20) file_num = 2, in cache
-        memtable.append(generate_ents(5, 10), generate_ents_index(5, 10, 1));
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
+        let (ents, ents_idx) = generate_ents(5, 10, LogQueue::Append, 1, &stats);
+        memtable.append(ents, ents_idx);
+        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
+        memtable.compact_cache_to(10);
 
         // Not in range.
         assert_eq!(memtable.get_entry(2), (None, None));
@@ -1095,30 +1025,35 @@ mod tests {
     #[test]
     fn test_memtable_rewrite() {
         let region_id = 8;
-        let cache_limit = 15;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, cache_limit, stats);
+        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
 
-        // after appending
-        // [10, 20) file_num = 2, not in cache
-        // [20, 30) file_num = 3, 5 not in cache, 5 in cache
-        // [30, 40) file_num = 4, in cache
-        memtable.append(generate_ents(10, 20), generate_ents_index(10, 20, 2));
+        // After appending and compacting:
+        // [10, 20) file_num = 2, not in cache;
+        // [20, 30) file_num = 3, 5 not in cache, 5 in cache;
+        // [30, 40) file_num = 4, in cache.
+        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        memtable.append(ents, ents_idx);
         memtable.put(b"kk1".to_vec(), b"vv1".to_vec(), 2);
-        memtable.append(generate_ents(20, 30), generate_ents_index(20, 30, 3));
+        let (ents, ents_idx) = generate_ents(20, 30, LogQueue::Append, 3, &stats);
+        memtable.append(ents, ents_idx);
         memtable.put(b"kk2".to_vec(), b"vv2".to_vec(), 3);
-        memtable.append(generate_ents(30, 40), generate_ents_index(30, 40, 4));
+        let (ents, ents_idx) = generate_ents(30, 40, LogQueue::Append, 4, &stats);
+        memtable.append(ents, ents_idx);
         memtable.put(b"kk3".to_vec(), b"vv3".to_vec(), 4);
+        memtable.compact_cache_to(25);
 
-        assert_eq!(memtable.cache_size, 15);
         assert_eq!(memtable.entries_size(), 30);
+        assert_eq!(stats.cache_size(), 15);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 2);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 4);
         memtable.check_entries_index_and_cache();
 
         // Rewrite compacted entries.
-        memtable.rewrite(generate_rewrite_ents_index(0, 10, 50), Some(1));
+        let (_, ents_idx) = generate_ents(0, 10, LogQueue::Rewrite, 50, &stats);
+        memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
+
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 2);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 4);
         assert!(memtable.min_file_num(LogQueue::Rewrite).is_none());
@@ -1129,124 +1064,140 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 11);
 
         // Rewrite compacted entries + valid entries.
-        memtable.rewrite(generate_rewrite_ents_index(0, 20, 100), Some(2));
+        let (_, ents_idx) = generate_ents(0, 20, LogQueue::Rewrite, 100, &stats);
+        memtable.rewrite(ents_idx, Some(2));
+        memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
         memtable.rewrite_key(b"kk1".to_vec(), Some(2), 100);
+
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.min_file_num(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_num(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.get(b"kk1"), Some(b"vv1".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 32);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 21);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 33);
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Rewrite vaild entries, some of them are in cache.
-        memtable.rewrite(generate_rewrite_ents_index(20, 30, 101), Some(3));
+        let (_, ents_idx) = generate_ents(20, 30, LogQueue::Rewrite, 101, &stats);
+        memtable.rewrite(ents_idx, Some(3));
         memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
-        assert_eq!(memtable.cache_size, 15);
+
+        assert_eq!(stats.cache_size(), 10); // Clean rewritten entries from cache.
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.min_file_num(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_num(LogQueue::Rewrite).unwrap(), 101);
         assert_eq!(memtable.rewrite_count, 20);
         assert_eq!(memtable.get(b"kk2"), Some(b"vv2".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 43);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 21);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 44);
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
+
+        // Put some entries overwritting entires in file 4.
+        let (ents, ents_idx) = generate_ents(35, 36, LogQueue::Append, 5, &stats);
+        memtable.append(ents, ents_idx);
+        memtable.put(b"kk3".to_vec(), b"vv33".to_vec(), 5);
+        assert_eq!(stats.cache_size(), 6);
+        assert_eq!(memtable.entries_index.back().unwrap().index, 35);
 
         // Rewrite valid + overwritten entries.
-        memtable.append(generate_ents(35, 36), generate_ents_index(35, 36, 5));
-        memtable.put(b"kk2".to_vec(), b"vv4".to_vec(), 5);
-        assert_eq!(memtable.cache_size, 11);
-        assert_eq!(memtable.entries_index.back().unwrap().index, 35);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 43);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
-        memtable.rewrite(generate_rewrite_ents_index(30, 40, 102), Some(4));
+        let (_, ents_idx) = generate_ents(30, 40, LogQueue::Rewrite, 102, &stats);
+        memtable.rewrite(ents_idx, Some(4));
         memtable.rewrite_key(b"kk3".to_vec(), Some(4), 102);
+
+        assert_eq!(stats.cache_size(), 0);
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.min_file_num(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_num(LogQueue::Rewrite).unwrap(), 102);
         assert_eq!(memtable.rewrite_count, 25);
-        assert_eq!(memtable.get(b"kk2"), Some(b"vv4".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 54);
+        assert_eq!(memtable.get(b"kk3"), Some(b"vv33".to_vec()));
+        assert_eq!(memtable.global_stats.rewrite_operations(), 55);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 27);
 
-        // Rewrite after compact.
-        memtable.append(generate_ents(36, 50), generate_ents_index(36, 50, 6));
+        // Compact after rewrite.
+        let (ents, ents_idx) = generate_ents(35, 50, LogQueue::Append, 6, &stats);
+        memtable.append(ents, ents_idx);
         memtable.compact_to(30);
+        assert_eq!(memtable.entries_index.back().unwrap().index, 49);
         assert_eq!(memtable.rewrite_count, 5);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 54);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 55);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 47);
+        assert_eq!(stats.cache_size(), 15);
         memtable.compact_to(40);
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 54);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 55);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 52);
+        assert_eq!(stats.cache_size(), 10);
 
-        assert_eq!(memtable.cache_size, 10);
-        assert_eq!(memtable.entries_index.back().unwrap().index, 49);
-        memtable.rewrite(generate_rewrite_ents_index(30, 36, 103), Some(5));
-        memtable.rewrite_key(b"kk2".to_vec(), Some(5), 103);
+        let (_, ents_idx) = generate_ents(30, 36, LogQueue::Rewrite, 103, &stats);
+        memtable.rewrite(ents_idx, Some(5));
+        memtable.rewrite_key(b"kk3".to_vec(), Some(5), 103);
+
         assert_eq!(memtable.min_file_num(LogQueue::Append).unwrap(), 6);
         assert_eq!(memtable.max_file_num(LogQueue::Append).unwrap(), 6);
         assert_eq!(memtable.min_file_num(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_num(LogQueue::Rewrite).unwrap(), 103);
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 61);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 62);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 58);
+        assert_eq!(stats.cache_size(), 10);
 
         // Rewrite after cut.
-        memtable.append(generate_ents(50, 55), generate_ents_index(50, 55, 7));
-        memtable.rewrite(generate_rewrite_ents_index(30, 50, 104), Some(6));
+        let (ents, ents_idx) = generate_ents(50, 55, LogQueue::Append, 7, &stats);
+        memtable.append(ents, ents_idx);
+        let (_, ents_idx) = generate_ents(30, 50, LogQueue::Rewrite, 104, &stats);
+        memtable.rewrite(ents_idx, Some(6));
         assert_eq!(memtable.rewrite_count, 10);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 81);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 68);
-        memtable.append(generate_ents(45, 50), generate_ents_index(45, 50, 7));
+        assert_eq!(stats.cache_size(), 5);
+
+        let (ents, ents_idx) = generate_ents(45, 50, LogQueue::Append, 7, &stats);
+        memtable.append(ents, ents_idx);
         assert_eq!(memtable.rewrite_count, 5);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 81);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 73);
-        memtable.append(generate_ents(40, 50), generate_ents_index(40, 50, 7));
+        assert_eq!(stats.cache_size(), 5);
+
+        let (ents, ents_idx) = generate_ents(40, 50, LogQueue::Append, 7, &stats);
+        memtable.append(ents, ents_idx);
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 81);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
+        assert_eq!(stats.cache_size(), 10);
     }
 
-    fn generate_ents(begin_idx: u64, end_idx: u64) -> Vec<Entry> {
+    fn generate_ents(
+        begin_idx: u64,
+        end_idx: u64,
+        queue: LogQueue,
+        file_num: u64,
+        stats: &Arc<GlobalStats>,
+    ) -> (Vec<Entry>, Vec<EntryIndex>) {
         assert!(end_idx >= begin_idx);
-        let mut ents = vec![];
+        let (mut ents, mut ents_idx) = (vec![], vec![]);
         for idx in begin_idx..end_idx {
             let mut ent = Entry::new();
             ent.set_index(idx);
             ents.push(ent);
-        }
-        ents
-    }
 
-    fn generate_ents_index(begin_idx: u64, end_idx: u64, file_num: u64) -> Vec<EntryIndex> {
-        assert!(end_idx >= begin_idx);
-        let mut ents_idx = vec![];
-        for idx in begin_idx..end_idx {
             let mut ent_idx = EntryIndex::default();
             ent_idx.index = idx;
+            ent_idx.queue = queue;
             ent_idx.file_num = file_num;
             ent_idx.offset = idx; // fake offset
             ent_idx.len = 1; // fake size
-            ents_idx.push(ent_idx);
-        }
-        ents_idx
-    }
 
-    fn generate_rewrite_ents_index(begin_idx: u64, end_idx: u64, file_num: u64) -> Vec<EntryIndex> {
-        assert!(end_idx >= begin_idx);
-        let mut ents_idx = vec![];
-        for idx in begin_idx..end_idx {
-            let mut ent_idx = EntryIndex::default();
-            ent_idx.index = idx;
-            ent_idx.queue = LogQueue::Rewrite;
-            ent_idx.file_num = file_num;
-            ent_idx.offset = idx; // fake offset
-            ent_idx.len = 1; // fake size
+            if queue != LogQueue::Rewrite {
+                let mut tracker = CacheTracker::new(stats.clone(), Arc::new(AtomicUsize::new(1)));
+                tracker.global_stats.add_mem_change(1);
+                tracker.sub_on_drop = 1;
+                ent_idx.cache_tracker = Some(tracker);
+            }
+
             ents_idx.push(ent_idx);
         }
-        ents_idx
+        (ents, ents_idx)
     }
 }
