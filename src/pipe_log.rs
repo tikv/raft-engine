@@ -488,7 +488,7 @@ impl GenericPipeLog for PipeLog {
             }
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.update_position(LogQueue::Append, cur_file_num, offset, &None);
+                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
                 }
             }
             *file_num = cur_file_num;

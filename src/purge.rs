@@ -226,8 +226,9 @@ where
             let memtable = self.memtables.get_or_insert(item.raft_group_id);
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
-                    let entries_index = entries_to_add.entries_index;
-                    memtable.wl().rewrite(entries_index, latest_rewrite);
+                    memtable
+                        .wl()
+                        .rewrite(entries_to_add.entries_index, latest_rewrite);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
