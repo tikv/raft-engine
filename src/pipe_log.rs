@@ -18,7 +18,6 @@ use protobuf::Message;
 use crate::cache_evict::CacheSubmitor;
 use crate::config::Config;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::memtable::FileIndex;
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
 
@@ -108,6 +107,9 @@ impl LogFd {
     fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
+    pub fn sync(&self) -> Result<()> {
+        fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"))
+    }
 }
 
 impl Drop for LogFd {
@@ -171,7 +173,7 @@ impl LogManager {
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
             let fd = Arc::new(LogFd(open_active_file(&path)?));
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            fd.sync()?;
 
             self.active_log_size = file_len(fd.0)?;
             self.active_log_capacity = self.active_log_size;
@@ -216,7 +218,7 @@ impl LogManager {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }
-        fsync(active_fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+        active_fd.sync()?;
         self.active_log_size = offset;
         self.active_log_capacity = offset;
         self.last_sync_size = self.active_log_size;
@@ -458,17 +460,12 @@ impl GenericPipeLog for PipeLog {
                 cache_submitor.get_cache_tracker(cur_file_num, offset, batch.entries_size());
             drop(cache_submitor);
             if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+                fd.sync()?;
             }
-            let file_position = FileIndex {
-                file_num: cur_file_num,
-                base_offset: offset,
-                queue: LogQueue::Append,
-            };
 
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.update_position(file_position, &tracker);
+                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
                 }
             }
 
@@ -487,16 +484,11 @@ impl GenericPipeLog for PipeLog {
         if let Some(content) = batch.encode_to_bytes() {
             let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
             if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+                fd.sync()?;
             }
-            let file_position = FileIndex {
-                queue: LogQueue::Rewrite,
-                file_num: cur_file_num,
-                base_offset: offset,
-            };
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.update_position(file_position, &None);
+                    entries.update_position(LogQueue::Append, cur_file_num, offset, &None);
                 }
             }
             *file_num = cur_file_num;
@@ -515,7 +507,7 @@ impl GenericPipeLog for PipeLog {
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
         if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            fd.sync()?;
         }
         Ok(())
     }

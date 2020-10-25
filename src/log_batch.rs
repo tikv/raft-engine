@@ -9,7 +9,8 @@ use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
-use crate::memtable::{EntryIndex, FileIndex};
+use crate::memtable::EntryIndex;
+use crate::pipe_log::LogQueue;
 use crate::{Error, Result};
 
 pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
@@ -138,7 +139,8 @@ impl<E: Message + PartialEq> PartialEq for Entries<E> {
 
 impl<E: Message> Entries<E> {
     pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
-        let entries_index = entries_index.unwrap_or_else(|| vec![EntryIndex::default(); entries.len()]);
+        let entries_index =
+            entries_index.unwrap_or_else(|| vec![EntryIndex::default(); entries.len()]);
         Entries {
             entries,
             entries_index,
@@ -163,8 +165,8 @@ impl<E: Message> Entries<E> {
 
             let mut entry_index = EntryIndex::default();
             entry_index.index = W::index(&e);
-            entry_index.file_position.file_num = file_num;
-            entry_index.file_position.base_offset = base_offset;
+            entry_index.file_num = file_num;
+            entry_index.base_offset = base_offset;
             entry_index.offset = batch_offset + content_len - buf.len() as u64;
             entry_index.len = len as u64;
             *entries_size += entry_index.len as usize;
@@ -178,7 +180,7 @@ impl<E: Message> Entries<E> {
         Ok(Entries::new(entries, Some(entries_index)))
     }
 
-    pub fn encode_to<W>(&self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
+    pub fn encode_to<W>(&mut self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
     where
         W: EntryExt<E>,
     {
@@ -195,12 +197,12 @@ impl<E: Message> Entries<E> {
             vec.encode_var_u64(content.len() as u64)?;
 
             // file_num = 0 means entry index is not initialized.
-            if self.entries_index[i].file_position.file_num == 0 {
+            if self.entries_index[i].file_num == 0 {
                 self.entries_index[i].index = W::index(&e);
                 // This offset doesn't count the header.
                 self.entries_index[i].offset = vec.len() as u64;
                 self.entries_index[i].len = content.len() as u64;
-                *entries_size += entries_index[i].len as usize;
+                *entries_size += self.entries_index[i].len as usize;
             }
 
             vec.extend_from_slice(&content);
@@ -209,13 +211,13 @@ impl<E: Message> Entries<E> {
     }
 
     pub fn update_position(
-        &self,
+        &mut self,
         queue: LogQueue,
         file_num: u64,
         base: u64,
         tracker: &Option<CacheTracker>,
     ) {
-        for idx in self.entries_index.borrow_mut().iter_mut() {
+        for idx in self.entries_index.iter_mut() {
             debug_assert!(idx.file_num == 0 && idx.base_offset == 0);
             debug_assert!(idx.cache_tracker.is_none());
             idx.queue = queue;
@@ -230,8 +232,8 @@ impl<E: Message> Entries<E> {
         }
     }
 
-    pub fn attach_cache_tracker(&self, tracker: CacheTracker) {
-        for idx in self.entries_index.borrow_mut().iter_mut() {
+    pub fn attach_cache_tracker(&mut self, tracker: CacheTracker) {
+        for idx in self.entries_index.iter_mut() {
             let mut tkr = tracker.clone();
             tkr.global_stats.add_mem_change(idx.len as usize);
             tkr.sub_on_drop = idx.len as usize;
@@ -394,7 +396,7 @@ impl<E: Message> LogItem<E> {
         }
     }
 
-    pub fn encode_to<W>(&self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
+    pub fn encode_to<W>(&mut self, vec: &mut Vec<u8>, entries_size: &mut usize) -> Result<()>
     where
         W: EntryExt<E>,
     {
@@ -464,7 +466,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
-    entries_size: RefCell<usize>,
+    entries_size: usize,
     _phantom: PhantomData<W>,
 }
 
@@ -476,7 +478,7 @@ where
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(16),
-            entries_size: RefCell::new(0),
+            entries_size: 0,
             _phantom: PhantomData,
         }
     }
@@ -494,7 +496,7 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
-            entries_size: RefCell::new(0),
+            entries_size: 0,
             _phantom: PhantomData,
         }
     }
@@ -574,7 +576,7 @@ where
                 file_num,
                 base_offset,
                 content_offset,
-                &mut log_batch.entries_size.borrow_mut(),
+                &mut log_batch.entries_size,
             )?;
             log_batch.items.push(item);
             items_count -= 1;
@@ -601,7 +603,7 @@ where
         let mut vec = Vec::with_capacity(4096);
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
-        for item in &self.items {
+        for item in self.items.iter_mut() {
             item.encode_to::<W>(&mut vec, &mut self.entries_size)
                 .unwrap();
         }

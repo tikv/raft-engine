@@ -300,8 +300,8 @@ where
                                 offset,
                                 log_batch.entries_size(),
                             ) {
-                                for item in &log_batch.items {
-                                    if let LogItemContent::Entries(ref entries) = item.content {
+                                for item in log_batch.items.iter_mut() {
+                                    if let LogItemContent::Entries(entries) = &mut item.content {
                                         entries.attach_cache_tracker(tracker.clone());
                                     }
                                 }
@@ -508,9 +508,9 @@ where
     W: EntryExt<E>,
     P: GenericPipeLog,
 {
-    let queue = entry_index.file_position.queue;
-    let file_num = entry_index.file_position.file_num;
-    let base_offset = entry_index.file_position.base_offset;
+    let queue = entry_index.queue;
+    let file_num = entry_index.file_num;
+    let base_offset = entry_index.base_offset;
     let batch_len = entry_index.batch_len;
     let offset = entry_index.offset;
     let len = entry_index.len;
