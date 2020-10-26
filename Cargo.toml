@@ -21,3 +21,10 @@ thiserror = "1.0"
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 tempfile = "3.1"
 toml = "0.5"
+env_logger = "0.7"
+rand = "0.7"
+rand_distr = "0.3"
+
+[[example]]
+name = "append-compact-purge"
+path = "examples/append_compact_purge.rs"

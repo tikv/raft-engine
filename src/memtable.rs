@@ -133,7 +133,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
         let last_index = self.entries_index.back().unwrap().index;
         let first_index = self.entries_index.front().unwrap().index;
-        assert!(first_index <= index); // Compacted entries can't be overwritten.
+        // Compacted entries can't be overwritten.
+        assert!(first_index <= index, "corrupted raft {}", self.region_id);
+
         let conflict = if index <= last_index {
             (index - first_index) as usize
         } else {
