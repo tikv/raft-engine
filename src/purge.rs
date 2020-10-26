@@ -175,13 +175,15 @@ where
             .unwrap();
 
         let memtables = self.memtables.collect(|t| {
-            let min_file_num = t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX);
-            let count = t.entries_count();
-            if min_file_num <= latest_compact && count > REWRITE_ENTRY_COUNT_THRESHOLD {
+            let (rewrite, compact) = t.needs_rewrite_or_compact(
+                latest_rewrite,
+                latest_compact,
+                REWRITE_ENTRY_COUNT_THRESHOLD,
+            );
+            if compact {
                 will_force_compact.push(t.region_id());
-                return false;
             }
-            min_file_num <= latest_rewrite && count <= REWRITE_ENTRY_COUNT_THRESHOLD
+            rewrite
         });
 
         self.rewrite_memtables(

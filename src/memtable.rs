@@ -563,6 +563,32 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .fold(None, |min, v| Some(cmp::min(min.unwrap_or(u64::MAX), v.2)))
     }
 
+    /// Returns (needs_rewrite, needs_force_compact).
+    pub fn needs_rewrite_or_compact(
+        &self,
+        latest_rewrite: u64,
+        latest_compact: u64,
+        // Only entries with count is less than the limit can be rewritten.
+        rewrite_count_limit: usize,
+    ) -> (bool, bool) {
+        debug_assert!(latest_compact <= latest_rewrite);
+        let min_file_num = match self.min_file_num(LogQueue::Append) {
+            Some(file_num) if file_num <= latest_rewrite => file_num,
+            _ => return (false, false),
+        };
+        let entries_count = self.entries_count();
+
+        if min_file_num < latest_compact && entries_count > rewrite_count_limit {
+            // `rewrite_count_limit` is considered because in some raft applications,
+            // log-compaction is implemented based on an special raft log, which means
+            // there will always be at least 1 log left.
+            return (false, true);
+        }
+
+        let needs_rewrite = entries_count < rewrite_count_limit;
+        (needs_rewrite, false)
+    }
+
     fn count_limit(&self, start_idx: usize, end_idx: usize, max_size: usize) -> usize {
         assert!(start_idx < end_idx);
         let (first, second) = slices_in_range(&self.entries_index, start_idx, end_idx);
