@@ -211,7 +211,7 @@ where
         latest_rewrite: Option<u64>,
     ) -> Result<()> {
         let mut file_num = 0;
-        self.pipe_log.rewrite(&log_batch, true, &mut file_num)?;
+        self.pipe_log.rewrite(log_batch, true, &mut file_num)?;
         if file_num > 0 {
             self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
         }
@@ -228,8 +228,9 @@ where
             let memtable = self.memtables.get_or_insert(item.raft_group_id);
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
-                    let entries_index = entries_to_add.entries_index.into_inner();
-                    memtable.wl().rewrite(entries_index, latest_rewrite);
+                    memtable
+                        .wl()
+                        .rewrite(entries_to_add.entries_index, latest_rewrite);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),

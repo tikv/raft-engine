@@ -137,7 +137,7 @@ where
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
                     let entries = entries_to_add.entries;
-                    let entries_index = entries_to_add.entries_index.into_inner();
+                    let entries_index = entries_to_add.entries_index;
                     if queue == LogQueue::Rewrite {
                         memtable.wl().append_rewrite(entries, entries_index);
                     } else {
@@ -300,8 +300,8 @@ where
                                 offset,
                                 log_batch.entries_size(),
                             ) {
-                                for item in &log_batch.items {
-                                    if let LogItemContent::Entries(ref entries) = item.content {
+                                for item in log_batch.items.iter_mut() {
+                                    if let LogItemContent::Entries(entries) = &mut item.content {
                                         entries.attach_cache_tracker(tracker.clone());
                                     }
                                 }

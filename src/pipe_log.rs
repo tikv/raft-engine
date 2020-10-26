@@ -57,7 +57,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Write a batch into the append queue.
     fn write<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize>;
@@ -65,7 +65,7 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Rewrite a batch into the rewrite queue.
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
         file_num: &mut u64,
     ) -> Result<usize>;
@@ -106,6 +106,9 @@ pub struct LogFd(RawFd);
 impl LogFd {
     fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
+    }
+    pub fn sync(&self) -> Result<()> {
+        fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"))
     }
 }
 
@@ -170,7 +173,7 @@ impl LogManager {
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
             let fd = Arc::new(LogFd(open_active_file(&path)?));
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            fd.sync()?;
 
             self.active_log_size = file_len(fd.0)?;
             self.active_log_capacity = self.active_log_size;
@@ -215,7 +218,7 @@ impl LogManager {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }
-        fsync(active_fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+        active_fd.sync()?;
         self.active_log_size = offset;
         self.active_log_capacity = offset;
         self.last_sync_size = self.active_log_size;
@@ -445,7 +448,7 @@ impl GenericPipeLog for PipeLog {
 
     fn write<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
@@ -457,11 +460,11 @@ impl GenericPipeLog for PipeLog {
                 cache_submitor.get_cache_tracker(cur_file_num, offset, batch.entries_size());
             drop(cache_submitor);
             if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+                fd.sync()?;
             }
 
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
+            for item in batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
                     entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
                 }
             }
@@ -474,17 +477,17 @@ impl GenericPipeLog for PipeLog {
 
     fn rewrite<E: Message, W: EntryExt<E>>(
         &self,
-        batch: &LogBatch<E, W>,
+        batch: &mut LogBatch<E, W>,
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
         if let Some(content) = batch.encode_to_bytes() {
             let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
             if sync {
-                fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+                fd.sync()?;
             }
-            for item in &batch.items {
-                if let LogItemContent::Entries(ref entries) = item.content {
+            for item in batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
                     entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
                 }
             }
@@ -504,7 +507,7 @@ impl GenericPipeLog for PipeLog {
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
         if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fsync(fd.0).map_err(|e| parse_nix_error(e, "fsync"))?;
+            fd.sync()?;
         }
         Ok(())
     }
@@ -844,9 +847,9 @@ mod tests {
         // After 4 batches are written into pipe log, no `CacheTask::NewChunk`
         // task should be triggered. However the last batch will trigger it.
         for i in 0..5 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 4 {
@@ -859,9 +862,9 @@ mod tests {
         // Write more 2 batches into pipe log. A `CacheTask::NewChunk` will be
         // emit on the second batch because log file is switched.
         for i in 5..7 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 6 {
@@ -875,9 +878,9 @@ mod tests {
         // `CacheTracker`s accociated in `EntryIndex`s are droped.
         drop(log_batches);
         for _ in 7..20 {
-            let log_batch = get_1m_batch();
+            let mut log_batch = get_1m_batch();
             let mut file_num = 0;
-            pipe_log.write(&log_batch, true, &mut file_num).unwrap();
+            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
             drop(log_batch);
             assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
         }

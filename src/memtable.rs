@@ -1194,7 +1194,6 @@ mod tests {
                 tracker.sub_on_drop = 1;
                 ent_idx.cache_tracker = Some(tracker);
             }
-
             ents_idx.push(ent_idx);
         }
         (ents, ents_idx)
