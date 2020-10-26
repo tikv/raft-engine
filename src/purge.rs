@@ -159,14 +159,16 @@ where
         assert!(latest_compact <= latest_rewrite);
         let mut log_batch = LogBatch::<E, W>::new();
 
-        while let Some(item) = self.removed_memtables.lock().unwrap().pop() {
+        let mut removed_memtables = self.removed_memtables.lock().unwrap();
+        while let Some(item) = removed_memtables.pop() {
             let (file_num, raft_id) = ((item.0).0, item.1);
             if file_num > latest_rewrite {
-                self.removed_memtables.lock().unwrap().push(item);
+                removed_memtables.push(item);
                 break;
             }
             log_batch.clean_region(raft_id);
         }
+        drop(removed_memtables);
 
         let memtables = self.memtables.collect(|t| {
             let min_file_num = t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX);
