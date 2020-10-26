@@ -168,11 +168,17 @@ where
     }
 
     fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        let queue = LogQueue::Append;
+        if log_batch.items.is_empty() {
+            if sync {
+                self.pipe_log.sync(LogQueue::Append)?;
+            }
+            return Ok(0);
+        }
+
         let mut file_num = 0;
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
-            self.apply_to_memtable(log_batch, queue, file_num);
+            self.apply_to_memtable(log_batch, LogQueue::Append, file_num);
         }
         Ok(bytes)
     }
@@ -350,13 +356,13 @@ where
     }
 
     pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::default();
         log_batch.put(region_id, key.to_vec(), value.to_vec());
         self.write(&mut log_batch, false).map(|_| ())
     }
 
     pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
-        let mut log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::default();
         log_batch.put_msg(region_id, key.to_vec(), m)?;
         self.write(&mut log_batch, false).map(|_| ())
     }
@@ -447,7 +453,7 @@ where
             None => return 0,
         };
 
-        let mut log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::default();
         log_batch.add_command(region_id, Command::Compact { index });
         self.write(&mut log_batch, false).map(|_| ()).unwrap();
 
@@ -594,7 +600,7 @@ mod tests {
         append_log(&engine, 1, &Entry::new());
         assert!(engine.memtables.get(1).is_some());
 
-        let mut log_batch = LogBatch::new();
+        let mut log_batch = LogBatch::default();
         log_batch.clean_region(1);
         engine.write(&mut log_batch, false).unwrap();
         assert!(engine.memtables.get(1).is_none());

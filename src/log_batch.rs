@@ -24,7 +24,7 @@ const TYPE_KV: u8 = 0x3;
 const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
-const COMPRESSION_SIZE: usize = 4096;
+const DEFAULT_BATCH_CAP: usize = 64;
 
 #[inline]
 fn crc32(data: &[u8]) -> u32 {
@@ -477,7 +477,7 @@ where
 {
     fn default() -> Self {
         Self {
-            items: Vec::with_capacity(16),
+            items: Vec::with_capacity(DEFAULT_BATCH_CAP),
             entries_size: 0,
             _phantom: PhantomData,
         }
@@ -489,10 +489,6 @@ where
     E: Message,
     W: EntryExt<E>,
 {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
@@ -594,7 +590,7 @@ where
     }
 
     // TODO: avoid to write a large batch into one compressed chunk.
-    pub fn encode_to_bytes(&mut self) -> Option<Vec<u8>> {
+    pub fn encode_to_bytes(&mut self, compression_threshold: usize) -> Option<Vec<u8>> {
         if self.items.is_empty() {
             return None;
         }
@@ -608,7 +604,7 @@ where
                 .unwrap();
         }
 
-        let compression_type = if vec.len() > COMPRESSION_SIZE {
+        let compression_type = if compression_threshold > 0 && vec.len() > compression_threshold {
             vec = lz4::encode_block(&vec[HEADER_LEN..], HEADER_LEN, 4);
             CompressionType::Lz4
         } else {
@@ -735,7 +731,7 @@ mod tests {
     #[test]
     fn test_log_batch_enc_dec() {
         let region_id = 8;
-        let mut batch = LogBatch::<Entry, Entry>::new();
+        let mut batch = LogBatch::<Entry, Entry>::default();
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024]);
         batch.add_entries(region_id, vec![entry; 10]);
@@ -743,7 +739,7 @@ mod tests {
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
         batch.delete(region_id, b"key2".to_vec());
 
-        let encoded = batch.encode_to_bytes().unwrap();
+        let encoded = batch.encode_to_bytes(0).unwrap();
         let mut s = encoded.as_slice();
         let decoded_batch = LogBatch::from_bytes(&mut s, 0, 0).unwrap().unwrap();
         assert_eq!(s.len(), 0);

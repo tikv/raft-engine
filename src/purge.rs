@@ -1,6 +1,6 @@
 use std::cmp::{self, Reverse};
 use std::collections::BinaryHeap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use log::info;
 use protobuf::Message;
@@ -8,6 +8,7 @@ use protobuf::Message;
 use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
+use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue};
 use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
@@ -17,6 +18,7 @@ use crate::{GlobalStats, Result};
 const REWRITE_ENTRY_COUNT_THRESHOLD: usize = 32;
 const REWRITE_INACTIVE_RATIO: f64 = 0.7;
 const FORCE_COMPACT_RATIO: f64 = 0.2;
+const REWRITE_BATCH_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct PurgeManager<E, W, P>
@@ -157,8 +159,8 @@ where
         will_force_compact: &mut Vec<u64>,
     ) {
         assert!(latest_compact <= latest_rewrite);
-        let mut log_batch = LogBatch::<E, W>::new();
 
+        let mut log_batch = LogBatch::<E, W>::default();
         let mut removed_memtables = self.removed_memtables.lock().unwrap();
         while let Some(item) = removed_memtables.pop() {
             let (file_num, raft_id) = ((item.0).0, item.1);
@@ -169,6 +171,8 @@ where
             log_batch.clean_region(raft_id);
         }
         drop(removed_memtables);
+        self.rewrite_impl(&mut log_batch, Some(latest_rewrite), true)
+            .unwrap();
 
         let memtables = self.memtables.collect(|t| {
             let min_file_num = t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX);
@@ -180,38 +184,84 @@ where
             min_file_num <= latest_rewrite && count <= REWRITE_ENTRY_COUNT_THRESHOLD
         });
 
+        self.rewrite_memtables(
+            memtables,
+            |t: &MemTable<E, W>, ents, ents_idx| {
+                t.fetch_rewrite_entries(latest_rewrite, ents, ents_idx)
+            },
+            |t: &MemTable<E, W>, kvs| t.fetch_rewrite_kvs(latest_rewrite, kvs),
+            REWRITE_ENTRY_COUNT_THRESHOLD,
+            Some(latest_rewrite),
+        );
+    }
+
+    fn squeeze_rewrite_queue(&self) {
+        // Switch the active rewrite file.
+        self.pipe_log.new_log_file(LogQueue::Rewrite).unwrap();
+
+        let memtables = self
+            .memtables
+            .collect(|t| t.min_file_num(LogQueue::Rewrite).unwrap_or_default() > 0);
+
+        self.rewrite_memtables(
+            memtables,
+            |t: &MemTable<E, W>, ents, ents_idx| t.fetch_entries_from_rewrite(ents, ents_idx),
+            |t: &MemTable<E, W>, kvs| t.fetch_kvs_from_rewrite(kvs),
+            0,
+            None,
+        );
+    }
+
+    fn rewrite_memtables<FE, FK>(
+        &self,
+        memtables: Vec<Arc<RwLock<MemTable<E, W>>>>,
+        fe: FE,
+        fk: FK,
+        expect_count: usize,
+        rewrite: Option<u64>,
+    ) where
+        FE: Fn(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()> + Copy,
+        FK: Fn(&MemTable<E, W>, &mut Vec<(Vec<u8>, Vec<u8>)>) + Copy,
+    {
+        let mut log_batch = LogBatch::<E, W>::default();
+        let mut total_size = 0;
         for memtable in memtables {
             let region_id = memtable.rl().region_id();
 
-            let entries_count = memtable.rl().entries_count();
-            let mut entries = Vec::with_capacity(entries_count);
-            fetch_entries(
-                &self.pipe_log,
-                &memtable,
-                &mut entries,
-                entries_count,
-                |t, ents, ents_idx| t.fetch_rewrite_entries(latest_rewrite, ents, ents_idx),
-            )
-            .unwrap();
+            let mut entries = Vec::new();
+            fetch_entries(&self.pipe_log, &memtable, &mut entries, expect_count, fe).unwrap();
+            entries.iter().for_each(|e| total_size += e.compute_size());
             log_batch.add_entries(region_id, entries);
 
             let mut kvs = Vec::new();
-            memtable.rl().fetch_rewrite_kvs(latest_rewrite, &mut kvs);
+            fk(&*memtable.rl(), &mut kvs);
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }
+
+            if total_size as usize > REWRITE_BATCH_SIZE {
+                self.rewrite_impl(&mut log_batch, rewrite, false).unwrap();
+                total_size = 0;
+            }
         }
-        self.rewrite_impl(&mut log_batch, Some(latest_rewrite))
-            .unwrap();
+        self.rewrite_impl(&mut log_batch, rewrite, true).unwrap();
     }
 
     fn rewrite_impl(
         &self,
         log_batch: &mut LogBatch<E, W>,
         latest_rewrite: Option<u64>,
+        sync: bool,
     ) -> Result<()> {
+        if log_batch.is_empty() {
+            if sync {
+                self.pipe_log.sync(LogQueue::Rewrite)?;
+            }
+            return Ok(());
+        }
+
         let mut file_num = 0;
-        self.pipe_log.rewrite(log_batch, true, &mut file_num)?;
+        self.pipe_log.rewrite(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
         }
@@ -242,37 +292,6 @@ where
                 _ => unreachable!(),
             }
         }
-    }
-
-    fn squeeze_rewrite_queue(&self) {
-        self.pipe_log.new_log_file(LogQueue::Rewrite).unwrap();
-
-        let memtables = self
-            .memtables
-            .collect(|t| t.min_file_num(LogQueue::Rewrite).unwrap_or_default() > 0);
-
-        let mut log_batch = LogBatch::<E, W>::new();
-        for memtable in memtables {
-            let region_id = memtable.rl().region_id();
-
-            let mut entries = Vec::new();
-            fetch_entries(
-                &self.pipe_log,
-                &memtable,
-                &mut entries,
-                0,
-                |t, ents, ents_idx| t.fetch_entries_from_rewrite(ents, ents_idx),
-            )
-            .unwrap();
-            log_batch.add_entries(region_id, entries);
-
-            let mut kvs = Vec::new();
-            memtable.rl().fetch_kvs_from_rewrite(&mut kvs);
-            for (k, v) in kvs {
-                log_batch.put(region_id, k, v);
-            }
-        }
-        self.rewrite_impl(&mut log_batch, None).unwrap();
     }
 }
 
