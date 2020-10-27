@@ -5,6 +5,7 @@ use raft_engine::{Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
 
+#[derive(Clone)]
 struct EntryExtImpl;
 impl EntryExt<Entry> for EntryExtImpl {
     fn index(entry: &Entry) -> u64 {
@@ -12,6 +13,8 @@ impl EntryExt<Entry> for EntryExtImpl {
     }
 }
 
+// How to run the example:
+// $ RUST_LOG=debug cargo run --release --example append-compact-purge
 fn main() {
     env_logger::init();
 

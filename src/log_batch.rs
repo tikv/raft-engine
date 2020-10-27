@@ -232,6 +232,13 @@ impl<E: Message> Entries<E> {
         }
     }
 
+    pub fn set_queue_when_recover(&mut self, queue: LogQueue) {
+        for idx in self.entries_index.iter_mut() {
+            debug_assert!(idx.file_num > 0 && idx.base_offset > 0);
+            idx.queue = queue;
+        }
+    }
+
     pub fn attach_cache_tracker(&mut self, tracker: CacheTracker) {
         for idx in self.entries_index.iter_mut() {
             let mut tkr = tracker.clone();

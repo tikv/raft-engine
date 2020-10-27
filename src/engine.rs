@@ -113,7 +113,7 @@ where
 pub struct Engine<E, W, P>
 where
     E: Message + Clone,
-    W: EntryExt<E>,
+    W: EntryExt<E> + Clone,
     P: GenericPipeLog,
 {
     cfg: Arc<Config>,
@@ -128,7 +128,7 @@ where
 impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone,
-    W: EntryExt<E> + 'static,
+    W: EntryExt<E> + Clone + 'static,
     P: GenericPipeLog,
 {
     fn apply_to_memtable(&self, log_batch: &mut LogBatch<E, W>, queue: LogQueue, file_num: u64) {
@@ -140,10 +140,11 @@ where
                     let entries = entries_to_add.entries;
                     let entries_index = entries_to_add.entries_index;
                     debug!(
-                        "{} append to {:?}.{}, Entries[{:?}:{:?})",
+                        "{} append to {:?}.{}, Entries[{:?}, {:?}:{:?})",
                         raft,
                         queue,
                         file_num,
+                        entries_index.first().map(|x| x.queue),
                         entries_index.first().map(|x| x.index),
                         entries_index.last().map(|x| x.index + 1),
                     );
@@ -218,7 +219,7 @@ where
 impl<E, W, P> fmt::Debug for Engine<E, W, P>
 where
     E: Message + Clone,
-    W: EntryExt<E>,
+    W: EntryExt<E> + Clone,
     P: GenericPipeLog,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -233,7 +234,7 @@ struct Workers {
 impl<E, W> Engine<E, W, PipeLog>
 where
     E: Message + Clone,
-    W: EntryExt<E> + 'static,
+    W: EntryExt<E> + Clone + 'static,
 {
     pub fn new(cfg: Config) -> Engine<E, W, PipeLog> {
         Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE).unwrap()
@@ -290,14 +291,31 @@ where
         };
 
         engine.pipe_log.cache_submitor().block_on_full();
-        engine.recover(
-            LogQueue::Rewrite,
-            RecoveryMode::TolerateCorruptedTailRecords,
-        )?;
-        engine.recover(LogQueue::Append, engine.cfg.recovery_mode)?;
+        engine.recover_from_queues()?;
         engine.pipe_log.cache_submitor().nonblock_on_full();
 
         Ok(engine)
+    }
+
+    fn recover_from_queues(&self) -> Result<()> {
+        // Recover the rewrite queue then recover the append queue.
+        let mut engine = self.clone();
+        engine.memtables = MemTableAccessor::new(self.memtables.creator.clone());
+        let rewrite_recover_mode = RecoveryMode::TolerateCorruptedTailRecords;
+        engine.recover(LogQueue::Rewrite, rewrite_recover_mode)?;
+
+        self.recover(LogQueue::Append, self.cfg.recovery_mode)?;
+
+        let (appends, rewrites) = (&self.memtables, &engine.memtables);
+        for i in 0..SLOTS_COUNT {
+            for (id, raft) in rewrites.slots[i].rl().iter() {
+                let mut raft_rewrite = raft.wl();
+                let raft_append = appends.get_or_insert(*id);
+                raft_append.wl().merge_lower_prio(&mut *raft_rewrite);
+            }
+        }
+
+        Ok(())
     }
 
     // Recover from disk.
@@ -329,25 +347,8 @@ where
             buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
             let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
             loop {
-                match LogBatch::from_bytes(&mut buf, file_num, offset) {
-                    Ok(Some(mut log_batch)) => {
-                        if queue == LogQueue::Append {
-                            if let Some(tracker) = self.pipe_log.cache_submitor().get_cache_tracker(
-                                file_num,
-                                offset,
-                                log_batch.entries_size(),
-                            ) {
-                                for item in log_batch.items.iter_mut() {
-                                    if let LogItemContent::Entries(entries) = &mut item.content {
-                                        entries.attach_cache_tracker(tracker.clone());
-                                    }
-                                }
-                            }
-                        }
-
-                        self.apply_to_memtable(&mut log_batch, queue, file_num);
-                        offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
-                    }
+                let mut log_batch = match LogBatch::from_bytes(&mut buf, file_num, offset) {
+                    Ok(Some(log_batch)) => log_batch,
                     Ok(None) => {
                         info!("Recovered raft log {:?}.{}.", queue, file_num);
                         break;
@@ -361,13 +362,34 @@ where
                         if file_num == active_file_num
                             && recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
                         {
-                            self.pipe_log
-                                .truncate_active_log(queue, Some(offset as usize))?;
+                            let offset = Some(offset as usize);
+                            self.pipe_log.truncate_active_log(queue, offset)?;
                             break;
                         }
                         return Err(box_err!("Raft log content is corrupted"));
                     }
+                };
+                if queue == LogQueue::Append {
+                    let size = log_batch.entries_size();
+                    let mut submitor = self.pipe_log.cache_submitor();
+                    if let Some(tracker) = submitor.get_cache_tracker(file_num, offset, size) {
+                        for item in log_batch.items.iter_mut() {
+                            if let LogItemContent::Entries(entries) = &mut item.content {
+                                entries.attach_cache_tracker(tracker.clone());
+                            }
+                        }
+                    }
+                } else {
+                    // By default the queue is `LogQueue::Append`, so it's unnecessary.
+                    for item in log_batch.items.iter_mut() {
+                        if let LogItemContent::Entries(entries) = &mut item.content {
+                            entries.set_queue_when_recover(LogQueue::Rewrite);
+                        }
+                    }
                 }
+
+                self.apply_to_memtable(&mut log_batch, queue, file_num);
+                offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
             }
         }
         info!("Recover raft log takes {:?}", start.elapsed());
@@ -378,7 +400,7 @@ where
 impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone,
-    W: EntryExt<E> + 'static,
+    W: EntryExt<E> + Clone + 'static,
     P: GenericPipeLog + 'static,
 {
     /// Synchronize the Raft engine.
@@ -524,7 +546,7 @@ pub fn fetch_entries<E, W, P, F>(
 ) -> Result<()>
 where
     E: Message + Clone,
-    W: EntryExt<E>,
+    W: EntryExt<E> + Clone,
     P: GenericPipeLog,
     F: FnMut(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()>,
 {
@@ -542,7 +564,7 @@ where
 pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex) -> Result<E>
 where
     E: Message + Clone,
-    W: EntryExt<E>,
+    W: EntryExt<E> + Clone,
     P: GenericPipeLog,
 {
     let queue = entry_index.queue;
@@ -587,7 +609,7 @@ mod tests {
     impl<E, W, P> Engine<E, W, P>
     where
         E: Message + Clone,
-        W: EntryExt<E> + 'static,
+        W: EntryExt<E> + Clone + 'static,
         P: GenericPipeLog,
     {
         pub fn purge_manager(&self) -> &PurgeManager<E, W, P> {
@@ -748,6 +770,8 @@ mod tests {
 
     #[test]
     fn test_cache_limit() {
+        env_logger::init();
+
         let dir = tempfile::Builder::new()
             .prefix("test_recover_with_cache_limit")
             .tempdir()
@@ -772,7 +796,11 @@ mod tests {
         }
 
         let cache_size = engine.global_stats.cache_size();
-        assert!(cache_size <= 10 * 1024 * 1024);
+        assert!(
+            cache_size <= 10 * 1024 * 1024,
+            "cache size {} > 10M",
+            cache_size
+        );
 
         // Recover from log files.
         engine.stop();
