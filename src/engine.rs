@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use protobuf::Message;
 
 use crate::cache_evict::{
@@ -133,11 +133,20 @@ where
 {
     fn apply_to_memtable(&self, log_batch: &mut LogBatch<E, W>, queue: LogQueue, file_num: u64) {
         for item in log_batch.items.drain(..) {
-            let memtable = self.memtables.get_or_insert(item.raft_group_id);
+            let raft = item.raft_group_id;
+            let memtable = self.memtables.get_or_insert(raft);
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
                     let entries = entries_to_add.entries;
                     let entries_index = entries_to_add.entries_index;
+                    debug!(
+                        "{} append to {:?}.{}, Entries[{:?}:{:?})",
+                        raft,
+                        queue,
+                        file_num,
+                        entries_index.first().map(|x| x.index),
+                        entries_index.last().map(|x| x.index + 1),
+                    );
                     if queue == LogQueue::Rewrite {
                         memtable.wl().append_rewrite(entries, entries_index);
                     } else {
@@ -145,23 +154,45 @@ where
                     }
                 }
                 LogItemContent::Command(Command::Clean) => {
-                    if self.memtables.remove(item.raft_group_id).is_some() {
-                        self.purge_manager
-                            .remove_memtable(file_num, item.raft_group_id);
+                    debug!("{} append to {:?}.{}, Clean", raft, queue, file_num);
+                    if self.memtables.remove(raft).is_some() {
+                        self.purge_manager.remove_memtable(file_num, raft);
                     }
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
+                    debug!(
+                        "{} append to {:?}.{}, Compact({})",
+                        raft, queue, file_num, index
+                    );
                     memtable.wl().compact_to(index);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => {
                         let (key, value) = (kv.key, kv.value.unwrap());
+                        debug!(
+                            "{} append to {:?}.{}, Put({}, {})",
+                            raft,
+                            queue,
+                            file_num,
+                            hex::encode(&key),
+                            hex::encode(&value)
+                        );
                         match queue {
                             LogQueue::Append => memtable.wl().put(key, value, file_num),
                             LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_num),
                         }
                     }
-                    OpType::Del => memtable.wl().delete(kv.key.as_slice()),
+                    OpType::Del => {
+                        let key = kv.key;
+                        debug!(
+                            "{} append to {:?}.{}, Del({})",
+                            raft,
+                            queue,
+                            file_num,
+                            hex::encode(&key),
+                        );
+                        memtable.wl().delete(key.as_slice());
+                    }
                 },
             }
         }

@@ -2,7 +2,7 @@ use std::cmp::{self, Reverse};
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use log::info;
+use log::{debug, info};
 use protobuf::Message;
 
 use crate::config::Config;
@@ -276,19 +276,39 @@ where
         file_num: u64,
         latest_rewrite: Option<u64>,
     ) {
+        let queue = LogQueue::Rewrite;
         for item in log_batch.items.drain(..) {
-            let memtable = self.memtables.get_or_insert(item.raft_group_id);
+            let raft = item.raft_group_id;
+            let memtable = self.memtables.get_or_insert(raft);
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
-                    memtable
-                        .wl()
-                        .rewrite(entries_to_add.entries_index, latest_rewrite);
+                    let entries_index = entries_to_add.entries_index;
+                    debug!(
+                        "{} append to {:?}.{}, Entries[{:?}:{:?})",
+                        raft,
+                        queue,
+                        file_num,
+                        entries_index.first().map(|x| x.index),
+                        entries_index.last().map(|x| x.index + 1),
+                    );
+                    memtable.wl().rewrite(entries_index, latest_rewrite);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
-                    OpType::Put => memtable.wl().rewrite_key(kv.key, latest_rewrite, file_num),
+                    OpType::Put => {
+                        let key = kv.key;
+                        debug!(
+                            "{} append to {:?}.{}, Put({})",
+                            raft,
+                            queue,
+                            file_num,
+                            hex::encode(&key),
+                        );
+                        memtable.wl().rewrite_key(key, latest_rewrite, file_num);
+                    }
                     _ => unreachable!(),
                 },
                 LogItemContent::Command(Command::Clean) => {
+                    debug!("{} append to {:?}.{}, Clean", raft, queue, file_num);
                     // Nothing need to do.
                 }
                 _ => unreachable!(),
