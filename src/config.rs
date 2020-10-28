@@ -36,6 +36,11 @@ pub struct Config {
 
     /// Total size limit to cache log entries.
     pub cache_limit: ReadableSize,
+
+    /// Compress a log batch if its size is greater than `batch_compression_threshold`.
+    ///
+    /// Set to `0` will disable compression.
+    pub batch_compression_threshold: ReadableSize,
 }
 
 impl Default for Config {
@@ -47,6 +52,7 @@ impl Default for Config {
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             cache_limit: ReadableSize::gb(1),
+            batch_compression_threshold: ReadableSize::kb(8),
         }
     }
 }

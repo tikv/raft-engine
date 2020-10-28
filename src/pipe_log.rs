@@ -298,6 +298,7 @@ pub struct PipeLog {
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
+    compression_threshold: usize,
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
@@ -312,6 +313,7 @@ impl PipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
+            compression_threshold: cfg.batch_compression_threshold.0 as usize,
             appender,
             rewriter,
             cache_submitor: Arc::new(Mutex::new(cache_submitor)),
@@ -452,7 +454,7 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes() {
+        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut cache_submitor = self.cache_submitor.lock().unwrap();
             let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
@@ -481,7 +483,7 @@ impl GenericPipeLog for PipeLog {
         mut sync: bool,
         file_num: &mut u64,
     ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes() {
+        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
             let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
@@ -834,7 +836,7 @@ mod tests {
         let get_1m_batch = || {
             let mut entry = Entry::new();
             entry.set_data(vec![b'a'; 1024]); // 1K data.
-            let mut log_batch = LogBatch::<Entry, Entry>::new();
+            let mut log_batch = LogBatch::<Entry, Entry>::default();
             log_batch.add_entries(1, vec![entry]);
             log_batch
         };

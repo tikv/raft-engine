@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crossbeam::channel::{bounded, Sender};
-use log::{info, warn};
+use log::{debug, warn};
 use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
@@ -195,7 +195,7 @@ where
             let (read_len, chunk_content) = match self.read_chunk(&chunk) {
                 Ok((len, content)) => (len, content),
                 Err(e) => {
-                    info!("Evictor read chunk {:?} fail: {}", chunk, e);
+                    debug!("Evictor read chunk {:?} fail: {}", chunk, e);
                     continue;
                 }
             };
