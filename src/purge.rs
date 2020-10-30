@@ -73,6 +73,17 @@ where
         }
 
         let (rewrite_limit, compact_limit) = self.latest_inactive_file_num();
+        if !self
+            .pipe_log
+            .hooks()
+            .iter()
+            .all(|h| h.ready_for_purge(LogQueue::Append, rewrite_limit))
+        {
+            // Generally it means some entries or kvs are not written into memtables, skip.
+            debug!("Append file {} is not ready for purge", rewrite_limit);
+            return Ok(vec![]);
+        }
+
         let mut will_force_compact = Vec::new();
         self.regions_rewrite_or_force_compact(
             rewrite_limit,
@@ -84,19 +95,28 @@ where
             self.squeeze_rewrite_queue();
         }
 
-        let (min_file_1, min_file_2) =
-            self.memtables
-                .fold((u64::MAX, u64::MAX), |(mut min1, mut min2), t| {
-                    min1 = cmp::min(min1, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX));
-                    min2 = cmp::min(min2, t.min_file_num(LogQueue::Rewrite).unwrap_or(u64::MAX));
-                    (min1, min2)
-                });
-        let purged_1 = self.pipe_log.purge_to(LogQueue::Append, min_file_1)?;
-        info!("purged {} expired log files", purged_1);
+        let (min_file_1, min_file_2) = self.memtables.fold(
+            (
+                rewrite_limit + 1,
+                self.pipe_log.active_file_num(LogQueue::Rewrite),
+            ),
+            |(mut min1, mut min2), t| {
+                min1 = cmp::min(min1, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX));
+                min2 = cmp::min(min2, t.min_file_num(LogQueue::Rewrite).unwrap_or(u64::MAX));
+                (min1, min2)
+            },
+        );
+        assert!(min_file_1 > 0 && min_file_2 > 0);
 
-        if min_file_2 < self.pipe_log.active_file_num(LogQueue::Rewrite) {
-            let purged_2 = self.pipe_log.purge_to(LogQueue::Rewrite, min_file_2)?;
-            info!("purged {} expired rewrite files", purged_2);
+        for (purge_to, queue) in &[
+            (min_file_1, LogQueue::Append),
+            (min_file_2, LogQueue::Rewrite),
+        ] {
+            let purged = self.pipe_log.purge_to(*queue, *purge_to)?;
+            info!("purged {} expired log files for queue {:?}", purged, *queue);
+            for hook in self.pipe_log.hooks() {
+                hook.post_purge(*queue, *purge_to - 1);
+            }
         }
 
         Ok(will_force_compact)
@@ -138,20 +158,18 @@ where
         let compact_limit = (total_size * (1.0 - FORCE_COMPACT_RATIO)) as usize;
         let mut latest_needs_rewrite = self.pipe_log.latest_file_before(queue, rewrite_limit);
         let mut latest_needs_compact = self.pipe_log.latest_file_before(queue, compact_limit);
-        latest_needs_rewrite = cmp::min(latest_needs_rewrite, active_file_num);
-        latest_needs_compact = cmp::min(latest_needs_compact, active_file_num);
+        latest_needs_rewrite = cmp::min(latest_needs_rewrite, active_file_num - 1);
+        latest_needs_compact = cmp::min(latest_needs_compact, active_file_num - 1);
         (latest_needs_rewrite, latest_needs_compact)
     }
 
-    fn rewrite_queue_needs_squeeze(&self) -> bool {
+    pub fn rewrite_queue_needs_squeeze(&self) -> bool {
         // Squeeze the rewrite queue if its garbage ratio reaches 50%.
         let rewrite_operations = self.global_stats.rewrite_operations();
         let compacted_rewrite_operations = self.global_stats.compacted_rewrite_operations();
         compacted_rewrite_operations as f64 / rewrite_operations as f64 > 0.5
     }
 
-    // FIXME: We need to ensure that all operations before `latest_rewrite` (included) are written
-    // into memtables.
     fn regions_rewrite_or_force_compact(
         &self,
         latest_rewrite: u64,
@@ -241,7 +259,8 @@ where
                 log_batch.put(region_id, k, v);
             }
 
-            if total_size as usize > REWRITE_BATCH_SIZE {
+            let target_file_size = self.cfg.target_file_size.0 as usize;
+            if total_size as usize > cmp::min(REWRITE_BATCH_SIZE, target_file_size) {
                 self.rewrite_impl(&mut log_batch, rewrite, false).unwrap();
                 total_size = 0;
             }
@@ -266,6 +285,9 @@ where
         self.pipe_log.rewrite(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
+            for hook in self.pipe_log.hooks() {
+                hook.post_apply_memtables(LogQueue::Rewrite, file_num);
+            }
         }
         Ok(())
     }

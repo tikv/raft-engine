@@ -5,6 +5,7 @@ use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
+use log::trace;
 use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
@@ -156,10 +157,12 @@ impl<E: Message> Entries<E> {
     ) -> Result<Entries<E>> {
         let content_len = buf.len() as u64;
         let mut count = codec::decode_var_u64(buf)? as usize;
+        trace!("decoding entries, count: {}", count);
         let mut entries = Vec::with_capacity(count);
         let mut entries_index = Vec::with_capacity(count);
         while count > 0 {
             let len = codec::decode_var_u64(buf)? as usize;
+            trace!("decoding an entry, len: {}", len);
             let mut e = E::new();
             e.merge_from_bytes(&buf[..len])?;
 
@@ -184,10 +187,6 @@ impl<E: Message> Entries<E> {
     where
         W: EntryExt<E>,
     {
-        if self.entries.is_empty() {
-            return Ok(());
-        }
-
         // layout = { entries count | multiple entries }
         // entries layout = { entry layout | ... | entry layout }
         // entry layout = { len | entry content }
@@ -436,6 +435,7 @@ impl<E: Message> LogItem<E> {
         let buf_len = buf.len();
         let raft_group_id = codec::decode_var_u64(buf)?;
         batch_offset += (buf_len - buf.len()) as u64;
+        trace!("decoding log item for {}", raft_group_id);
         let item_type = buf.read_u8()?;
         batch_offset += 1;
         let content = match item_type {
@@ -451,10 +451,12 @@ impl<E: Message> LogItem<E> {
             }
             TYPE_COMMAND => {
                 let cmd = Command::from_bytes(buf)?;
+                trace!("decoding command: {:?}", cmd);
                 LogItemContent::Command(cmd)
             }
             TYPE_KV => {
                 let kv = KeyValue::from_bytes(buf)?;
+                trace!("decoding kv: {:?}", kv);
                 LogItemContent::Kv(kv)
             }
             _ => return Err(Error::Codec(CodecError::KeyNotFound)),
@@ -560,6 +562,7 @@ where
         let batch_len = header >> 8;
         let batch_type = CompressionType::from_byte(header as u8);
         test_batch_checksum(&buf[..batch_len])?;
+        trace!("decoding log batch({}, {:?})", batch_len, batch_type);
 
         let decompressed = match batch_type {
             CompressionType::None => Cow::Borrowed(&buf[..(batch_len - CHECKSUM_LEN)]),
@@ -668,23 +671,27 @@ mod tests {
 
     #[test]
     fn test_entries_enc_dec() {
-        let pb_entries = vec![Entry::new(); 10];
-        let file_num = 1;
-        let mut entries = Entries::new(pb_entries, None);
+        for pb_entries in vec![
+            vec![Entry::new(); 10],
+            vec![], // Empty entries.
+        ] {
+            let file_num = 1;
+            let mut entries = Entries::new(pb_entries, None);
 
-        let (mut encoded, mut entries_size1) = (vec![], 0);
-        entries
-            .encode_to::<Entry>(&mut encoded, &mut entries_size1)
-            .unwrap();
-        for idx in entries.entries_index.iter_mut() {
-            idx.file_num = file_num;
+            let (mut encoded, mut entries_size1) = (vec![], 0);
+            entries
+                .encode_to::<Entry>(&mut encoded, &mut entries_size1)
+                .unwrap();
+            for idx in entries.entries_index.iter_mut() {
+                idx.file_num = file_num;
+            }
+            let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
+            let decode_entries =
+                Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2).unwrap();
+            assert_eq!(s.len(), 0);
+            assert_eq!(entries.entries, decode_entries.entries);
+            assert_eq!(entries.entries_index, decode_entries.entries_index);
         }
-        let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
-        let decode_entries =
-            Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2).unwrap();
-        assert_eq!(s.len(), 0);
-        assert_eq!(entries.entries, decode_entries.entries);
-        assert_eq!(entries.entries_index, decode_entries.entries_index);
     }
 
     #[test]

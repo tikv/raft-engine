@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use std::{fmt, u64};
 
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use protobuf::Message;
 
 use crate::cache_evict::{
@@ -15,7 +15,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, FILE_MAGIC_HEADER, VERSION};
+use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, PipeLogHook, FILE_MAGIC_HEADER, VERSION};
 use crate::purge::PurgeManager;
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, GlobalStats, Result};
@@ -211,6 +211,9 @@ where
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
             self.apply_to_memtable(log_batch, LogQueue::Append, file_num);
+            for hook in self.pipe_log.hooks() {
+                hook.post_apply_memtables(LogQueue::Append, file_num);
+            }
         }
         Ok(bytes)
     }
@@ -231,29 +234,55 @@ struct Workers {
     cache_evict: Worker<CacheTask>,
 }
 
+// An internal structure for tests.
+struct EngineOptions {
+    chunk_limit: usize,
+    no_default_hooks: bool,
+    hooks: Vec<Arc<dyn PipeLogHook>>,
+}
+
+impl Default for EngineOptions {
+    fn default() -> EngineOptions {
+        EngineOptions {
+            chunk_limit: DEFAULT_CACHE_CHUNK_SIZE,
+            no_default_hooks: false,
+            hooks: vec![],
+        }
+    }
+}
+
 impl<E, W> Engine<E, W, PipeLog>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone + 'static,
 {
     pub fn new(cfg: Config) -> Engine<E, W, PipeLog> {
-        Self::new_impl(cfg, DEFAULT_CACHE_CHUNK_SIZE).unwrap()
+        let options = Default::default();
+        Self::with_options(cfg, options).unwrap()
     }
 
-    fn new_impl(cfg: Config, chunk_limit: usize) -> Result<Engine<E, W, PipeLog>> {
+    fn with_options(cfg: Config, options: EngineOptions) -> Result<Engine<E, W, PipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let global_stats = Arc::new(GlobalStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
+        let mut hooks = vec![];
+        if !options.no_default_hooks {
+            hooks.push(global_stats.clone() as Arc<dyn PipeLogHook>);
+        }
+        for hook in options.hooks {
+            hooks.push(hook);
+        }
         let pipe_log = PipeLog::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
-                chunk_limit,
+                options.chunk_limit,
                 cache_evict_worker.scheduler(),
                 global_stats.clone(),
             ),
+            hooks,
         )
         .expect("Open raft log");
 
@@ -265,7 +294,7 @@ where
         let cache_evict_runner = CacheEvictRunner::new(
             cache_limit,
             global_stats.clone(),
-            chunk_limit,
+            options.chunk_limit,
             memtables.clone(),
             pipe_log.clone(),
         );
@@ -323,6 +352,7 @@ where
         // Get first file number and last file number.
         let first_file_num = self.pipe_log.first_file_num(queue);
         let active_file_num = self.pipe_log.active_file_num(queue);
+        trace!("recovering queue {:?}", queue);
 
         // Iterate and recover from files one by one.
         let start = Instant::now();
@@ -347,6 +377,7 @@ where
             buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
             let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
             loop {
+                debug!("recovering log batch at {}.{}", file_num, offset);
                 let mut log_batch = match LogBatch::from_bytes(&mut buf, file_num, offset) {
                     Ok(Some(log_batch)) => log_batch,
                     Ok(None) => {
@@ -627,9 +658,11 @@ mod tests {
     }
 
     fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
-        engine.append(raft, vec![entry.clone()]).unwrap();
+        let mut log_batch = LogBatch::default();
+        log_batch.add_entries(raft, vec![entry.clone()]);
         let last_index = format!("{}", entry.index).into_bytes();
-        engine.put(raft, b"last_index", &last_index).unwrap();
+        log_batch.put(raft, b"last_index".to_vec(), last_index);
+        engine.write(&mut log_batch, false).unwrap();
     }
 
     fn last_index(engine: &RaftLogEngine, raft: u64) -> u64 {
@@ -770,8 +803,6 @@ mod tests {
 
     #[test]
     fn test_cache_limit() {
-        env_logger::init();
-
         let dir = tempfile::Builder::new()
             .prefix("test_recover_with_cache_limit")
             .tempdir()
@@ -783,7 +814,9 @@ mod tests {
         cfg.target_file_size = ReadableSize::mb(8);
         cfg.cache_limit = ReadableSize::mb(10);
 
-        let engine = RaftLogEngine::new_impl(cfg.clone(), 512 * 1024).unwrap();
+        let mut options = EngineOptions::default();
+        options.chunk_limit = 512 * 1024;
+        let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
 
         // Append some entries with total size 100M.
         let mut entry = Entry::new();
@@ -805,7 +838,10 @@ mod tests {
         // Recover from log files.
         engine.stop();
         drop(engine);
-        let engine = RaftLogEngine::new_impl(cfg.clone(), 512 * 1024).unwrap();
+        let mut options = EngineOptions::default();
+        options.chunk_limit = 512 * 1024;
+        let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
+
         let cache_size = engine.global_stats.cache_size();
         assert!(cache_size <= 10 * 1024 * 1024);
 
@@ -979,5 +1015,178 @@ mod tests {
         drop(engine);
         let engine = RaftLogEngine::new(cfg.clone());
         assert!(engine.memtables.get(1).is_none());
+    }
+
+    #[test]
+    fn test_pipe_log_hooks() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct QueueHook {
+            files: AtomicUsize,
+            batches: AtomicUsize,
+            applys: AtomicUsize,
+            purged: AtomicU64,
+        }
+        impl QueueHook {
+            fn files(&self) -> usize {
+                self.files.load(Ordering::Acquire)
+            }
+            fn batches(&self) -> usize {
+                self.batches.load(Ordering::Acquire)
+            }
+            fn applys(&self) -> usize {
+                self.applys.load(Ordering::Acquire)
+            }
+            fn purged(&self) -> u64 {
+                self.purged.load(Ordering::Acquire)
+            }
+        }
+
+        struct Hook(HashMap<LogQueue, QueueHook>);
+        impl Default for Hook {
+            fn default() -> Hook {
+                let mut hash = HashMap::default();
+                hash.insert(LogQueue::Append, QueueHook::default());
+                hash.insert(LogQueue::Rewrite, QueueHook::default());
+                Hook(hash)
+            }
+        }
+
+        impl PipeLogHook for Hook {
+            fn post_new_log_file(&self, queue: LogQueue, _: u64) {
+                self.0[&queue].files.fetch_add(1, Ordering::Release);
+            }
+
+            fn on_append_log_file(&self, queue: LogQueue, _: u64) {
+                self.0[&queue].batches.fetch_add(1, Ordering::Release);
+            }
+
+            fn post_apply_memtables(&self, queue: LogQueue, _: u64) {
+                self.0[&queue].applys.fetch_add(1, Ordering::Release);
+            }
+
+            fn ready_for_purge(&self, _: LogQueue, _: u64) -> bool {
+                // To test the default hook's logic.
+                true
+            }
+
+            fn post_purge(&self, queue: LogQueue, file_num: u64) {
+                self.0[&queue].purged.store(file_num, Ordering::Release);
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("test_clean_raft_with_rewrite")
+            .tempdir()
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        cfg.target_file_size = ReadableSize::kb(128);
+        cfg.purge_threshold = ReadableSize::kb(512);
+        cfg.cache_limit = ReadableSize::kb(0);
+        cfg.batch_compression_threshold = ReadableSize::kb(0);
+
+        let hook = Arc::new(Hook::default());
+
+        let mut options = EngineOptions::default();
+        options.hooks = vec![hook.clone()];
+        let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
+        assert_eq!(hook.0[&LogQueue::Append].files(), 1);
+        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 1);
+
+        let mut entry = Entry::new();
+        entry.set_data(vec![b'x'; 64 * 1024]);
+
+        // Append 10 logs for region 1, 10 logs for region 2.
+        for i in 1..=20 {
+            let region_id = (i as u64 - 1) % 2 + 1;
+            entry.set_index((i as u64 + 1) / 2);
+            append_log(&engine, region_id, &entry);
+            assert_eq!(hook.0[&LogQueue::Append].batches(), i);
+            assert_eq!(hook.0[&LogQueue::Append].applys(), i);
+        }
+        assert_eq!(hook.0[&LogQueue::Append].files(), 10);
+
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        engine.purge_manager.purge_expired_files().unwrap();
+        assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
+
+        // All things in a region will in one write batch.
+        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].batches(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].applys(), 2);
+
+        // Compact so that almost all content of rewrite queue will become garbage.
+        for i in 21..=30 {
+            let region_id = (i as u64 - 1) % 2 + 1;
+            entry.set_index((i as u64 + 1) / 2);
+            append_log(&engine, region_id, &entry);
+            assert_eq!(hook.0[&LogQueue::Append].batches(), i);
+            assert_eq!(hook.0[&LogQueue::Append].applys(), i);
+        }
+        engine.compact_to(1, 28);
+        engine.compact_to(2, 28);
+        assert_eq!(hook.0[&LogQueue::Append].batches(), 32);
+        assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
+        assert!(engine.purge_manager.rewrite_queue_needs_squeeze());
+
+        engine.purge_manager.purge_expired_files().unwrap();
+        assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
+        assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
+
+        // Use an another thread to lock memtable of region 3.
+        let (tx, rx) = mpsc::sync_channel(1);
+        let table_3 = engine.memtables.get_or_insert(3);
+        let th1 = std::thread::spawn(move || {
+            let x = table_3.rl();
+            let _ = rx.recv().unwrap();
+            drop(x);
+        });
+
+        // Use an another thread to push something to region 3.
+        let engine_clone = engine.clone();
+        let mut entry_clone = entry.clone();
+        let th2 = std::thread::spawn(move || {
+            entry_clone.set_index(1);
+            append_log(&engine_clone, 3, &entry_clone);
+        });
+
+        // Sleep a while to wait the log batch `Append(3, [1])` to get written.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(hook.0[&LogQueue::Append].batches(), 33);
+        assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
+
+        for i in 31..=40 {
+            let region_id = (i as u64 - 1) % 2 + 1;
+            entry.set_index((i as u64 + 1) / 2);
+            append_log(&engine, region_id, &entry);
+            assert_eq!(hook.0[&LogQueue::Append].batches(), i + 3);
+            assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
+        }
+
+        // Can't purge because `purge_pender` is still not written to memtables.
+        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        let old_first = engine.pipe_log.first_file_num(LogQueue::Append);
+        engine.purge_manager.purge_expired_files().unwrap();
+        let new_first = engine.pipe_log.first_file_num(LogQueue::Append);
+        assert_eq!(old_first, new_first);
+
+        // Release the lock on region 3. Then can purge.
+        tx.send(0i32).unwrap();
+        th1.join().unwrap();
+        th2.join().unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        engine.purge_manager.purge_expired_files().unwrap();
+        let new_first = engine.pipe_log.first_file_num(LogQueue::Append);
+        assert_ne!(old_first, new_first);
+
+        // Drop and then recover.
+        drop(engine);
+        drop(RaftLogEngine::new(cfg));
     }
 }

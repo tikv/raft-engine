@@ -99,6 +99,25 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64>;
 
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
+
+    fn hooks(&self) -> &[Arc<dyn PipeLogHook>];
+}
+
+pub trait PipeLogHook: Sync + Send {
+    /// Called *after* a new log file is created.
+    fn post_new_log_file(&self, queue: LogQueue, file_num: u64);
+
+    /// Called *before* a log batch has been appended into a log file.
+    fn on_append_log_file(&self, queue: LogQueue, file_num: u64);
+
+    /// Called *after* a log batch has been applied to memtables.
+    fn post_apply_memtables(&self, queue: LogQueue, file_num: u64);
+
+    /// Test whether a log file can be purged or not.
+    fn ready_for_purge(&self, queue: LogQueue, file_num: u64) -> bool;
+
+    /// Called *after* a log file get purged.
+    fn post_purge(&self, queue: LogQueue, file_num: u64);
 }
 
 pub struct LogFd(RawFd);
@@ -125,6 +144,7 @@ struct LogManager {
     rotate_size: usize,
     bytes_per_sync: usize,
     name_suffix: &'static str,
+    hooks: Vec<Arc<dyn PipeLogHook>>,
 
     pub first_file_num: u64,
     pub active_file_num: u64,
@@ -143,6 +163,7 @@ impl LogManager {
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             name_suffix,
+            hooks: vec![],
 
             first_file_num: INIT_FILE_NUM,
             active_file_num: 0,
@@ -162,12 +183,16 @@ impl LogManager {
         if !logs.is_empty() {
             self.first_file_num = min_file_num;
             self.active_file_num = max_file_num;
+            let queue = queue_from_suffix(self.name_suffix);
 
-            for file_name in &logs[0..logs.len() - 1] {
+            for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
                 path.push(file_name);
                 let fd = Arc::new(LogFd(open_frozen_file(&path)?));
                 self.all_files.push_back(fd);
+                for hook in &self.hooks {
+                    hook.post_new_log_file(queue, self.first_file_num + i as u64);
+                }
             }
 
             let mut path = PathBuf::from(&self.dir);
@@ -179,6 +204,10 @@ impl LogManager {
             self.active_log_capacity = self.active_log_size;
             self.last_sync_size = self.active_log_size;
             self.all_files.push_back(fd);
+
+            for hook in &self.hooks {
+                hook.post_new_log_file(queue, self.active_file_num);
+            }
         }
         Ok(())
     }
@@ -187,7 +216,6 @@ impl LogManager {
         if self.active_file_num > 0 {
             self.truncate_active_log(None)?;
         }
-
         self.active_file_num += 1;
 
         let mut path = PathBuf::from(&self.dir);
@@ -199,6 +227,12 @@ impl LogManager {
         self.active_log_capacity = bytes;
         self.last_sync_size = 0;
         self.all_files.push_back(fd);
+
+        for hook in &self.hooks {
+            let queue = queue_from_suffix(&self.name_suffix);
+            hook.post_new_log_file(queue, self.active_file_num);
+        }
+
         Ok(())
     }
 
@@ -287,7 +321,7 @@ impl LogManager {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LogQueue {
     Append,
     Rewrite,
@@ -303,12 +337,19 @@ pub struct PipeLog {
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
     cache_submitor: Arc<Mutex<CacheSubmitor>>,
+    hooks: Vec<Arc<dyn PipeLogHook>>,
 }
 
 impl PipeLog {
-    fn new(cfg: &Config, cache_submitor: CacheSubmitor) -> PipeLog {
+    fn new(
+        cfg: &Config,
+        cache_submitor: CacheSubmitor,
+        hooks: Vec<Arc<dyn PipeLogHook>>,
+    ) -> PipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, REWRITE_SUFFIX)));
+        appender.wl().hooks = hooks.clone();
+        rewriter.wl().hooks = hooks.clone();
         PipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -317,10 +358,15 @@ impl PipeLog {
             appender,
             rewriter,
             cache_submitor: Arc::new(Mutex::new(cache_submitor)),
+            hooks,
         }
     }
 
-    pub fn open(cfg: &Config, cache_submitor: CacheSubmitor) -> Result<PipeLog> {
+    pub fn open(
+        cfg: &Config,
+        cache_submitor: CacheSubmitor,
+        hooks: Vec<Arc<dyn PipeLogHook>>,
+    ) -> Result<PipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -330,7 +376,7 @@ impl PipeLog {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let pipe_log = PipeLog::new(cfg, cache_submitor);
+        let pipe_log = PipeLog::new(cfg, cache_submitor, hooks);
 
         let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
@@ -437,6 +483,10 @@ impl GenericPipeLog for PipeLog {
         sync: &mut bool,
     ) -> Result<(u64, u64, Arc<LogFd>)> {
         let (file_num, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+        for hook in &self.hooks {
+            hook.on_append_log_file(queue, file_num);
+        }
+
         pwrite_exact(fd.0, offset, content)?;
         Ok((file_num, offset, fd))
     }
@@ -579,6 +629,10 @@ impl GenericPipeLog for PipeLog {
     fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {
         self.cache_submitor.lock().unwrap()
     }
+
+    fn hooks(&self) -> &[Arc<dyn PipeLogHook>] {
+        &self.hooks
+    }
 }
 
 fn generate_file_name(file_num: u64, suffix: &'static str) -> String {
@@ -605,6 +659,14 @@ fn is_log_file(file_name: &str) -> bool {
 
 fn is_rewrite_file(file_name: &str) -> bool {
     file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN
+}
+
+fn queue_from_suffix(suffix: &str) -> LogQueue {
+    match suffix {
+        LOG_SUFFIX => LogQueue::Append,
+        REWRITE_SUFFIX => LogQueue::Rewrite,
+        _ => unreachable!(),
+    }
 }
 
 fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
@@ -699,7 +761,7 @@ mod tests {
         let mut worker = Worker::new("test".to_owned(), None);
         let stats = Arc::new(GlobalStats::default());
         let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
-        let log = PipeLog::open(&cfg, submitor).unwrap();
+        let log = PipeLog::open(&cfg, submitor, vec![]).unwrap();
         (log, worker.take_receiver())
     }
 
