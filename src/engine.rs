@@ -16,7 +16,7 @@ use crate::log_batch::{
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLog, PipeLogHook, FILE_MAGIC_HEADER, VERSION};
-use crate::purge::PurgeManager;
+use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, GlobalStats, Result};
 
@@ -269,7 +269,8 @@ where
 
         let mut hooks = vec![];
         if !options.no_default_hooks {
-            hooks.push(global_stats.clone() as Arc<dyn PipeLogHook>);
+            let hook = Arc::new(PurgeHook::default()) as Arc<dyn PipeLogHook>;
+            hooks.push(hook);
         }
         for hook in options.hooks {
             hooks.push(hook);

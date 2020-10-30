@@ -1,5 +1,7 @@
 use std::cmp::{self, Reverse};
 use std::collections::BinaryHeap;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use log::{debug, info};
@@ -9,7 +11,7 @@ use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{GenericPipeLog, LogQueue};
+use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLogHook};
 use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
 
@@ -334,6 +336,79 @@ where
                     // Nothing need to do.
                 }
                 _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct PurgeHook {
+    // There could be a gap between a write batch is written into a file and applied to memtables.
+    // If a log-rewrite happens at the time, entries and kvs in the batch can be omited. So after
+    // the log file gets purged, those entries and kvs will be lost.
+    //
+    // This field is used to forbid the bad case. Log files `active_log_files` can't be purged.
+    // It's only used for the append queue. The rewrite queue doesn't need this.
+    active_log_files: RwLock<VecDeque<(u64, AtomicUsize)>>,
+}
+
+impl PipeLogHook for PurgeHook {
+    fn post_new_log_file(&self, queue: LogQueue, file_num: u64) {
+        if queue == LogQueue::Append {
+            let mut active_log_files = self.active_log_files.wl();
+            if let Some(num) = active_log_files.back().map(|x| x.0) {
+                assert_eq!(num + 1, file_num, "active log files should be contiguous");
+            }
+            let counter = AtomicUsize::new(0);
+            active_log_files.push_back((file_num, counter));
+        }
+    }
+
+    fn on_append_log_file(&self, queue: LogQueue, file_num: u64) {
+        if queue == LogQueue::Append {
+            let active_log_files = self.active_log_files.rl();
+            assert!(!active_log_files.is_empty());
+            let front = active_log_files[0].0;
+            let counter = &active_log_files[(file_num - front) as usize].1;
+            counter.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    fn post_apply_memtables(&self, queue: LogQueue, file_num: u64) {
+        if queue == LogQueue::Append {
+            let active_log_files = self.active_log_files.rl();
+            assert!(!active_log_files.is_empty());
+            let front = active_log_files[0].0;
+            let counter = &active_log_files[(file_num - front) as usize].1;
+            counter.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    fn ready_for_purge(&self, queue: LogQueue, file_num: u64) -> bool {
+        if queue == LogQueue::Append {
+            let active_log_files = self.active_log_files.rl();
+            assert!(!active_log_files.is_empty());
+            let front = active_log_files[0].0;
+            for (i, n) in (front..=file_num).enumerate() {
+                assert_eq!(active_log_files[i].0, n);
+                let counter = &active_log_files[i].1;
+                if counter.load(Ordering::Acquire) > 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn post_purge(&self, queue: LogQueue, file_num: u64) {
+        if queue == LogQueue::Append {
+            let mut active_log_files = self.active_log_files.wl();
+            assert!(!active_log_files.is_empty());
+            let front = active_log_files[0].0;
+            for x in front..=file_num {
+                let (y, counter) = active_log_files.pop_front().unwrap();
+                assert_eq!(x, y);
+                assert_eq!(counter.load(Ordering::Acquire), 0);
             }
         }
     }
