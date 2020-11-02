@@ -227,12 +227,19 @@ impl LogManager {
         self.active_log_capacity = bytes;
         self.last_sync_size = 0;
         self.all_files.push_back(fd);
+        self.sync_dir()?;
 
         for hook in &self.hooks {
             let queue = queue_from_suffix(&self.name_suffix);
             hook.post_new_log_file(queue, self.active_file_num);
         }
 
+        Ok(())
+    }
+
+    fn sync_dir(&self) -> Result<()> {
+        let path = PathBuf::from(&self.dir);
+        std::fs::File::open(path).and_then(|d| d.sync_all())?;
         Ok(())
     }
 
@@ -243,7 +250,6 @@ impl LogManager {
                 let io_error = IoError::new(IoErrorKind::UnexpectedEof, "truncate");
                 return Err(Error::Io(io_error));
             }
-            cmp::Ordering::Equal => return Ok(()),
             _ => {}
         }
         let active_fd = self.get_active_fd().unwrap();
