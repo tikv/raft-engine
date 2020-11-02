@@ -245,12 +245,9 @@ impl LogManager {
 
     fn truncate_active_log(&mut self, offset: Option<usize>) -> Result<()> {
         let mut offset = offset.unwrap_or(self.active_log_size);
-        match offset.cmp(&self.active_log_size) {
-            cmp::Ordering::Greater => {
-                let io_error = IoError::new(IoErrorKind::UnexpectedEof, "truncate");
-                return Err(Error::Io(io_error));
-            }
-            _ => {}
+        if offset > self.active_log_size {
+            let io_error = IoError::new(IoErrorKind::UnexpectedEof, "truncate");
+            return Err(Error::Io(io_error));
         }
         let active_fd = self.get_active_fd().unwrap();
         ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;

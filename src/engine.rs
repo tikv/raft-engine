@@ -237,7 +237,6 @@ struct Workers {
 // An internal structure for tests.
 struct EngineOptions {
     chunk_limit: usize,
-    no_default_hooks: bool,
     hooks: Vec<Arc<dyn PipeLogHook>>,
 }
 
@@ -245,7 +244,6 @@ impl Default for EngineOptions {
     fn default() -> EngineOptions {
         EngineOptions {
             chunk_limit: DEFAULT_CACHE_CHUNK_SIZE,
-            no_default_hooks: false,
             hooks: vec![],
         }
     }
@@ -261,20 +259,14 @@ where
         Self::with_options(cfg, options).unwrap()
     }
 
-    fn with_options(cfg: Config, options: EngineOptions) -> Result<Engine<E, W, PipeLog>> {
+    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, PipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let global_stats = Arc::new(GlobalStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut hooks = vec![];
-        if !options.no_default_hooks {
-            let hook = Arc::new(PurgeHook::default()) as Arc<dyn PipeLogHook>;
-            hooks.push(hook);
-        }
-        for hook in options.hooks {
-            hooks.push(hook);
-        }
+        let mut hooks = vec![Arc::new(PurgeHook::default()) as Arc<dyn PipeLogHook>];
+        hooks.extend(options.hooks.drain(..));
         let pipe_log = PipeLog::open(
             &cfg,
             CacheSubmitor::new(
