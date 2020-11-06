@@ -1140,6 +1140,8 @@ mod tests {
             drop(x);
         });
 
+        std::thread::sleep(Duration::from_millis(200));
+
         // Use an another thread to push something to region 3.
         let engine_clone = engine.clone();
         let mut entry_clone = entry.clone();
@@ -1149,7 +1151,7 @@ mod tests {
         });
 
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(200));
         assert_eq!(hook.0[&LogQueue::Append].batches(), 33);
         assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
 
