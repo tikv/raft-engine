@@ -112,6 +112,11 @@ mod tests {
     use crate::log_batch::EntryExt;
     use raft::eraftpb::Entry;
 
+    #[ctor::ctor]
+    fn init() {
+        env_logger::init();
+    }
+
     impl EntryExt<Entry> for Entry {
         fn index(e: &Entry) -> u64 {
             e.get_index()
