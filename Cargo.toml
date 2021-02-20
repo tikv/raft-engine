@@ -18,6 +18,12 @@ crossbeam = "0.7"
 thiserror = "1.0"
 hex = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows = "0.3.1"
+
+[target.'cfg(windows)'.build-dependencies]
+windows = "0.3.1"
+
 [dev-dependencies]
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 tempfile = "3.1"
