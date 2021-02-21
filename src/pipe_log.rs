@@ -27,6 +27,7 @@ mod bindings {
 use bindings::{
     windows::HString,
     windows::BOOL,
+    windows::win32::shell::{PathIsDirectoryW, PathFileExistsW},
     windows::win32::system_services::{HANDLE},
     windows::win32::file_system::{CreateFileW, FlushFileBuffers, SetFilePointerEx, SetEndOfFile, ReadFile, WriteFile, GetFileSizeEx},
     windows::win32::file_system::{FILE_ACCESS_FLAGS, FILE_SHARE_FLAGS, FILE_CREATE_FLAGS, FILE_FLAGS_AND_ATTRIBUTES},
@@ -740,16 +741,25 @@ fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
 
 #[cfg(target_os = "windows")]
 fn open_active_file(path: &PathBuf) -> Result<RawFd> {
-    let pathStr = path.as_path().as_os_str().to_str().unwrap();
-    let ptr = HString::from(pathStr).as_wide().as_ptr();
+    let path_str = path.as_path().as_os_str().to_str().unwrap();
+    let ptr = HString::from(path_str).as_wide().as_ptr();
     unsafe {
+        let mut create_disposition = FILE_CREATE_FLAGS::CREATE_NEW;
+        let mut flag = FILE_FLAGS_AND_ATTRIBUTES::FILE_ATTRIBUTE_NORMAL;
+        if (PathFileExistsW(ptr) == BOOL(1)) {
+            create_disposition = FILE_CREATE_FLAGS::OPEN_EXISTING;
+            if (PathIsDirectoryW(ptr) == BOOL(1)) {
+                flag = FILE_FLAGS_AND_ATTRIBUTES(0x80 | 0x02000000); // FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS
+            }
+        }
+
         match CreateFileW(
             ptr,
-            FILE_ACCESS_FLAGS::FILE_GENERIC_WRITE,
-            FILE_SHARE_FLAGS(3),
+            FILE_ACCESS_FLAGS::FILE_ALL_ACCESS,
+            FILE_SHARE_FLAGS(7), // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null_mut(),
-            FILE_CREATE_FLAGS::CREATE_NEW,
-            FILE_FLAGS_AND_ATTRIBUTES::FILE_ATTRIBUTE_NORMAL,
+            create_disposition,
+            flag,
             HANDLE::default()
         ) {
             HANDLE(-1) => Err(Error::Io(std::io::Error::last_os_error())),
@@ -769,13 +779,19 @@ fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
 fn open_frozen_file(path: &PathBuf) -> Result<RawFd> {
     let ptr = HString::from(path.as_path().as_os_str().to_str().unwrap()).as_wide().as_ptr();
     unsafe {
+        let mut flag = FILE_FLAGS_AND_ATTRIBUTES::FILE_ATTRIBUTE_READONLY;
+        if (PathFileExistsW(ptr) == BOOL(1)) {
+            if (PathIsDirectoryW(ptr) == BOOL(1)) {
+                flag = FILE_FLAGS_AND_ATTRIBUTES(0x80 | 0x02000000); // FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS
+            }
+        }
         match CreateFileW(
             ptr,
             FILE_ACCESS_FLAGS::FILE_GENERIC_READ,
-            FILE_SHARE_FLAGS::FILE_SHARE_WRITE,
+            FILE_SHARE_FLAGS(7), // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null_mut(),
             FILE_CREATE_FLAGS::OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES::FILE_ATTRIBUTE_READONLY,
+            flag,
             HANDLE::default()
         ) {
             HANDLE(-1) => Err(Error::Io(std::io::Error::last_os_error())),
