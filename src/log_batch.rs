@@ -111,8 +111,8 @@ impl CompressionType {
         unsafe { mem::transmute(t) }
     }
 
-    pub fn to_byte(&self) -> u8 {
-        *self as u8
+    pub fn to_byte(self) -> u8 {
+        self as u8
     }
 }
 
@@ -166,12 +166,14 @@ impl<E: Message> Entries<E> {
             let mut e = E::new();
             e.merge_from_bytes(&buf[..len])?;
 
-            let mut entry_index = EntryIndex::default();
-            entry_index.index = W::index(&e);
-            entry_index.file_num = file_num;
-            entry_index.base_offset = base_offset;
-            entry_index.offset = batch_offset + content_len - buf.len() as u64;
-            entry_index.len = len as u64;
+            let entry_index = EntryIndex {
+                index: W::index(&e),
+                file_num,
+                base_offset,
+                offset: batch_offset + content_len - buf.len() as u64,
+                len: len as u64,
+                ..Default::default()
+            };
             *entries_size += entry_index.len as usize;
 
             buf.consume(len);

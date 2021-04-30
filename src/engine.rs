@@ -1,7 +1,9 @@
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::io::BufRead;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use std::{fmt, u64};
+use std::{fmt, mem, u64};
 
 use log::{debug, info, trace, warn};
 use protobuf::Message;
@@ -29,6 +31,10 @@ type MemTables<E, W> = HashMap<u64, Arc<RwLock<MemTable<E, W>>>>;
 pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>> {
     slots: Vec<Arc<RwLock<MemTables<E, W>>>>,
     creator: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>,
+
+    // Vector of (file_num, raft_group_id).
+    #[allow(clippy::type_complexity)]
+    removed_memtables: Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>,
 }
 
 impl<E, W> Clone for MemTableAccessor<E, W>
@@ -40,6 +46,7 @@ where
         Self {
             slots: self.slots.clone(),
             creator: self.creator.clone(),
+            removed_memtables: self.removed_memtables.clone(),
         }
     }
 }
@@ -56,13 +63,16 @@ where
         for _ in 0..SLOTS_COUNT {
             slots.push(Arc::new(RwLock::new(MemTables::default())));
         }
-        MemTableAccessor { slots, creator }
+        let removed_memtables = Default::default();
+        MemTableAccessor {
+            slots,
+            creator,
+            removed_memtables,
+        }
     }
 
     pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable<E, W>>> {
-        let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
-            .write()
-            .unwrap();
+        let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT].wl();
         let memtable = memtables
             .entry(raft_group_id)
             .or_insert_with(|| Arc::new(RwLock::new((self.creator)(raft_group_id))));
@@ -70,17 +80,26 @@ where
     }
 
     pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<E, W>>>> {
-        let memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
-            .read()
-            .unwrap();
-        memtables.get(&raft_group_id).cloned()
+        self.slots[raft_group_id as usize % SLOTS_COUNT]
+            .rl()
+            .get(&raft_group_id)
+            .cloned()
     }
 
-    pub fn remove(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<E, W>>>> {
-        let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT]
-            .write()
-            .unwrap();
-        memtables.remove(&raft_group_id)
+    pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable<E, W>>>) {
+        self.slots[raft_group_id as usize % SLOTS_COUNT]
+            .wl()
+            .insert(raft_group_id, memtable);
+    }
+
+    pub fn remove(&self, raft_group_id: u64, queue: LogQueue, file_num: u64) {
+        self.slots[raft_group_id as usize % SLOTS_COUNT]
+            .wl()
+            .remove(&raft_group_id);
+        if queue == LogQueue::Append {
+            let mut tables = self.removed_memtables.lock().unwrap();
+            tables.push((Reverse(file_num), raft_group_id));
+        }
     }
 
     pub fn fold<B, F: Fn(B, &MemTable<E, W>) -> B>(&self, mut init: B, fold: F) -> B {
@@ -107,6 +126,30 @@ where
         }
         memtables
     }
+
+    pub fn take_cleaned_rafts(&self, rewrite_file_num: u64) -> LogBatch<E, W> {
+        let mut log_batch = LogBatch::<E, W>::default();
+        let mut removed_memtables = self.removed_memtables.lock().unwrap();
+        while let Some(item) = removed_memtables.pop() {
+            let (file_num, raft_id) = ((item.0).0, item.1);
+            if file_num > rewrite_file_num {
+                removed_memtables.push(item);
+                break;
+            }
+            log_batch.clean_region(raft_id);
+        }
+        log_batch
+    }
+
+    // Only used for recover.
+    pub fn cleaned_rafts(&self) -> HashSet<u64> {
+        let mut cleaned_rafts = HashSet::default();
+        let removed_memtables = self.removed_memtables.lock().unwrap();
+        for (_, raft_id) in &*removed_memtables {
+            cleaned_rafts.insert(*raft_id);
+        }
+        cleaned_rafts
+    }
 }
 
 #[derive(Clone)]
@@ -117,7 +160,7 @@ where
     P: GenericPipeLog,
 {
     cfg: Arc<Config>,
-    memtables: MemTableAccessor<E, W>,
+    pub(crate) memtables: MemTableAccessor<E, W>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
     purge_manager: PurgeManager<E, W, P>,
@@ -131,10 +174,15 @@ where
     W: EntryExt<E> + Clone + 'static,
     P: GenericPipeLog,
 {
-    fn apply_to_memtable(&self, log_batch: &mut LogBatch<E, W>, queue: LogQueue, file_num: u64) {
+    fn apply_to_memtable(
+        memtables: &MemTableAccessor<E, W>,
+        log_batch: &mut LogBatch<E, W>,
+        queue: LogQueue,
+        file_num: u64,
+    ) {
         for item in log_batch.items.drain(..) {
             let raft = item.raft_group_id;
-            let memtable = self.memtables.get_or_insert(raft);
+            let memtable = memtables.get_or_insert(raft);
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
                     let entries = entries_to_add.entries;
@@ -156,9 +204,7 @@ where
                 }
                 LogItemContent::Command(Command::Clean) => {
                     debug!("{} append to {:?}.{}, Clean", raft, queue, file_num);
-                    if self.memtables.remove(raft).is_some() {
-                        self.purge_manager.remove_memtable(file_num, raft);
-                    }
+                    memtables.remove(raft, queue, file_num);
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
                     debug!(
@@ -210,7 +256,7 @@ where
         let mut file_num = 0;
         let bytes = self.pipe_log.write(log_batch, sync, &mut file_num)?;
         if file_num > 0 {
-            self.apply_to_memtable(log_batch, LogQueue::Append, file_num);
+            Self::apply_to_memtable(&self.memtables, log_batch, LogQueue::Append, file_num);
             for hook in self.pipe_log.hooks() {
                 hook.post_apply_memtables(LogQueue::Append, file_num);
             }
@@ -320,20 +366,29 @@ where
     }
 
     fn recover_from_queues(&self) -> Result<()> {
-        // Recover the rewrite queue then recover the append queue.
-        let mut engine = self.clone();
-        engine.memtables = MemTableAccessor::new(self.memtables.creator.clone());
-        let rewrite_recover_mode = RecoveryMode::TolerateCorruptedTailRecords;
-        engine.recover(LogQueue::Rewrite, rewrite_recover_mode)?;
+        let rewrite_memtables = MemTableAccessor::new(self.memtables.creator.clone());
+        Self::recover(
+            &rewrite_memtables,
+            &self.pipe_log,
+            LogQueue::Rewrite,
+            RecoveryMode::TolerateCorruptedTailRecords,
+        )?;
 
-        self.recover(LogQueue::Append, self.cfg.recovery_mode)?;
+        Self::recover(
+            &self.memtables,
+            &self.pipe_log,
+            LogQueue::Append,
+            self.cfg.recovery_mode,
+        )?;
 
-        let (appends, rewrites) = (&self.memtables, &engine.memtables);
-        for i in 0..SLOTS_COUNT {
-            for (id, raft) in rewrites.slots[i].rl().iter() {
-                let mut raft_rewrite = raft.wl();
-                let raft_append = appends.get_or_insert(*id);
-                raft_append.wl().merge_lower_prio(&mut *raft_rewrite);
+        let cleaned_rafts = self.memtables.cleaned_rafts();
+        for slot in rewrite_memtables.slots.into_iter() {
+            for (id, raft_rewrite) in mem::take(&mut *slot.wl()) {
+                if let Some(raft_append) = self.memtables.get(id) {
+                    raft_append.wl().merge_lower_prio(&mut *raft_rewrite.wl());
+                } else if !cleaned_rafts.contains(&id) {
+                    self.memtables.insert(id, raft_rewrite);
+                }
             }
         }
 
@@ -341,17 +396,22 @@ where
     }
 
     // Recover from disk.
-    fn recover(&self, queue: LogQueue, recovery_mode: RecoveryMode) -> Result<()> {
+    fn recover(
+        memtables: &MemTableAccessor<E, W>,
+        pipe_log: &PipeLog,
+        queue: LogQueue,
+        recovery_mode: RecoveryMode,
+    ) -> Result<()> {
         // Get first file number and last file number.
-        let first_file_num = self.pipe_log.first_file_num(queue);
-        let active_file_num = self.pipe_log.active_file_num(queue);
+        let first_file_num = pipe_log.first_file_num(queue);
+        let active_file_num = pipe_log.active_file_num(queue);
         trace!("recovering queue {:?}", queue);
 
         // Iterate and recover from files one by one.
         let start = Instant::now();
         for file_num in first_file_num..=active_file_num {
             // Read a file.
-            let content = self.pipe_log.read_whole_file(queue, file_num)?;
+            let content = pipe_log.read_whole_file(queue, file_num)?;
 
             // Verify file header.
             let mut buf = content.as_slice();
@@ -360,7 +420,7 @@ where
                     warn!("Raft log header is corrupted at {:?}.{}", queue, file_num);
                     return Err(box_err!("Raft log file header is corrupted"));
                 } else {
-                    self.pipe_log.truncate_active_log(queue, Some(0)).unwrap();
+                    pipe_log.truncate_active_log(queue, Some(0)).unwrap();
                     break;
                 }
             }
@@ -387,7 +447,7 @@ where
                             && recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
                         {
                             let offset = Some(offset as usize);
-                            self.pipe_log.truncate_active_log(queue, offset)?;
+                            pipe_log.truncate_active_log(queue, offset)?;
                             break;
                         }
                         return Err(box_err!("Raft log content is corrupted"));
@@ -395,7 +455,7 @@ where
                 };
                 if queue == LogQueue::Append {
                     let size = log_batch.entries_size();
-                    let mut submitor = self.pipe_log.cache_submitor();
+                    let mut submitor = pipe_log.cache_submitor();
                     if let Some(tracker) = submitor.get_cache_tracker(file_num, offset, size) {
                         for item in log_batch.items.iter_mut() {
                             if let LogItemContent::Entries(entries) = &mut item.content {
@@ -412,7 +472,7 @@ where
                     }
                 }
 
-                self.apply_to_memtable(&mut log_batch, queue, file_num);
+                Self::apply_to_memtable(memtables, &mut log_batch, queue, file_num);
                 offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
             }
         }
@@ -928,8 +988,7 @@ mod tests {
 
     // Raft groups can be removed when they only have entries in the rewrite queue.
     // We need to ensure that these raft groups won't appear again after recover.
-    #[test]
-    fn test_clean_raft_with_rewrite() {
+    fn test_clean_raft_with_only_rewrite(purge_before_recover: bool) {
         let dir = tempfile::Builder::new()
             .prefix("test_clean_raft_with_rewrite")
             .tempdir()
@@ -1001,13 +1060,29 @@ mod tests {
                 append_log(&engine, i, &entry);
             }
         }
-        assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_num(LogQueue::Append) > active_file_num);
+
+        if purge_before_recover {
+            assert!(engine.purge_expired_files().unwrap().is_empty());
+            assert!(engine.pipe_log.first_file_num(LogQueue::Append) > active_file_num);
+        }
 
         // After the engine recovers, the removed raft group shouldn't appear again.
         drop(engine);
         let engine = RaftLogEngine::new(cfg.clone());
         assert!(engine.memtables.get(1).is_none());
+    }
+
+    // Test `purge` should copy `LogBatch::Clean` to rewrite queue from append queue.
+    // So that after recover the cleaned raft group won't appear again.
+    #[test]
+    fn test_clean_raft_with_only_rewrite_1() {
+        test_clean_raft_with_only_rewrite(true);
+    }
+
+    // Test `recover` can handle `LogBatch::Clean` in append queue correctly.
+    #[test]
+    fn test_clean_raft_with_only_rewrite_2() {
+        test_clean_raft_with_only_rewrite(false);
     }
 
     #[test]

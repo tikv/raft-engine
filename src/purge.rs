@@ -1,5 +1,4 @@
-use std::cmp::{self, Reverse};
-use std::collections::BinaryHeap;
+use std::cmp;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -34,10 +33,6 @@ where
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
 
-    // Vector of (file_num, raft_group_id).
-    #[allow(clippy::type_complexity)]
-    removed_memtables: Arc<Mutex<BinaryHeap<(Reverse<u64>, u64)>>>,
-
     // Only one thread can run `purge_expired_files` at a time.
     purge_mutex: Arc<Mutex<()>>,
 }
@@ -59,7 +54,6 @@ where
             memtables,
             pipe_log,
             global_stats,
-            removed_memtables: Default::default(),
             purge_mutex: Arc::new(Mutex::new(())),
         }
     }
@@ -139,11 +133,6 @@ where
         }
     }
 
-    pub fn remove_memtable(&self, file_num: u64, raft_group_id: u64) {
-        let mut tables = self.removed_memtables.lock().unwrap();
-        tables.push((Reverse(file_num), raft_group_id));
-    }
-
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
     fn latest_inactive_file_num(&self) -> (u64, u64) {
         let queue = LogQueue::Append;
@@ -172,6 +161,10 @@ where
         compacted_rewrite_operations as f64 / rewrite_operations as f64 > 0.5
     }
 
+    pub fn handle_cleaned_raft(&self, mut log_batch: LogBatch<E, W>) {
+        self.rewrite_impl(&mut log_batch, None, true).unwrap();
+    }
+
     fn regions_rewrite_or_force_compact(
         &self,
         latest_rewrite: u64,
@@ -180,19 +173,8 @@ where
     ) {
         assert!(latest_compact <= latest_rewrite);
 
-        let mut log_batch = LogBatch::<E, W>::default();
-        let mut removed_memtables = self.removed_memtables.lock().unwrap();
-        while let Some(item) = removed_memtables.pop() {
-            let (file_num, raft_id) = ((item.0).0, item.1);
-            if file_num > latest_rewrite {
-                removed_memtables.push(item);
-                break;
-            }
-            log_batch.clean_region(raft_id);
-        }
-        drop(removed_memtables);
-        self.rewrite_impl(&mut log_batch, Some(latest_rewrite), true)
-            .unwrap();
+        let log_batch = self.memtables.take_cleaned_rafts(latest_rewrite);
+        self.handle_cleaned_raft(log_batch);
 
         let memtables = self.memtables.collect(|t| {
             let (rewrite, compact) = t.needs_rewrite_or_compact(
@@ -333,7 +315,6 @@ where
                 },
                 LogItemContent::Command(Command::Clean) => {
                     debug!("{} append to {:?}.{}, Clean", raft, queue, file_num);
-                    // Nothing need to do.
                 }
                 _ => unreachable!(),
             }
@@ -410,42 +391,6 @@ impl PipeLogHook for PurgeHook {
                 assert_eq!(x, y);
                 assert_eq!(counter.load(Ordering::Acquire), 0);
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::Engine;
-    use crate::pipe_log::PipeLog;
-    use raft::eraftpb::Entry;
-
-    type RaftLogEngine = Engine<Entry, Entry, PipeLog>;
-
-    #[test]
-    fn test_remove_memtable() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_remove_memtable")
-            .tempdir()
-            .unwrap();
-
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        let engine = RaftLogEngine::new(cfg.clone());
-
-        engine.purge_manager().remove_memtable(3, 10);
-        engine.purge_manager().remove_memtable(3, 9);
-        engine.purge_manager().remove_memtable(3, 11);
-        engine.purge_manager().remove_memtable(2, 9);
-        engine.purge_manager().remove_memtable(4, 4);
-        engine.purge_manager().remove_memtable(4, 3);
-
-        let mut tables = engine.purge_manager().removed_memtables.lock().unwrap();
-        for (file_num, raft_id) in vec![(2, 9), (3, 11), (3, 10), (3, 9), (4, 4), (4, 3)] {
-            let item = tables.pop().unwrap();
-            assert_eq!((item.0).0, file_num);
-            assert_eq!(item.1, raft_id);
         }
     }
 }
