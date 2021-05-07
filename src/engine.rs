@@ -619,6 +619,13 @@ where
         let mut workers = self.workers.wl();
         workers.cache_evict.stop();
     }
+
+    pub fn raft_groups(&self) -> Vec<u64> {
+        self.memtables.fold(vec![], |mut v, m| {
+            v.push(m.region_id());
+            v
+        })
+    }
 }
 
 pub fn fetch_entries<E, W, P, F>(
