@@ -1,6 +1,7 @@
 # raft-engine
 
 ![Rust](https://github.com/tikv/raft-engine/workflows/Rust/badge.svg?branch=master)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Ftikv%2Fraft-engine.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Ftikv%2Fraft-engine?ref=badge_shield)
 
 A WAL-is-data engine that used to store multi-raft log
 
@@ -61,3 +62,7 @@ If a regionâ€™s follower lefts behind a lot, causing entries in this region canâ
 Reduce above 60% raft associated IO.
 Reduce disk load and disk IO utilization by 50% at lease.
 Increase data importing speed around 10%-15%.
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Ftikv%2Fraft-engine.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Ftikv%2Fraft-engine?ref=badge_large)
