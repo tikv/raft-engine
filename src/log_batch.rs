@@ -8,7 +8,7 @@ use crc32fast::Hasher;
 use log::trace;
 use protobuf::Message;
 
-use crate::cache_evict::CacheTracker;
+use crate::cache_evict::ChunkCacheInfo;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{GenericFileId, LogQueue};
@@ -217,7 +217,7 @@ impl<E: Message, I: GenericFileId> Entries<E, I> {
         queue: LogQueue,
         file_id: I,
         offset: u64,
-        tracker: Option<CacheTracker>,
+        chunk: &Option<ChunkCacheInfo>,
     ) {
         for idx in self.entries_index.iter_mut() {
             debug_assert!(!idx.file_id.valid() && idx.base_offset == 0);
@@ -225,11 +225,8 @@ impl<E: Message, I: GenericFileId> Entries<E, I> {
             idx.queue = queue;
             idx.file_id = file_id;
             idx.base_offset = offset;
-            if let Some(ref tracker) = tracker {
-                let mut tracker = tracker.clone();
-                tracker.global_stats.add_mem_change(idx.len as usize);
-                tracker.sub_on_drop = idx.len as usize;
-                idx.cache_tracker = Some(tracker);
+            if let Some(ref chunk) = chunk {
+                idx.cache_tracker = Some(chunk.spawn_tracker(idx.len as usize));
             }
         }
     }
@@ -241,13 +238,10 @@ impl<E: Message, I: GenericFileId> Entries<E, I> {
         }
     }
 
-    pub fn set_cache_tracker(&mut self, tracker: CacheTracker) {
+    pub fn set_chunk_cache(&mut self, chunk: &ChunkCacheInfo) {
         for idx in self.entries_index.iter_mut() {
             debug_assert!(idx.cache_tracker.is_none());
-            let mut tracker = tracker.clone();
-            tracker.global_stats.add_mem_change(idx.len as usize);
-            tracker.sub_on_drop = idx.len as usize;
-            idx.cache_tracker = Some(tracker.clone());
+            idx.cache_tracker = Some(chunk.spawn_tracker(idx.len as usize));
         }
     }
 

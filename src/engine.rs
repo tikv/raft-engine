@@ -31,8 +31,7 @@ type MemTables<E, W, P> = HashMap<u64, Arc<RwLock<MemTable<E, W, P>>>>;
 #[derive(Clone)]
 pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> {
     slots: Vec<Arc<RwLock<MemTables<E, W, P>>>>,
-    // MemTable initializer.
-    creator: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
+    initializer: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
 
     #[allow(clippy::type_complexity)]
     removed_memtables: Arc<Mutex<HashMap<P::FileId, u64>>>,
@@ -45,7 +44,7 @@ where
     P: GenericPipeLog,
 {
     pub fn new(
-        creator: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
+        initializer: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
     ) -> MemTableAccessor<E, W, P> {
         let mut slots = Vec::with_capacity(SLOTS_COUNT);
         for _ in 0..SLOTS_COUNT {
@@ -53,7 +52,7 @@ where
         }
         MemTableAccessor {
             slots,
-            creator,
+            initializer,
             removed_memtables: Default::default(),
         }
     }
@@ -62,7 +61,7 @@ where
         let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT].wl();
         let memtable = memtables
             .entry(raft_group_id)
-            .or_insert_with(|| Arc::new(RwLock::new((self.creator)(raft_group_id))));
+            .or_insert_with(|| Arc::new(RwLock::new((self.initializer)(raft_group_id))));
         memtable.clone()
     }
 
@@ -315,8 +314,8 @@ where
 
         let cache_evict_runner = CacheEvictRunner::new(
             cache_limit,
-            global_stats.clone(),
             options.chunk_limit,
+            global_stats.clone(),
             memtables.clone(),
             pipe_log.clone(),
         );
@@ -349,7 +348,7 @@ where
     }
 
     fn recover_from_queues(&mut self) -> Result<()> {
-        let mut rewrite_memtables = MemTableAccessor::new(self.memtables.creator.clone());
+        let mut rewrite_memtables = MemTableAccessor::new(self.memtables.initializer.clone());
         Self::recover(
             &mut rewrite_memtables,
             &mut self.pipe_log,
@@ -370,7 +369,6 @@ where
                 if let Some(raft_append) = self.memtables.get(id) {
                     raft_append.wl().merge_lower_prio(&mut *raft_rewrite.wl());
                 } else if !ids.contains(&id) {
-                    // debug_assert!(!ids.contains(&id));
                     self.memtables.insert(id, raft_rewrite);
                 }
             }

@@ -32,7 +32,7 @@ where
     offset: u64,
 
     chunk_size: usize,
-    // Current cached size.
+    // Cached size of current chunk.
     size_tracker: Arc<AtomicUsize>,
 
     scheduler: Scheduler<CacheTask<P::FileId>>,
@@ -65,12 +65,13 @@ impl<P: GenericPipeLog> CacheSubmitor<P> {
         self.block_on_full = block_on_full;
     }
 
-    pub fn new_cache_tracker(
+    /// Returns the cache chunk info for newly appended block.
+    pub fn submit_new_block(
         &mut self,
         file_id: P::FileId,
         offset: u64,
         size: usize,
-    ) -> Option<CacheTracker> {
+    ) -> Option<ChunkCacheInfo> {
         if self.cache_limit == 0 || size == 0 {
             return None;
         }
@@ -113,7 +114,7 @@ impl<P: GenericPipeLog> CacheSubmitor<P> {
 
         self.chunk_size += size;
         self.size_tracker.fetch_add(size, Ordering::Release);
-        Some(CacheTracker::new(
+        Some(ChunkCacheInfo::new(
             self.global_stats.clone(),
             self.size_tracker.clone(),
         ))
@@ -134,8 +135,8 @@ where
     P: GenericPipeLog,
 {
     cache_limit: usize,
-    global_stats: Arc<GlobalStats>,
     chunk_limit: usize,
+    global_stats: Arc<GlobalStats>,
     valid_cache_chunks: VecDeque<CacheChunk<P::FileId>>,
     memtables: MemTableAccessor<E, W, P>,
     pipe_log: P,
@@ -149,15 +150,15 @@ where
 {
     pub fn new(
         cache_limit: usize,
-        global_stats: Arc<GlobalStats>,
         chunk_limit: usize,
+        global_stats: Arc<GlobalStats>,
         memtables: MemTableAccessor<E, W, P>,
         pipe_log: P,
     ) -> Runner<E, W, P> {
         Runner {
             cache_limit,
-            global_stats,
             chunk_limit,
+            global_stats,
             valid_cache_chunks: Default::default(),
             memtables,
             pipe_log,
@@ -288,35 +289,51 @@ where
 }
 
 #[derive(Clone)]
-pub struct CacheTracker {
-    pub global_stats: Arc<GlobalStats>,
-    pub chunk_size: Arc<AtomicUsize>,
-    pub sub_on_drop: usize,
+pub struct ChunkCacheInfo {
+    global_stats: Arc<GlobalStats>,
+    chunk_size: Arc<AtomicUsize>,
 }
 
-impl CacheTracker {
+#[derive(Clone)]
+pub struct CacheTracker {
+    chunk_info: ChunkCacheInfo,
+    block_size: usize,
+}
+
+impl ChunkCacheInfo {
     pub fn new(global_stats: Arc<GlobalStats>, chunk_size: Arc<AtomicUsize>) -> Self {
-        CacheTracker {
+        ChunkCacheInfo {
             global_stats,
             chunk_size,
-            sub_on_drop: 0,
         }
+    }
+
+    pub fn spawn_tracker(&self, block_size: usize) -> CacheTracker {
+        let chunk_info = self.clone();
+        chunk_info.global_stats.add_mem_change(block_size);
+        CacheTracker {
+            chunk_info: self.clone(),
+            block_size,
+        }
+    }
+
+    pub fn on_block_dropped(&self, block_size: usize) {
+        self.global_stats.sub_mem_change(block_size);
+        self.chunk_size.fetch_sub(block_size, Ordering::Release);
     }
 }
 
 impl Drop for CacheTracker {
     fn drop(&mut self) {
-        if self.sub_on_drop > 0 {
-            self.global_stats.sub_mem_change(self.sub_on_drop);
-            self.chunk_size
-                .fetch_sub(self.sub_on_drop, Ordering::Release);
+        if self.block_size > 0 {
+            self.chunk_info.on_block_dropped(self.block_size);
         }
     }
 }
 
 impl fmt::Debug for CacheTracker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CacheTracker(size={})", self.sub_on_drop)
+        write!(f, "CacheTracker(size={})", self.block_size)
     }
 }
 

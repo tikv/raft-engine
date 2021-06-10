@@ -689,10 +689,10 @@ impl GenericPipeLog for PipeLog {
             if queue == LogQueue::Append {
                 let size = log_batch.entries_size();
                 let mut submitor = self.cache_submitor.lock().unwrap();
-                if let Some(tracker) = submitor.new_cache_tracker(file_id, offset, size) {
+                if let Some(chunk) = submitor.submit_new_block(file_id, offset, size) {
                     for item in log_batch.items.iter_mut() {
                         if let LogItemContent::Entries(entries) = &mut item.content {
-                            entries.set_cache_tracker(tracker.clone());
+                            entries.set_chunk_cache(&chunk);
                         }
                     }
                 }
@@ -716,11 +716,11 @@ impl GenericPipeLog for PipeLog {
     ) -> Result<(u64, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            let mut tracker = None;
+            let mut chunk = None;
             let (file_id, offset, fd) = if queue == LogQueue::Append {
                 let mut cache_submitor = self.cache_submitor.lock().unwrap();
                 let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
-                tracker = cache_submitor.new_cache_tracker(file_id, offset, batch.entries_size());
+                chunk = cache_submitor.submit_new_block(file_id, offset, batch.entries_size());
                 (file_id, offset, fd)
             } else {
                 self.append_bytes(queue, &content, &mut sync)?
@@ -731,7 +731,7 @@ impl GenericPipeLog for PipeLog {
 
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.set_position(queue, file_id, offset, tracker.clone());
+                    entries.set_position(queue, file_id, offset, &chunk);
                 }
             }
 

@@ -623,12 +623,12 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
     ) -> (bool, bool) {
         debug_assert!(latest_compact <= latest_rewrite);
         let min_file_num = match self.min_file_num(LogQueue::Append) {
-            Some(file_num) if file_num.le(&latest_rewrite) => file_num,
+            Some(file_num) if file_num <= latest_rewrite => file_num,
             _ => return (false, false),
         };
         let entries_count = self.entries_count();
 
-        if min_file_num.lt(&latest_compact) && entries_count > rewrite_count_limit {
+        if min_file_num < latest_compact && entries_count > rewrite_count_limit {
             // `rewrite_count_limit` is considered because in some raft applications,
             // log-compaction is implemented based on an special raft log, which means
             // there will always be at least 1 log left.
@@ -659,6 +659,7 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache_evict::ChunkCacheInfo;
     use crate::pipe_log::PipeLog;
     use raft::eraftpb::Entry;
     use std::sync::atomic::AtomicUsize;
@@ -1275,9 +1276,8 @@ mod tests {
             ent_idx.len = 1; // fake size
 
             if queue != LogQueue::Rewrite {
-                let mut tracker = CacheTracker::new(stats.clone(), Arc::new(AtomicUsize::new(1)));
-                tracker.global_stats.add_mem_change(1);
-                tracker.sub_on_drop = 1;
+                let tracker = ChunkCacheInfo::new(stats.clone(), Arc::new(AtomicUsize::new(1)))
+                    .spawn_tracker(1);
                 ent_idx.cache_tracker = Some(tracker);
             }
             ents_idx.push(ent_idx);
