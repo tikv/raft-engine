@@ -7,7 +7,7 @@ use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
 use crate::log_batch::{CompressionType, EntryExt};
-use crate::pipe_log::{GenericFileCheckpoint, GenericFileId, GenericPipeLog, LogQueue};
+use crate::pipe_log::{min_id, GenericFileId, GenericPipeLog, LogQueue};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, GlobalStats, Result};
 
@@ -254,7 +254,7 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
     pub fn rewrite(
         &mut self,
         entries_index: Vec<EntryIndex<P::FileId>>,
-        latest_rewrite: Option<P::FileCheckpoint>,
+        latest_rewrite: Option<P::FileId>,
     ) {
         if entries_index.is_empty() {
             return;
@@ -297,7 +297,7 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
         for (i, ei) in entries_index.iter().enumerate() {
             if let Some(latest_rewrite) = latest_rewrite {
                 debug_assert_eq!(self.entries_index[i + distance].queue, LogQueue::Append);
-                if !latest_rewrite.visible(self.entries_index[i + distance].file_id) {
+                if self.entries_index[i + distance].file_id > latest_rewrite {
                     self.compact_cache_to(self.entries_index[i + distance].index);
                     // Some entries are overwritten by new appends.
                     self.global_stats.add_compacted_rewrite(ents_len - i);
@@ -342,14 +342,14 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
     pub fn rewrite_key(
         &mut self,
         key: Vec<u8>,
-        latest_rewrite: Option<P::FileCheckpoint>,
+        latest_rewrite: Option<P::FileId>,
         file_id: P::FileId,
     ) {
         self.global_stats.add_rewrite(1);
         if let Some(value) = self.kvs.get_mut(&key) {
             if value.1 == LogQueue::Append {
                 if let Some(latest_rewrite) = latest_rewrite {
-                    if latest_rewrite.visible(value.2) {
+                    if value.2 <= latest_rewrite {
                         value.1 = LogQueue::Rewrite;
                         value.2 = file_id;
                     }
@@ -514,7 +514,7 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
 
     pub fn fetch_rewrite_entries(
         &self,
-        latest_rewrite: P::FileCheckpoint,
+        latest_rewrite: P::FileId,
         vec: &mut Vec<E>,
         vec_idx: &mut Vec<EntryIndex<P::FileId>>,
     ) -> Result<()> {
@@ -526,7 +526,7 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
             .entries_index
             .iter()
             .rev()
-            .find(|e| latest_rewrite.visible(e.file_id));
+            .find(|e| e.file_id <= latest_rewrite);
         if let (Some(begin), Some(end)) = (begin, end) {
             if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
@@ -548,13 +548,9 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
         Ok(())
     }
 
-    pub fn fetch_rewrite_kvs(
-        &self,
-        latest_rewrite: P::FileCheckpoint,
-        vec: &mut Vec<(Vec<u8>, Vec<u8>)>,
-    ) {
+    pub fn fetch_rewrite_kvs(&self, latest_rewrite: P::FileId, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, queue, file_id)) in &self.kvs {
-            if *queue == LogQueue::Append && latest_rewrite.visible(*file_id) {
+            if *queue == LogQueue::Append && *file_id <= latest_rewrite {
                 vec.push((key.clone(), value.clone()));
             }
         }
@@ -568,17 +564,17 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
         }
     }
 
-    pub fn min_file_checkpoint(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
+    pub fn min_file_id(&self, queue: LogQueue) -> Option<P::FileId> {
         let entry = match queue {
             LogQueue::Append => self.entries_index.get(self.rewrite_count),
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
             LogQueue::Rewrite => self.entries_index.front(),
         };
         let ents_min = entry.map(|e| e.file_id);
-        let kvs_min = self.kvs_min_file_checkpoint(queue);
+        let kvs_min = self.kvs_min_file_id(queue);
         match (ents_min, kvs_min) {
-            (Some(ents_min), Some(kvs_min)) => Some(kvs_min.union_file_min(ents_min)),
-            (Some(ents_min), None) => Some(P::FileCheckpoint::default().union_file_min(ents_min)),
+            (Some(ents_min), Some(kvs_min)) => Some(min_id(kvs_min, ents_min)),
+            (Some(ents_min), None) => Some(ents_min),
             (None, Some(kvs_min)) => Some(kvs_min),
             (None, None) => None,
         }
@@ -600,15 +596,15 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
         self.entries_index.back().map(|e| e.index)
     }
 
-    pub fn kvs_min_file_checkpoint(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
+    pub fn kvs_min_file_id(&self, queue: LogQueue) -> Option<P::FileId> {
         self.kvs
             .values()
             .filter(|v| v.1 == queue)
             .fold(None, |min, v| {
                 if let Some(min) = min {
-                    Some(min.union_file_min(v.2))
+                    Some(min_id(min, v.2))
                 } else {
-                    Some(P::FileCheckpoint::default().union_file_min(v.2))
+                    Some(v.2)
                 }
             })
     }
@@ -616,20 +612,19 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
     /// Returns (needs_rewrite, needs_force_compact).
     pub fn needs_rewrite_or_compact(
         &self,
-        latest_rewrite: P::FileCheckpoint,
-        latest_compact: P::FileCheckpoint,
+        latest_rewrite: P::FileId,
+        latest_compact: P::FileId,
         // Only entries with count is less than the limit can be rewritten.
         rewrite_count_limit: usize,
     ) -> (bool, bool) {
         debug_assert!(latest_compact <= latest_rewrite);
-        let min_file_checkpoint = match self.min_file_checkpoint(LogQueue::Append) {
-            // TODO(tabokie)
+        let min_file_id = match self.min_file_id(LogQueue::Append) {
             Some(file_num) if file_num <= latest_rewrite => file_num,
             _ => return (false, false),
         };
         let entries_count = self.entries_count();
 
-        if min_file_checkpoint < latest_compact && entries_count > rewrite_count_limit {
+        if min_file_id < latest_compact && entries_count > rewrite_count_limit {
             // `rewrite_count_limit` is considered because in some raft applications,
             // log-compaction is implemented based on an special raft log, which means
             // there will always be at least 1 log left.
@@ -661,12 +656,12 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
 mod tests {
     use super::*;
     use crate::cache_evict::ChunkCacheInfo;
-    use crate::pipe_log::PipeLog;
+    use crate::pipe_log::{max_id, PipeLog};
     use raft::eraftpb::Entry;
     use std::sync::atomic::AtomicUsize;
 
     impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
-        pub fn max_file_checkpoint(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
+        pub fn max_file_id(&self, queue: LogQueue) -> Option<P::FileId> {
             let entry = match queue {
                 LogQueue::Append if self.rewrite_count == self.entries_index.len() => None,
                 LogQueue::Append => self.entries_index.back(),
@@ -675,26 +670,24 @@ mod tests {
             };
             let ents_max = entry.map(|e| e.file_id);
 
-            let kvs_max = self.kvs_max_file_checkpoint(queue);
+            let kvs_max = self.kvs_max_file_id(queue);
             match (ents_max, kvs_max) {
-                (Some(ents_max), Some(kvs_max)) => Some(kvs_max.union_file_max(ents_max)),
-                (Some(ents_max), None) => {
-                    Some(P::FileCheckpoint::default().union_file_max(ents_max))
-                }
+                (Some(ents_max), Some(kvs_max)) => Some(max_id(kvs_max, ents_max)),
+                (Some(ents_max), None) => Some(ents_max),
                 (None, Some(kvs_max)) => Some(kvs_max),
                 (None, None) => None,
             }
         }
 
-        pub fn kvs_max_file_checkpoint(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
+        pub fn kvs_max_file_id(&self, queue: LogQueue) -> Option<P::FileId> {
             self.kvs
                 .values()
                 .filter(|v| v.1 == queue)
                 .fold(None, |max, v| {
                     if let Some(max) = max {
-                        Some(max.union_file_max(v.2))
+                        Some(max_id(max, v.2))
                     } else {
-                        Some(P::FileCheckpoint::default().union_file_max(v.2))
+                        Some(v.2)
                     }
                 })
         }
@@ -750,8 +743,8 @@ mod tests {
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(stats.cache_size(), 10);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 1);
         memtable.check_entries_index_and_cache();
 
         // Append entries [20, 30) file_num = 2.
@@ -762,8 +755,8 @@ mod tests {
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 20);
         assert_eq!(stats.cache_size(), 20);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 2);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 2);
         memtable.check_entries_index_and_cache();
 
         // Partial overlap Appending.
@@ -776,8 +769,8 @@ mod tests {
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(stats.cache_size(), 25);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
         // Full overlap Appending.
@@ -788,8 +781,8 @@ mod tests {
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(stats.cache_size(), 30);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 4);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 4);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 4);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4);
         memtable.check_entries_index_and_cache();
     }
 
@@ -814,8 +807,8 @@ mod tests {
 
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(stats.cache_size(), 25);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
         // Compact to 5.
@@ -823,8 +816,8 @@ mod tests {
         assert_eq!(memtable.compact_to(5), 5);
         assert_eq!(memtable.entries_size(), 20);
         assert_eq!(stats.cache_size(), 20);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
         // Compact to 20.
@@ -832,8 +825,8 @@ mod tests {
         assert_eq!(memtable.compact_to(20), 15);
         assert_eq!(memtable.entries_size(), 5);
         assert_eq!(stats.cache_size(), 5);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 3);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
         // Compact to 20 or smaller index, nothing happens.
@@ -865,8 +858,8 @@ mod tests {
 
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(stats.cache_size(), 25);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 3);
         memtable.check_entries_index_and_cache();
 
         // Compact cache to 15.
@@ -1072,8 +1065,8 @@ mod tests {
         let (k5, v5) = (b"key5", b"value5");
         memtable.put(k1.to_vec(), v1.to_vec(), 1);
         memtable.put(k5.to_vec(), v5.to_vec(), 5);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 1);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 5);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
         assert_eq!(memtable.get(k5.as_ref()), Some(v5.to_vec()));
 
@@ -1131,8 +1124,8 @@ mod tests {
 
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(stats.cache_size(), 15);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 2);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 4);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 2);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4);
         memtable.check_entries_index_and_cache();
 
         // Rewrite compacted entries.
@@ -1140,10 +1133,10 @@ mod tests {
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
 
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 2);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 4);
-        assert!(memtable.min_file_checkpoint(LogQueue::Rewrite).is_none());
-        assert!(memtable.max_file_checkpoint(LogQueue::Rewrite).is_none());
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 2);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4);
+        assert!(memtable.min_file_id(LogQueue::Rewrite).is_none());
+        assert!(memtable.max_file_id(LogQueue::Rewrite).is_none());
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.get(b"kk0"), None);
         assert_eq!(memtable.global_stats.rewrite_operations(), 11);
@@ -1156,10 +1149,10 @@ mod tests {
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
         memtable.rewrite_key(b"kk1".to_vec(), Some(2), 100);
 
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 3);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 4);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Rewrite).unwrap(), 100);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Rewrite).unwrap(), 100);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 3);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4);
+        assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100);
+        assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.get(b"kk1"), Some(b"vv1".to_vec()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 33);
@@ -1171,10 +1164,10 @@ mod tests {
         memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
 
         assert_eq!(stats.cache_size(), 10); // Clean rewritten entries from cache.
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 4);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 4);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Rewrite).unwrap(), 100);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Rewrite).unwrap(), 101);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 4);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4);
+        assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100);
+        assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 101);
         assert_eq!(memtable.rewrite_count, 20);
         assert_eq!(memtable.get(b"kk2"), Some(b"vv2".to_vec()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 44);
@@ -1193,10 +1186,10 @@ mod tests {
         memtable.rewrite_key(b"kk3".to_vec(), Some(4), 102);
 
         assert_eq!(stats.cache_size(), 1);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 5);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 5);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Rewrite).unwrap(), 100);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Rewrite).unwrap(), 102);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 5);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 5);
+        assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100);
+        assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 102);
         assert_eq!(memtable.rewrite_count, 25);
         assert_eq!(memtable.get(b"kk3"), Some(b"vv33".to_vec()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 55);
@@ -1221,10 +1214,10 @@ mod tests {
         memtable.rewrite(ents_idx, Some(5));
         memtable.rewrite_key(b"kk3".to_vec(), Some(5), 103);
 
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Append).unwrap(), 6);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Append).unwrap(), 6);
-        assert_eq!(memtable.min_file_checkpoint(LogQueue::Rewrite).unwrap(), 100);
-        assert_eq!(memtable.max_file_checkpoint(LogQueue::Rewrite).unwrap(), 103);
+        assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 6);
+        assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 6);
+        assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100);
+        assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 103);
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 62);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 58);

@@ -41,7 +41,7 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 /// Timely ordered file identifier.
 pub trait GenericFileId:
-    PartialOrd
+    Ord
     + Eq
     + Copy
     + Clone
@@ -51,6 +51,7 @@ pub trait GenericFileId:
     + std::fmt::Display
     + std::fmt::Debug
     + std::hash::Hash
+    + std::ops::Sub<Output = u64>
 {
     /// Default constructor must return an invalid instance.
     fn valid(&self) -> bool;
@@ -60,30 +61,25 @@ pub trait GenericFileId:
     fn backward(&self, step: u64) -> Self;
 }
 
-/// A point-in-time view of active writting files.
-pub trait GenericFileCheckpoint<I>:
-    PartialOrd + Eq + Copy + Clone + Send + Sync + std::fmt::Display + std::fmt::Debug + Default
-where
-    I: GenericFileId,
-{
-    /// Returns whether there exists one valid file in this view.
-    fn valid(&self) -> bool;
-    /// Steps forward every files in this view.
-    fn forward(&self, step: u64) -> Self;
-    /// Steps backward every files in this view.
-    fn backward(&self, step: u64) -> Self;
-    /// Unions with a file, retain the newer one. Invalid file will always be overwritten.
-    fn union_file_max(&self, rhs: I) -> Self;
-    /// Unions with a file, retain the older one. Invalid file will always be overwritten.
-    fn union_file_min(&self, rhs: I) -> Self;
-    /// Unions with a checkpoint, retain the newer files. Invalid files will always be overwritten.
-    fn union_max(&self, rhs: Self) -> Self;
-    /// Unions with a checkpoint, retain the older files. Invalid files will always be overwritten.
-    fn union_min(&self, rhs: Self) -> Self;
-    /// Returns whether a file is visible (not newer) in this view.
-    fn visible(&self, rhs: I) -> bool;
-    /// Returns whether a file is exactly included in this view.
-    fn contains(&self, rhs: I) -> bool;
+pub fn min_id<I: GenericFileId>(lhs: I, rhs: I) -> I {
+    if !lhs.valid() {
+        rhs
+    } else if !rhs.valid() {
+        lhs
+    } else {
+        std::cmp::min(lhs, rhs)
+    }
+}
+
+#[allow(dead_code)]
+pub fn max_id<I: GenericFileId>(lhs: I, rhs: I) -> I {
+    if !lhs.valid() {
+        rhs
+    } else if !rhs.valid() {
+        lhs
+    } else {
+        std::cmp::max(lhs, rhs)
+    }
 }
 
 impl GenericFileId for u64 {
@@ -104,51 +100,8 @@ impl GenericFileId for u64 {
     }
 }
 
-impl GenericFileCheckpoint<u64> for u64 {
-    fn valid(&self) -> bool {
-        *self > 0
-    }
-    fn forward(&self, step: u64) -> u64 {
-        GenericFileId::forward(self, step)
-    }
-    fn backward(&self, step: u64) -> u64 {
-        GenericFileId::backward(self, step)
-    }
-    fn union_file_max(&self, rhs: u64) -> u64 {
-        std::cmp::max(*self, rhs)
-    }
-    fn union_file_min(&self, rhs: u64) -> u64 {
-        if rhs == 0 {
-            *self
-        } else if *self == 0 {
-            rhs
-        } else {
-            std::cmp::min(*self, rhs)
-        }
-    }
-    fn union_max(&self, rhs: Self) -> u64 {
-        std::cmp::max(*self, rhs)
-    }
-    fn union_min(&self, rhs: Self) -> u64 {
-        if rhs == 0 {
-            *self
-        } else if *self == 0 {
-            rhs
-        } else {
-            std::cmp::min(*self, rhs)
-        }
-    }
-    fn visible(&self, rhs: u64) -> bool {
-        *self >= rhs
-    }
-    fn contains(&self, rhs: u64) -> bool {
-        *self == rhs
-    }
-}
-
 pub trait GenericPipeLog: Sized + Clone + Send {
     type FileId: GenericFileId;
-    type FileCheckpoint: GenericFileCheckpoint<Self::FileId>;
 
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
@@ -189,22 +142,22 @@ pub trait GenericPipeLog: Sized + Clone + Send {
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
 
-    /// Active file checkpoint in the given queue.
-    fn active_file_checkpoint(&self, queue: LogQueue) -> Self::FileCheckpoint;
+    /// Active file id in the given queue.
+    fn active_file_id(&self, queue: LogQueue) -> Self::FileId;
 
-    /// First file checkpoint in the given queue.
-    fn first_file_checkpoint(&self, queue: LogQueue) -> Self::FileCheckpoint;
+    /// First file id in the given queue.
+    fn first_file_id(&self, queue: LogQueue) -> Self::FileId;
 
-    /// Returns the oldest checkpoint containing given file size percentile.
-    fn file_checkpoint_at(&self, queue: LogQueue, position: f64) -> Self::FileCheckpoint;
+    /// Returns the oldest id containing given file size percentile.
+    fn file_at(&self, queue: LogQueue, position: f64) -> Self::FileId;
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
 
     /// Truncate the active log file of `queue`.
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()>;
 
-    /// Purge the append queue to the given file checkpoint.
-    fn purge_to(&self, queue: LogQueue, file_checkpoint: Self::FileCheckpoint) -> Result<usize>;
+    /// Purge the append queue to the given file id.
+    fn purge_to(&self, queue: LogQueue, file_id: Self::FileId) -> Result<usize>;
 
     fn hooks(&self) -> &[Arc<dyn PipeLogHook<Self>>];
 }
@@ -223,10 +176,10 @@ where
     fn post_apply_memtables(&self, queue: LogQueue, file_id: P::FileId);
 
     /// Test whether a log file can be purged or not.
-    fn ready_for_purge(&self, queue: LogQueue, file_id: P::FileCheckpoint) -> bool;
+    fn ready_for_purge(&self, queue: LogQueue, file_id: P::FileId) -> bool;
 
     /// Called *after* a log file get purged.
-    fn post_purge(&self, queue: LogQueue, file_id: P::FileCheckpoint);
+    fn post_purge(&self, queue: LogQueue, file_id: P::FileId);
 }
 
 pub struct LogFd(RawFd);
@@ -283,15 +236,10 @@ impl LogManager {
         }
     }
 
-    fn open_files(
-        &mut self,
-        logs: Vec<String>,
-        min_file_checkpoint: u64,
-        max_file_checkpoint: u64,
-    ) -> Result<()> {
+    fn open_files(&mut self, logs: Vec<String>, min_file_id: u64, max_file_id: u64) -> Result<()> {
         if !logs.is_empty() {
-            self.first_file_num = min_file_checkpoint;
-            self.active_file_num = max_file_checkpoint;
+            self.first_file_num = min_file_id;
+            self.active_file_num = max_file_id;
             let queue = queue_from_suffix(self.name_suffix);
 
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
@@ -490,7 +438,7 @@ impl PipeLog {
 
         let pipe_log = PipeLog::new(cfg, cache_submitor, hooks);
 
-        let (mut min_file_checkpoint, mut max_file_checkpoint): (u64, u64) = (u64::MAX, 0);
+        let (mut min_file_id, mut max_file_id): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
         let (mut log_files, mut rewrite_files) = (vec![], vec![]);
         for entry in fs::read_dir(path)? {
@@ -506,8 +454,8 @@ impl PipeLog {
                     Ok(num) => num,
                     Err(_) => continue,
                 };
-                min_file_checkpoint = cmp::min(min_file_checkpoint, file_num);
-                max_file_checkpoint = cmp::max(max_file_checkpoint, file_num);
+                min_file_id = cmp::min(min_file_id, file_num);
+                max_file_id = cmp::max(max_file_id, file_num);
                 log_files.push(file_name.to_string());
             } else if is_rewrite_file(file_name) {
                 let file_num = match extract_file_num(file_name, REWRITE_NUM_LEN) {
@@ -529,7 +477,7 @@ impl PipeLog {
 
         log_files.sort();
         rewrite_files.sort();
-        if log_files.len() as u64 != max_file_checkpoint - min_file_checkpoint + 1 {
+        if log_files.len() as u64 != max_file_id - min_file_id + 1 {
             return Err(box_err!("Corruption occurs on log files"));
         }
         if !rewrite_files.is_empty()
@@ -540,7 +488,7 @@ impl PipeLog {
 
         pipe_log
             .mut_queue(LogQueue::Append)
-            .open_files(log_files, min_file_checkpoint, max_file_checkpoint)?;
+            .open_files(log_files, min_file_id, max_file_id)?;
         pipe_log.mut_queue(LogQueue::Rewrite).open_files(
             rewrite_files,
             min_rewrite_num,
@@ -604,7 +552,6 @@ impl PipeLog {
 
 impl GenericPipeLog for PipeLog {
     type FileId = u64;
-    type FileCheckpoint = u64;
 
     fn close(&self) -> Result<()> {
         let _write_lock = self.cache_submitor.lock().unwrap();
@@ -652,7 +599,7 @@ impl GenericPipeLog for PipeLog {
         let content = self.read_file_bytes(queue, file_id)?;
         let mut buf = content.as_slice();
         if !buf.starts_with(FILE_MAGIC_HEADER) {
-            if self.active_file_checkpoint(queue) == file_id {
+            if self.active_file_id(queue) == file_id {
                 warn!("Raft log header is corrupted at {:?}.{}", queue, file_id);
                 return Err(box_err!("Raft log file header is corrupted"));
             } else {
@@ -676,7 +623,7 @@ impl GenericPipeLog for PipeLog {
                         "Raft log content is corrupted at {:?}.{}:{}, error: {}",
                         queue, file_id, offset, e
                     );
-                    if file_id == self.active_file_checkpoint(queue)
+                    if file_id == self.active_file_id(queue)
                         && mode == RecoveryMode::TolerateCorruptedTailRecords
                     {
                         self.truncate_active_log(queue, Some(offset as usize))?;
@@ -747,20 +694,20 @@ impl GenericPipeLog for PipeLog {
         Ok(())
     }
 
-    fn active_file_checkpoint(&self, queue: LogQueue) -> u64 {
+    fn active_file_id(&self, queue: LogQueue) -> u64 {
         self.get_queue(queue).active_file_num
     }
 
-    fn first_file_checkpoint(&self, queue: LogQueue) -> u64 {
+    fn first_file_id(&self, queue: LogQueue) -> u64 {
         self.get_queue(queue).first_file_num
     }
 
-    fn file_checkpoint_at(&self, queue: LogQueue, position: f64) -> u64 {
+    fn file_at(&self, queue: LogQueue, position: f64) -> u64 {
         // TODO: sanitize position
         let cur_size = self.total_size(queue);
         let count = (cur_size as f64 * position) as usize / self.rotate_size;
         let file_num = self.get_queue(queue).first_file_num + count as u64;
-        assert!(file_num <= self.active_file_checkpoint(queue));
+        assert!(file_num <= self.active_file_id(queue));
         file_num
     }
 
@@ -772,20 +719,20 @@ impl GenericPipeLog for PipeLog {
         self.mut_queue(queue).truncate_active_log(offset)
     }
 
-    fn purge_to(&self, queue: LogQueue, file_checkpoint: u64) -> Result<usize> {
+    fn purge_to(&self, queue: LogQueue, file_id: u64) -> Result<usize> {
         let (mut manager, name_suffix) = match queue {
             LogQueue::Append => (self.appender.wl(), LOG_SUFFIX),
             LogQueue::Rewrite => (self.rewriter.wl(), REWRITE_SUFFIX),
         };
-        let purge_count = manager.purge_to(file_checkpoint)?;
+        let purge_count = manager.purge_to(file_id)?;
         drop(manager);
 
-        for cur_file_num in (file_checkpoint - purge_count as u64)..file_checkpoint {
+        for cur_file_num in (file_id - purge_count as u64)..file_id {
             let mut path = PathBuf::from(&self.dir);
             path.push(generate_file_name(cur_file_num, name_suffix));
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
-                return Ok((cur_file_num + purge_count as u64 - file_checkpoint) as usize);
+                return Ok((cur_file_num + purge_count as u64 - file_id) as usize);
             }
         }
         Ok(purge_count)
@@ -948,8 +895,8 @@ mod tests {
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
         let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.first_file_checkpoint(queue), INIT_FILE_NUM);
-        assert_eq!(pipe_log.active_file_checkpoint(queue), INIT_FILE_NUM);
+        assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_NUM);
+        assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_NUM);
 
         let header_size = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
 
@@ -958,16 +905,16 @@ mod tests {
         let (file_num, offset, _) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
         assert_eq!(file_num, 1);
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_checkpoint(queue), 1);
+        assert_eq!(pipe_log.active_file_id(queue), 1);
 
         let (file_num, offset, _) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
         assert_eq!(file_num, 2);
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_checkpoint(queue), 2);
+        assert_eq!(pipe_log.active_file_id(queue), 2);
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(queue, 2).unwrap(), 1);
-        assert_eq!(pipe_log.first_file_checkpoint(queue), 2);
+        assert_eq!(pipe_log.first_file_id(queue), 2);
 
         // cannot purge active file
         assert!(pipe_log.purge_to(queue, 3).is_err());
@@ -998,8 +945,8 @@ mod tests {
 
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(queue, 3).is_ok());
-        assert_eq!(pipe_log.first_file_checkpoint(queue), 3);
-        assert_eq!(pipe_log.active_file_checkpoint(queue), 3);
+        assert_eq!(pipe_log.first_file_id(queue), 3);
+        assert_eq!(pipe_log.active_file_id(queue), 3);
 
         // truncate file
         pipe_log
@@ -1020,16 +967,16 @@ mod tests {
         let mut header: Vec<u8> = vec![];
         header.extend(FILE_MAGIC_HEADER);
         header.extend(VERSION);
-        let content = pipe_log.read_next_file().unwrap().unwrap();
+        let content = pipe_log.read_next_file_id().unwrap().unwrap();
         assert_eq!(header, content);
-        assert!(pipe_log.read_next_file().unwrap().is_none());
+        assert!(pipe_log.read_next_file_id().unwrap().is_none());
         **************************/
 
         pipe_log.close().unwrap();
 
         // reopen
         let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.active_file_checkpoint(queue), 3);
+        assert_eq!(pipe_log.active_file_id(queue), 3);
         assert_eq!(
             pipe_log.active_log_size(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len()

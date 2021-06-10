@@ -15,9 +15,7 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{
-    GenericFileCheckpoint, GenericFileId, GenericPipeLog, LogQueue, PipeLog, PipeLogHook,
-};
+use crate::pipe_log::{GenericFileId, GenericPipeLog, LogQueue, PipeLog, PipeLogHook};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, GlobalStats, Result};
@@ -113,14 +111,11 @@ where
         memtables
     }
 
-    pub fn clean_regions_before(
-        &self,
-        rewrite_file_checkpoint: P::FileCheckpoint,
-    ) -> LogBatch<E, W, P::FileId> {
+    pub fn clean_regions_before(&self, rewrite_file_id: P::FileId) -> LogBatch<E, W, P::FileId> {
         let mut log_batch = LogBatch::<E, W, P::FileId>::default();
         let mut removed_memtables = self.removed_memtables.lock().unwrap();
         removed_memtables.retain(|&file_id, raft_id| {
-            if rewrite_file_checkpoint.visible(file_id) {
+            if file_id <= rewrite_file_id {
                 log_batch.clean_region(*raft_id);
                 false
             } else {
@@ -385,15 +380,14 @@ where
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
         // Get first file number and last file number.
-        let first_file_checkpoint = pipe_log.first_file_checkpoint(queue);
-        let active_file_checkpoint = pipe_log.active_file_checkpoint(queue);
+        let first_file = pipe_log.first_file_id(queue);
+        let active_file = pipe_log.active_file_id(queue);
         trace!("recovering queue {:?}", queue);
 
         // Iterate and recover from files one by one.
         let start = Instant::now();
         let mut batches = Vec::new();
-        // TODO(tabokie): enumerate on generic checkpoint.
-        for file_id in first_file_checkpoint..=active_file_checkpoint {
+        for file_id in first_file..=active_file {
             pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
             for mut batch in batches.drain(..) {
                 Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
@@ -676,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_entry_from_file() {
+    fn test_get_entry_from_file_id() {
         let normal_batch_size = 10;
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size, compressed_batch_size] {
@@ -760,11 +754,11 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
 
-        let old_min_file_checkpoint = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let old_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_checkpoint = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let new_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
         // Some entries are rewritten.
-        assert!(new_min_file_checkpoint > old_min_file_checkpoint);
+        assert!(new_min_file_id > old_min_file_id);
         // No regions need to be force compacted because the threshold is not reached.
         assert!(will_force_compact.is_empty());
         // After purge, entries and raft state are still available.
@@ -774,11 +768,11 @@ mod tests {
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
-        let old_min_file_checkpoint = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let old_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_checkpoint = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let new_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
         // No entries are rewritten.
-        assert_eq!(new_min_file_checkpoint, old_min_file_checkpoint);
+        assert_eq!(new_min_file_id, old_min_file_id);
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
@@ -863,9 +857,9 @@ mod tests {
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_checkpoint(LogQueue::Append) > 1);
+        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1);
 
-        let active_num = engine.pipe_log.active_file_checkpoint(LogQueue::Rewrite);
+        let active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
         let active_len = engine
             .pipe_log
             .file_len(LogQueue::Rewrite, active_num)
@@ -903,7 +897,7 @@ mod tests {
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
 
-        let new_active_num = engine.pipe_log.active_file_checkpoint(LogQueue::Rewrite);
+        let new_active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
         let new_active_len = engine
             .pipe_log
             .file_len(LogQueue::Rewrite, active_num)
@@ -949,7 +943,7 @@ mod tests {
             append_log(&engine, 1, &entry);
         }
 
-        assert_eq!(engine.pipe_log.active_file_checkpoint(LogQueue::Append), 1);
+        assert_eq!(engine.pipe_log.active_file_id(LogQueue::Append), 1);
 
         // Put more raft logs to trigger purge.
         for i in 2..64 {
@@ -962,12 +956,12 @@ mod tests {
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_checkpoint(LogQueue::Append) > 1);
+        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1);
 
         // All entries of region 1 has been rewritten.
         let memtable_1 = engine.memtables.get(1).unwrap();
-        assert!(memtable_1.rl().max_file_checkpoint(LogQueue::Append).is_none());
-        assert!(memtable_1.rl().kvs_max_file_checkpoint(LogQueue::Append).is_none());
+        assert!(memtable_1.rl().max_file_id(LogQueue::Append).is_none());
+        assert!(memtable_1.rl().kvs_max_file_id(LogQueue::Append).is_none());
         // Entries of region 1 after the clean command should be still valid.
         for j in 2..=11 {
             let entry_j = engine.get_entry(1, j).unwrap().unwrap();
@@ -981,7 +975,7 @@ mod tests {
         assert!(engine.memtables.get(1).is_none());
 
         // Put more raft logs and then recover.
-        let active_file_checkpoint = engine.pipe_log.active_file_checkpoint(LogQueue::Append);
+        let active_file = engine.pipe_log.active_file_id(LogQueue::Append);
         for i in 64..=128 {
             for j in 1..=10 {
                 entry.set_index(j);
@@ -991,7 +985,7 @@ mod tests {
 
         if purge_before_recover {
             assert!(engine.purge_expired_files().unwrap().is_empty());
-            assert!(engine.pipe_log.first_file_checkpoint(LogQueue::Append) > active_file_checkpoint);
+            assert!(engine.pipe_log.first_file_id(LogQueue::Append) > active_file);
         }
 
         // After the engine recovers, the removed raft group shouldn't appear again.
@@ -1168,9 +1162,9 @@ mod tests {
 
         // Can't purge because `purge_pender` is still not written to memtables.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
-        let old_first = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let old_first = engine.pipe_log.first_file_id(LogQueue::Append);
         engine.purge_manager.purge_expired_files().unwrap();
-        let new_first = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let new_first = engine.pipe_log.first_file_id(LogQueue::Append);
         assert_eq!(old_first, new_first);
 
         // Release the lock on region 3. Then can purge.
@@ -1180,7 +1174,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(200));
         engine.purge_manager.purge_expired_files().unwrap();
-        let new_first = engine.pipe_log.first_file_checkpoint(LogQueue::Append);
+        let new_first = engine.pipe_log.first_file_id(LogQueue::Append);
         assert_ne!(old_first, new_first);
 
         // Drop and then recover.
