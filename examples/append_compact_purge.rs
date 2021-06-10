@@ -37,7 +37,7 @@ fn main() {
 
     let mut batch = LogBatch::with_capacity(256);
     let mut entry = Entry::new();
-    entry.set_data(vec![b'x'; 1024 * 32]);
+    entry.set_data(vec![b'x'; 1024 * 32].into());
     loop {
         for _ in 0..1024 {
             let region = rand_regions.next().unwrap();

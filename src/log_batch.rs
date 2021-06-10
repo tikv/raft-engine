@@ -11,7 +11,7 @@ use protobuf::Message;
 use crate::cache_evict::CacheTracker;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
-use crate::pipe_log::LogQueue;
+use crate::pipe_log::{GenericFileId, LogQueue};
 use crate::{Error, Result};
 
 pub const BATCH_MIN_SIZE: usize = HEADER_LEN + CHECKSUM_LEN;
@@ -123,23 +123,24 @@ pub trait EntryExt<M: Message>: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct Entries<E>
+pub struct Entries<E, I>
 where
     E: Message,
+    I: GenericFileId,
 {
     pub entries: Vec<E>,
     // EntryIndex may be update after write to file.
-    pub entries_index: Vec<EntryIndex>,
+    pub entries_index: Vec<EntryIndex<I>>,
 }
 
-impl<E: Message + PartialEq> PartialEq for Entries<E> {
-    fn eq(&self, other: &Entries<E>) -> bool {
+impl<E: Message + PartialEq, I: GenericFileId> PartialEq for Entries<E, I> {
+    fn eq(&self, other: &Entries<E, I>) -> bool {
         self.entries == other.entries && self.entries_index == other.entries_index
     }
 }
 
-impl<E: Message> Entries<E> {
-    pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex>>) -> Entries<E> {
+impl<E: Message, I: GenericFileId> Entries<E, I> {
+    pub fn new(entries: Vec<E>, entries_index: Option<Vec<EntryIndex<I>>>) -> Entries<E, I> {
         let entries_index =
             entries_index.unwrap_or_else(|| vec![EntryIndex::default(); entries.len()]);
         Entries {
@@ -150,11 +151,11 @@ impl<E: Message> Entries<E> {
 
     pub fn from_bytes<W: EntryExt<E>>(
         buf: &mut SliceReader<'_>,
-        file_num: u64,
+        file_id: I,
         base_offset: u64,  // Offset of the batch from its log file.
         batch_offset: u64, // Offset of the item from in its batch.
         entries_size: &mut usize,
-    ) -> Result<Entries<E>> {
+    ) -> Result<Entries<E, I>> {
         let content_len = buf.len() as u64;
         let mut count = codec::decode_var_u64(buf)? as usize;
         trace!("decoding entries, count: {}", count);
@@ -168,7 +169,7 @@ impl<E: Message> Entries<E> {
 
             let entry_index = EntryIndex {
                 index: W::index(&e),
-                file_num,
+                file_id,
                 base_offset,
                 offset: batch_offset + content_len - buf.len() as u64,
                 len: len as u64,
@@ -198,8 +199,8 @@ impl<E: Message> Entries<E> {
             vec.encode_var_u64(content.len() as u64)?;
 
             // file_num = 0 means entry index is not initialized.
-            if self.entries_index[i].file_num == 0 {
-                self.entries_index[i].index = W::index(&e);
+            if !self.entries_index[i].file_id.valid() {
+                self.entries_index[i].index = W::index(e);
                 // This offset doesn't count the header.
                 self.entries_index[i].offset = vec.len() as u64;
                 self.entries_index[i].len = content.len() as u64;
@@ -211,41 +212,42 @@ impl<E: Message> Entries<E> {
         Ok(())
     }
 
-    pub fn update_position(
+    pub fn set_position(
         &mut self,
         queue: LogQueue,
-        file_num: u64,
-        base: u64,
-        tracker: &Option<CacheTracker>,
+        file_id: I,
+        offset: u64,
+        tracker: Option<CacheTracker>,
     ) {
         for idx in self.entries_index.iter_mut() {
-            debug_assert!(idx.file_num == 0 && idx.base_offset == 0);
+            debug_assert!(!idx.file_id.valid() && idx.base_offset == 0);
             debug_assert!(idx.cache_tracker.is_none());
             idx.queue = queue;
-            idx.file_num = file_num;
-            idx.base_offset = base;
-            if let Some(ref tkr) = tracker {
-                let mut tkr = tkr.clone();
-                tkr.global_stats.add_mem_change(idx.len as usize);
-                tkr.sub_on_drop = idx.len as usize;
-                idx.cache_tracker = Some(tkr);
+            idx.file_id = file_id;
+            idx.base_offset = offset;
+            if let Some(ref tracker) = tracker {
+                let mut tracker = tracker.clone();
+                tracker.global_stats.add_mem_change(idx.len as usize);
+                tracker.sub_on_drop = idx.len as usize;
+                idx.cache_tracker = Some(tracker);
             }
         }
     }
 
-    pub fn set_queue_when_recover(&mut self, queue: LogQueue) {
+    pub fn set_queue(&mut self, queue: LogQueue) {
         for idx in self.entries_index.iter_mut() {
-            debug_assert!(idx.file_num > 0 && idx.base_offset > 0);
+            debug_assert!(idx.file_id.valid() && idx.base_offset > 0);
             idx.queue = queue;
         }
     }
 
-    pub fn attach_cache_tracker(&mut self, tracker: CacheTracker) {
+    pub fn set_cache_tracker(&mut self, tracker: CacheTracker) {
         for idx in self.entries_index.iter_mut() {
-            let mut tkr = tracker.clone();
-            tkr.global_stats.add_mem_change(idx.len as usize);
-            tkr.sub_on_drop = idx.len as usize;
-            idx.cache_tracker = Some(tkr);
+            debug_assert!(idx.cache_tracker.is_none());
+            let mut tracker = tracker.clone();
+            tracker.global_stats.add_mem_change(idx.len as usize);
+            tracker.sub_on_drop = idx.len as usize;
+            idx.cache_tracker = Some(tracker.clone());
         }
     }
 
@@ -359,33 +361,35 @@ impl KeyValue {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LogItem<E>
+pub struct LogItem<E, I>
 where
     E: Message,
+    I: GenericFileId,
 {
     pub raft_group_id: u64,
-    pub content: LogItemContent<E>,
+    pub content: LogItemContent<E, I>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum LogItemContent<E>
+pub enum LogItemContent<E, I>
 where
     E: Message,
+    I: GenericFileId,
 {
-    Entries(Entries<E>),
+    Entries(Entries<E, I>),
     Command(Command),
     Kv(KeyValue),
 }
 
-impl<E: Message> LogItem<E> {
-    pub fn from_entries(raft_group_id: u64, entries: Vec<E>) -> LogItem<E> {
+impl<E: Message, I: GenericFileId> LogItem<E, I> {
+    pub fn from_entries(raft_group_id: u64, entries: Vec<E>) -> LogItem<E, I> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Entries(Entries::new(entries, None)),
         }
     }
 
-    pub fn from_command(raft_group_id: u64, command: Command) -> LogItem<E> {
+    pub fn from_command(raft_group_id: u64, command: Command) -> LogItem<E, I> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Command(command),
@@ -397,7 +401,7 @@ impl<E: Message> LogItem<E> {
         op_type: OpType,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
-    ) -> LogItem<E> {
+    ) -> LogItem<E, I> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Kv(KeyValue::new(op_type, key, value)),
@@ -429,11 +433,11 @@ impl<E: Message> LogItem<E> {
 
     pub fn from_bytes<W: EntryExt<E>>(
         buf: &mut SliceReader<'_>,
-        file_num: u64,
+        file_id: I,
         base_offset: u64,      // Offset of the batch from its log file.
         mut batch_offset: u64, // Offset of the item from in its batch.
         entries_size: &mut usize,
-    ) -> Result<LogItem<E>> {
+    ) -> Result<LogItem<E, I>> {
         let buf_len = buf.len();
         let raft_group_id = codec::decode_var_u64(buf)?;
         batch_offset += (buf_len - buf.len()) as u64;
@@ -444,7 +448,7 @@ impl<E: Message> LogItem<E> {
             TYPE_ENTRIES => {
                 let entries = Entries::from_bytes::<W>(
                     buf,
-                    file_num,
+                    file_id,
                     base_offset,
                     batch_offset,
                     entries_size,
@@ -471,20 +475,22 @@ impl<E: Message> LogItem<E> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LogBatch<E, W>
+pub struct LogBatch<E, W, I>
 where
     E: Message,
     W: EntryExt<E>,
+    I: GenericFileId,
 {
-    pub items: Vec<LogItem<E>>,
+    pub items: Vec<LogItem<E, I>>,
     entries_size: usize,
     _phantom: PhantomData<W>,
 }
 
-impl<E, W> Default for LogBatch<E, W>
+impl<E, W, I> Default for LogBatch<E, W, I>
 where
     E: Message,
     W: EntryExt<E>,
+    I: GenericFileId,
 {
     fn default() -> Self {
         Self {
@@ -495,10 +501,11 @@ where
     }
 }
 
-impl<E, W> LogBatch<E, W>
+impl<E, W, I> LogBatch<E, W, I>
 where
     E: Message,
     W: EntryExt<E>,
+    I: GenericFileId,
 {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
@@ -549,10 +556,10 @@ where
 
     pub fn from_bytes(
         buf: &mut SliceReader<'_>,
-        file_num: u64,
+        file_id: I,
         // The offset of the batch from its log file.
         base_offset: u64,
-    ) -> Result<Option<LogBatch<E, W>>> {
+    ) -> Result<Option<LogBatch<E, W, I>>> {
         if buf.is_empty() {
             return Ok(None);
         }
@@ -581,7 +588,7 @@ where
             let content_offset = (content_len - reader.len()) as u64;
             let item = LogItem::from_bytes::<W>(
                 &mut reader,
-                file_num,
+                file_id,
                 base_offset,
                 content_offset,
                 &mut log_batch.entries_size,
@@ -678,18 +685,19 @@ mod tests {
             vec![], // Empty entries.
         ] {
             let file_num = 1;
-            let mut entries = Entries::new(pb_entries, None);
+            let mut entries = Entries::<_, u64>::new(pb_entries, None);
 
             let (mut encoded, mut entries_size1) = (vec![], 0);
             entries
                 .encode_to::<Entry>(&mut encoded, &mut entries_size1)
                 .unwrap();
             for idx in entries.entries_index.iter_mut() {
-                idx.file_num = file_num;
+                idx.file_id = file_num;
             }
             let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
             let decode_entries =
-                Entries::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2).unwrap();
+                Entries::<_, u64>::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2)
+                    .unwrap();
             assert_eq!(s.len(), 0);
             assert_eq!(entries.entries, decode_entries.entries);
             assert_eq!(entries.entries_index, decode_entries.entries_index);
@@ -722,7 +730,7 @@ mod tests {
     fn test_log_item_enc_dec() {
         let region_id = 8;
         let items = vec![
-            LogItem::from_entries(region_id, vec![Entry::new(); 10]),
+            LogItem::<_, u64>::from_entries(region_id, vec![Entry::new(); 10]),
             LogItem::from_command(region_id, Command::Clean),
             LogItem::from_kv(
                 region_id,
@@ -747,9 +755,9 @@ mod tests {
     #[test]
     fn test_log_batch_enc_dec() {
         let region_id = 8;
-        let mut batch = LogBatch::<Entry, Entry>::default();
+        let mut batch = LogBatch::<Entry, Entry, u64>::default();
         let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024]);
+        entry.set_data(vec![b'x'; 1024].into());
         batch.add_entries(region_id, vec![entry; 10]);
         batch.add_command(region_id, Command::Clean);
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());

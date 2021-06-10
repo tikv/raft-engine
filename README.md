@@ -61,3 +61,4 @@ If a regionâ€™s follower lefts behind a lot, causing entries in this region canâ
 Reduce above 60% raft associated IO.
 Reduce disk load and disk IO utilization by 50% at lease.
 Increase data importing speed around 10%-15%.
+

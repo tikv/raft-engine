@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read};
+use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
@@ -16,7 +16,7 @@ use nix::NixPath;
 use protobuf::Message;
 
 use crate::cache_evict::CacheSubmitor;
-use crate::config::Config;
+use crate::config::{Config, RecoveryMode};
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::util::HandyRwLock;
 use crate::{Error, Result};
@@ -39,85 +39,194 @@ const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
-pub trait GenericPipeLog: Sized + Clone + Send {
-    /// Read some bytes from the given position.
-    fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>>;
+/// Timely ordered file identifier.
+pub trait GenericFileId:
+    PartialOrd
+    + Eq
+    + Copy
+    + Clone
+    + Send
+    + Sync
+    + Default
+    + std::fmt::Display
+    + std::fmt::Debug
+    + std::hash::Hash
+{
+    /// Default constructor must return an invalid instance.
+    fn valid(&self) -> bool;
+    /// Returns an invalid ID when applied on an invalid file ID.
+    fn forward(&self, step: u64) -> Self;
+    /// Returns an invalid ID when out of bound or applied on an invalid file ID.
+    fn backward(&self, step: u64) -> Self;
+}
 
-    /// Append some bytes to the given queue.
-    fn append(
-        &self,
-        queue: LogQueue,
-        content: &[u8],
-        sync: &mut bool,
-    ) -> Result<(u64, u64, Arc<LogFd>)>;
+/// A point-in-time view of active writting files.
+pub trait GenericFileCheckpoint<I>:
+    PartialOrd + Eq + Copy + Clone + Send + Sync + std::fmt::Display + std::fmt::Debug + Default
+where
+    I: GenericFileId,
+{
+    /// Returns whether there exists one valid file in this view.
+    fn valid(&self) -> bool;
+    /// Steps forward every files in this view.
+    fn forward(&self, step: u64) -> Self;
+    /// Steps backward every files in this view.
+    fn backward(&self, step: u64) -> Self;
+    /// Unions with a file, retain the newer one. Invalid file will always be overwritten.
+    fn union_file_max(&self, rhs: I) -> Self;
+    /// Unions with a file, retain the older one. Invalid file will always be overwritten.
+    fn union_file_min(&self, rhs: I) -> Self;
+    /// Unions with a checkpoint, retain the newer files. Invalid files will always be overwritten.
+    fn union_max(&self, rhs: Self) -> Self;
+    /// Unions with a checkpoint, retain the older files. Invalid files will always be overwritten.
+    fn union_min(&self, rhs: Self) -> Self;
+    /// Returns whether a file is visible (not newer) in this view.
+    fn visible(&self, rhs: I) -> bool;
+    /// Returns whether a file is exactly included in this view.
+    fn contains(&self, rhs: I) -> bool;
+}
+
+impl GenericFileId for u64 {
+    fn valid(&self) -> bool {
+        *self > 0
+    }
+
+    fn forward(&self, step: u64) -> Self {
+        *self + step
+    }
+
+    fn backward(&self, step: u64) -> Self {
+        if *self <= step {
+            0
+        } else {
+            *self - step
+        }
+    }
+}
+
+impl GenericFileCheckpoint<u64> for u64 {
+    fn valid(&self) -> bool {
+        *self > 0
+    }
+    fn forward(&self, step: u64) -> u64 {
+        GenericFileId::forward(self, step)
+    }
+    fn backward(&self, step: u64) -> u64 {
+        GenericFileId::backward(self, step)
+    }
+    fn union_file_max(&self, rhs: u64) -> u64 {
+        std::cmp::max(*self, rhs)
+    }
+    fn union_file_min(&self, rhs: u64) -> u64 {
+        if rhs == 0 {
+            *self
+        } else if *self == 0 {
+            rhs
+        } else {
+            std::cmp::min(*self, rhs)
+        }
+    }
+    fn union_max(&self, rhs: Self) -> u64 {
+        std::cmp::max(*self, rhs)
+    }
+    fn union_min(&self, rhs: Self) -> u64 {
+        if rhs == 0 {
+            *self
+        } else if *self == 0 {
+            rhs
+        } else {
+            std::cmp::min(*self, rhs)
+        }
+    }
+    fn visible(&self, rhs: u64) -> bool {
+        *self >= rhs
+    }
+    fn contains(&self, rhs: u64) -> bool {
+        *self == rhs
+    }
+}
+
+pub trait GenericPipeLog: Sized + Clone + Send {
+    type FileId: GenericFileId;
+    type FileCheckpoint: GenericFileCheckpoint<Self::FileId>;
 
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
 
-    /// Write a batch into the append queue.
-    fn write<E: Message, W: EntryExt<E>>(
-        &self,
-        batch: &mut LogBatch<E, W>,
-        sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize>;
-
-    /// Rewrite a batch into the rewrite queue.
-    fn rewrite<E: Message, W: EntryExt<E>>(
-        &self,
-        batch: &mut LogBatch<E, W>,
-        sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize>;
-
-    /// Truncate the active log file of `queue`.
-    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()>;
-
-    fn new_log_file(&self, queue: LogQueue) -> Result<()>;
-
-    /// Sync the given queue.
-    fn sync(&self, queue: LogQueue) -> Result<()>;
-
-    /// Read whole file into buffer, used for recovery.
-    fn read_whole_file(&self, queue: LogQueue, file_num: u64) -> Result<Vec<u8>>;
-
-    /// Purge the append queue to the given file number.
-    fn purge_to(&self, queue: LogQueue, file_num: u64) -> Result<usize>;
+    fn file_len(&self, queue: LogQueue, file_id: Self::FileId) -> Result<u64>;
 
     /// Total size of the append queue.
     fn total_size(&self, queue: LogQueue) -> usize;
 
-    /// Active file number in the given queue.
-    fn active_file_num(&self, queue: LogQueue) -> u64;
+    /// Read some bytes from the given position.
+    fn read_bytes(
+        &self,
+        queue: LogQueue,
+        file_id: Self::FileId,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>>;
 
-    /// First file number in the given queue.
-    fn first_file_num(&self, queue: LogQueue) -> u64;
+    /// Read a file into bytes.
+    fn read_file_bytes(&self, queue: LogQueue, file_id: Self::FileId) -> Result<Vec<u8>>;
 
-    /// Return the last file number before `total - size`. `0` means no such files.
-    fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64;
+    fn read_file<E: Message, W: EntryExt<E>>(
+        &self,
+        queue: LogQueue,
+        file_id: u64,
+        mode: RecoveryMode,
+        batches: &mut Vec<LogBatch<E, W, Self::FileId>>,
+    ) -> Result<()>;
 
-    fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64>;
+    /// Write a batch into the append queue.
+    fn append<E: Message, W: EntryExt<E>>(
+        &self,
+        queue: LogQueue,
+        batch: &mut LogBatch<E, W, Self::FileId>,
+        sync: bool,
+    ) -> Result<(Self::FileId, usize)>;
 
-    fn cache_submitor(&self) -> MutexGuard<CacheSubmitor>;
+    /// Sync the given queue.
+    fn sync(&self, queue: LogQueue) -> Result<()>;
 
-    fn hooks(&self) -> &[Arc<dyn PipeLogHook>];
+    /// Active file checkpoint in the given queue.
+    fn active_file_checkpoint(&self, queue: LogQueue) -> Self::FileCheckpoint;
+
+    /// First file checkpoint in the given queue.
+    fn first_file_checkpoint(&self, queue: LogQueue) -> Self::FileCheckpoint;
+
+    /// Returns the oldest checkpoint containing given file size percentile.
+    fn file_checkpoint_at(&self, queue: LogQueue, position: f64) -> Self::FileCheckpoint;
+
+    fn new_log_file(&self, queue: LogQueue) -> Result<()>;
+
+    /// Truncate the active log file of `queue`.
+    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()>;
+
+    /// Purge the append queue to the given file checkpoint.
+    fn purge_to(&self, queue: LogQueue, file_checkpoint: Self::FileCheckpoint) -> Result<usize>;
+
+    fn hooks(&self) -> &[Arc<dyn PipeLogHook<Self>>];
 }
 
-pub trait PipeLogHook: Sync + Send {
+pub trait PipeLogHook<P>: Sync + Send
+where
+    P: GenericPipeLog,
+{
     /// Called *after* a new log file is created.
-    fn post_new_log_file(&self, queue: LogQueue, file_num: u64);
+    fn post_new_log_file(&self, queue: LogQueue, file_id: P::FileId);
 
     /// Called *before* a log batch has been appended into a log file.
-    fn on_append_log_file(&self, queue: LogQueue, file_num: u64);
+    fn on_append_log_file(&self, queue: LogQueue, file_id: P::FileId);
 
     /// Called *after* a log batch has been applied to memtables.
-    fn post_apply_memtables(&self, queue: LogQueue, file_num: u64);
+    fn post_apply_memtables(&self, queue: LogQueue, file_id: P::FileId);
 
     /// Test whether a log file can be purged or not.
-    fn ready_for_purge(&self, queue: LogQueue, file_num: u64) -> bool;
+    fn ready_for_purge(&self, queue: LogQueue, file_id: P::FileCheckpoint) -> bool;
 
     /// Called *after* a log file get purged.
-    fn post_purge(&self, queue: LogQueue, file_num: u64);
+    fn post_purge(&self, queue: LogQueue, file_id: P::FileCheckpoint);
 }
 
 pub struct LogFd(RawFd);
@@ -144,7 +253,7 @@ struct LogManager {
     rotate_size: usize,
     bytes_per_sync: usize,
     name_suffix: &'static str,
-    hooks: Vec<Arc<dyn PipeLogHook>>,
+    hooks: Vec<Arc<dyn PipeLogHook<PipeLog>>>,
 
     pub first_file_num: u64,
     pub active_file_num: u64,
@@ -230,7 +339,7 @@ impl LogManager {
         self.sync_dir()?;
 
         for hook in &self.hooks {
-            let queue = queue_from_suffix(&self.name_suffix);
+            let queue = queue_from_suffix(self.name_suffix);
             hook.post_new_log_file(queue, self.active_file_num);
         }
 
@@ -339,18 +448,18 @@ pub struct PipeLog {
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
-    cache_submitor: Arc<Mutex<CacheSubmitor>>,
-    hooks: Vec<Arc<dyn PipeLogHook>>,
+    cache_submitor: Arc<Mutex<CacheSubmitor<PipeLog>>>,
+    hooks: Vec<Arc<dyn PipeLogHook<PipeLog>>>,
 }
 
 impl PipeLog {
     fn new(
         cfg: &Config,
-        cache_submitor: CacheSubmitor,
-        hooks: Vec<Arc<dyn PipeLogHook>>,
+        cache_submitor: CacheSubmitor<PipeLog>,
+        hooks: Vec<Arc<dyn PipeLogHook<PipeLog>>>,
     ) -> PipeLog {
-        let appender = Arc::new(RwLock::new(LogManager::new(&cfg, LOG_SUFFIX)));
-        let rewriter = Arc::new(RwLock::new(LogManager::new(&cfg, REWRITE_SUFFIX)));
+        let appender = Arc::new(RwLock::new(LogManager::new(cfg, LOG_SUFFIX)));
+        let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, REWRITE_SUFFIX)));
         appender.wl().hooks = hooks.clone();
         rewriter.wl().hooks = hooks.clone();
         PipeLog {
@@ -367,8 +476,8 @@ impl PipeLog {
 
     pub fn open(
         cfg: &Config,
-        cache_submitor: CacheSubmitor,
-        hooks: Vec<Arc<dyn PipeLogHook>>,
+        cache_submitor: CacheSubmitor<PipeLog>,
+        hooks: Vec<Arc<dyn PipeLogHook<PipeLog>>>,
     ) -> Result<PipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
@@ -441,6 +550,26 @@ impl PipeLog {
         Ok(pipe_log)
     }
 
+    pub fn set_recovery_mode(&self, recovery_mode: bool) {
+        let mut submitor = self.cache_submitor.lock().unwrap();
+        submitor.set_block_on_full(recovery_mode);
+    }
+
+    fn append_bytes(
+        &self,
+        queue: LogQueue,
+        content: &[u8],
+        sync: &mut bool,
+    ) -> Result<(u64, u64, Arc<LogFd>)> {
+        let (file_num, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+        for hook in &self.hooks {
+            hook.on_append_log_file(queue, file_num);
+        }
+
+        pwrite_exact(fd.0, offset, content)?;
+        Ok((file_num, offset, fd))
+    }
+
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager> {
         match queue {
             LogQueue::Append => self.appender.rl(),
@@ -474,25 +603,8 @@ impl PipeLog {
 }
 
 impl GenericPipeLog for PipeLog {
-    fn fread(&self, queue: LogQueue, file_num: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
-        let fd = self.get_queue(queue).get_fd(file_num)?;
-        pread_exact(fd.0, offset, len as usize)
-    }
-
-    fn append(
-        &self,
-        queue: LogQueue,
-        content: &[u8],
-        sync: &mut bool,
-    ) -> Result<(u64, u64, Arc<LogFd>)> {
-        let (file_num, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
-        for hook in &self.hooks {
-            hook.on_append_log_file(queue, file_num);
-        }
-
-        pwrite_exact(fd.0, offset, content)?;
-        Ok((file_num, offset, fd))
-    }
+    type FileId = u64;
+    type FileCheckpoint = u64;
 
     fn close(&self) -> Result<()> {
         let _write_lock = self.cache_submitor.lock().unwrap();
@@ -501,75 +613,26 @@ impl GenericPipeLog for PipeLog {
         Ok(())
     }
 
-    fn write<E: Message, W: EntryExt<E>>(
-        &self,
-        batch: &mut LogBatch<E, W>,
-        mut sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
-            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            let mut cache_submitor = self.cache_submitor.lock().unwrap();
-            let (cur_file_num, offset, fd) = self.append(LogQueue::Append, &content, &mut sync)?;
-            let tracker =
-                cache_submitor.get_cache_tracker(cur_file_num, offset, batch.entries_size());
-            drop(cache_submitor);
-            if sync {
-                fd.sync()?;
-            }
-
-            for item in batch.items.iter_mut() {
-                if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.update_position(LogQueue::Append, cur_file_num, offset, &tracker);
-                }
-            }
-
-            *file_num = cur_file_num;
-            return Ok(content.len());
-        }
-        Ok(0)
+    fn file_len(&self, queue: LogQueue, file_id: u64) -> Result<u64> {
+        self.get_queue(queue)
+            .get_fd(file_id)
+            .map(|fd| file_len(fd.0).unwrap() as u64)
     }
 
-    fn rewrite<E: Message, W: EntryExt<E>>(
-        &self,
-        batch: &mut LogBatch<E, W>,
-        mut sync: bool,
-        file_num: &mut u64,
-    ) -> Result<usize> {
-        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
-            let (cur_file_num, offset, fd) = self.append(LogQueue::Rewrite, &content, &mut sync)?;
-            if sync {
-                fd.sync()?;
-            }
-            for item in batch.items.iter_mut() {
-                if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.update_position(LogQueue::Rewrite, cur_file_num, offset, &None);
-                }
-            }
-            *file_num = cur_file_num;
-            return Ok(content.len());
-        }
-        Ok(0)
+    fn total_size(&self, queue: LogQueue) -> usize {
+        let manager = self.get_queue(queue);
+        (manager.active_file_num - manager.first_file_num) as usize * self.rotate_size
+            + manager.active_log_size
     }
 
-    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
-        self.mut_queue(queue).truncate_active_log(offset)
+    fn read_bytes(&self, queue: LogQueue, file_id: u64, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let fd = self.get_queue(queue).get_fd(file_id)?;
+        pread_exact(fd.0, offset, len as usize)
     }
 
-    fn new_log_file(&self, queue: LogQueue) -> Result<()> {
-        self.mut_queue(queue).new_log_file()
-    }
-
-    fn sync(&self, queue: LogQueue) -> Result<()> {
-        if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fd.sync()?;
-        }
-        Ok(())
-    }
-
-    fn read_whole_file(&self, queue: LogQueue, file_num: u64) -> Result<Vec<u8>> {
+    fn read_file_bytes(&self, queue: LogQueue, file_id: u64) -> Result<Vec<u8>> {
         let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(file_num, self.get_name_suffix(queue)));
+        path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
         let meta = fs::metadata(&path)?;
         let mut vec = Vec::with_capacity(meta.len() as usize);
 
@@ -579,61 +642,156 @@ impl GenericPipeLog for PipeLog {
         Ok(vec)
     }
 
-    fn purge_to(&self, queue: LogQueue, file_num: u64) -> Result<usize> {
+    fn read_file<E: Message, W: EntryExt<E>>(
+        &self,
+        queue: LogQueue,
+        file_id: u64,
+        mode: RecoveryMode,
+        batches: &mut Vec<LogBatch<E, W, Self::FileId>>,
+    ) -> Result<()> {
+        let content = self.read_file_bytes(queue, file_id)?;
+        let mut buf = content.as_slice();
+        if !buf.starts_with(FILE_MAGIC_HEADER) {
+            if self.active_file_checkpoint(queue) == file_id {
+                warn!("Raft log header is corrupted at {:?}.{}", queue, file_id);
+                return Err(box_err!("Raft log file header is corrupted"));
+            } else {
+                self.truncate_active_log(queue, Some(0))?;
+                return Ok(());
+            }
+        }
+        let start_ptr = buf.as_ptr();
+        buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
+        let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
+        loop {
+            debug!("recovering log batch at {}.{}", file_id, offset);
+            let mut log_batch = match LogBatch::from_bytes(&mut buf, file_id, offset) {
+                Ok(Some(log_batch)) => log_batch,
+                Ok(None) => {
+                    info!("Recovered raft log {:?}.{}.", queue, file_id);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        "Raft log content is corrupted at {:?}.{}:{}, error: {}",
+                        queue, file_id, offset, e
+                    );
+                    if file_id == self.active_file_checkpoint(queue)
+                        && mode == RecoveryMode::TolerateCorruptedTailRecords
+                    {
+                        self.truncate_active_log(queue, Some(offset as usize))?;
+                        return Ok(());
+                    } else {
+                        return Err(box_err!("Raft log content is corrupted"));
+                    }
+                }
+            };
+            if queue == LogQueue::Append {
+                let size = log_batch.entries_size();
+                let mut submitor = self.cache_submitor.lock().unwrap();
+                if let Some(tracker) = submitor.new_cache_tracker(file_id, offset, size) {
+                    for item in log_batch.items.iter_mut() {
+                        if let LogItemContent::Entries(entries) = &mut item.content {
+                            entries.set_cache_tracker(tracker.clone());
+                        }
+                    }
+                }
+            } else {
+                for item in log_batch.items.iter_mut() {
+                    if let LogItemContent::Entries(entries) = &mut item.content {
+                        entries.set_queue(LogQueue::Rewrite);
+                    }
+                }
+            }
+            batches.push(log_batch);
+            offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
+        }
+    }
+
+    fn append<E: Message, W: EntryExt<E>>(
+        &self,
+        queue: LogQueue,
+        batch: &mut LogBatch<E, W, Self::FileId>,
+        mut sync: bool,
+    ) -> Result<(u64, usize)> {
+        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
+            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
+            let mut tracker = None;
+            let (file_id, offset, fd) = if queue == LogQueue::Append {
+                let mut cache_submitor = self.cache_submitor.lock().unwrap();
+                let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
+                tracker = cache_submitor.new_cache_tracker(file_id, offset, batch.entries_size());
+                (file_id, offset, fd)
+            } else {
+                self.append_bytes(queue, &content, &mut sync)?
+            };
+            if sync {
+                fd.sync()?;
+            }
+
+            for item in batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
+                    entries.set_position(queue, file_id, offset, tracker.clone());
+                }
+            }
+
+            return Ok((file_id, content.len()));
+        }
+        Ok((0, 0))
+    }
+
+    fn sync(&self, queue: LogQueue) -> Result<()> {
+        if let Some(fd) = self.get_queue(queue).get_active_fd() {
+            fd.sync()?;
+        }
+        Ok(())
+    }
+
+    fn active_file_checkpoint(&self, queue: LogQueue) -> u64 {
+        self.get_queue(queue).active_file_num
+    }
+
+    fn first_file_checkpoint(&self, queue: LogQueue) -> u64 {
+        self.get_queue(queue).first_file_num
+    }
+
+    fn file_checkpoint_at(&self, queue: LogQueue, position: f64) -> u64 {
+        // TODO: sanitize position
+        let cur_size = self.total_size(queue);
+        let count = (cur_size as f64 * position) as usize / self.rotate_size;
+        let file_num = self.get_queue(queue).first_file_num + count as u64;
+        assert!(file_num <= self.active_file_checkpoint(queue));
+        file_num
+    }
+
+    fn new_log_file(&self, queue: LogQueue) -> Result<()> {
+        self.mut_queue(queue).new_log_file()
+    }
+
+    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
+        self.mut_queue(queue).truncate_active_log(offset)
+    }
+
+    fn purge_to(&self, queue: LogQueue, file_checkpoint: u64) -> Result<usize> {
         let (mut manager, name_suffix) = match queue {
             LogQueue::Append => (self.appender.wl(), LOG_SUFFIX),
             LogQueue::Rewrite => (self.rewriter.wl(), REWRITE_SUFFIX),
         };
-        let purge_count = manager.purge_to(file_num)?;
+        let purge_count = manager.purge_to(file_checkpoint)?;
         drop(manager);
 
-        for cur_file_num in (file_num - purge_count as u64)..file_num {
+        for cur_file_num in (file_checkpoint - purge_count as u64)..file_checkpoint {
             let mut path = PathBuf::from(&self.dir);
             path.push(generate_file_name(cur_file_num, name_suffix));
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
-                return Ok((cur_file_num + purge_count as u64 - file_num) as usize);
+                return Ok((cur_file_num + purge_count as u64 - file_checkpoint) as usize);
             }
         }
         Ok(purge_count)
     }
 
-    fn total_size(&self, queue: LogQueue) -> usize {
-        let manager = self.get_queue(queue);
-        (manager.active_file_num - manager.first_file_num) as usize * self.rotate_size
-            + manager.active_log_size
-    }
-
-    fn active_file_num(&self, queue: LogQueue) -> u64 {
-        self.get_queue(queue).active_file_num
-    }
-
-    fn first_file_num(&self, queue: LogQueue) -> u64 {
-        self.get_queue(queue).first_file_num
-    }
-
-    fn latest_file_before(&self, queue: LogQueue, size: usize) -> u64 {
-        let cur_size = self.total_size(queue);
-        if cur_size <= size {
-            return 0;
-        }
-        let count = (cur_size - size) / self.rotate_size;
-        let file_num = self.get_queue(queue).first_file_num + count as u64;
-        assert!(file_num <= self.active_file_num(queue));
-        file_num
-    }
-
-    fn file_len(&self, queue: LogQueue, file_num: u64) -> Result<u64> {
-        self.get_queue(queue)
-            .get_fd(file_num)
-            .map(|fd| file_len(fd.0).unwrap() as u64)
-    }
-
-    fn cache_submitor(&self) -> MutexGuard<CacheSubmitor> {
-        self.cache_submitor.lock().unwrap()
-    }
-
-    fn hooks(&self) -> &[Arc<dyn PipeLogHook>] {
+    fn hooks(&self) -> &[Arc<dyn PipeLogHook<PipeLog>>] {
         &self.hooks
     }
 }
@@ -755,7 +913,7 @@ mod tests {
         path: &str,
         bytes_per_sync: usize,
         rotate_size: usize,
-    ) -> (PipeLog, Receiver<Option<CacheTask>>) {
+    ) -> (PipeLog, Receiver<Option<CacheTask<u64>>>) {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
@@ -790,37 +948,41 @@ mod tests {
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
         let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.first_file_num(queue), INIT_FILE_NUM);
-        assert_eq!(pipe_log.active_file_num(queue), INIT_FILE_NUM);
+        assert_eq!(pipe_log.first_file_checkpoint(queue), INIT_FILE_NUM);
+        assert_eq!(pipe_log.active_file_checkpoint(queue), INIT_FILE_NUM);
 
         let header_size = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let (file_num, offset, _) = pipe_log.append(queue, &content, &mut false).unwrap();
+        let (file_num, offset, _) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
         assert_eq!(file_num, 1);
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_num(queue), 1);
+        assert_eq!(pipe_log.active_file_checkpoint(queue), 1);
 
-        let (file_num, offset, _) = pipe_log.append(queue, &content, &mut false).unwrap();
+        let (file_num, offset, _) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
         assert_eq!(file_num, 2);
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_num(queue), 2);
+        assert_eq!(pipe_log.active_file_checkpoint(queue), 2);
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(queue, 2).unwrap(), 1);
-        assert_eq!(pipe_log.first_file_num(queue), 2);
+        assert_eq!(pipe_log.first_file_checkpoint(queue), 2);
 
         // cannot purge active file
         assert!(pipe_log.purge_to(queue, 3).is_err());
 
         // append position
         let s_content = b"short content".to_vec();
-        let (file_num, offset, _) = pipe_log.append(queue, &s_content, &mut false).unwrap();
+        let (file_num, offset, _) = pipe_log
+            .append_bytes(queue, &s_content, &mut false)
+            .unwrap();
         assert_eq!(file_num, 3);
         assert_eq!(offset, header_size);
 
-        let (file_num, offset, _) = pipe_log.append(queue, &s_content, &mut false).unwrap();
+        let (file_num, offset, _) = pipe_log
+            .append_bytes(queue, &s_content, &mut false)
+            .unwrap();
         assert_eq!(file_num, 3);
         assert_eq!(offset, header_size + s_content.len() as u64);
 
@@ -829,16 +991,15 @@ mod tests {
             FILE_MAGIC_HEADER.len() + VERSION.len() + 2 * s_content.len()
         );
 
-        // fread
         let content_readed = pipe_log
-            .fread(queue, 3, header_size, s_content.len() as u64)
+            .read_bytes(queue, 3, header_size, s_content.len() as u64)
             .unwrap();
         assert_eq!(content_readed, s_content);
 
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(queue, 3).is_ok());
-        assert_eq!(pipe_log.first_file_num(queue), 3);
-        assert_eq!(pipe_log.active_file_num(queue), 3);
+        assert_eq!(pipe_log.first_file_checkpoint(queue), 3);
+        assert_eq!(pipe_log.active_file_checkpoint(queue), 3);
 
         // truncate file
         pipe_log
@@ -868,7 +1029,7 @@ mod tests {
 
         // reopen
         let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.active_file_num(queue), 3);
+        assert_eq!(pipe_log.active_file_checkpoint(queue), 3);
         assert_eq!(
             pipe_log.active_log_size(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len()
@@ -900,8 +1061,8 @@ mod tests {
 
         let get_1m_batch = || {
             let mut entry = Entry::new();
-            entry.set_data(vec![b'a'; 1024]); // 1K data.
-            let mut log_batch = LogBatch::<Entry, Entry>::default();
+            entry.set_data(vec![b'a'; 1024].into()); // 1K data.
+            let mut log_batch = LogBatch::<Entry, Entry, u64>::default();
             log_batch.add_entries(1, vec![entry]);
             log_batch
         };
@@ -915,8 +1076,9 @@ mod tests {
         // task should be triggered. However the last batch will trigger it.
         for i in 0..5 {
             let mut log_batch = get_1m_batch();
-            let mut file_num = 0;
-            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
+            pipe_log
+                .append(LogQueue::Append, &mut log_batch, true)
+                .unwrap();
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 4 {
@@ -930,8 +1092,9 @@ mod tests {
         // emit on the second batch because log file is switched.
         for i in 5..7 {
             let mut log_batch = get_1m_batch();
-            let mut file_num = 0;
-            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
+            pipe_log
+                .append(LogQueue::Append, &mut log_batch, true)
+                .unwrap();
             log_batches.push(log_batch);
             let x = receiver.recv_timeout(Duration::from_millis(100));
             if i < 6 {
@@ -946,8 +1109,9 @@ mod tests {
         drop(log_batches);
         for _ in 7..20 {
             let mut log_batch = get_1m_batch();
-            let mut file_num = 0;
-            pipe_log.write(&mut log_batch, true, &mut file_num).unwrap();
+            pipe_log
+                .append(LogQueue::Append, &mut log_batch, true)
+                .unwrap();
             drop(log_batch);
             assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
         }

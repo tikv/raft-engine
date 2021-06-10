@@ -7,7 +7,7 @@ use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
 use crate::log_batch::{CompressionType, EntryExt};
-use crate::pipe_log::LogQueue;
+use crate::pipe_log::{GenericFileCheckpoint, GenericFileId, GenericPipeLog, LogQueue};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, GlobalStats, Result};
 
@@ -15,12 +15,15 @@ const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct EntryIndex {
+pub struct EntryIndex<I>
+where
+    I: GenericFileId,
+{
     pub index: u64,
 
     // Log batch physical position in file.
     pub queue: LogQueue,
-    pub file_num: u64,
+    pub file_id: I,
     pub base_offset: u64,
     pub compression_type: CompressionType,
     pub batch_len: u64,
@@ -33,12 +36,12 @@ pub struct EntryIndex {
     pub cache_tracker: Option<CacheTracker>,
 }
 
-impl Default for EntryIndex {
-    fn default() -> EntryIndex {
+impl<I: GenericFileId> Default for EntryIndex<I> {
+    fn default() -> EntryIndex<I> {
         EntryIndex {
             index: 0,
             queue: LogQueue::Append,
-            file_num: 0,
+            file_id: Default::default(),
             base_offset: 0,
             compression_type: CompressionType::None,
             batch_len: 0,
@@ -62,25 +65,38 @@ impl Default for EntryIndex {
  *                      |                                        |
  *                 first entry                               last entry
  */
-pub struct MemTable<E: Message + Clone, W: EntryExt<E>> {
+pub struct MemTable<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> {
     region_id: u64,
 
     // latest N entries
     entries_cache: VecDeque<E>,
 
     // All entries index
-    entries_index: VecDeque<EntryIndex>,
+    entries_index: VecDeque<EntryIndex<P::FileId>>,
     rewrite_count: usize,
 
     // Region scope key/value pairs
-    // key -> (value, queue, file_num)
-    kvs: HashMap<Vec<u8>, (Vec<u8>, LogQueue, u64)>,
+    // key -> (value, queue, file_id)
+    kvs: HashMap<Vec<u8>, (Vec<u8>, LogQueue, P::FileId)>,
 
     global_stats: Arc<GlobalStats>,
     _phantom: PhantomData<W>,
 }
 
-impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
+impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
+    pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable<E, W, P> {
+        MemTable::<E, W, P> {
+            region_id,
+            entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
+            entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
+            rewrite_count: 0,
+            kvs: HashMap::default(),
+
+            global_stats,
+            _phantom: PhantomData,
+        }
+    }
+
     fn cache_distance(&self) -> usize {
         if self.entries_cache.is_empty() {
             return self.entries_index.len();
@@ -193,20 +209,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         std::mem::swap(self, rhs);
     }
 
-    pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable<E, W> {
-        MemTable::<E, W> {
-            region_id,
-            entries_cache: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
-            entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
-            rewrite_count: 0,
-            kvs: HashMap::default(),
-
-            global_stats,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn append(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex>) {
+    pub fn append(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex<P::FileId>>) {
         assert_eq!(entries.len(), entries_index.len());
         if entries.is_empty() {
             return;
@@ -232,7 +235,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.entries_index.extend(entries_index);
     }
 
-    pub fn append_rewrite(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex>) {
+    pub fn append_rewrite(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex<P::FileId>>) {
         self.global_stats.add_rewrite(entries.len());
         match (
             self.entries_index.back().map(|x| x.index),
@@ -248,7 +251,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.rewrite_count = self.entries_index.len();
     }
 
-    pub fn rewrite(&mut self, entries_index: Vec<EntryIndex>, latest_rewrite: Option<u64>) {
+    pub fn rewrite(
+        &mut self,
+        entries_index: Vec<EntryIndex<P::FileId>>,
+        latest_rewrite: Option<P::FileCheckpoint>,
+    ) {
         if entries_index.is_empty() {
             return;
         }
@@ -290,7 +297,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         for (i, ei) in entries_index.iter().enumerate() {
             if let Some(latest_rewrite) = latest_rewrite {
                 debug_assert_eq!(self.entries_index[i + distance].queue, LogQueue::Append);
-                if self.entries_index[i + distance].file_num > latest_rewrite {
+                if !latest_rewrite.visible(self.entries_index[i + distance].file_id) {
                     self.compact_cache_to(self.entries_index[i + distance].index);
                     // Some entries are overwritten by new appends.
                     self.global_stats.add_compacted_rewrite(ents_len - i);
@@ -307,7 +314,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
                 self.entries_index[i + distance].queue = LogQueue::Rewrite;
             }
 
-            self.entries_index[i + distance].file_num = ei.file_num;
+            self.entries_index[i + distance].file_id = ei.file_id;
             self.entries_index[i + distance].base_offset = ei.base_offset;
             self.entries_index[i + distance].compression_type = ei.compression_type;
             self.entries_index[i + distance].batch_len = ei.batch_len;
@@ -319,35 +326,40 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.rewrite_count = distance + ents_len;
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_num: u64) {
-        if let Some(origin) = self.kvs.insert(key, (value, LogQueue::Append, file_num)) {
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: P::FileId) {
+        if let Some(origin) = self.kvs.insert(key, (value, LogQueue::Append, file_id)) {
             if origin.1 == LogQueue::Rewrite {
                 self.global_stats.add_compacted_rewrite(1);
             }
         }
     }
 
-    pub fn put_rewrite(&mut self, key: Vec<u8>, value: Vec<u8>, file_num: u64) {
-        self.kvs.insert(key, (value, LogQueue::Rewrite, file_num));
+    pub fn put_rewrite(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: P::FileId) {
+        self.kvs.insert(key, (value, LogQueue::Rewrite, file_id));
         self.global_stats.add_rewrite(1);
     }
 
-    pub fn rewrite_key(&mut self, key: Vec<u8>, latest_rewrite: Option<u64>, file_num: u64) {
+    pub fn rewrite_key(
+        &mut self,
+        key: Vec<u8>,
+        latest_rewrite: Option<P::FileCheckpoint>,
+        file_id: P::FileId,
+    ) {
         self.global_stats.add_rewrite(1);
         if let Some(value) = self.kvs.get_mut(&key) {
             if value.1 == LogQueue::Append {
                 if let Some(latest_rewrite) = latest_rewrite {
-                    if value.2 <= latest_rewrite {
+                    if latest_rewrite.visible(value.2) {
                         value.1 = LogQueue::Rewrite;
-                        value.2 = file_num;
+                        value.2 = file_id;
                     }
                 } else {
                     // The rewritten key/value pair has been overwritten.
                     self.global_stats.add_compacted_rewrite(1);
                 }
             } else {
-                assert!(value.2 <= file_num);
-                value.2 = file_num;
+                assert!(value.2 <= file_id);
+                value.2 = file_id;
             }
         } else {
             // The rewritten key/value pair has been compacted.
@@ -410,7 +422,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     // If entry exist in cache, return (Entry, None).
     // If entry exist but not in cache, return (None, EntryIndex).
     // If entry not exist, return (None, None).
-    pub fn get_entry(&self, index: u64) -> (Option<E>, Option<EntryIndex>) {
+    pub fn get_entry(&self, index: u64) -> (Option<E>, Option<EntryIndex<P::FileId>>) {
         if self.entries_index.is_empty() {
             return (None, None);
         }
@@ -441,7 +453,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         end: u64,
         max_size: Option<usize>,
         vec: &mut Vec<E>,
-        vec_idx: &mut Vec<EntryIndex>,
+        vec_idx: &mut Vec<EntryIndex<P::FileId>>,
     ) -> Result<()> {
         assert!(end > begin, "fetch_entries_to({}, {})", begin, end);
         let (vec_len, vec_idx_len) = (vec.len(), vec_idx.len());
@@ -502,9 +514,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 
     pub fn fetch_rewrite_entries(
         &self,
-        latest_rewrite: u64,
+        latest_rewrite: P::FileCheckpoint,
         vec: &mut Vec<E>,
-        vec_idx: &mut Vec<EntryIndex>,
+        vec_idx: &mut Vec<EntryIndex<P::FileId>>,
     ) -> Result<()> {
         let begin = self
             .entries_index
@@ -514,7 +526,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             .entries_index
             .iter()
             .rev()
-            .find(|e| e.file_num <= latest_rewrite);
+            .find(|e| latest_rewrite.visible(e.file_id));
         if let (Some(begin), Some(end)) = (begin, end) {
             if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec, vec_idx);
@@ -526,7 +538,7 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     pub fn fetch_entries_from_rewrite(
         &self,
         vec: &mut Vec<E>,
-        vec_idx: &mut Vec<EntryIndex>,
+        vec_idx: &mut Vec<EntryIndex<P::FileId>>,
     ) -> Result<()> {
         if self.rewrite_count > 0 {
             let end = self.entries_index[self.rewrite_count - 1].index + 1;
@@ -536,9 +548,13 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         Ok(())
     }
 
-    pub fn fetch_rewrite_kvs(&self, latest_rewrite: u64, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+    pub fn fetch_rewrite_kvs(
+        &self,
+        latest_rewrite: P::FileCheckpoint,
+        vec: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
         for (key, (value, queue, file_num)) in &self.kvs {
-            if *queue == LogQueue::Append && *file_num <= latest_rewrite {
+            if *queue == LogQueue::Append && latest_rewrite.visible(*file_num) {
                 vec.push((key.clone(), value.clone()));
             }
         }
@@ -552,17 +568,17 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         }
     }
 
-    pub fn min_file_num(&self, queue: LogQueue) -> Option<u64> {
+    pub fn min_file_num(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
         let entry = match queue {
             LogQueue::Append => self.entries_index.get(self.rewrite_count),
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
             LogQueue::Rewrite => self.entries_index.front(),
         };
-        let ents_min = entry.map(|e| e.file_num);
+        let ents_min = entry.map(|e| e.file_id);
         let kvs_min = self.kvs_min_file_num(queue);
         match (ents_min, kvs_min) {
-            (Some(ents_min), Some(kvs_min)) => Some(cmp::min(ents_min, kvs_min)),
-            (Some(ents_min), None) => Some(ents_min),
+            (Some(ents_min), Some(kvs_min)) => Some(kvs_min.union_file_min(ents_min)),
+            (Some(ents_min), None) => Some(P::FileCheckpoint::default().union_file_min(ents_min)),
             (None, Some(kvs_min)) => Some(kvs_min),
             (None, None) => None,
         }
@@ -584,29 +600,35 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         self.entries_index.back().map(|e| e.index)
     }
 
-    pub fn kvs_min_file_num(&self, queue: LogQueue) -> Option<u64> {
+    pub fn kvs_min_file_num(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
         self.kvs
             .values()
             .filter(|v| v.1 == queue)
-            .fold(None, |min, v| Some(cmp::min(min.unwrap_or(u64::MAX), v.2)))
+            .fold(None, |min, v| {
+                if let Some(min) = min {
+                    Some(min.union_file_min(v.2))
+                } else {
+                    Some(P::FileCheckpoint::default().union_file_min(v.2))
+                }
+            })
     }
 
     /// Returns (needs_rewrite, needs_force_compact).
     pub fn needs_rewrite_or_compact(
         &self,
-        latest_rewrite: u64,
-        latest_compact: u64,
+        latest_rewrite: P::FileCheckpoint,
+        latest_compact: P::FileCheckpoint,
         // Only entries with count is less than the limit can be rewritten.
         rewrite_count_limit: usize,
     ) -> (bool, bool) {
         debug_assert!(latest_compact <= latest_rewrite);
         let min_file_num = match self.min_file_num(LogQueue::Append) {
-            Some(file_num) if file_num <= latest_rewrite => file_num,
+            Some(file_num) if file_num.le(&latest_rewrite) => file_num,
             _ => return (false, false),
         };
         let entries_count = self.entries_count();
 
-        if min_file_num < latest_compact && entries_count > rewrite_count_limit {
+        if min_file_num.lt(&latest_compact) && entries_count > rewrite_count_limit {
             // `rewrite_count_limit` is considered because in some raft applications,
             // log-compaction is implemented based on an special raft log, which means
             // there will always be at least 1 log left.
@@ -637,36 +659,45 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe_log::PipeLog;
     use raft::eraftpb::Entry;
     use std::sync::atomic::AtomicUsize;
 
-    impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
-        pub fn max_file_num(&self, queue: LogQueue) -> Option<u64> {
+    impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
+        pub fn max_file_num(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
             let entry = match queue {
                 LogQueue::Append if self.rewrite_count == self.entries_index.len() => None,
                 LogQueue::Append => self.entries_index.back(),
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
                 LogQueue::Rewrite => self.entries_index.get(self.rewrite_count - 1),
             };
-            let ents_max = entry.map(|e| e.file_num);
+            let ents_max = entry.map(|e| e.file_id);
 
             let kvs_max = self.kvs_max_file_num(queue);
             match (ents_max, kvs_max) {
-                (Some(ents_max), Some(kvs_max)) => Some(cmp::max(ents_max, kvs_max)),
-                (Some(ents_max), None) => Some(ents_max),
+                (Some(ents_max), Some(kvs_max)) => Some(kvs_max.union_file_max(ents_max)),
+                (Some(ents_max), None) => {
+                    Some(P::FileCheckpoint::default().union_file_max(ents_max))
+                }
                 (None, Some(kvs_max)) => Some(kvs_max),
                 (None, None) => None,
             }
         }
 
-        pub fn kvs_max_file_num(&self, queue: LogQueue) -> Option<u64> {
+        pub fn kvs_max_file_num(&self, queue: LogQueue) -> Option<P::FileCheckpoint> {
             self.kvs
                 .values()
                 .filter(|v| v.1 == queue)
-                .fold(None, |max, v| Some(cmp::max(max.unwrap_or(0), v.2)))
+                .fold(None, |max, v| {
+                    if let Some(max) = max {
+                        Some(max.union_file_max(v.2))
+                    } else {
+                        Some(P::FileCheckpoint::default().union_file_max(v.2))
+                    }
+                })
         }
 
-        pub fn fetch_all(&self, vec: &mut Vec<E>, vec_idx: &mut Vec<EntryIndex>) {
+        pub fn fetch_all(&self, vec: &mut Vec<E>, vec_idx: &mut Vec<EntryIndex<P::FileId>>) {
             if self.entries_index.is_empty() {
                 return;
             }
@@ -708,12 +739,12 @@ mod tests {
     fn test_memtable_append() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // Append entries [10, 20) file_num = 1.
         // after appending
         // [10, 20) file_num = 1
-        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(stats.cache_size(), 10);
@@ -725,7 +756,7 @@ mod tests {
         // after appending:
         // [10, 20) file_num = 1
         // [20, 30) file_num = 2
-        let (ents, ents_idx) = generate_ents(20, 30, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 30, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 20);
         assert_eq!(stats.cache_size(), 20);
@@ -739,7 +770,7 @@ mod tests {
         // [10, 20) file_num = 1
         // [20, 25) file_num = 2
         // [25, 35) file_num = 3
-        let (ents, ents_idx) = generate_ents(25, 35, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(25, 35, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(stats.cache_size(), 25);
@@ -751,7 +782,7 @@ mod tests {
         // Append entries [10, 40) file_num = 4.
         // After appending:
         // [10, 40) file_num = 4
-        let (ents, ents_idx) = generate_ents(10, 40, LogQueue::Append, 4, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 40, LogQueue::Append, 4, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(stats.cache_size(), 30);
@@ -764,19 +795,19 @@ mod tests {
     fn test_memtable_compact() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(10, 15, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 15, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(15, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(15, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
 
         assert_eq!(memtable.entries_size(), 25);
@@ -815,19 +846,19 @@ mod tests {
     fn test_memtable_compact_cache() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(10, 15, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 15, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(15, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(15, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
 
         assert_eq!(memtable.entries_size(), 25);
@@ -856,18 +887,18 @@ mod tests {
     fn test_memtable_fetch() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // After appending and compact cache:
         // [0, 10) file_num = 1, not in cache
         // [10, 15) file_num = 2, not in cache
         // [15, 20) file_num = 2, in cache
         // [20, 25) file_num = 3, in cache
-        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         memtable.compact_cache_to(15);
 
@@ -983,19 +1014,19 @@ mod tests {
     fn test_memtable_fetch_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (ents, ents_idx) = generate_ents(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"k1".to_vec(), b"v1".to_vec(), 1);
-        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"k2".to_vec(), b"v2".to_vec(), 2);
-        let (ents, ents_idx) = generate_ents(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"k3".to_vec(), b"v3".to_vec(), 3);
 
@@ -1003,7 +1034,7 @@ mod tests {
         // [0, 10) queue = rewrite, file_num = 50,
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (_, ents_idx) = generate_ents(0, 10, LogQueue::Rewrite, 50, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Rewrite, 50, &stats);
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"k1".to_vec(), Some(1), 50);
         assert_eq!(memtable.entries_size(), 25);
@@ -1033,7 +1064,7 @@ mod tests {
     fn test_memtable_kv_operations() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats);
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats);
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
@@ -1052,13 +1083,13 @@ mod tests {
     fn test_memtable_get_entry() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // [5, 10) file_num = 1, not in cache
         // [10, 20) file_num = 2, in cache
-        let (ents, ents_idx) = generate_ents(5, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(5, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         memtable.compact_cache_to(10);
 
@@ -1079,19 +1110,19 @@ mod tests {
     fn test_memtable_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
 
         // After appending and compacting:
         // [10, 20) file_num = 2, not in cache;
         // [20, 30) file_num = 3, 5 not in cache, 5 in cache;
         // [30, 40) file_num = 4, in cache.
-        let (ents, ents_idx) = generate_ents(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk1".to_vec(), b"vv1".to_vec(), 2);
-        let (ents, ents_idx) = generate_ents(20, 30, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 30, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk2".to_vec(), b"vv2".to_vec(), 3);
-        let (ents, ents_idx) = generate_ents(30, 40, LogQueue::Append, 4, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(30, 40, LogQueue::Append, 4, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk3".to_vec(), b"vv3".to_vec(), 4);
         memtable.compact_cache_to(25);
@@ -1103,7 +1134,7 @@ mod tests {
         memtable.check_entries_index_and_cache();
 
         // Rewrite compacted entries.
-        let (_, ents_idx) = generate_ents(0, 10, LogQueue::Rewrite, 50, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Rewrite, 50, &stats);
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
 
@@ -1117,7 +1148,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 11);
 
         // Rewrite compacted entries + valid entries.
-        let (_, ents_idx) = generate_ents(0, 20, LogQueue::Rewrite, 100, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(0, 20, LogQueue::Rewrite, 100, &stats);
         memtable.rewrite(ents_idx, Some(2));
         assert_eq!(memtable.global_stats.rewrite_operations(), 31);
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
@@ -1133,7 +1164,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Rewrite vaild entries, some of them are in cache.
-        let (_, ents_idx) = generate_ents(20, 30, LogQueue::Rewrite, 101, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(20, 30, LogQueue::Rewrite, 101, &stats);
         memtable.rewrite(ents_idx, Some(3));
         memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
 
@@ -1148,14 +1179,14 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Put some entries overwritting entires in file 4.
-        let (ents, ents_idx) = generate_ents(35, 36, LogQueue::Append, 5, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(35, 36, LogQueue::Append, 5, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk3".to_vec(), b"vv33".to_vec(), 5);
         assert_eq!(stats.cache_size(), 6);
         assert_eq!(memtable.entries_index.back().unwrap().index, 35);
 
         // Rewrite valid + overwritten entries.
-        let (_, ents_idx) = generate_ents(30, 40, LogQueue::Rewrite, 102, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(30, 40, LogQueue::Rewrite, 102, &stats);
         memtable.rewrite(ents_idx, Some(4));
         memtable.rewrite_key(b"kk3".to_vec(), Some(4), 102);
 
@@ -1170,7 +1201,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 27);
 
         // Compact after rewrite.
-        let (ents, ents_idx) = generate_ents(35, 50, LogQueue::Append, 6, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(35, 50, LogQueue::Append, 6, &stats);
         memtable.append(ents, ents_idx);
         memtable.compact_to(30);
         assert_eq!(memtable.entries_index.back().unwrap().index, 49);
@@ -1184,7 +1215,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 52);
         assert_eq!(stats.cache_size(), 10);
 
-        let (_, ents_idx) = generate_ents(30, 36, LogQueue::Rewrite, 103, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(30, 36, LogQueue::Rewrite, 103, &stats);
         memtable.rewrite(ents_idx, Some(5));
         memtable.rewrite_key(b"kk3".to_vec(), Some(5), 103);
 
@@ -1198,23 +1229,23 @@ mod tests {
         assert_eq!(stats.cache_size(), 10);
 
         // Rewrite after cut.
-        let (ents, ents_idx) = generate_ents(50, 55, LogQueue::Append, 7, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(50, 55, LogQueue::Append, 7, &stats);
         memtable.append(ents, ents_idx);
-        let (_, ents_idx) = generate_ents(30, 50, LogQueue::Rewrite, 104, &stats);
+        let (_, ents_idx) = generate_ents::<PipeLog>(30, 50, LogQueue::Rewrite, 104, &stats);
         memtable.rewrite(ents_idx, Some(6));
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 68);
         assert_eq!(stats.cache_size(), 5);
 
-        let (ents, ents_idx) = generate_ents(45, 50, LogQueue::Append, 7, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(45, 50, LogQueue::Append, 7, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.rewrite_count, 5);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 73);
         assert_eq!(stats.cache_size(), 5);
 
-        let (ents, ents_idx) = generate_ents(40, 50, LogQueue::Append, 7, &stats);
+        let (ents, ents_idx) = generate_ents::<PipeLog>(40, 50, LogQueue::Append, 7, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
@@ -1222,13 +1253,13 @@ mod tests {
         assert_eq!(stats.cache_size(), 10);
     }
 
-    fn generate_ents(
+    fn generate_ents<P: GenericPipeLog>(
         begin_idx: u64,
         end_idx: u64,
         queue: LogQueue,
-        file_num: u64,
+        file_id: P::FileId,
         stats: &Arc<GlobalStats>,
-    ) -> (Vec<Entry>, Vec<EntryIndex>) {
+    ) -> (Vec<Entry>, Vec<EntryIndex<P::FileId>>) {
         assert!(end_idx >= begin_idx);
         let (mut ents, mut ents_idx) = (vec![], vec![]);
         for idx in begin_idx..end_idx {
@@ -1239,7 +1270,7 @@ mod tests {
             let mut ent_idx = EntryIndex::default();
             ent_idx.index = idx;
             ent_idx.queue = queue;
-            ent_idx.file_num = file_num;
+            ent_idx.file_id = file_id;
             ent_idx.offset = idx; // fake offset
             ent_idx.len = 1; // fake size
 

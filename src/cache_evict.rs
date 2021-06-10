@@ -10,7 +10,7 @@ use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::{GenericPipeLog, LogQueue};
+use crate::pipe_log::{GenericFileId, GenericPipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use crate::{GlobalStats, Result};
 
@@ -21,52 +21,53 @@ const LOW_WATER_RATIO: f64 = 0.8;
 const CHUNKS_SHRINK_TO: usize = 1024;
 
 /// Used in `PipLog` to emit `CacheTask::NewChunk` tasks.
-pub struct CacheSubmitor {
-    file_num: u64,
-    offset: u64,
-    // `chunk_size` is different from `size_tracker`. For a given chunk,
-    // the former is monotomically increasing, but the latter can decrease.
-    chunk_size: usize,
-    size_tracker: Arc<AtomicUsize>,
-
-    scheduler: Scheduler<CacheTask>,
+pub struct CacheSubmitor<P>
+where
+    P: GenericPipeLog,
+{
     cache_limit: usize,
     chunk_limit: usize,
+
+    file_id: P::FileId,
+    offset: u64,
+
+    chunk_size: usize,
+    // Current cached size.
+    size_tracker: Arc<AtomicUsize>,
+
+    scheduler: Scheduler<CacheTask<P::FileId>>,
+
     global_stats: Arc<GlobalStats>,
     block_on_full: bool,
 }
 
-impl CacheSubmitor {
+impl<P: GenericPipeLog> CacheSubmitor<P> {
     pub fn new(
         cache_limit: usize,
         chunk_limit: usize,
-        scheduler: Scheduler<CacheTask>,
+        scheduler: Scheduler<CacheTask<P::FileId>>,
         global_stats: Arc<GlobalStats>,
     ) -> Self {
         CacheSubmitor {
-            file_num: 0,
+            cache_limit,
+            chunk_limit,
+            file_id: Default::default(),
             offset: 0,
             chunk_size: 0,
             size_tracker: Arc::new(AtomicUsize::new(0)),
             scheduler,
-            cache_limit,
-            chunk_limit,
             global_stats,
             block_on_full: false,
         }
     }
 
-    pub fn block_on_full(&mut self) {
-        self.block_on_full = true;
+    pub fn set_block_on_full(&mut self, block_on_full: bool) {
+        self.block_on_full = block_on_full;
     }
 
-    pub fn nonblock_on_full(&mut self) {
-        self.block_on_full = false;
-    }
-
-    pub fn get_cache_tracker(
+    pub fn new_cache_tracker(
         &mut self,
-        file_num: u64,
+        file_id: P::FileId,
         offset: u64,
         size: usize,
     ) -> Option<CacheTracker> {
@@ -74,21 +75,22 @@ impl CacheSubmitor {
             return None;
         }
 
-        if self.file_num == 0 {
-            self.file_num = file_num;
+        if !self.file_id.valid() {
+            self.file_id = file_id;
             self.offset = offset;
         }
 
-        if self.chunk_size >= self.chunk_limit || self.file_num < file_num {
+        if self.chunk_size >= self.chunk_limit || self.file_id != file_id {
+            debug_assert!(self.file_id <= file_id);
             // If all entries are released from cache, the chunk can be ignored.
             if self.size_tracker.load(Ordering::Relaxed) > 0 {
                 let mut task = CacheChunk {
-                    file_num: self.file_num,
+                    file_id: self.file_id,
                     base_offset: self.offset,
                     end_offset: offset,
                     size_tracker: self.size_tracker.clone(),
                 };
-                if file_num != self.file_num {
+                if file_id != self.file_id {
                     // Log file is switched, use `u64::MAX` as the end.
                     task.end_offset = u64::MAX;
                 }
@@ -96,7 +98,7 @@ impl CacheSubmitor {
                     warn!("Failed to schedule cache chunk to evictor: {}", e);
                 }
             }
-            self.reset(file_num, offset);
+            self.reset(file_id, offset);
         }
 
         if self.block_on_full {
@@ -117,8 +119,8 @@ impl CacheSubmitor {
         ))
     }
 
-    fn reset(&mut self, file_num: u64, offset: u64) {
-        self.file_num = file_num;
+    fn reset(&mut self, file_id: P::FileId, offset: u64) {
+        self.file_id = file_id;
         self.offset = offset;
         self.chunk_size = 0;
         self.size_tracker = Arc::new(AtomicUsize::new(0));
@@ -134,8 +136,8 @@ where
     cache_limit: usize,
     global_stats: Arc<GlobalStats>,
     chunk_limit: usize,
-    valid_cache_chunks: VecDeque<CacheChunk>,
-    memtables: MemTableAccessor<E, W>,
+    valid_cache_chunks: VecDeque<CacheChunk<P::FileId>>,
+    memtables: MemTableAccessor<E, W, P>,
     pipe_log: P,
 }
 
@@ -149,7 +151,7 @@ where
         cache_limit: usize,
         global_stats: Arc<GlobalStats>,
         chunk_limit: usize,
-        memtables: MemTableAccessor<E, W>,
+        memtables: MemTableAccessor<E, W, P>,
         pipe_log: P,
     ) -> Runner<E, W, P> {
         Runner {
@@ -201,8 +203,9 @@ where
             };
 
             let mut reader: &[u8] = chunk_content.as_ref();
-            let (file_num, mut offset) = (chunk.file_num, chunk.base_offset);
-            while let Some(b) = LogBatch::<E, W>::from_bytes(&mut reader, file_num, offset).unwrap()
+            let (file_id, mut offset) = (chunk.file_id, chunk.base_offset);
+            while let Some(b) =
+                LogBatch::<E, W, P::FileId>::from_bytes(&mut reader, file_id, offset).unwrap()
             {
                 offset += read_len - reader.len() as u64;
                 for item in b.items {
@@ -221,17 +224,17 @@ where
         true
     }
 
-    fn read_chunk(&self, chunk: &CacheChunk) -> Result<(u64, Vec<u8>)> {
+    fn read_chunk(&self, chunk: &CacheChunk<P::FileId>) -> Result<(u64, Vec<u8>)> {
         let read_len = if chunk.end_offset == u64::MAX {
-            let file_len = self.pipe_log.file_len(LogQueue::Append, chunk.file_num)?;
+            let file_len = self.pipe_log.file_len(LogQueue::Append, chunk.file_id)?;
             file_len - chunk.base_offset
         } else {
             chunk.end_offset - chunk.base_offset
         };
 
-        let content = self.pipe_log.fread(
+        let content = self.pipe_log.read_bytes(
             LogQueue::Append,
-            chunk.file_num,
+            chunk.file_id,
             chunk.base_offset,
             read_len,
         )?;
@@ -239,13 +242,13 @@ where
     }
 }
 
-impl<E, W, P> Runnable<CacheTask> for Runner<E, W, P>
+impl<E, W, P> Runnable<CacheTask<P::FileId>> for Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
     P: GenericPipeLog,
 {
-    fn run(&mut self, task: CacheTask) -> bool {
+    fn run(&mut self, task: CacheTask<P::FileId>) -> bool {
         match task {
             CacheTask::NewChunk(chunk) => self.valid_cache_chunks.push_back(chunk),
             CacheTask::EvictOldest(tx) => {
@@ -265,14 +268,20 @@ where
 }
 
 #[derive(Clone)]
-pub enum CacheTask {
-    NewChunk(CacheChunk),
+pub enum CacheTask<I>
+where
+    I: GenericFileId,
+{
+    NewChunk(CacheChunk<I>),
     EvictOldest(Sender<()>),
 }
 
 #[derive(Clone, Debug)]
-pub struct CacheChunk {
-    file_num: u64,
+pub struct CacheChunk<I>
+where
+    I: GenericFileId,
+{
+    file_id: I,
     base_offset: u64,
     end_offset: u64,
     size_tracker: Arc<AtomicUsize>,
@@ -318,7 +327,7 @@ impl PartialEq for CacheTracker {
     }
 }
 
-impl CacheChunk {
+impl<I: GenericFileId> CacheChunk<I> {
     #[cfg(test)]
     pub fn self_check(&self, expected_chunk_size: usize) {
         assert!(self.end_offset > self.base_offset);
