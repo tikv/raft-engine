@@ -286,12 +286,12 @@ impl LogManager {
     fn open_files(
         &mut self,
         logs: Vec<String>,
-        min_file_num: u64,
-        max_file_num: u64,
+        min_file_checkpoint: u64,
+        max_file_checkpoint: u64,
     ) -> Result<()> {
         if !logs.is_empty() {
-            self.first_file_num = min_file_num;
-            self.active_file_num = max_file_num;
+            self.first_file_num = min_file_checkpoint;
+            self.active_file_num = max_file_checkpoint;
             let queue = queue_from_suffix(self.name_suffix);
 
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
@@ -490,7 +490,7 @@ impl PipeLog {
 
         let pipe_log = PipeLog::new(cfg, cache_submitor, hooks);
 
-        let (mut min_file_num, mut max_file_num): (u64, u64) = (u64::MAX, 0);
+        let (mut min_file_checkpoint, mut max_file_checkpoint): (u64, u64) = (u64::MAX, 0);
         let (mut min_rewrite_num, mut max_rewrite_num): (u64, u64) = (u64::MAX, 0);
         let (mut log_files, mut rewrite_files) = (vec![], vec![]);
         for entry in fs::read_dir(path)? {
@@ -506,8 +506,8 @@ impl PipeLog {
                     Ok(num) => num,
                     Err(_) => continue,
                 };
-                min_file_num = cmp::min(min_file_num, file_num);
-                max_file_num = cmp::max(max_file_num, file_num);
+                min_file_checkpoint = cmp::min(min_file_checkpoint, file_num);
+                max_file_checkpoint = cmp::max(max_file_checkpoint, file_num);
                 log_files.push(file_name.to_string());
             } else if is_rewrite_file(file_name) {
                 let file_num = match extract_file_num(file_name, REWRITE_NUM_LEN) {
@@ -529,7 +529,7 @@ impl PipeLog {
 
         log_files.sort();
         rewrite_files.sort();
-        if log_files.len() as u64 != max_file_num - min_file_num + 1 {
+        if log_files.len() as u64 != max_file_checkpoint - min_file_checkpoint + 1 {
             return Err(box_err!("Corruption occurs on log files"));
         }
         if !rewrite_files.is_empty()
@@ -540,7 +540,7 @@ impl PipeLog {
 
         pipe_log
             .mut_queue(LogQueue::Append)
-            .open_files(log_files, min_file_num, max_file_num)?;
+            .open_files(log_files, min_file_checkpoint, max_file_checkpoint)?;
         pipe_log.mut_queue(LogQueue::Rewrite).open_files(
             rewrite_files,
             min_rewrite_num,

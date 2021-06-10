@@ -69,7 +69,7 @@ where
             return Ok(vec![]);
         }
 
-        let (rewrite_limit, compact_limit) = self.latest_inactive_file_num();
+        let (rewrite_limit, compact_limit) = self.latest_inactive_file_checkpoint();
         if !self
             .pipe_log
             .hooks()
@@ -98,8 +98,8 @@ where
                 self.pipe_log.active_file_checkpoint(LogQueue::Rewrite),
             ),
             |(mut min1, mut min2), t| {
-                min1 = min1.union_min(t.min_file_num(LogQueue::Append).unwrap_or_default());
-                min2 = min2.union_min(t.min_file_num(LogQueue::Rewrite).unwrap_or_default());
+                min1 = min1.union_min(t.min_file_checkpoint(LogQueue::Append).unwrap_or_default());
+                min2 = min2.union_min(t.min_file_checkpoint(LogQueue::Rewrite).unwrap_or_default());
                 (min1, min2)
             },
         );
@@ -120,9 +120,9 @@ where
     }
 
     pub fn needs_purge_log_files(&self, queue: LogQueue) -> bool {
-        let active_file_num = self.pipe_log.active_file_checkpoint(queue);
-        let first_file_num = self.pipe_log.first_file_checkpoint(queue);
-        if active_file_num == first_file_num {
+        let active_file_checkpoint = self.pipe_log.active_file_checkpoint(queue);
+        let first_file_checkpoint = self.pipe_log.first_file_checkpoint(queue);
+        if active_file_checkpoint == first_file_checkpoint {
             return false;
         }
 
@@ -135,12 +135,12 @@ where
     }
 
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
-    fn latest_inactive_file_num(&self) -> (P::FileCheckpoint, P::FileCheckpoint) {
+    fn latest_inactive_file_checkpoint(&self) -> (P::FileCheckpoint, P::FileCheckpoint) {
         let queue = LogQueue::Append;
 
-        let first_file_num = self.pipe_log.first_file_checkpoint(queue);
-        let active_file_num = self.pipe_log.active_file_checkpoint(queue);
-        if active_file_num == first_file_num {
+        let first_file_checkpoint = self.pipe_log.first_file_checkpoint(queue);
+        let active_file_checkpoint = self.pipe_log.active_file_checkpoint(queue);
+        if active_file_checkpoint == first_file_checkpoint {
             // Can't rewrite or force compact the active file.
             return (Default::default(), Default::default());
         }
@@ -149,8 +149,8 @@ where
             .pipe_log
             .file_checkpoint_at(queue, REWRITE_INACTIVE_RATIO);
         let mut latest_needs_compact = self.pipe_log.file_checkpoint_at(queue, FORCE_COMPACT_RATIO);
-        latest_needs_rewrite = latest_needs_rewrite.union_min(active_file_num.backward(1));
-        latest_needs_compact = latest_needs_compact.union_min(active_file_num.backward(1));
+        latest_needs_rewrite = latest_needs_rewrite.union_min(active_file_checkpoint.backward(1));
+        latest_needs_compact = latest_needs_compact.union_min(active_file_checkpoint.backward(1));
         (latest_needs_rewrite, latest_needs_compact)
     }
 
@@ -204,7 +204,7 @@ where
         self.pipe_log.new_log_file(LogQueue::Rewrite).unwrap();
 
         let memtables = self.memtables.collect(|t| {
-            t.min_file_num(LogQueue::Rewrite)
+            t.min_file_checkpoint(LogQueue::Rewrite)
                 .unwrap_or_default()
                 .valid()
         });

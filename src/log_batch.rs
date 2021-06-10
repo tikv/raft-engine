@@ -198,7 +198,6 @@ impl<E: Message, I: GenericFileId> Entries<E, I> {
             let content = e.write_to_bytes()?;
             vec.encode_var_u64(content.len() as u64)?;
 
-            // file_num = 0 means entry index is not initialized.
             if !self.entries_index[i].file_id.valid() {
                 self.entries_index[i].index = W::index(e);
                 // This offset doesn't count the header.
@@ -678,7 +677,7 @@ mod tests {
             vec![Entry::new(); 10],
             vec![], // Empty entries.
         ] {
-            let file_num = 1;
+            let file_id = 1;
             let mut entries = Entries::<_, u64>::new(pb_entries, None);
 
             let (mut encoded, mut entries_size1) = (vec![], 0);
@@ -686,11 +685,11 @@ mod tests {
                 .encode_to::<Entry>(&mut encoded, &mut entries_size1)
                 .unwrap();
             for idx in entries.entries_index.iter_mut() {
-                idx.file_id = file_num;
+                idx.file_id = file_id;
             }
             let (mut s, mut entries_size2) = (encoded.as_slice(), 0);
             let decode_entries =
-                Entries::<_, u64>::from_bytes::<Entry>(&mut s, file_num, 0, 0, &mut entries_size2)
+                Entries::<_, u64>::from_bytes::<Entry>(&mut s, file_id, 0, 0, &mut entries_size2)
                     .unwrap();
             assert_eq!(s.len(), 0);
             assert_eq!(entries.entries, decode_entries.entries);
