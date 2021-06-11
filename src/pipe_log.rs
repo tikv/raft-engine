@@ -26,30 +26,6 @@ impl From<u64> for FileId {
     }
 }
 
-impl std::iter::Step for FileId {
-    fn steps_between(start: &Self, end: &Self) -> Option<usize> {
-        if start.0 == 0 || end.0 == 0 || start.0 > end.0 {
-            None
-        } else {
-            Some((end.0 - start.0) as usize)
-        }
-    }
-    fn forward_checked(start: Self, count: usize) -> Option<Self> {
-        if start.0 == 0 {
-            None
-        } else {
-            Some(FileId(start.0 + count as u64))
-        }
-    }
-    fn backward_checked(start: Self, count: usize) -> Option<Self> {
-        if start.0 <= count as u64 {
-            None
-        } else {
-            Some(FileId(start.0 - count as u64))
-        }
-    }
-}
-
 impl FileId {
     pub fn as_u64(&self) -> u64 {
         self.0
@@ -60,15 +36,27 @@ impl FileId {
     }
     /// Returns an invalid ID when applied on an invalid file ID.
     pub fn forward(&self, step: usize) -> Self {
-        std::iter::Step::forward_checked(*self, step).unwrap_or_default()
+        if self.0 == 0 {
+            Default::default()
+        } else {
+            FileId(self.0 + step as u64)
+        }
     }
     /// Returns an invalid ID when out of bound or applied on an invalid file ID.
     pub fn backward(&self, step: usize) -> Self {
-        std::iter::Step::backward_checked(*self, step).unwrap_or_default()
+        if self.0 <= step as u64 {
+            Default::default()
+        } else {
+            FileId(self.0 - step as u64)
+        }
     }
     /// Returns step distance from another older ID.
     pub fn distance_from(&self, rhs: &Self) -> Option<usize> {
-        std::iter::Step::steps_between(rhs, self)
+        if self.0 == 0 || rhs.0 == 0 || self.0 < rhs.0 {
+            None
+        } else {
+            Some((self.0 - rhs.0) as usize)
+        }
     }
 
     pub fn min(lhs: FileId, rhs: FileId) -> FileId {

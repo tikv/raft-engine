@@ -610,16 +610,15 @@ impl PipeLog for FilePipeLog {
         let purge_count = manager.purge_to(file_id)?;
         drop(manager);
 
-        for cur_file_num in file_id.backward(purge_count)..file_id {
+        let mut cur_file_id = file_id.backward(purge_count);
+        for i in 0..purge_count {
             let mut path = PathBuf::from(&self.dir);
-            path.push(generate_file_name(cur_file_num, name_suffix));
+            path.push(generate_file_name(cur_file_id, name_suffix));
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
-                return Ok(cur_file_num
-                    .forward(purge_count)
-                    .distance_from(&file_id)
-                    .unwrap());
+                return Ok(i);
             }
+            cur_file_id = cur_file_id.forward(1);
         }
         Ok(purge_count)
     }

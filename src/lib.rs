@@ -1,5 +1,4 @@
 #![feature(shrink_to)]
-#![feature(step_trait)]
 #![feature(cell_update)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
