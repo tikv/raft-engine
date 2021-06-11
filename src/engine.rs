@@ -6,16 +6,18 @@ use std::{mem, u64};
 use log::{debug, info, trace};
 use protobuf::Message;
 
+use crate::file_pipe_log::FilePipeLog;
 use crate::cache_evict::{
     CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
 };
 use crate::config::{Config, RecoveryMode};
+use crate::event_listener::EventListener;
 use crate::log_batch::{
     self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{GenericFileId, GenericPipeLog, LogQueue, PipeLog, PipeLogHook};
+use crate::pipe_log::{GenericFileId, PipeLog, LogQueue};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, GlobalStats, Result};
@@ -27,7 +29,7 @@ type MemTables<E, W, P> = HashMap<u64, Arc<RwLock<MemTable<E, W, P>>>>;
 
 /// Collection of MemTables, indexed by Raft group ID.
 #[derive(Clone)]
-pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> {
+pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>, P: PipeLog> {
     slots: Vec<Arc<RwLock<MemTables<E, W, P>>>>,
     initializer: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
 
@@ -39,7 +41,7 @@ impl<E, W, P> MemTableAccessor<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E>,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     pub fn new(
         initializer: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
@@ -141,7 +143,7 @@ pub struct Engine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     pub(crate) memtables: MemTableAccessor<E, W, P>,
@@ -150,13 +152,15 @@ where
     purge_manager: PurgeManager<E, W, P>,
 
     workers: Arc<RwLock<Workers<P>>>,
+
+    listeners: Vec<Arc<dyn EventListener<P>>>,
 }
 
 impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone + 'static,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     fn apply_to_memtable(
         memtables: &MemTableAccessor<E, W, P>,
@@ -239,8 +243,8 @@ where
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
             if file_id.valid() {
                 Self::apply_to_memtable(&self.memtables, log_batch, LogQueue::Append, file_id);
-                for hook in self.pipe_log.hooks() {
-                    hook.post_apply_memtables(LogQueue::Append, file_id);
+                for listener in &self.listeners {
+                    listener.post_apply_memtables(LogQueue::Append, file_id);
                 }
             }
             Ok(bytes)
@@ -250,7 +254,7 @@ where
 
 struct Workers<P>
 where
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     cache_evict: Worker<CacheTask<P::FileId>>,
 }
@@ -258,37 +262,37 @@ where
 // An internal structure for tests.
 struct EngineOptions {
     chunk_limit: usize,
-    hooks: Vec<Arc<dyn PipeLogHook<PipeLog>>>,
+    listeners: Vec<Arc<dyn EventListener<FilePipeLog>>>,
 }
 
 impl Default for EngineOptions {
     fn default() -> EngineOptions {
         EngineOptions {
             chunk_limit: DEFAULT_CACHE_CHUNK_SIZE,
-            hooks: vec![],
+            listeners: vec![],
         }
     }
 }
 
-impl<E, W> Engine<E, W, PipeLog>
+impl<E, W> Engine<E, W, FilePipeLog>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone + 'static,
 {
-    pub fn new(cfg: Config) -> Engine<E, W, PipeLog> {
+    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog> {
         let options = Default::default();
         Self::with_options(cfg, options).unwrap()
     }
 
-    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, PipeLog>> {
+    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
         let cache_limit = cfg.cache_limit.0 as usize;
         let global_stats = Arc::new(GlobalStats::default());
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut hooks = vec![Arc::new(PurgeHook::new()) as Arc<dyn PipeLogHook<PipeLog>>];
-        hooks.extend(options.hooks.drain(..));
-        let pipe_log = PipeLog::open(
+        let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener<FilePipeLog>>];
+        listeners.extend(options.listeners.drain(..));
+        let pipe_log = FilePipeLog::open(
             &cfg,
             CacheSubmitor::new(
                 cache_limit,
@@ -296,13 +300,13 @@ where
                 cache_evict_worker.scheduler(),
                 global_stats.clone(),
             ),
-            hooks,
+            listeners.clone(),
         )
         .expect("Open raft log");
 
         let memtables = {
             let stats = global_stats.clone();
-            MemTableAccessor::<E, W, PipeLog>::new(Arc::new(move |id: u64| {
+            MemTableAccessor::<E, W, FilePipeLog>::new(Arc::new(move |id: u64| {
                 MemTable::new(id, stats.clone())
             }))
         };
@@ -322,6 +326,7 @@ where
             memtables.clone(),
             pipe_log.clone(),
             global_stats.clone(),
+            listeners.clone(),
         );
 
         let mut engine = Engine {
@@ -333,6 +338,7 @@ where
             workers: Arc::new(RwLock::new(Workers {
                 cache_evict: cache_evict_worker,
             })),
+            listeners,
         };
 
         engine.pipe_log.set_recovery_mode(true);
@@ -374,8 +380,8 @@ where
 
     // Recover from disk.
     fn recover(
-        memtables: &mut MemTableAccessor<E, W, PipeLog>,
-        pipe_log: &mut PipeLog,
+        memtables: &mut MemTableAccessor<E, W, FilePipeLog>,
+        pipe_log: &mut FilePipeLog,
         queue: LogQueue,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -404,7 +410,7 @@ impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone + 'static,
-    P: GenericPipeLog + 'static,
+    P: PipeLog + 'static,
 {
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
@@ -557,7 +563,7 @@ pub fn fetch_entries<E, W, P, F>(
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
     F: FnMut(&MemTable<E, W, P>, &mut Vec<E>, &mut Vec<EntryIndex<P::FileId>>) -> Result<()>,
 {
     let mut ents = Vec::with_capacity(count);
@@ -575,7 +581,7 @@ pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex<P::F
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     let queue = entry_index.queue;
     let file_id = entry_index.file_id;
@@ -620,14 +626,14 @@ mod tests {
     where
         E: Message + Clone,
         W: EntryExt<E> + Clone + 'static,
-        P: GenericPipeLog,
+        P: PipeLog,
     {
         pub fn purge_manager(&self) -> &PurgeManager<E, W, P> {
             &self.purge_manager
         }
     }
 
-    type RaftLogEngine = Engine<Entry, Entry, PipeLog>;
+    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
@@ -1010,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pipe_log_hooks() {
+    fn test_pipe_log_listeners() {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         use std::sync::mpsc;
         use std::time::Duration;
@@ -1047,7 +1053,7 @@ mod tests {
             }
         }
 
-        impl PipeLogHook<PipeLog> for Hook {
+        impl EventListener<FilePipeLog> for Hook {
             fn post_new_log_file(&self, queue: LogQueue, _: u64) {
                 self.0[&queue].files.fetch_add(1, Ordering::Release);
             }
@@ -1085,7 +1091,7 @@ mod tests {
         let hook = Arc::new(Hook::default());
 
         let mut options = EngineOptions::default();
-        options.hooks = vec![hook.clone()];
+        options.listeners = vec![hook.clone()];
         let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
         assert_eq!(hook.0[&LogQueue::Append].files(), 1);
         assert_eq!(hook.0[&LogQueue::Rewrite].files(), 1);

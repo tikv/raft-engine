@@ -7,7 +7,7 @@ use protobuf::Message;
 
 use crate::cache_evict::CacheTracker;
 use crate::log_batch::{CompressionType, EntryExt};
-use crate::pipe_log::{min_id, GenericFileId, GenericPipeLog, LogQueue};
+use crate::pipe_log::{min_id, GenericFileId, PipeLog, LogQueue};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, GlobalStats, Result};
 
@@ -65,7 +65,7 @@ impl<I: GenericFileId> Default for EntryIndex<I> {
  *                      |                                        |
  *                 first entry                               last entry
  */
-pub struct MemTable<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> {
+pub struct MemTable<E: Message + Clone, W: EntryExt<E>, P: PipeLog> {
     region_id: u64,
 
     // latest N entries
@@ -83,7 +83,7 @@ pub struct MemTable<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> {
     _phantom: PhantomData<W>,
 }
 
-impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
+impl<E: Message + Clone, W: EntryExt<E>, P: PipeLog> MemTable<E, W, P> {
     pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable<E, W, P> {
         MemTable::<E, W, P> {
             region_id,
@@ -655,12 +655,13 @@ impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_pipe_log::FilePipeLog;
     use crate::cache_evict::ChunkCacheInfo;
-    use crate::pipe_log::{max_id, PipeLog};
+    use crate::pipe_log::max_id;
     use raft::eraftpb::Entry;
     use std::sync::atomic::AtomicUsize;
 
-    impl<E: Message + Clone, W: EntryExt<E>, P: GenericPipeLog> MemTable<E, W, P> {
+    impl<E: Message + Clone, W: EntryExt<E>, P: PipeLog> MemTable<E, W, P> {
         pub fn max_file_id(&self, queue: LogQueue) -> Option<P::FileId> {
             let entry = match queue {
                 LogQueue::Append if self.rewrite_count == self.entries_index.len() => None,
@@ -734,12 +735,12 @@ mod tests {
     fn test_memtable_append() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // Append entries [10, 20) file_num = 1.
         // after appending
         // [10, 20) file_num = 1
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 20, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(stats.cache_size(), 10);
@@ -751,7 +752,7 @@ mod tests {
         // after appending:
         // [10, 20) file_num = 1
         // [20, 30) file_num = 2
-        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 30, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(20, 30, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 20);
         assert_eq!(stats.cache_size(), 20);
@@ -765,7 +766,7 @@ mod tests {
         // [10, 20) file_num = 1
         // [20, 25) file_num = 2
         // [25, 35) file_num = 3
-        let (ents, ents_idx) = generate_ents::<PipeLog>(25, 35, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(25, 35, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(stats.cache_size(), 25);
@@ -777,7 +778,7 @@ mod tests {
         // Append entries [10, 40) file_num = 4.
         // After appending:
         // [10, 40) file_num = 4
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 40, LogQueue::Append, 4, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 40, LogQueue::Append, 4, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(stats.cache_size(), 30);
@@ -790,19 +791,19 @@ mod tests {
     fn test_memtable_compact() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 15, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 15, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(15, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(15, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
 
         assert_eq!(memtable.entries_size(), 25);
@@ -841,19 +842,19 @@ mod tests {
     fn test_memtable_compact_cache() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 15, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 15, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(15, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(15, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
 
         assert_eq!(memtable.entries_size(), 25);
@@ -882,18 +883,18 @@ mod tests {
     fn test_memtable_fetch() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // After appending and compact cache:
         // [0, 10) file_num = 1, not in cache
         // [10, 15) file_num = 2, not in cache
         // [15, 20) file_num = 2, in cache
         // [20, 25) file_num = 3, in cache
-        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         memtable.compact_cache_to(15);
 
@@ -1009,19 +1010,19 @@ mod tests {
     fn test_memtable_fetch_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (ents, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(0, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"k1".to_vec(), b"v1".to_vec(), 1);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"k2".to_vec(), b"v2".to_vec(), 2);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 25, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(20, 25, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"k3".to_vec(), b"v3".to_vec(), 3);
 
@@ -1029,7 +1030,7 @@ mod tests {
         // [0, 10) queue = rewrite, file_num = 50,
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let (_, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Rewrite, 50, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(0, 10, LogQueue::Rewrite, 50, &stats);
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"k1".to_vec(), Some(1), 50);
         assert_eq!(memtable.entries_size(), 25);
@@ -1059,7 +1060,7 @@ mod tests {
     fn test_memtable_kv_operations() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats);
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats);
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
@@ -1078,13 +1079,13 @@ mod tests {
     fn test_memtable_get_entry() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // [5, 10) file_num = 1, not in cache
         // [10, 20) file_num = 2, in cache
-        let (ents, ents_idx) = generate_ents::<PipeLog>(5, 10, LogQueue::Append, 1, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(5, 10, LogQueue::Append, 1, &stats);
         memtable.append(ents, ents_idx);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         memtable.compact_cache_to(10);
 
@@ -1105,19 +1106,19 @@ mod tests {
     fn test_memtable_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<Entry, Entry, PipeLog>::new(region_id, stats.clone());
+        let mut memtable = MemTable::<Entry, Entry, FilePipeLog>::new(region_id, stats.clone());
 
         // After appending and compacting:
         // [10, 20) file_num = 2, not in cache;
         // [20, 30) file_num = 3, 5 not in cache, 5 in cache;
         // [30, 40) file_num = 4, in cache.
-        let (ents, ents_idx) = generate_ents::<PipeLog>(10, 20, LogQueue::Append, 2, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(10, 20, LogQueue::Append, 2, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk1".to_vec(), b"vv1".to_vec(), 2);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(20, 30, LogQueue::Append, 3, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(20, 30, LogQueue::Append, 3, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk2".to_vec(), b"vv2".to_vec(), 3);
-        let (ents, ents_idx) = generate_ents::<PipeLog>(30, 40, LogQueue::Append, 4, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(30, 40, LogQueue::Append, 4, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk3".to_vec(), b"vv3".to_vec(), 4);
         memtable.compact_cache_to(25);
@@ -1129,7 +1130,7 @@ mod tests {
         memtable.check_entries_index_and_cache();
 
         // Rewrite compacted entries.
-        let (_, ents_idx) = generate_ents::<PipeLog>(0, 10, LogQueue::Rewrite, 50, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(0, 10, LogQueue::Rewrite, 50, &stats);
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
 
@@ -1143,7 +1144,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 11);
 
         // Rewrite compacted entries + valid entries.
-        let (_, ents_idx) = generate_ents::<PipeLog>(0, 20, LogQueue::Rewrite, 100, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(0, 20, LogQueue::Rewrite, 100, &stats);
         memtable.rewrite(ents_idx, Some(2));
         assert_eq!(memtable.global_stats.rewrite_operations(), 31);
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
@@ -1159,7 +1160,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Rewrite vaild entries, some of them are in cache.
-        let (_, ents_idx) = generate_ents::<PipeLog>(20, 30, LogQueue::Rewrite, 101, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(20, 30, LogQueue::Rewrite, 101, &stats);
         memtable.rewrite(ents_idx, Some(3));
         memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
 
@@ -1174,14 +1175,14 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Put some entries overwritting entires in file 4.
-        let (ents, ents_idx) = generate_ents::<PipeLog>(35, 36, LogQueue::Append, 5, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(35, 36, LogQueue::Append, 5, &stats);
         memtable.append(ents, ents_idx);
         memtable.put(b"kk3".to_vec(), b"vv33".to_vec(), 5);
         assert_eq!(stats.cache_size(), 6);
         assert_eq!(memtable.entries_index.back().unwrap().index, 35);
 
         // Rewrite valid + overwritten entries.
-        let (_, ents_idx) = generate_ents::<PipeLog>(30, 40, LogQueue::Rewrite, 102, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(30, 40, LogQueue::Rewrite, 102, &stats);
         memtable.rewrite(ents_idx, Some(4));
         memtable.rewrite_key(b"kk3".to_vec(), Some(4), 102);
 
@@ -1196,7 +1197,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 27);
 
         // Compact after rewrite.
-        let (ents, ents_idx) = generate_ents::<PipeLog>(35, 50, LogQueue::Append, 6, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(35, 50, LogQueue::Append, 6, &stats);
         memtable.append(ents, ents_idx);
         memtable.compact_to(30);
         assert_eq!(memtable.entries_index.back().unwrap().index, 49);
@@ -1210,7 +1211,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 52);
         assert_eq!(stats.cache_size(), 10);
 
-        let (_, ents_idx) = generate_ents::<PipeLog>(30, 36, LogQueue::Rewrite, 103, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(30, 36, LogQueue::Rewrite, 103, &stats);
         memtable.rewrite(ents_idx, Some(5));
         memtable.rewrite_key(b"kk3".to_vec(), Some(5), 103);
 
@@ -1224,23 +1225,23 @@ mod tests {
         assert_eq!(stats.cache_size(), 10);
 
         // Rewrite after cut.
-        let (ents, ents_idx) = generate_ents::<PipeLog>(50, 55, LogQueue::Append, 7, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(50, 55, LogQueue::Append, 7, &stats);
         memtable.append(ents, ents_idx);
-        let (_, ents_idx) = generate_ents::<PipeLog>(30, 50, LogQueue::Rewrite, 104, &stats);
+        let (_, ents_idx) = generate_ents::<FilePipeLog>(30, 50, LogQueue::Rewrite, 104, &stats);
         memtable.rewrite(ents_idx, Some(6));
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 68);
         assert_eq!(stats.cache_size(), 5);
 
-        let (ents, ents_idx) = generate_ents::<PipeLog>(45, 50, LogQueue::Append, 7, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(45, 50, LogQueue::Append, 7, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.rewrite_count, 5);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 73);
         assert_eq!(stats.cache_size(), 5);
 
-        let (ents, ents_idx) = generate_ents::<PipeLog>(40, 50, LogQueue::Append, 7, &stats);
+        let (ents, ents_idx) = generate_ents::<FilePipeLog>(40, 50, LogQueue::Append, 7, &stats);
         memtable.append(ents, ents_idx);
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
@@ -1248,7 +1249,7 @@ mod tests {
         assert_eq!(stats.cache_size(), 10);
     }
 
-    fn generate_ents<P: GenericPipeLog>(
+    fn generate_ents<P: PipeLog>(
         begin_idx: u64,
         end_idx: u64,
         queue: LogQueue,

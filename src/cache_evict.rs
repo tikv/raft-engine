@@ -10,7 +10,7 @@ use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::{GenericFileId, GenericPipeLog, LogQueue};
+use crate::pipe_log::{GenericFileId, PipeLog, LogQueue};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use crate::{GlobalStats, Result};
 
@@ -23,7 +23,7 @@ const CHUNKS_SHRINK_TO: usize = 1024;
 /// Used in `PipLog` to emit `CacheTask::NewChunk` tasks.
 pub struct CacheSubmitor<P>
 where
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     cache_limit: usize,
     chunk_limit: usize,
@@ -41,7 +41,7 @@ where
     block_on_full: bool,
 }
 
-impl<P: GenericPipeLog> CacheSubmitor<P> {
+impl<P: PipeLog> CacheSubmitor<P> {
     pub fn new(
         cache_limit: usize,
         chunk_limit: usize,
@@ -132,7 +132,7 @@ pub struct Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     cache_limit: usize,
     chunk_limit: usize,
@@ -146,7 +146,7 @@ impl<E, W, P> Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     pub fn new(
         cache_limit: usize,
@@ -247,7 +247,7 @@ impl<E, W, P> Runnable<CacheTask<P::FileId>> for Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     fn run(&mut self, task: CacheTask<P::FileId>) -> bool {
         match task {

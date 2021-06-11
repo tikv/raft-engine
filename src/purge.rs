@@ -8,9 +8,10 @@ use protobuf::Message;
 
 use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
+use crate::event_listener::EventListener;
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{min_id, GenericFileId, GenericPipeLog, LogQueue, PipeLogHook};
+use crate::pipe_log::{min_id, GenericFileId, PipeLog, LogQueue};
 use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
 
@@ -26,12 +27,13 @@ pub struct PurgeManager<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W, P>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
+    listeners: Vec<Arc<dyn EventListener<P>>>,
 
     // Only one thread can run `purge_expired_files` at a time.
     purge_mutex: Arc<Mutex<()>>,
@@ -41,19 +43,21 @@ impl<E, W, P> PurgeManager<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     pub fn new(
         cfg: Arc<Config>,
         memtables: MemTableAccessor<E, W, P>,
         pipe_log: P,
         global_stats: Arc<GlobalStats>,
+        listeners: Vec<Arc<dyn EventListener<P>>>,
     ) -> PurgeManager<E, W, P> {
         PurgeManager {
             cfg,
             memtables,
             pipe_log,
             global_stats,
+            listeners,
             purge_mutex: Arc::new(Mutex::new(())),
         }
     }
@@ -70,8 +74,7 @@ where
 
         let (rewrite_limit, compact_limit) = self.latest_inactive_file_id();
         if !self
-            .pipe_log
-            .hooks()
+            .listeners
             .iter()
             .all(|h| h.ready_for_purge(LogQueue::Append, rewrite_limit))
         {
@@ -111,8 +114,8 @@ where
         ] {
             let purged = self.pipe_log.purge_to(*queue, *purge_to)?;
             info!("purged {} expired log files for queue {:?}", purged, *queue);
-            for hook in self.pipe_log.hooks() {
-                hook.post_purge(*queue, purge_to.backward(1));
+            for listener in &self.listeners {
+                listener.post_purge(*queue, purge_to.backward(1));
             }
         }
 
@@ -268,8 +271,8 @@ where
         let (file_id, _) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
         if file_id.valid() {
             self.rewrite_to_memtable(log_batch, file_id, latest_rewrite);
-            for hook in self.pipe_log.hooks() {
-                hook.post_apply_memtables(LogQueue::Rewrite, file_id);
+            for listener in &self.listeners {
+                listener.post_apply_memtables(LogQueue::Rewrite, file_id);
             }
         }
         Ok(())
@@ -323,7 +326,7 @@ where
 
 pub struct PurgeHook<P>
 where
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     // There could be a gap between a write batch is written into a file and applied to memtables.
     // If a log-rewrite happens at the time, entries and kvs in the batch can be omited. So after
@@ -335,7 +338,7 @@ where
     active_log_files: RwLock<VecDeque<(P::FileId, AtomicUsize)>>,
 }
 
-impl<P: GenericPipeLog> PurgeHook<P> {
+impl<P: PipeLog> PurgeHook<P> {
     pub fn new() -> Self {
         PurgeHook {
             active_log_files: Default::default(),
@@ -343,7 +346,7 @@ impl<P: GenericPipeLog> PurgeHook<P> {
     }
 }
 
-impl<P: GenericPipeLog> PipeLogHook<P> for PurgeHook<P> {
+impl<P: PipeLog> EventListener<P> for PurgeHook<P> {
     fn post_new_log_file(&self, queue: LogQueue, file_id: P::FileId) {
         if queue == LogQueue::Append {
             let mut active_log_files = self.active_log_files.wl();
