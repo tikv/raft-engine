@@ -387,11 +387,13 @@ where
         // Iterate and recover from files one by one.
         let start = Instant::now();
         let mut batches = Vec::new();
-        for file_id in first_file..=active_file {
+        let mut file_id = first_file;
+        while file_id <= active_file {
             pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
             for mut batch in batches.drain(..) {
                 Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
             }
+            file_id = file_id.forward(1);
         }
         info!("Recover raft log takes {:?}", start.elapsed());
         Ok(())

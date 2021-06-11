@@ -147,7 +147,6 @@ where
 
         let latest_needs_rewrite = self.pipe_log.file_at(queue, REWRITE_INACTIVE_RATIO);
         let latest_needs_compact = self.pipe_log.file_at(queue, FORCE_COMPACT_RATIO);
-        // TODO(tabokie): one of them is invalid
         (
             min_id(latest_needs_rewrite, active_file.backward(1)),
             min_id(latest_needs_compact, active_file.backward(1)),
@@ -365,7 +364,7 @@ impl<P: GenericPipeLog> PipeLogHook<P> for PurgeHook<P> {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            let counter = &active_log_files[(file_id - front) as usize].1;
+            let counter = &active_log_files[file_id.distance_from(&front).unwrap() as usize].1;
             counter.fetch_add(1, Ordering::Release);
         }
     }
@@ -375,7 +374,7 @@ impl<P: GenericPipeLog> PipeLogHook<P> for PurgeHook<P> {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            let counter = &active_log_files[(file_id - front) as usize].1;
+            let counter = &active_log_files[file_id.distance_from(&front).unwrap() as usize].1;
             counter.fetch_sub(1, Ordering::Release);
         }
     }
@@ -401,7 +400,8 @@ impl<P: GenericPipeLog> PipeLogHook<P> for PurgeHook<P> {
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
             if front <= file_id {
-                let mut purged = active_log_files.drain(0..=(file_id - front) as usize);
+                let mut purged =
+                    active_log_files.drain(0..=file_id.distance_from(&front).unwrap() as usize);
                 assert_eq!(purged.next_back().unwrap().0, file_id);
             }
         }

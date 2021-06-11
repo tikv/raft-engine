@@ -51,7 +51,6 @@ pub trait GenericFileId:
     + std::fmt::Display
     + std::fmt::Debug
     + std::hash::Hash
-    + std::ops::Sub<Output = u64>
 {
     /// Default constructor must return an invalid instance.
     fn valid(&self) -> bool;
@@ -59,6 +58,8 @@ pub trait GenericFileId:
     fn forward(&self, step: u64) -> Self;
     /// Returns an invalid ID when out of bound or applied on an invalid file ID.
     fn backward(&self, step: u64) -> Self;
+    /// Returns step distance from another older ID.
+    fn distance_from(&self, rhs: &Self) -> Option<u64>;
 }
 
 pub fn min_id<I: GenericFileId>(lhs: I, rhs: I) -> I {
@@ -88,7 +89,11 @@ impl GenericFileId for u64 {
     }
 
     fn forward(&self, step: u64) -> Self {
-        *self + step
+        if *self == 0 {
+            0
+        } else {
+            *self + step
+        }
     }
 
     fn backward(&self, step: u64) -> Self {
@@ -96,6 +101,14 @@ impl GenericFileId for u64 {
             0
         } else {
             *self - step
+        }
+    }
+
+    fn distance_from(&self, rhs: &Self) -> Option<u64> {
+        if *self == 0 || *rhs == 0 || *self < *rhs {
+            None
+        } else {
+            Some(*self - *rhs)
         }
     }
 }
