@@ -10,87 +10,92 @@ pub enum LogQueue {
     Rewrite,
 }
 
-/// Timely ordered file identifier.
-pub trait GenericFileId:
-    Ord
-    + Eq
-    + Copy
-    + Clone
-    + Send
-    + Sync
-    + Default
-    + std::fmt::Display
-    + std::fmt::Debug
-    + std::hash::Hash
-{
-    /// Default constructor must return an invalid instance.
-    fn valid(&self) -> bool;
-    /// Returns an invalid ID when applied on an invalid file ID.
-    fn forward(&self, step: u64) -> Self;
-    /// Returns an invalid ID when out of bound or applied on an invalid file ID.
-    fn backward(&self, step: u64) -> Self;
-    /// Returns step distance from another older ID.
-    fn distance_from(&self, rhs: &Self) -> Option<u64>;
-}
+#[derive(PartialOrd, PartialEq, Eq, Copy, Clone, Default, Debug, Hash)]
+pub struct FileId(u64);
 
-pub fn min_id<I: GenericFileId>(lhs: I, rhs: I) -> I {
-    if !lhs.valid() {
-        rhs
-    } else if !rhs.valid() {
-        lhs
-    } else {
-        std::cmp::min(lhs, rhs)
+impl std::fmt::Display for FileId {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
-#[allow(dead_code)]
-pub fn max_id<I: GenericFileId>(lhs: I, rhs: I) -> I {
-    if !lhs.valid() {
-        rhs
-    } else if !rhs.valid() {
-        lhs
-    } else {
-        std::cmp::max(lhs, rhs)
+impl From<u64> for FileId {
+    fn from(num: u64) -> FileId {
+        FileId(num)
     }
 }
 
-impl GenericFileId for u64 {
-    fn valid(&self) -> bool {
-        *self > 0
-    }
-
-    fn forward(&self, step: u64) -> Self {
-        if *self == 0 {
-            0
-        } else {
-            *self + step
-        }
-    }
-
-    fn backward(&self, step: u64) -> Self {
-        if *self <= step {
-            0
-        } else {
-            *self - step
-        }
-    }
-
-    fn distance_from(&self, rhs: &Self) -> Option<u64> {
-        if *self == 0 || *rhs == 0 || *self < *rhs {
+impl std::iter::Step for FileId {
+    fn steps_between(start: &Self, end: &Self) -> Option<usize> {
+        if start.0 == 0 || end.0 == 0 || start.0 > end.0 {
             None
         } else {
-            Some(*self - *rhs)
+            Some((end.0 - start.0) as usize)
+        }
+    }
+    fn forward_checked(start: Self, count: usize) -> Option<Self> {
+        if start.0 == 0 {
+            None
+        } else {
+            Some(FileId(start.0 + count as u64))
+        }
+    }
+    fn backward_checked(start: Self, count: usize) -> Option<Self> {
+        if start.0 <= count as u64 {
+            None
+        } else {
+            Some(FileId(start.0 - count as u64))
+        }
+    }
+}
+
+impl FileId {
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+    /// Default constructor must return an invalid instance.
+    pub fn valid(&self) -> bool {
+        self.0 > 0
+    }
+    /// Returns an invalid ID when applied on an invalid file ID.
+    pub fn forward(&self, step: usize) -> Self {
+        std::iter::Step::forward_checked(*self, step).unwrap_or_default()
+    }
+    /// Returns an invalid ID when out of bound or applied on an invalid file ID.
+    pub fn backward(&self, step: usize) -> Self {
+        std::iter::Step::backward_checked(*self, step).unwrap_or_default()
+    }
+    /// Returns step distance from another older ID.
+    pub fn distance_from(&self, rhs: &Self) -> Option<usize> {
+        std::iter::Step::steps_between(rhs, self)
+    }
+
+    pub fn min(lhs: FileId, rhs: FileId) -> FileId {
+        if !lhs.valid() {
+            rhs
+        } else if !rhs.valid() {
+            lhs
+        } else {
+            std::cmp::min(lhs.0, rhs.0).into()
+        }
+    }
+    pub fn max(lhs: FileId, rhs: FileId) -> FileId {
+        if !lhs.valid() {
+            rhs
+        } else if !rhs.valid() {
+            lhs
+        } else {
+            std::cmp::max(lhs.0, rhs.0).into()
         }
     }
 }
 
 pub trait PipeLog: Sized + Clone + Send {
-    type FileId: GenericFileId;
-
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
 
-    fn file_len(&self, queue: LogQueue, file_id: Self::FileId) -> Result<u64>;
+    fn file_len(&self, queue: LogQueue, file_id: FileId) -> Result<u64>;
 
     /// Total size of the append queue.
     fn total_size(&self, queue: LogQueue) -> usize;
@@ -99,41 +104,41 @@ pub trait PipeLog: Sized + Clone + Send {
     fn read_bytes(
         &self,
         queue: LogQueue,
-        file_id: Self::FileId,
+        file_id: FileId,
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>>;
 
     /// Read a file into bytes.
-    fn read_file_bytes(&self, queue: LogQueue, file_id: Self::FileId) -> Result<Vec<u8>>;
+    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>>;
 
     fn read_file<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
-        file_id: u64,
+        file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<E, W, Self::FileId>>,
+        batches: &mut Vec<LogBatch<E, W>>,
     ) -> Result<()>;
 
     /// Write a batch into the append queue.
     fn append<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
-        batch: &mut LogBatch<E, W, Self::FileId>,
+        batch: &mut LogBatch<E, W>,
         sync: bool,
-    ) -> Result<(Self::FileId, usize)>;
+    ) -> Result<(FileId, usize)>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
 
     /// Active file id in the given queue.
-    fn active_file_id(&self, queue: LogQueue) -> Self::FileId;
+    fn active_file_id(&self, queue: LogQueue) -> FileId;
 
     /// First file id in the given queue.
-    fn first_file_id(&self, queue: LogQueue) -> Self::FileId;
+    fn first_file_id(&self, queue: LogQueue) -> FileId;
 
     /// Returns the oldest id containing given file size percentile.
-    fn file_at(&self, queue: LogQueue, position: f64) -> Self::FileId;
+    fn file_at(&self, queue: LogQueue, position: f64) -> FileId;
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
 
@@ -141,5 +146,5 @@ pub trait PipeLog: Sized + Clone + Send {
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()>;
 
     /// Purge the append queue to the given file id.
-    fn purge_to(&self, queue: LogQueue, file_id: Self::FileId) -> Result<usize>;
+    fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize>;
 }

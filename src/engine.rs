@@ -6,18 +6,18 @@ use std::{mem, u64};
 use log::{debug, info, trace};
 use protobuf::Message;
 
-use crate::file_pipe_log::FilePipeLog;
 use crate::cache_evict::{
     CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
 };
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
+use crate::file_pipe_log::FilePipeLog;
 use crate::log_batch::{
     self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{GenericFileId, PipeLog, LogQueue};
+use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, CacheStats, GlobalStats, Result};
@@ -25,27 +25,26 @@ use crate::{codec, CacheStats, GlobalStats, Result};
 const SLOTS_COUNT: usize = 128;
 
 // Modifying MemTables collection requires a write lock.
-type MemTables<E, W, P> = HashMap<u64, Arc<RwLock<MemTable<E, W, P>>>>;
+type MemTables<E, W> = HashMap<u64, Arc<RwLock<MemTable<E, W>>>>;
 
 /// Collection of MemTables, indexed by Raft group ID.
 #[derive(Clone)]
-pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>, P: PipeLog> {
-    slots: Vec<Arc<RwLock<MemTables<E, W, P>>>>,
-    initializer: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
+pub struct MemTableAccessor<E: Message + Clone, W: EntryExt<E>> {
+    slots: Vec<Arc<RwLock<MemTables<E, W>>>>,
+    initializer: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>,
 
     #[allow(clippy::type_complexity)]
-    removed_memtables: Arc<Mutex<HashMap<P::FileId, u64>>>,
+    removed_memtables: Arc<Mutex<HashMap<FileId, u64>>>,
 }
 
-impl<E, W, P> MemTableAccessor<E, W, P>
+impl<E, W> MemTableAccessor<E, W>
 where
     E: Message + Clone,
     W: EntryExt<E>,
-    P: PipeLog,
 {
     pub fn new(
-        initializer: Arc<dyn Fn(u64) -> MemTable<E, W, P> + Send + Sync>,
-    ) -> MemTableAccessor<E, W, P> {
+        initializer: Arc<dyn Fn(u64) -> MemTable<E, W> + Send + Sync>,
+    ) -> MemTableAccessor<E, W> {
         let mut slots = Vec::with_capacity(SLOTS_COUNT);
         for _ in 0..SLOTS_COUNT {
             slots.push(Arc::new(RwLock::new(MemTables::default())));
@@ -57,7 +56,7 @@ where
         }
     }
 
-    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable<E, W, P>>> {
+    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable<E, W>>> {
         let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT].wl();
         let memtable = memtables
             .entry(raft_group_id)
@@ -65,20 +64,20 @@ where
         memtable.clone()
     }
 
-    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<E, W, P>>>> {
+    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<E, W>>>> {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
             .rl()
             .get(&raft_group_id)
             .cloned()
     }
 
-    pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable<E, W, P>>>) {
+    pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable<E, W>>>) {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
             .wl()
             .insert(raft_group_id, memtable);
     }
 
-    pub fn remove(&self, raft_group_id: u64, queue: LogQueue, file_id: P::FileId) {
+    pub fn remove(&self, raft_group_id: u64, queue: LogQueue, file_id: FileId) {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
             .wl()
             .remove(&raft_group_id);
@@ -88,7 +87,7 @@ where
         }
     }
 
-    pub fn fold<B, F: Fn(B, &MemTable<E, W, P>) -> B>(&self, mut init: B, fold: F) -> B {
+    pub fn fold<B, F: Fn(B, &MemTable<E, W>) -> B>(&self, mut init: B, fold: F) -> B {
         for tables in &self.slots {
             for memtable in tables.rl().values() {
                 init = fold(init, &*memtable.rl());
@@ -97,10 +96,10 @@ where
         init
     }
 
-    pub fn collect<F: FnMut(&MemTable<E, W, P>) -> bool>(
+    pub fn collect<F: FnMut(&MemTable<E, W>) -> bool>(
         &self,
         mut condition: F,
-    ) -> Vec<Arc<RwLock<MemTable<E, W, P>>>> {
+    ) -> Vec<Arc<RwLock<MemTable<E, W>>>> {
         let mut memtables = Vec::new();
         for tables in &self.slots {
             memtables.extend(tables.rl().values().filter_map(|t| {
@@ -113,8 +112,8 @@ where
         memtables
     }
 
-    pub fn clean_regions_before(&self, rewrite_file_id: P::FileId) -> LogBatch<E, W, P::FileId> {
-        let mut log_batch = LogBatch::<E, W, P::FileId>::default();
+    pub fn clean_regions_before(&self, rewrite_file_id: FileId) -> LogBatch<E, W> {
+        let mut log_batch = LogBatch::<E, W>::default();
         let mut removed_memtables = self.removed_memtables.lock().unwrap();
         removed_memtables.retain(|&file_id, raft_id| {
             if file_id <= rewrite_file_id {
@@ -146,14 +145,14 @@ where
     P: PipeLog,
 {
     cfg: Arc<Config>,
-    pub(crate) memtables: MemTableAccessor<E, W, P>,
+    pub(crate) memtables: MemTableAccessor<E, W>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
     purge_manager: PurgeManager<E, W, P>,
 
-    workers: Arc<RwLock<Workers<P>>>,
+    workers: Arc<RwLock<Workers>>,
 
-    listeners: Vec<Arc<dyn EventListener<P>>>,
+    listeners: Vec<Arc<dyn EventListener>>,
 }
 
 impl<E, W, P> Engine<E, W, P>
@@ -163,10 +162,10 @@ where
     P: PipeLog,
 {
     fn apply_to_memtable(
-        memtables: &MemTableAccessor<E, W, P>,
-        log_batch: &mut LogBatch<E, W, P::FileId>,
+        memtables: &MemTableAccessor<E, W>,
+        log_batch: &mut LogBatch<E, W>,
         queue: LogQueue,
-        file_id: P::FileId,
+        file_id: FileId,
     ) {
         for item in log_batch.items.drain(..) {
             let raft = item.raft_group_id;
@@ -176,7 +175,7 @@ where
                     let entries = entries_to_add.entries;
                     let entries_index = entries_to_add.entries_index;
                     debug!(
-                        "{} append to {:?}.{}, Entries[{:?}, {:?}:{:?})",
+                        "{} append to {:?}.{:?}, Entries[{:?}, {:?}:{:?})",
                         raft,
                         queue,
                         file_id,
@@ -233,7 +232,7 @@ where
         }
     }
 
-    fn write_impl(&self, log_batch: &mut LogBatch<E, W, P::FileId>, sync: bool) -> Result<usize> {
+    fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         if log_batch.items.is_empty() {
             if sync {
                 self.pipe_log.sync(LogQueue::Append)?;
@@ -252,17 +251,14 @@ where
     }
 }
 
-struct Workers<P>
-where
-    P: PipeLog,
-{
-    cache_evict: Worker<CacheTask<P::FileId>>,
+struct Workers {
+    cache_evict: Worker<CacheTask>,
 }
 
 // An internal structure for tests.
 struct EngineOptions {
     chunk_limit: usize,
-    listeners: Vec<Arc<dyn EventListener<FilePipeLog>>>,
+    listeners: Vec<Arc<dyn EventListener>>,
 }
 
 impl Default for EngineOptions {
@@ -290,7 +286,7 @@ where
 
         let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
-        let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener<FilePipeLog>>];
+        let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener>];
         listeners.extend(options.listeners.drain(..));
         let pipe_log = FilePipeLog::open(
             &cfg,
@@ -306,9 +302,7 @@ where
 
         let memtables = {
             let stats = global_stats.clone();
-            MemTableAccessor::<E, W, FilePipeLog>::new(Arc::new(move |id: u64| {
-                MemTable::new(id, stats.clone())
-            }))
+            MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| MemTable::new(id, stats.clone())))
         };
 
         let cache_evict_runner = CacheEvictRunner::new(
@@ -380,7 +374,7 @@ where
 
     // Recover from disk.
     fn recover(
-        memtables: &mut MemTableAccessor<E, W, FilePipeLog>,
+        memtables: &mut MemTableAccessor<E, W>,
         pipe_log: &mut FilePipeLog,
         queue: LogQueue,
         recovery_mode: RecoveryMode,
@@ -530,7 +524,7 @@ where
 
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: &mut LogBatch<E, W, P::FileId>, sync: bool) -> Result<usize> {
+    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         self.write_impl(log_batch, sync)
     }
 
@@ -555,7 +549,7 @@ where
 
 pub fn fetch_entries<E, W, P, F>(
     pipe_log: &P,
-    memtable: &RwLock<MemTable<E, W, P>>,
+    memtable: &RwLock<MemTable<E, W>>,
     vec: &mut Vec<E>,
     count: usize,
     mut fetch: F,
@@ -564,7 +558,7 @@ where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
     P: PipeLog,
-    F: FnMut(&MemTable<E, W, P>, &mut Vec<E>, &mut Vec<EntryIndex<P::FileId>>) -> Result<()>,
+    F: FnMut(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()>,
 {
     let mut ents = Vec::with_capacity(count);
     let mut ents_idx = Vec::with_capacity(count);
@@ -577,7 +571,7 @@ where
     Ok(())
 }
 
-pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex<P::FileId>) -> Result<E>
+pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex) -> Result<E>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
@@ -865,14 +859,14 @@ mod tests {
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1);
+        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1.into());
 
         let active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
         let active_len = engine
             .pipe_log
             .file_len(LogQueue::Rewrite, active_num)
             .unwrap();
-        assert!(active_num > 1 || active_len > 59); // The rewrite queue isn't empty.
+        assert!(active_num > 1.into() || active_len > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
         for i in 1..=10 {
@@ -951,7 +945,7 @@ mod tests {
             append_log(&engine, 1, &entry);
         }
 
-        assert_eq!(engine.pipe_log.active_file_id(LogQueue::Append), 1);
+        assert_eq!(engine.pipe_log.active_file_id(LogQueue::Append), 1.into());
 
         // Put more raft logs to trigger purge.
         for i in 2..64 {
@@ -964,7 +958,7 @@ mod tests {
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1);
+        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1.into());
 
         // All entries of region 1 has been rewritten.
         let memtable_1 = engine.memtables.get(1).unwrap();
@@ -1053,26 +1047,28 @@ mod tests {
             }
         }
 
-        impl EventListener<FilePipeLog> for Hook {
-            fn post_new_log_file(&self, queue: LogQueue, _: u64) {
+        impl EventListener for Hook {
+            fn post_new_log_file(&self, queue: LogQueue, _: FileId) {
                 self.0[&queue].files.fetch_add(1, Ordering::Release);
             }
 
-            fn on_append_log_file(&self, queue: LogQueue, _: u64) {
+            fn on_append_log_file(&self, queue: LogQueue, _: FileId) {
                 self.0[&queue].batches.fetch_add(1, Ordering::Release);
             }
 
-            fn post_apply_memtables(&self, queue: LogQueue, _: u64) {
+            fn post_apply_memtables(&self, queue: LogQueue, _: FileId) {
                 self.0[&queue].applys.fetch_add(1, Ordering::Release);
             }
 
-            fn ready_for_purge(&self, _: LogQueue, _: u64) -> bool {
+            fn ready_for_purge(&self, _: LogQueue, _: FileId) -> bool {
                 // To test the default hook's logic.
                 true
             }
 
-            fn post_purge(&self, queue: LogQueue, file_id: u64) {
-                self.0[&queue].purged.store(file_id, Ordering::Release);
+            fn post_purge(&self, queue: LogQueue, file_id: FileId) {
+                self.0[&queue]
+                    .purged
+                    .store(file_id.as_u64(), Ordering::Release);
             }
         }
 

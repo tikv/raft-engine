@@ -10,7 +10,7 @@ use protobuf::Message;
 
 use crate::engine::MemTableAccessor;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
-use crate::pipe_log::{GenericFileId, PipeLog, LogQueue};
+use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::util::{HandyRwLock, Runnable, Scheduler};
 use crate::{GlobalStats, Result};
 
@@ -21,31 +21,28 @@ const LOW_WATER_RATIO: f64 = 0.8;
 const CHUNKS_SHRINK_TO: usize = 1024;
 
 /// Used in `PipLog` to emit `CacheTask::NewChunk` tasks.
-pub struct CacheSubmitor<P>
-where
-    P: PipeLog,
-{
+pub struct CacheSubmitor {
     cache_limit: usize,
     chunk_limit: usize,
 
-    file_id: P::FileId,
+    file_id: FileId,
     offset: u64,
 
     chunk_size: usize,
     // Cached size of current chunk.
     size_tracker: Arc<AtomicUsize>,
 
-    scheduler: Scheduler<CacheTask<P::FileId>>,
+    scheduler: Scheduler<CacheTask>,
 
     global_stats: Arc<GlobalStats>,
     block_on_full: bool,
 }
 
-impl<P: PipeLog> CacheSubmitor<P> {
+impl CacheSubmitor {
     pub fn new(
         cache_limit: usize,
         chunk_limit: usize,
-        scheduler: Scheduler<CacheTask<P::FileId>>,
+        scheduler: Scheduler<CacheTask>,
         global_stats: Arc<GlobalStats>,
     ) -> Self {
         CacheSubmitor {
@@ -68,7 +65,7 @@ impl<P: PipeLog> CacheSubmitor<P> {
     /// Returns the cache chunk info for newly appended block.
     pub fn submit_new_block(
         &mut self,
-        file_id: P::FileId,
+        file_id: FileId,
         offset: u64,
         size: usize,
     ) -> Option<ChunkCacheInfo> {
@@ -120,7 +117,7 @@ impl<P: PipeLog> CacheSubmitor<P> {
         ))
     }
 
-    fn reset(&mut self, file_id: P::FileId, offset: u64) {
+    fn reset(&mut self, file_id: FileId, offset: u64) {
         self.file_id = file_id;
         self.offset = offset;
         self.chunk_size = 0;
@@ -137,8 +134,8 @@ where
     cache_limit: usize,
     chunk_limit: usize,
     global_stats: Arc<GlobalStats>,
-    valid_cache_chunks: VecDeque<CacheChunk<P::FileId>>,
-    memtables: MemTableAccessor<E, W, P>,
+    valid_cache_chunks: VecDeque<CacheChunk>,
+    memtables: MemTableAccessor<E, W>,
     pipe_log: P,
 }
 
@@ -152,7 +149,7 @@ where
         cache_limit: usize,
         chunk_limit: usize,
         global_stats: Arc<GlobalStats>,
-        memtables: MemTableAccessor<E, W, P>,
+        memtables: MemTableAccessor<E, W>,
         pipe_log: P,
     ) -> Runner<E, W, P> {
         Runner {
@@ -205,8 +202,7 @@ where
 
             let mut reader: &[u8] = chunk_content.as_ref();
             let (file_id, mut offset) = (chunk.file_id, chunk.base_offset);
-            while let Some(b) =
-                LogBatch::<E, W, P::FileId>::from_bytes(&mut reader, file_id, offset).unwrap()
+            while let Some(b) = LogBatch::<E, W>::from_bytes(&mut reader, file_id, offset).unwrap()
             {
                 offset += read_len - reader.len() as u64;
                 for item in b.items {
@@ -225,7 +221,7 @@ where
         true
     }
 
-    fn read_chunk(&self, chunk: &CacheChunk<P::FileId>) -> Result<(u64, Vec<u8>)> {
+    fn read_chunk(&self, chunk: &CacheChunk) -> Result<(u64, Vec<u8>)> {
         let read_len = if chunk.end_offset == u64::MAX {
             let file_len = self.pipe_log.file_len(LogQueue::Append, chunk.file_id)?;
             file_len - chunk.base_offset
@@ -243,13 +239,13 @@ where
     }
 }
 
-impl<E, W, P> Runnable<CacheTask<P::FileId>> for Runner<E, W, P>
+impl<E, W, P> Runnable<CacheTask> for Runner<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + 'static,
     P: PipeLog,
 {
-    fn run(&mut self, task: CacheTask<P::FileId>) -> bool {
+    fn run(&mut self, task: CacheTask) -> bool {
         match task {
             CacheTask::NewChunk(chunk) => self.valid_cache_chunks.push_back(chunk),
             CacheTask::EvictOldest(tx) => {
@@ -269,20 +265,14 @@ where
 }
 
 #[derive(Clone)]
-pub enum CacheTask<I>
-where
-    I: GenericFileId,
-{
-    NewChunk(CacheChunk<I>),
+pub enum CacheTask {
+    NewChunk(CacheChunk),
     EvictOldest(Sender<()>),
 }
 
 #[derive(Clone, Debug)]
-pub struct CacheChunk<I>
-where
-    I: GenericFileId,
-{
-    file_id: I,
+pub struct CacheChunk {
+    file_id: FileId,
     base_offset: u64,
     end_offset: u64,
     size_tracker: Arc<AtomicUsize>,
@@ -344,7 +334,7 @@ impl PartialEq for CacheTracker {
     }
 }
 
-impl<I: GenericFileId> CacheChunk<I> {
+impl CacheChunk {
     #[cfg(test)]
     pub fn self_check(&self, expected_chunk_size: usize) {
         assert!(self.end_offset > self.base_offset);

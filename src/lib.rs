@@ -1,4 +1,5 @@
 #![feature(shrink_to)]
+#![feature(step_trait)]
 #![feature(cell_update)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,12 +17,12 @@ macro_rules! box_err {
 
 pub mod codec;
 
-mod file_pipe_log;
 mod cache_evict;
 mod config;
 mod engine;
 mod errors;
 mod event_listener;
+mod file_pipe_log;
 mod log_batch;
 mod memtable;
 mod pipe_log;
