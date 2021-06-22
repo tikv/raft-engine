@@ -51,7 +51,7 @@ impl FileId {
         }
     }
     /// Returns step distance from another older ID.
-    pub fn distance_from(&self, rhs: &Self) -> Option<usize> {
+    pub fn step_after(&self, rhs: &Self) -> Option<usize> {
         if self.0 == 0 || rhs.0 == 0 || self.0 < rhs.0 {
             None
         } else {
@@ -83,9 +83,9 @@ pub trait PipeLog: Sized + Clone + Send {
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
 
-    fn file_len(&self, queue: LogQueue, file_id: FileId) -> Result<u64>;
+    fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64>;
 
-    /// Total size of the append queue.
+    /// Total size of the given queue.
     fn total_size(&self, queue: LogQueue) -> usize;
 
     /// Read some bytes from the given position.
@@ -96,9 +96,6 @@ pub trait PipeLog: Sized + Clone + Send {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>>;
-
-    /// Read a file into bytes.
-    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>>;
 
     fn read_file<E: Message, W: EntryExt<E>>(
         &self,
@@ -129,9 +126,6 @@ pub trait PipeLog: Sized + Clone + Send {
     fn file_at(&self, queue: LogQueue, position: f64) -> FileId;
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
-
-    /// Truncate the active log file of `queue`.
-    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()>;
 
     /// Purge the append queue to the given file id.
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize>;

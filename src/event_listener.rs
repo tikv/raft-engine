@@ -1,6 +1,5 @@
 use crate::pipe_log::{FileId, LogQueue};
 
-/// Thread-safe.
 pub trait EventListener: Sync + Send {
     /// Called *after* a new log file is created.
     fn post_new_log_file(&self, queue: LogQueue, file_id: FileId);

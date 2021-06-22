@@ -101,8 +101,8 @@ where
             ),
             |(min1, min2), t| {
                 (
-                    FileId::min(min1, t.min_file_id(LogQueue::Append).unwrap_or(min1)),
-                    FileId::min(min2, t.min_file_id(LogQueue::Rewrite).unwrap_or(min2)),
+                    FileId::min(min1, t.min_file_id(LogQueue::Append).unwrap_or_default()),
+                    FileId::min(min2, t.min_file_id(LogQueue::Rewrite).unwrap_or_default()),
                 )
             },
         );
@@ -363,7 +363,7 @@ impl EventListener for PurgeHook {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            let counter = &active_log_files[file_id.distance_from(&front).unwrap()].1;
+            let counter = &active_log_files[file_id.step_after(&front).unwrap()].1;
             counter.fetch_add(1, Ordering::Release);
         }
     }
@@ -373,7 +373,7 @@ impl EventListener for PurgeHook {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            let counter = &active_log_files[file_id.distance_from(&front).unwrap()].1;
+            let counter = &active_log_files[file_id.step_after(&front).unwrap()].1;
             counter.fetch_sub(1, Ordering::Release);
         }
     }
@@ -399,7 +399,7 @@ impl EventListener for PurgeHook {
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
             if front <= file_id {
-                let mut purged = active_log_files.drain(0..=file_id.distance_from(&front).unwrap());
+                let mut purged = active_log_files.drain(0..=file_id.step_after(&front).unwrap());
                 assert_eq!(purged.next_back().unwrap().0, file_id);
             }
         }

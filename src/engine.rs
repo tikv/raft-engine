@@ -864,7 +864,7 @@ mod tests {
         let active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
         let active_len = engine
             .pipe_log
-            .file_len(LogQueue::Rewrite, active_num)
+            .file_size(LogQueue::Rewrite, active_num)
             .unwrap();
         assert!(active_num > 1.into() || active_len > 59); // The rewrite queue isn't empty.
 
@@ -902,7 +902,7 @@ mod tests {
         let new_active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
         let new_active_len = engine
             .pipe_log
-            .file_len(LogQueue::Rewrite, active_num)
+            .file_size(LogQueue::Rewrite, active_num)
             .unwrap();
         assert!(
             new_active_num > active_num

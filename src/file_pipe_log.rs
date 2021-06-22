@@ -121,7 +121,7 @@ impl LogManager {
             let fd = Arc::new(LogFd(open_active_file(&path)?));
             fd.sync()?;
 
-            self.active_log_size = file_len(fd.0)?;
+            self.active_log_size = file_size(fd.0)?;
             self.active_log_capacity = self.active_log_size;
             self.last_sync_size = self.active_log_size;
             self.all_files.push_back(fd);
@@ -194,7 +194,7 @@ impl LogManager {
                 "file_id out of range",
             )));
         }
-        Ok(self.all_files[file_id.distance_from(&self.first_file_id).unwrap()].clone())
+        Ok(self.all_files[file_id.step_after(&self.first_file_id).unwrap()].clone())
     }
 
     fn get_active_fd(&self) -> Option<Arc<LogFd>> {
@@ -205,7 +205,7 @@ impl LogManager {
         if file_id > self.active_file_id {
             return Err(box_err!("Purge active or newer files"));
         }
-        let end_offset = file_id.distance_from(&self.first_file_id).unwrap();
+        let end_offset = file_id.step_after(&self.first_file_id).unwrap();
         self.all_files.drain(..end_offset);
         self.first_file_id = file_id;
         Ok(end_offset)
@@ -344,7 +344,7 @@ impl FilePipeLog {
 
         log_files.sort();
         rewrite_files.sort();
-        if max_file_id.distance_from(&min_file_id).is_none() {
+        if max_file_id.step_after(&min_file_id).is_none() {
             println!(
                 "min = {}, max = {}, log files len = {}",
                 min_file_id,
@@ -352,11 +352,11 @@ impl FilePipeLog {
                 log_files.len()
             );
         }
-        if log_files.len() != max_file_id.distance_from(&min_file_id).unwrap() + 1 {
+        if log_files.len() != max_file_id.step_after(&min_file_id).unwrap() + 1 {
             return Err(box_err!("Corruption occurs on log files"));
         }
         if !rewrite_files.is_empty()
-            && rewrite_files.len() != max_rewrite_num.distance_from(&min_rewrite_num).unwrap() + 1
+            && rewrite_files.len() != max_rewrite_num.step_after(&min_rewrite_num).unwrap() + 1
         {
             return Err(box_err!("Corruption occurs on rewrite files"));
         }
@@ -376,6 +376,18 @@ impl FilePipeLog {
     pub fn set_recovery_mode(&self, recovery_mode: bool) {
         let mut submitor = self.cache_submitor.lock().unwrap();
         submitor.set_block_on_full(recovery_mode);
+    }
+
+    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
+        let mut path = PathBuf::from(&self.dir);
+        path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
+        let meta = fs::metadata(&path)?;
+        let mut vec = Vec::with_capacity(meta.len() as usize);
+
+        // Read the whole file.
+        let mut file = File::open(&path)?;
+        file.read_to_end(&mut vec)?;
+        Ok(vec)
     }
 
     fn append_bytes(
@@ -414,6 +426,10 @@ impl FilePipeLog {
         }
     }
 
+    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
+        self.mut_queue(queue).truncate_active_log(offset)
+    }
+
     #[cfg(test)]
     fn active_log_size(&self, queue: LogQueue) -> usize {
         self.get_queue(queue).active_log_size
@@ -433,17 +449,17 @@ impl PipeLog for FilePipeLog {
         Ok(())
     }
 
-    fn file_len(&self, queue: LogQueue, file_id: FileId) -> Result<u64> {
+    fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64> {
         self.get_queue(queue)
             .get_fd(file_id)
-            .map(|fd| file_len(fd.0).unwrap() as u64)
+            .map(|fd| file_size(fd.0).unwrap() as u64)
     }
 
     fn total_size(&self, queue: LogQueue) -> usize {
         let manager = self.get_queue(queue);
         manager
             .active_file_id
-            .distance_from(&manager.first_file_id)
+            .step_after(&manager.first_file_id)
             .unwrap()
             * self.rotate_size
             + manager.active_log_size
@@ -458,18 +474,6 @@ impl PipeLog for FilePipeLog {
     ) -> Result<Vec<u8>> {
         let fd = self.get_queue(queue).get_fd(file_id)?;
         pread_exact(fd.0, offset, len as usize)
-    }
-
-    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
-        let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
-        let meta = fs::metadata(&path)?;
-        let mut vec = Vec::with_capacity(meta.len() as usize);
-
-        // Read the whole file.
-        let mut file = File::open(&path)?;
-        file.read_to_end(&mut vec)?;
-        Ok(vec)
     }
 
     fn read_file<E: Message, W: EntryExt<E>>(
@@ -598,10 +602,6 @@ impl PipeLog for FilePipeLog {
         self.mut_queue(queue).new_log_file()
     }
 
-    fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
-        self.mut_queue(queue).truncate_active_log(offset)
-    }
-
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize> {
         let (mut manager, name_suffix) = match queue {
             LogQueue::Append => (self.appender.wl(), LOG_SUFFIX),
@@ -680,7 +680,7 @@ fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_frozen_file"))
 }
 
-fn file_len(fd: RawFd) -> Result<usize> {
+fn file_size(fd: RawFd) -> Result<usize> {
     lseek(fd, 0, Whence::SeekEnd)
         .map(|n| n as usize)
         .map_err(|e| parse_nix_error(e, "lseek"))

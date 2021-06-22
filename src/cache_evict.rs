@@ -223,8 +223,8 @@ where
 
     fn read_chunk(&self, chunk: &CacheChunk) -> Result<(u64, Vec<u8>)> {
         let read_len = if chunk.end_offset == u64::MAX {
-            let file_len = self.pipe_log.file_len(LogQueue::Append, chunk.file_id)?;
-            file_len - chunk.base_offset
+            let file_size = self.pipe_log.file_size(LogQueue::Append, chunk.file_id)?;
+            file_size - chunk.base_offset
         } else {
             chunk.end_offset - chunk.base_offset
         };
