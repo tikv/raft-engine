@@ -624,10 +624,10 @@ impl PipeLog for FilePipeLog {
     }
 }
 
-fn generate_file_name(file_num: FileId, suffix: &'static str) -> String {
+fn generate_file_name(file_id: FileId, suffix: &'static str) -> String {
     match suffix {
-        LOG_SUFFIX => format!("{:016}{}", file_num, suffix),
-        REWRITE_SUFFIX => format!("{:08}{}", file_num, suffix),
+        LOG_SUFFIX => format!("{:016}{}", file_id, suffix),
+        REWRITE_SUFFIX => format!("{:08}{}", file_id, suffix),
         _ => unreachable!(),
     }
 }
