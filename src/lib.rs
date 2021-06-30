@@ -20,19 +20,21 @@ mod cache_evict;
 mod config;
 mod engine;
 mod errors;
+mod event_listener;
+mod file_pipe_log;
 mod log_batch;
 mod memtable;
 mod pipe_log;
 mod purge;
 mod util;
 
-use crate::pipe_log::PipeLog;
+use crate::file_pipe_log::FilePipeLog;
 
 pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
 pub use self::util::ReadableSize;
-pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, PipeLog>;
+pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
 
 #[derive(Clone, Copy, Default)]
 pub struct CacheStats {

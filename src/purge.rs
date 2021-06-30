@@ -8,9 +8,10 @@ use protobuf::Message;
 
 use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
+use crate::event_listener::EventListener;
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::memtable::{EntryIndex, MemTable};
-use crate::pipe_log::{GenericPipeLog, LogQueue, PipeLogHook};
+use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
 
@@ -26,12 +27,13 @@ pub struct PurgeManager<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
+    listeners: Vec<Arc<dyn EventListener>>,
 
     // Only one thread can run `purge_expired_files` at a time.
     purge_mutex: Arc<Mutex<()>>,
@@ -41,37 +43,38 @@ impl<E, W, P> PurgeManager<E, W, P>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
-    P: GenericPipeLog,
+    P: PipeLog,
 {
     pub fn new(
         cfg: Arc<Config>,
         memtables: MemTableAccessor<E, W>,
         pipe_log: P,
         global_stats: Arc<GlobalStats>,
+        listeners: Vec<Arc<dyn EventListener>>,
     ) -> PurgeManager<E, W, P> {
         PurgeManager {
             cfg,
             memtables,
             pipe_log,
             global_stats,
+            listeners,
             purge_mutex: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let _purge_mutex = match self.purge_mutex.try_lock() {
-            Ok(context) => context,
-            _ => return Ok(vec![]),
-        };
+        let guard = self.purge_mutex.try_lock();
+        if guard.is_err() {
+            return Ok(vec![]);
+        }
 
         if !self.needs_purge_log_files(LogQueue::Append) {
             return Ok(vec![]);
         }
 
-        let (rewrite_limit, compact_limit) = self.latest_inactive_file_num();
+        let (rewrite_limit, compact_limit) = self.latest_inactive_file_id();
         if !self
-            .pipe_log
-            .hooks()
+            .listeners
             .iter()
             .all(|h| h.ready_for_purge(LogQueue::Append, rewrite_limit))
         {
@@ -93,16 +96,17 @@ where
 
         let (min_file_1, min_file_2) = self.memtables.fold(
             (
-                rewrite_limit + 1,
-                self.pipe_log.active_file_num(LogQueue::Rewrite),
+                rewrite_limit.forward(1),
+                self.pipe_log.active_file_id(LogQueue::Rewrite),
             ),
-            |(mut min1, mut min2), t| {
-                min1 = cmp::min(min1, t.min_file_num(LogQueue::Append).unwrap_or(u64::MAX));
-                min2 = cmp::min(min2, t.min_file_num(LogQueue::Rewrite).unwrap_or(u64::MAX));
-                (min1, min2)
+            |(min1, min2), t| {
+                (
+                    FileId::min(min1, t.min_file_id(LogQueue::Append).unwrap_or_default()),
+                    FileId::min(min2, t.min_file_id(LogQueue::Rewrite).unwrap_or_default()),
+                )
             },
         );
-        assert!(min_file_1 > 0 && min_file_2 > 0);
+        assert!(min_file_1.valid() && min_file_2.valid());
 
         for (purge_to, queue) in &[
             (min_file_1, LogQueue::Append),
@@ -110,8 +114,8 @@ where
         ] {
             let purged = self.pipe_log.purge_to(*queue, *purge_to)?;
             info!("purged {} expired log files for queue {:?}", purged, *queue);
-            for hook in self.pipe_log.hooks() {
-                hook.post_purge(*queue, *purge_to - 1);
+            for listener in &self.listeners {
+                listener.post_purge(*queue, purge_to.backward(1));
             }
         }
 
@@ -119,9 +123,9 @@ where
     }
 
     pub fn needs_purge_log_files(&self, queue: LogQueue) -> bool {
-        let active_file_num = self.pipe_log.active_file_num(queue);
-        let first_file_num = self.pipe_log.first_file_num(queue);
-        if active_file_num == first_file_num {
+        let active_file = self.pipe_log.active_file_id(queue);
+        let first_file = self.pipe_log.first_file_id(queue);
+        if active_file == first_file {
             return false;
         }
 
@@ -134,24 +138,22 @@ where
     }
 
     // Returns (`latest_needs_rewrite`, `latest_needs_force_compact`).
-    fn latest_inactive_file_num(&self) -> (u64, u64) {
+    fn latest_inactive_file_id(&self) -> (FileId, FileId) {
         let queue = LogQueue::Append;
 
-        let first_file_num = self.pipe_log.first_file_num(queue);
-        let active_file_num = self.pipe_log.active_file_num(queue);
-        if active_file_num == first_file_num {
+        let first_file = self.pipe_log.first_file_id(queue);
+        let active_file = self.pipe_log.active_file_id(queue);
+        if active_file == first_file {
             // Can't rewrite or force compact the active file.
-            return (0, 0);
+            return (Default::default(), Default::default());
         }
 
-        let total_size = self.pipe_log.total_size(queue) as f64;
-        let rewrite_limit = (total_size * (1.0 - REWRITE_INACTIVE_RATIO)) as usize;
-        let compact_limit = (total_size * (1.0 - FORCE_COMPACT_RATIO)) as usize;
-        let mut latest_needs_rewrite = self.pipe_log.latest_file_before(queue, rewrite_limit);
-        let mut latest_needs_compact = self.pipe_log.latest_file_before(queue, compact_limit);
-        latest_needs_rewrite = cmp::min(latest_needs_rewrite, active_file_num - 1);
-        latest_needs_compact = cmp::min(latest_needs_compact, active_file_num - 1);
-        (latest_needs_rewrite, latest_needs_compact)
+        let latest_needs_rewrite = self.pipe_log.file_at(queue, REWRITE_INACTIVE_RATIO);
+        let latest_needs_compact = self.pipe_log.file_at(queue, FORCE_COMPACT_RATIO);
+        (
+            FileId::min(latest_needs_rewrite, active_file.backward(1)),
+            FileId::min(latest_needs_compact, active_file.backward(1)),
+        )
     }
 
     pub fn rewrite_queue_needs_squeeze(&self) -> bool {
@@ -167,13 +169,13 @@ where
 
     fn regions_rewrite_or_force_compact(
         &self,
-        latest_rewrite: u64,
-        latest_compact: u64,
+        latest_rewrite: FileId,
+        latest_compact: FileId,
         will_force_compact: &mut Vec<u64>,
     ) {
         assert!(latest_compact <= latest_rewrite);
 
-        let log_batch = self.memtables.take_cleaned_rafts(latest_rewrite);
+        let log_batch = self.memtables.clean_regions_before(latest_rewrite);
         self.handle_cleaned_raft(log_batch);
 
         let memtables = self.memtables.collect(|t| {
@@ -205,7 +207,7 @@ where
 
         let memtables = self
             .memtables
-            .collect(|t| t.min_file_num(LogQueue::Rewrite).unwrap_or_default() > 0);
+            .collect(|t| t.min_file_id(LogQueue::Rewrite).unwrap_or_default().valid());
 
         self.rewrite_memtables(
             memtables,
@@ -222,7 +224,7 @@ where
         fe: FE,
         fk: FK,
         expect_count: usize,
-        rewrite: Option<u64>,
+        rewrite: Option<FileId>,
     ) where
         FE: Fn(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()> + Copy,
         FK: Fn(&MemTable<E, W>, &mut Vec<(Vec<u8>, Vec<u8>)>) + Copy,
@@ -255,7 +257,7 @@ where
     fn rewrite_impl(
         &self,
         log_batch: &mut LogBatch<E, W>,
-        latest_rewrite: Option<u64>,
+        latest_rewrite: Option<FileId>,
         sync: bool,
     ) -> Result<()> {
         if log_batch.is_empty() {
@@ -265,12 +267,11 @@ where
             return Ok(());
         }
 
-        let mut file_num = 0;
-        self.pipe_log.rewrite(log_batch, sync, &mut file_num)?;
-        if file_num > 0 {
-            self.rewrite_to_memtable(log_batch, file_num, latest_rewrite);
-            for hook in self.pipe_log.hooks() {
-                hook.post_apply_memtables(LogQueue::Rewrite, file_num);
+        let (file_id, _) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
+        if file_id.valid() {
+            self.rewrite_to_memtable(log_batch, file_id, latest_rewrite);
+            for listener in &self.listeners {
+                listener.post_apply_memtables(LogQueue::Rewrite, file_id);
             }
         }
         Ok(())
@@ -279,8 +280,8 @@ where
     fn rewrite_to_memtable(
         &self,
         log_batch: &mut LogBatch<E, W>,
-        file_num: u64,
-        latest_rewrite: Option<u64>,
+        file_id: FileId,
+        latest_rewrite: Option<FileId>,
     ) {
         let queue = LogQueue::Rewrite;
         for item in log_batch.items.drain(..) {
@@ -293,7 +294,7 @@ where
                         "{} append to {:?}.{}, Entries[{:?}:{:?})",
                         raft,
                         queue,
-                        file_num,
+                        file_id,
                         entries_index.first().map(|x| x.index),
                         entries_index.last().map(|x| x.index + 1),
                     );
@@ -306,15 +307,15 @@ where
                             "{} append to {:?}.{}, Put({})",
                             raft,
                             queue,
-                            file_num,
+                            file_id,
                             hex::encode(&key),
                         );
-                        memtable.wl().rewrite_key(key, latest_rewrite, file_num);
+                        memtable.wl().rewrite_key(key, latest_rewrite, file_id);
                     }
                     _ => unreachable!(),
                 },
                 LogItemContent::Command(Command::Clean) => {
-                    debug!("{} append to {:?}.{}, Clean", raft, queue, file_num);
+                    debug!("{} append to {:?}.{}, Clean", raft, queue, file_id);
                 }
                 _ => unreachable!(),
             }
@@ -322,58 +323,69 @@ where
     }
 }
 
-#[derive(Default)]
 pub struct PurgeHook {
     // There could be a gap between a write batch is written into a file and applied to memtables.
     // If a log-rewrite happens at the time, entries and kvs in the batch can be omited. So after
     // the log file gets purged, those entries and kvs will be lost.
     //
-    // This field is used to forbid the bad case. Log files `active_log_files` can't be purged.
+    // Maintain a per-file reference counter to forbid this bad case. Log files `active_log_files`
+    // can't be purged.
     // It's only used for the append queue. The rewrite queue doesn't need this.
-    active_log_files: RwLock<VecDeque<(u64, AtomicUsize)>>,
+    active_log_files: RwLock<VecDeque<(FileId, AtomicUsize)>>,
 }
 
-impl PipeLogHook for PurgeHook {
-    fn post_new_log_file(&self, queue: LogQueue, file_num: u64) {
+impl PurgeHook {
+    pub fn new() -> Self {
+        PurgeHook {
+            active_log_files: Default::default(),
+        }
+    }
+}
+
+impl EventListener for PurgeHook {
+    fn post_new_log_file(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
             let mut active_log_files = self.active_log_files.wl();
-            if let Some(num) = active_log_files.back().map(|x| x.0) {
-                assert_eq!(num + 1, file_num, "active log files should be contiguous");
+            if let Some(id) = active_log_files.back().map(|x| x.0) {
+                assert_eq!(
+                    id.forward(1),
+                    file_id,
+                    "active log files should be contiguous"
+                );
             }
             let counter = AtomicUsize::new(0);
-            active_log_files.push_back((file_num, counter));
+            active_log_files.push_back((file_id, counter));
         }
     }
 
-    fn on_append_log_file(&self, queue: LogQueue, file_num: u64) {
+    fn on_append_log_file(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            let counter = &active_log_files[(file_num - front) as usize].1;
+            let counter = &active_log_files[file_id.step_after(&front).unwrap()].1;
             counter.fetch_add(1, Ordering::Release);
         }
     }
 
-    fn post_apply_memtables(&self, queue: LogQueue, file_num: u64) {
+    fn post_apply_memtables(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            let counter = &active_log_files[(file_num - front) as usize].1;
+            let counter = &active_log_files[file_id.step_after(&front).unwrap()].1;
             counter.fetch_sub(1, Ordering::Release);
         }
     }
 
-    fn ready_for_purge(&self, queue: LogQueue, file_num: u64) -> bool {
+    fn ready_for_purge(&self, queue: LogQueue, file_id: FileId) -> bool {
         if queue == LogQueue::Append {
             let active_log_files = self.active_log_files.rl();
             assert!(!active_log_files.is_empty());
-            let front = active_log_files[0].0;
-            for (i, n) in (front..=file_num).enumerate() {
-                assert_eq!(active_log_files[i].0, n);
-                let counter = &active_log_files[i].1;
-                if counter.load(Ordering::Acquire) > 0 {
+            for (id, counter) in active_log_files.iter() {
+                if *id > file_id {
+                    break;
+                } else if counter.load(Ordering::Acquire) > 0 {
                     return false;
                 }
             }
@@ -381,15 +393,14 @@ impl PipeLogHook for PurgeHook {
         true
     }
 
-    fn post_purge(&self, queue: LogQueue, file_num: u64) {
+    fn post_purge(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
             let mut active_log_files = self.active_log_files.wl();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
-            for x in front..=file_num {
-                let (y, counter) = active_log_files.pop_front().unwrap();
-                assert_eq!(x, y);
-                assert_eq!(counter.load(Ordering::Acquire), 0);
+            if front <= file_id {
+                let mut purged = active_log_files.drain(0..=file_id.step_after(&front).unwrap());
+                assert_eq!(purged.next_back().unwrap().0, file_id);
             }
         }
     }
