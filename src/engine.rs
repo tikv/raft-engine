@@ -17,9 +17,10 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::{HandyRwLock, HashMap, Worker};
+use crate::util::{HandyRwLock, HashMap, InstantExt, Worker};
 use crate::{codec, CacheStats, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -233,11 +234,12 @@ where
     }
 
     fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        if log_batch.items.is_empty() {
+        let start = Instant::now();
+        let bytes = if log_batch.items.is_empty() {
             if sync {
                 self.pipe_log.sync(LogQueue::Append)?;
             }
-            Ok(0)
+            0
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
             if file_id.valid() {
@@ -246,8 +248,10 @@ where
                     listener.post_apply_memtables(LogQueue::Append, file_id);
                 }
             }
-            Ok(bytes)
-        }
+            bytes
+        };
+        ENGINE_WRITE_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        Ok(bytes)
     }
 }
 
@@ -389,7 +393,7 @@ where
         let mut batches = Vec::new();
         let mut file_id = first_file;
         while file_id <= active_file {
-            pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
+            pipe_log.read_file_for_recovery(queue, file_id, recovery_mode, &mut batches)?;
             for mut batch in batches.drain(..) {
                 Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
             }

@@ -4,6 +4,7 @@ use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 use std::{cmp, u64};
 
 use log::{debug, info, warn};
@@ -19,8 +20,9 @@ use crate::cache_evict::CacheSubmitor;
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::HandyRwLock;
+use crate::util::{HandyRwLock, InstantExt};
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -48,7 +50,10 @@ impl LogFd {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
     pub fn sync(&self) -> Result<()> {
-        fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"))
+        let start = Instant::now();
+        let res = fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"));
+        LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        res
     }
 }
 
@@ -378,7 +383,7 @@ impl FilePipeLog {
         submitor.set_block_on_full(recovery_mode);
     }
 
-    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
+    fn read_file_bytes_for_recovery(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
         let mut path = PathBuf::from(&self.dir);
         path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
         let meta = fs::metadata(&path)?;
@@ -473,17 +478,22 @@ impl PipeLog for FilePipeLog {
         len: u64,
     ) -> Result<Vec<u8>> {
         let fd = self.get_queue(queue).get_fd(file_id)?;
-        pread_exact(fd.0, offset, len as usize)
+        let res = pread_exact(fd.0, offset, len as usize);
+        match queue {
+            LogQueue::Rewrite => LOG_READ_SIZE_HISTOGRAM_VEC.rewrite.observe(len as f64),
+            LogQueue::Append => LOG_READ_SIZE_HISTOGRAM_VEC.append.observe(len as f64),
+        }
+        res
     }
 
-    fn read_file<E: Message, W: EntryExt<E>>(
+    fn read_file_for_recovery<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
         batches: &mut Vec<LogBatch<E, W>>,
     ) -> Result<()> {
-        let content = self.read_file_bytes(queue, file_id)?;
+        let content = self.read_file_bytes_for_recovery(queue, file_id)?;
         let mut buf = content.as_slice();
         if !buf.starts_with(FILE_MAGIC_HEADER) {
             if self.active_file_id(queue) == file_id {
@@ -549,6 +559,7 @@ impl PipeLog for FilePipeLog {
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
+            let start = Instant::now();
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             let mut chunk = None;
             let (file_id, offset, fd) = if queue == LogQueue::Append {
@@ -566,6 +577,25 @@ impl PipeLog for FilePipeLog {
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
                     entries.set_position(queue, file_id, offset, &chunk);
+                }
+            }
+
+            match queue {
+                LogQueue::Rewrite => {
+                    LOG_APPEND_TIME_HISTOGRAM_VEC
+                        .rewrite
+                        .observe(start.saturating_elapsed().as_secs_f64());
+                    LOG_APPEND_SIZE_HISTOGRAM_VEC
+                        .rewrite
+                        .observe(content.len() as f64);
+                }
+                LogQueue::Append => {
+                    LOG_APPEND_TIME_HISTOGRAM_VEC
+                        .append
+                        .observe(start.saturating_elapsed().as_secs_f64());
+                    LOG_APPEND_SIZE_HISTOGRAM_VEC
+                        .append
+                        .observe(content.len() as f64);
                 }
             }
 
