@@ -187,6 +187,17 @@ impl<'de> Deserialize<'de> for ReadableSize {
     }
 }
 
+pub trait InstantExt {
+    fn saturating_elapsed(&self) -> Duration;
+}
+
+impl InstantExt for std::time::Instant {
+    #[inline]
+    fn saturating_elapsed(&self) -> Duration {
+        std::time::Instant::now().saturating_duration_since(*self)
+    }
+}
+
 /// Take slices in the range.
 ///
 /// ### Panics
