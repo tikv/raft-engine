@@ -34,9 +34,6 @@ pub struct Config {
     /// Only purge if disk file size is greater than `purge_threshold`.
     pub purge_threshold: ReadableSize,
 
-    /// Total size limit to cache log entries.
-    pub cache_limit: ReadableSize,
-
     /// Compress a log batch if its size is greater than `batch_compression_threshold`.
     ///
     /// Set to `0` will disable compression.
@@ -51,7 +48,6 @@ impl Default for Config {
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
-            cache_limit: ReadableSize::gb(1),
             batch_compression_threshold: ReadableSize::kb(8),
         }
     }
@@ -90,7 +86,6 @@ mod tests {
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
-            cache-limit = "1GB"
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -98,6 +93,5 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
-        assert_eq!(load.cache_limit, ReadableSize::gb(1));
     }
 }

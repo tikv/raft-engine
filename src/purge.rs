@@ -192,9 +192,7 @@ where
 
         self.rewrite_memtables(
             memtables,
-            |t: &MemTable<E, W>, ents, ents_idx| {
-                t.fetch_rewrite_entries(latest_rewrite, ents, ents_idx)
-            },
+            |t: &MemTable<E, W>, ents_idx| t.fetch_rewrite_entries(latest_rewrite, ents_idx),
             |t: &MemTable<E, W>, kvs| t.fetch_rewrite_kvs(latest_rewrite, kvs),
             REWRITE_ENTRY_COUNT_THRESHOLD,
             Some(latest_rewrite),
@@ -211,7 +209,7 @@ where
 
         self.rewrite_memtables(
             memtables,
-            |t: &MemTable<E, W>, ents, ents_idx| t.fetch_entries_from_rewrite(ents, ents_idx),
+            |t: &MemTable<E, W>, ents_idx| t.fetch_entries_from_rewrite(ents_idx),
             |t: &MemTable<E, W>, kvs| t.fetch_kvs_from_rewrite(kvs),
             0,
             None,
@@ -226,7 +224,7 @@ where
         expect_count: usize,
         rewrite: Option<FileId>,
     ) where
-        FE: Fn(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()> + Copy,
+        FE: Fn(&MemTable<E, W>, &mut Vec<EntryIndex>) -> Result<()> + Copy,
         FK: Fn(&MemTable<E, W>, &mut Vec<(Vec<u8>, Vec<u8>)>) + Copy,
     {
         let mut log_batch = LogBatch::<E, W>::default();
