@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
 use log::{debug, info, warn};
@@ -262,7 +262,6 @@ pub struct FilePipeLog {
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
     listeners: Vec<Arc<dyn EventListener>>,
-    lock: Arc<Mutex<()>>,
 }
 
 impl FilePipeLog {
@@ -279,7 +278,6 @@ impl FilePipeLog {
             appender,
             rewriter,
             listeners,
-            lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -429,7 +427,6 @@ impl FilePipeLog {
 
 impl PipeLog for FilePipeLog {
     fn close(&self) -> Result<()> {
-        let _write_lock = self.lock.lock().unwrap();
         self.appender.wl().truncate_active_log(None)?;
         self.rewriter.wl().truncate_active_log(None)?;
         Ok(())
@@ -527,12 +524,7 @@ impl PipeLog for FilePipeLog {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
             // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
             #[allow(clippy::branches_sharing_code)]
-            let (file_id, offset, fd) = if queue == LogQueue::Append {
-                let mut _guard = self.lock.lock().unwrap();
-                self.append_bytes(queue, &content, &mut sync)?
-            } else {
-                self.append_bytes(queue, &content, &mut sync)?
-            };
+            let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
             }
