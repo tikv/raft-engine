@@ -380,12 +380,17 @@ impl FilePipeLog {
         content: &[u8],
         sync: &mut bool,
     ) -> Result<(FileId, u64, Arc<LogFd>)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+        // Must hold lock until file is written to avoid corrupted holes.
+        let (file_id, offset, fd) = {
+            let mut queue = self.mut_queue(queue);
+            let (file_id, offset, fd) = queue.on_append(content.len(), sync)?;
+            pwrite_exact(fd.0, offset, content)?;
+            (file_id, offset, fd)
+        };
         for listener in &self.listeners {
             listener.on_append_log_file(queue, file_id);
         }
 
-        pwrite_exact(fd.0, offset, content)?;
         Ok((file_id, offset, fd))
     }
 
