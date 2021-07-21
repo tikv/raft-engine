@@ -381,12 +381,9 @@ impl FilePipeLog {
         sync: &mut bool,
     ) -> Result<(FileId, u64, Arc<LogFd>)> {
         // Must hold lock until file is written to avoid corrupted holes.
-        let (file_id, offset, fd) = {
-            let mut queue = self.mut_queue(queue);
-            let (file_id, offset, fd) = queue.on_append(content.len(), sync)?;
-            pwrite_exact(fd.0, offset, content)?;
-            (file_id, offset, fd)
-        };
+        let mut log_manager = self.mut_queue(queue);
+        let (file_id, offset, fd) = log_manager.on_append(content.len(), sync)?;
+        pwrite_exact(fd.0, offset, content)?;
         for listener in &self.listeners {
             listener.on_append_log_file(queue, file_id);
         }
@@ -527,8 +524,6 @@ impl PipeLog for FilePipeLog {
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
-            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            #[allow(clippy::branches_sharing_code)]
             let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
