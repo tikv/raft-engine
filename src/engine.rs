@@ -1,14 +1,11 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::{mem, u64};
 
 use log::{debug, info, trace};
 use protobuf::Message;
 
-use crate::cache_evict::{
-    CacheSubmitor, CacheTask, Runner as CacheEvictRunner, DEFAULT_CACHE_CHUNK_SIZE,
-};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
@@ -19,8 +16,8 @@ use crate::log_batch::{
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::{HandyRwLock, HashMap, Worker};
-use crate::{codec, CacheStats, GlobalStats, Result};
+use crate::util::{HandyRwLock, HashMap};
+use crate::{codec, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -251,22 +248,16 @@ where
     }
 }
 
-struct Workers {
-    cache_evict: Worker<CacheTask>,
-}
+struct Workers {}
 
 // An internal structure for tests.
 struct EngineOptions {
-    chunk_limit: usize,
     listeners: Vec<Arc<dyn EventListener>>,
 }
 
 impl Default for EngineOptions {
     fn default() -> EngineOptions {
-        EngineOptions {
-            chunk_limit: DEFAULT_CACHE_CHUNK_SIZE,
-            listeners: vec![],
-        }
+        EngineOptions { listeners: vec![] }
     }
 }
 
@@ -281,38 +272,16 @@ where
     }
 
     fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
-        let cache_limit = cfg.cache_limit.0 as usize;
         let global_stats = Arc::new(GlobalStats::default());
-
-        let mut cache_evict_worker = Worker::new("cache_evict".to_owned(), None);
 
         let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener>];
         listeners.extend(options.listeners.drain(..));
-        let pipe_log = FilePipeLog::open(
-            &cfg,
-            CacheSubmitor::new(
-                cache_limit,
-                options.chunk_limit,
-                cache_evict_worker.scheduler(),
-                global_stats.clone(),
-            ),
-            listeners.clone(),
-        )
-        .expect("Open raft log");
+        let pipe_log = FilePipeLog::open(&cfg, listeners.clone()).expect("Open raft log");
 
         let memtables = {
             let stats = global_stats.clone();
             MemTableAccessor::<E, W>::new(Arc::new(move |id: u64| MemTable::new(id, stats.clone())))
         };
-
-        let cache_evict_runner = CacheEvictRunner::new(
-            cache_limit,
-            options.chunk_limit,
-            global_stats.clone(),
-            memtables.clone(),
-            pipe_log.clone(),
-        );
-        cache_evict_worker.start(cache_evict_runner, Some(Duration::from_secs(1)));
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
@@ -329,16 +298,11 @@ where
             pipe_log,
             global_stats,
             purge_manager,
-            workers: Arc::new(RwLock::new(Workers {
-                cache_evict: cache_evict_worker,
-            })),
+            workers: Arc::new(RwLock::new(Workers {})),
             listeners,
         };
 
-        engine.pipe_log.set_recovery_mode(true);
         engine.recover_from_queues()?;
-        engine.pipe_log.set_recovery_mode(false);
-
         Ok(engine)
     }
 
@@ -440,22 +404,13 @@ where
     }
 
     pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<E>> {
-        // Fetch from cache
-        let entry_idx = {
-            if let Some(memtable) = self.memtables.get(region_id) {
-                match memtable.rl().get_entry(log_idx) {
-                    (Some(entry), _) => return Ok(Some(entry)),
-                    (None, Some(idx)) => idx,
-                    (None, None) => return Ok(None),
-                }
-            } else {
-                return Ok(None);
+        if let Some(memtable) = self.memtables.get(region_id) {
+            if let Some(idx) = memtable.rl().get_entry(log_idx) {
+                let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?;
+                return Ok(Some(entry));
             }
-        };
-
-        // Read from file
-        let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &entry_idx)?;
-        Ok(Some(entry))
+        }
+        Ok(None)
     }
 
     /// Purge expired logs files and return a set of Raft group ids
@@ -480,7 +435,7 @@ where
                 &memtable,
                 vec,
                 (end - begin) as usize,
-                |t, ents, ents_idx| t.fetch_entries_to(begin, end, max_size, ents, ents_idx),
+                |t, ents_idx| t.fetch_entries_to(begin, end, max_size, ents_idx),
             )?;
             return Ok(vec.len() - old_len);
         }
@@ -516,27 +471,10 @@ where
         self.first_index(region_id).unwrap_or(index) - first_index
     }
 
-    pub fn compact_cache_to(&self, region_id: u64, index: u64) {
-        if let Some(memtable) = self.memtables.get(region_id) {
-            memtable.wl().compact_cache_to(index);
-        }
-    }
-
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
     pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         self.write_impl(log_batch, sync)
-    }
-
-    /// Flush stats about EntryCache.
-    pub fn flush_cache_stats(&self) -> CacheStats {
-        self.global_stats.flush_cache_stats()
-    }
-
-    /// Stop background thread which will keep trying evict caching.
-    pub fn stop(&self) {
-        let mut workers = self.workers.wl();
-        workers.cache_evict.stop();
     }
 
     pub fn raft_groups(&self) -> Vec<u64> {
@@ -558,16 +496,14 @@ where
     E: Message + Clone,
     W: EntryExt<E> + Clone,
     P: PipeLog,
-    F: FnMut(&MemTable<E, W>, &mut Vec<E>, &mut Vec<EntryIndex>) -> Result<()>,
+    F: FnMut(&MemTable<E, W>, &mut Vec<EntryIndex>) -> Result<()>,
 {
-    let mut ents = Vec::with_capacity(count);
     let mut ents_idx = Vec::with_capacity(count);
-    fetch(&*memtable.rl(), &mut ents, &mut ents_idx)?;
+    fetch(&*memtable.rl(), &mut ents_idx)?;
 
     for ei in ents_idx {
         vec.push(read_entry_from_file::<_, W, _>(pipe_log, &ei)?);
     }
-    vec.extend(ents.into_iter());
     Ok(())
 }
 
@@ -695,10 +631,6 @@ mod tests {
             }
 
             for i in 10..20 {
-                // Test get_entry from cache.
-                entry.set_index(i + 1);
-                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
-
                 // Test get_entry from file.
                 entry.set_index(i);
                 assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
@@ -781,58 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_limit() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_recover_with_cache_limit")
-            .tempdir()
-            .unwrap();
-
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.purge_threshold = ReadableSize::mb(70);
-        cfg.target_file_size = ReadableSize::mb(8);
-        cfg.cache_limit = ReadableSize::mb(10);
-
-        let mut options = EngineOptions::default();
-        options.chunk_limit = 512 * 1024;
-        let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
-
-        // Append some entries with total size 100M.
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024].into());
-        for idx in 1..=10 {
-            for raft_id in 1..=10000 {
-                entry.set_index(idx);
-                append_log(&engine, raft_id, &entry);
-            }
-        }
-        let cache_size = engine.global_stats.cache_size();
-        assert!(
-            cache_size <= 10 * 1024 * 1024,
-            "cache size {} > 10M",
-            cache_size
-        );
-
-        // Recover from log files.
-        engine.stop();
-        drop(engine);
-        let mut options = EngineOptions::default();
-        options.chunk_limit = 512 * 1024;
-        let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
-        let cache_size = engine.global_stats.cache_size();
-        assert!(cache_size <= 10 * 1024 * 1024);
-
-        // Rewrite inactive logs.
-        for raft_id in 1..=10000 {
-            engine.compact_to(raft_id, 8);
-        }
-        let ret = engine.purge_expired_files().unwrap();
-        assert!(ret.is_empty());
-        let cache_size = engine.global_stats.cache_size();
-        assert!(cache_size <= 10 * 1024 * 1024);
-    }
-
-    #[test]
     fn test_rewrite_and_recover() {
         let dir = tempfile::Builder::new()
             .prefix("test_rewrite_and_recover")
@@ -841,7 +721,6 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.cache_limit = ReadableSize::kb(0);
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(80);
         let engine = RaftLogEngine::new(cfg.clone());
@@ -920,7 +799,6 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.cache_limit = ReadableSize::kb(0);
         cfg.target_file_size = ReadableSize::kb(128);
         cfg.purge_threshold = ReadableSize::kb(512);
         let engine = RaftLogEngine::new(cfg.clone());
@@ -1081,7 +959,6 @@ mod tests {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.target_file_size = ReadableSize::kb(128);
         cfg.purge_threshold = ReadableSize::kb(512);
-        cfg.cache_limit = ReadableSize::kb(0);
         cfg.batch_compression_threshold = ReadableSize::kb(0);
 
         let hook = Arc::new(Hook::default());

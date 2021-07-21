@@ -8,7 +8,6 @@ use crc32fast::Hasher;
 use log::trace;
 use protobuf::Message;
 
-use crate::cache_evict::ChunkCacheInfo;
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileId, LogQueue};
@@ -210,22 +209,12 @@ impl<E: Message> Entries<E> {
         Ok(())
     }
 
-    pub fn set_position(
-        &mut self,
-        queue: LogQueue,
-        file_id: FileId,
-        offset: u64,
-        chunk: &Option<ChunkCacheInfo>,
-    ) {
+    pub fn set_position(&mut self, queue: LogQueue, file_id: FileId, offset: u64) {
         for idx in self.entries_index.iter_mut() {
             debug_assert!(!idx.file_id.valid() && idx.base_offset == 0);
-            debug_assert!(idx.cache_tracker.is_none());
             idx.queue = queue;
             idx.file_id = file_id;
             idx.base_offset = offset;
-            if let Some(ref chunk) = chunk {
-                idx.cache_tracker = Some(chunk.spawn_tracker(idx.len as usize));
-            }
         }
     }
 
@@ -233,13 +222,6 @@ impl<E: Message> Entries<E> {
         for idx in self.entries_index.iter_mut() {
             debug_assert!(idx.file_id.valid() && idx.base_offset > 0);
             idx.queue = queue;
-        }
-    }
-
-    pub fn set_chunk_cache(&mut self, chunk: &ChunkCacheInfo) {
-        for idx in self.entries_index.iter_mut() {
-            debug_assert!(idx.cache_tracker.is_none());
-            idx.cache_tracker = Some(chunk.spawn_tracker(idx.len as usize));
         }
     }
 
