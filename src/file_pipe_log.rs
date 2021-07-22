@@ -309,7 +309,6 @@ impl FilePipeLog {
                     Ok(num) => num,
                     Err(_) => continue,
                 };
-                println!("file id = {}", file_id);
                 min_file_id = FileId::min(min_file_id, file_id);
                 max_file_id = FileId::max(max_file_id, file_id);
                 log_files.push(file_name.to_string());
@@ -798,19 +797,8 @@ mod tests {
         );
         assert!(trunc_big_offset.is_err());
 
-        /**************************
-        // read next file
-        let mut header: Vec<u8> = vec![];
-        header.extend(FILE_MAGIC_HEADER);
-        header.extend(VERSION);
-        let content = pipe_log.read_next_file_id().unwrap().unwrap();
-        assert_eq!(header, content);
-        assert!(pipe_log.read_next_file_id().unwrap().is_none());
-        **************************/
-
-        pipe_log.close().unwrap();
-
         // reopen
+        pipe_log.close().unwrap();
         let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
