@@ -22,7 +22,7 @@ fn main() {
     config.dir = "append-compact-purge-data".to_owned();
     config.purge_threshold = ReadableSize::gb(2);
     config.batch_compression_threshold = ReadableSize::kb(0);
-    let engine = RaftLogEngine::<Entry, EntryExtImpl>::new(config);
+    let engine = RaftLogEngine::<Entry, EntryExtImpl>::open(config).expect("Open raft engine");
 
     let compact_offset = 32; // In src/purge.rs, it's the limit for rewrite.
 

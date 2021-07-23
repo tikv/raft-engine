@@ -198,7 +198,7 @@ where
 
     // Compact the entire rewrite queue into new rewrite files.
     fn compact_rewrite_queue(&self) -> Result<()> {
-        self.pipe_log.new_log_file(LogQueue::Rewrite).unwrap();
+        self.pipe_log.new_log_file(LogQueue::Rewrite)?;
 
         let memtables = self
             .memtables

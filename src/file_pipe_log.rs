@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
+use std::fs;
+use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -23,14 +23,12 @@ use crate::util::HandyRwLock;
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
-const LOG_SUFFIX_LEN: usize = 8;
 const LOG_NUM_LEN: usize = 16;
-const LOG_NAME_LEN: usize = LOG_NUM_LEN + LOG_SUFFIX_LEN;
+const LOG_NAME_LEN: usize = LOG_NUM_LEN + LOG_SUFFIX.len();
 
 const REWRITE_SUFFIX: &str = ".rewrite";
-const REWRITE_SUFFIX_LEN: usize = 8;
 const REWRITE_NUM_LEN: usize = 8;
-const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX_LEN;
+const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX.len();
 
 const INIT_FILE_NUM: u64 = 1;
 
@@ -39,6 +37,35 @@ pub const VERSION: &[u8] = b"v1.0.0";
 const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
+
+fn build_file_name(queue: LogQueue, file_id: FileId) -> String {
+    match queue {
+        LogQueue::Append => format!("{:0width$}{}", file_id, LOG_SUFFIX, width = LOG_NUM_LEN),
+        LogQueue::Rewrite => format!(
+            "{:0width$}{}",
+            file_id,
+            REWRITE_SUFFIX,
+            width = REWRITE_NUM_LEN
+        ),
+    }
+}
+
+fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
+    if file_name.ends_with(LOG_SUFFIX) {
+        if file_name.len() == LOG_NAME_LEN {
+            if let Ok(num) = file_name[..LOG_NUM_LEN].parse::<u64>() {
+                return Ok((LogQueue::Append, num.into()));
+            }
+        }
+    } else if file_name.ends_with(REWRITE_SUFFIX) {
+        if file_name.len() == REWRITE_NAME_LEN {
+            if let Ok(num) = file_name[..REWRITE_NUM_LEN].parse::<u64>() {
+                return Ok((LogQueue::Rewrite, num.into()));
+            }
+        }
+    }
+    Err(Error::ParseFileName(file_name.to_owned()))
+}
 
 pub struct LogFd(RawFd);
 
@@ -60,10 +87,10 @@ impl Drop for LogFd {
 }
 
 struct LogManager {
+    queue: LogQueue,
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
-    name_suffix: &'static str,
     listeners: Vec<Arc<dyn EventListener>>,
 
     pub first_file_id: FileId,
@@ -77,12 +104,12 @@ struct LogManager {
 }
 
 impl LogManager {
-    fn new(cfg: &Config, name_suffix: &'static str) -> Self {
+    fn new(cfg: &Config, queue: LogQueue) -> Self {
         Self {
+            queue,
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
-            name_suffix,
             listeners: vec![],
 
             first_file_id: INIT_FILE_NUM.into(),
@@ -103,21 +130,20 @@ impl LogManager {
         if !logs.is_empty() {
             self.first_file_id = min_file_id;
             self.active_file_id = max_file_id;
-            let queue = queue_from_suffix(self.name_suffix);
 
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
                 path.push(file_name);
-                let fd = Arc::new(LogFd(open_frozen_file(&path)?));
+                let fd = Arc::new(LogFd(open_file_readonly(&path)?));
                 self.all_files.push_back(fd);
                 for listener in &self.listeners {
-                    listener.post_new_log_file(queue, self.first_file_id.forward(i));
+                    listener.post_new_log_file(self.queue, self.first_file_id.forward(i));
                 }
             }
 
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
-            let fd = Arc::new(LogFd(open_active_file(&path)?));
+            let fd = Arc::new(LogFd(open_file(&path)?));
             fd.sync()?;
 
             self.active_log_size = file_size(fd.0)?;
@@ -126,7 +152,7 @@ impl LogManager {
             self.all_files.push_back(fd);
 
             for listener in &self.listeners {
-                listener.post_new_log_file(queue, self.active_file_id);
+                listener.post_new_log_file(self.queue, self.active_file_id);
             }
         }
         Ok(())
@@ -143,8 +169,8 @@ impl LogManager {
         };
 
         let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(self.active_file_id, self.name_suffix));
-        let fd = Arc::new(LogFd(open_active_file(&path)?));
+        path.push(build_file_name(self.queue, self.active_file_id));
+        let fd = Arc::new(LogFd(open_file(&path)?));
         let bytes = write_file_header(fd.0)?;
 
         self.active_log_size = bytes;
@@ -154,8 +180,7 @@ impl LogManager {
         self.sync_dir()?;
 
         for listener in &self.listeners {
-            let queue = queue_from_suffix(self.name_suffix);
-            listener.post_new_log_file(queue, self.active_file_id);
+            listener.post_new_log_file(self.queue, self.active_file_id);
         }
 
         Ok(())
@@ -266,8 +291,8 @@ pub struct FilePipeLog {
 
 impl FilePipeLog {
     fn new(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> FilePipeLog {
-        let appender = Arc::new(RwLock::new(LogManager::new(cfg, LOG_SUFFIX)));
-        let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, REWRITE_SUFFIX)));
+        let appender = Arc::new(RwLock::new(LogManager::new(cfg, LogQueue::Append)));
+        let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, LogQueue::Rewrite)));
         appender.wl().listeners = listeners.clone();
         rewriter.wl().listeners = listeners.clone();
         FilePipeLog {
@@ -304,22 +329,17 @@ impl FilePipeLog {
             }
 
             let file_name = file_path.file_name().unwrap().to_str().unwrap();
-            if is_log_file(file_name) {
-                let file_id = match extract_file_id(file_name, LOG_NUM_LEN) {
-                    Ok(num) => num,
-                    Err(_) => continue,
-                };
-                min_file_id = FileId::min(min_file_id, file_id);
-                max_file_id = FileId::max(max_file_id, file_id);
-                log_files.push(file_name.to_string());
-            } else if is_rewrite_file(file_name) {
-                let file_id = match extract_file_id(file_name, REWRITE_NUM_LEN) {
-                    Ok(num) => num,
-                    Err(_) => continue,
-                };
-                min_rewrite_num = FileId::min(min_rewrite_num, file_id);
-                max_rewrite_num = FileId::max(max_rewrite_num, file_id);
-                rewrite_files.push(file_name.to_string());
+            match parse_file_name(file_name)? {
+                (LogQueue::Append, file_id) => {
+                    min_file_id = FileId::min(min_file_id, file_id);
+                    max_file_id = FileId::max(max_file_id, file_id);
+                    log_files.push(file_name.to_string());
+                }
+                (LogQueue::Rewrite, file_id) => {
+                    min_rewrite_num = FileId::min(min_rewrite_num, file_id);
+                    max_rewrite_num = FileId::max(max_rewrite_num, file_id);
+                    rewrite_files.push(file_name.to_string());
+                }
             }
         }
 
@@ -361,18 +381,6 @@ impl FilePipeLog {
         Ok(pipe_log)
     }
 
-    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
-        let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
-        let meta = fs::metadata(&path)?;
-        let mut vec = Vec::with_capacity(meta.len() as usize);
-
-        // Read the whole file.
-        let mut file = File::open(&path)?;
-        file.read_to_end(&mut vec)?;
-        Ok(vec)
-    }
-
     fn append_bytes(
         &self,
         queue: LogQueue,
@@ -401,13 +409,6 @@ impl FilePipeLog {
         match queue {
             LogQueue::Append => self.appender.wl(),
             LogQueue::Rewrite => self.rewriter.wl(),
-        }
-    }
-
-    fn get_name_suffix(&self, queue: LogQueue) -> &'static str {
-        match queue {
-            LogQueue::Append => LOG_SUFFIX,
-            LogQueue::Rewrite => REWRITE_SUFFIX,
         }
     }
 
@@ -460,14 +461,16 @@ impl PipeLog for FilePipeLog {
         pread_exact(fd.0, offset, len as usize)
     }
 
-    fn read_file<E: Message, W: EntryExt<E>>(
+    fn read_file_into_log_batch<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
         batches: &mut Vec<LogBatch<E, W>>,
     ) -> Result<()> {
-        let content = self.read_file_bytes(queue, file_id)?;
+        let mut path = PathBuf::from(&self.dir);
+        path.push(build_file_name(queue, file_id));
+        let content = fs::read(&path)?;
         let mut buf = content.as_slice();
         if !buf.starts_with(FILE_MAGIC_HEADER) {
             if self.active_file_id(queue) == file_id {
@@ -568,9 +571,9 @@ impl PipeLog for FilePipeLog {
     }
 
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize> {
-        let (mut manager, name_suffix) = match queue {
-            LogQueue::Append => (self.appender.wl(), LOG_SUFFIX),
-            LogQueue::Rewrite => (self.rewriter.wl(), REWRITE_SUFFIX),
+        let mut manager = match queue {
+            LogQueue::Append => self.appender.wl(),
+            LogQueue::Rewrite => self.rewriter.wl(),
         };
         let purge_count = manager.purge_to(file_id)?;
         drop(manager);
@@ -578,7 +581,7 @@ impl PipeLog for FilePipeLog {
         let mut cur_file_id = file_id.backward(purge_count);
         for i in 0..purge_count {
             let mut path = PathBuf::from(&self.dir);
-            path.push(generate_file_name(cur_file_id, name_suffix));
+            path.push(build_file_name(queue, cur_file_id));
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
                 return Ok(i);
@@ -586,40 +589,6 @@ impl PipeLog for FilePipeLog {
             cur_file_id = cur_file_id.forward(1);
         }
         Ok(purge_count)
-    }
-}
-
-fn generate_file_name(file_id: FileId, suffix: &'static str) -> String {
-    match suffix {
-        LOG_SUFFIX => format!("{:016}{}", file_id, suffix),
-        REWRITE_SUFFIX => format!("{:08}{}", file_id, suffix),
-        _ => unreachable!(),
-    }
-}
-
-fn extract_file_id(file_name: &str, file_num_len: usize) -> Result<FileId> {
-    if file_name.len() < file_num_len {
-        return Err(Error::ParseFileName(file_name.to_owned()));
-    }
-    match file_name[..file_num_len].parse::<u64>() {
-        Ok(num) => Ok(num.into()),
-        Err(_) => Err(Error::ParseFileName(file_name.to_owned())),
-    }
-}
-
-fn is_log_file(file_name: &str) -> bool {
-    file_name.ends_with(LOG_SUFFIX) && file_name.len() == LOG_NAME_LEN
-}
-
-fn is_rewrite_file(file_name: &str) -> bool {
-    file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN
-}
-
-fn queue_from_suffix(suffix: &str) -> LogQueue {
-    match suffix {
-        LOG_SUFFIX => LogQueue::Append,
-        REWRITE_SUFFIX => LogQueue::Rewrite,
-        _ => unreachable!(),
     }
 }
 
@@ -633,16 +602,16 @@ fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
     }
 }
 
-fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+fn open_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDWR | OFlag::O_CREAT;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
-    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_active_file"))
+    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_file"))
 }
 
-fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+fn open_file_readonly<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDONLY;
     let mode = Mode::S_IRWXU;
-    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_frozen_file"))
+    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_file_readonly"))
 }
 
 fn file_size(fd: RawFd) -> Result<usize> {
@@ -708,19 +677,22 @@ mod tests {
     #[test]
     fn test_file_name() {
         let file_name: &str = "0000000000000123.raftlog";
-        assert_eq!(extract_file_id(file_name, LOG_NUM_LEN).unwrap(), 123.into());
-        assert_eq!(generate_file_name(123.into(), LOG_SUFFIX), file_name);
+        assert_eq!(
+            parse_file_name(file_name).unwrap(),
+            (LogQueue::Append, 123.into())
+        );
+        assert_eq!(build_file_name(LogQueue::Append, 123.into()), file_name);
 
         let file_name: &str = "00000123.rewrite";
         assert_eq!(
-            extract_file_id(file_name, REWRITE_NUM_LEN).unwrap(),
-            123.into()
+            parse_file_name(file_name).unwrap(),
+            (LogQueue::Rewrite, 123.into())
         );
-        assert_eq!(generate_file_name(123.into(), REWRITE_SUFFIX), file_name);
+        assert_eq!(build_file_name(LogQueue::Rewrite, 123.into()), file_name);
 
         let invalid_file_name: &str = "123.log";
-        assert!(extract_file_id(invalid_file_name, LOG_NUM_LEN).is_err());
-        assert!(extract_file_id(invalid_file_name, REWRITE_NUM_LEN).is_err());
+        assert!(parse_file_name(invalid_file_name).is_err());
+        assert!(parse_file_name(invalid_file_name).is_err());
     }
 
     fn test_pipe_log_impl(queue: LogQueue) {

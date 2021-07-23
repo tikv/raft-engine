@@ -187,7 +187,7 @@ impl<'de> Deserialize<'de> for ReadableSize {
 /// ### Panics
 ///
 /// if [low, high) is out of bound.
-pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T], &[T]) {
+pub(crate) fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T], &[T]) {
     let (first, second) = entry.as_slices();
     if low >= first.len() {
         (&second[low - first.len()..high - first.len()], &[])
@@ -198,7 +198,7 @@ pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T]
     }
 }
 
-pub trait HandyRwLock<T> {
+pub(crate) trait HandyRwLock<T> {
     fn wl(&self) -> RwLockWriteGuard<'_, T>;
     fn rl(&self) -> RwLockReadGuard<'_, T>;
 }

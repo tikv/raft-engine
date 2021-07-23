@@ -97,7 +97,7 @@ pub trait PipeLog: Sized + Clone + Send {
         len: u64,
     ) -> Result<Vec<u8>>;
 
-    fn read_file<E: Message, W: EntryExt<E>>(
+    fn read_file_into_log_batch<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         file_id: FileId,

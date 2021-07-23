@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::{mem, u64};
 
-use log::{debug, info, trace};
+use log::{debug, error, info, trace};
 use protobuf::Message;
 
 use crate::config::{Config, RecoveryMode};
@@ -31,7 +31,7 @@ pub struct MemTableAccessor {
     slots: Vec<Arc<RwLock<MemTables>>>,
     initializer: Arc<dyn Fn(u64) -> MemTable + Send + Sync>,
 
-    #[allow(clippy::type_complexity)]
+    // Deleted region memtables that are not yet rewritten.
     removed_memtables: Arc<Mutex<HashMap<FileId, u64>>>,
 }
 
@@ -143,17 +143,64 @@ where
     P: PipeLog,
 {
     cfg: Arc<Config>,
-    pub(crate) memtables: MemTableAccessor,
+    memtables: MemTableAccessor,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
     purge_manager: PurgeManager<E, W, P>,
-
-    workers: Arc<RwLock<Workers>>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 
     _phantom1: PhantomData<E>,
     _phantom2: PhantomData<W>,
+}
+
+impl<E, W> Engine<E, W, FilePipeLog>
+where
+    E: Message + Clone,
+    W: EntryExt<E> + Clone + 'static,
+{
+    pub fn open(cfg: Config) -> Result<Engine<E, W, FilePipeLog>> {
+        Self::open_with_listeners(cfg, vec![])
+    }
+
+    fn open_with_listeners(
+        cfg: Config,
+        mut listeners: Vec<Arc<dyn EventListener>>,
+    ) -> Result<Engine<E, W, FilePipeLog>> {
+        listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
+
+        let global_stats = Arc::new(GlobalStats::default());
+
+        let global_stats2 = global_stats.clone();
+        let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
+            MemTable::new(id, global_stats2.clone())
+        }));
+
+        let pipe_log = FilePipeLog::open(&cfg, listeners.clone())?;
+
+        let cfg = Arc::new(cfg);
+        let purge_manager = PurgeManager::new(
+            cfg.clone(),
+            memtables.clone(),
+            pipe_log.clone(),
+            global_stats.clone(),
+            listeners.clone(),
+        );
+
+        let mut engine = Engine {
+            cfg,
+            memtables,
+            pipe_log,
+            global_stats,
+            purge_manager,
+            listeners,
+            _phantom1: PhantomData,
+            _phantom2: PhantomData,
+        };
+
+        engine.recover()?;
+        Ok(engine)
+    }
 }
 
 impl<E, W, P> Engine<E, W, P>
@@ -162,6 +209,62 @@ where
     W: EntryExt<E> + Clone + 'static,
     P: PipeLog,
 {
+    fn recover(&mut self) -> Result<()> {
+        let mut rewrite_memtables = MemTableAccessor::new(self.memtables.initializer.clone());
+        Self::recover_queue(
+            &mut rewrite_memtables,
+            &mut self.pipe_log,
+            LogQueue::Rewrite,
+            RecoveryMode::TolerateCorruptedTailRecords,
+        )?;
+
+        Self::recover_queue(
+            &mut self.memtables,
+            &mut self.pipe_log,
+            LogQueue::Append,
+            self.cfg.recovery_mode,
+        )?;
+
+        let ids = self.memtables.cleaned_region_ids();
+        for slot in rewrite_memtables.slots.into_iter() {
+            for (id, raft_rewrite) in mem::take(&mut *slot.wl()) {
+                if let Some(raft_append) = self.memtables.get(id) {
+                    raft_append.wl().merge_lower_prio(&mut *raft_rewrite.wl());
+                } else if !ids.contains(&id) {
+                    self.memtables.insert(id, raft_rewrite);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn recover_queue(
+        memtables: &mut MemTableAccessor,
+        pipe_log: &mut P,
+        queue: LogQueue,
+        recovery_mode: RecoveryMode,
+    ) -> Result<()> {
+        // Get first file number and last file number.
+        let first_file = pipe_log.first_file_id(queue);
+        let active_file = pipe_log.active_file_id(queue);
+        trace!("recovering queue {:?}", queue);
+
+        // Iterate and recover from files one by one.
+        let start = Instant::now();
+        let mut batches = Vec::new();
+        let mut file_id = first_file;
+        while file_id <= active_file {
+            pipe_log.read_file_into_log_batch(queue, file_id, recovery_mode, &mut batches)?;
+            for mut batch in batches.drain(..) {
+                Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
+            }
+            file_id = file_id.forward(1);
+        }
+        info!("Recover raft log takes {:?}", start.elapsed());
+        Ok(())
+    }
+
     fn apply_to_memtable(
         memtables: &MemTableAccessor,
         log_batch: &mut LogBatch<E, W>,
@@ -249,132 +352,13 @@ where
             Ok(bytes)
         }
     }
-}
 
-struct Workers {}
-
-// An internal structure for tests.
-struct EngineOptions {
-    listeners: Vec<Arc<dyn EventListener>>,
-}
-
-impl Default for EngineOptions {
-    fn default() -> EngineOptions {
-        EngineOptions { listeners: vec![] }
-    }
-}
-
-impl<E, W> Engine<E, W, FilePipeLog>
-where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone + 'static,
-{
-    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog> {
-        let options = Default::default();
-        Self::with_options(cfg, options).unwrap()
+    /// Write the content of LogBatch into the engine and return written bytes.
+    /// If set sync true, the data will be persisted on disk by `fsync`.
+    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
+        self.write_impl(log_batch, sync)
     }
 
-    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
-        let global_stats = Arc::new(GlobalStats::default());
-
-        let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener>];
-        listeners.extend(options.listeners.drain(..));
-        let pipe_log = FilePipeLog::open(&cfg, listeners.clone()).expect("Open raft log");
-
-        let memtables = {
-            let stats = global_stats.clone();
-            MemTableAccessor::new(Arc::new(move |id: u64| MemTable::new(id, stats.clone())))
-        };
-
-        let cfg = Arc::new(cfg);
-        let purge_manager = PurgeManager::new(
-            cfg.clone(),
-            memtables.clone(),
-            pipe_log.clone(),
-            global_stats.clone(),
-            listeners.clone(),
-        );
-
-        let mut engine = Engine {
-            cfg,
-            memtables,
-            pipe_log,
-            global_stats,
-            purge_manager,
-            workers: Arc::new(RwLock::new(Workers {})),
-            listeners,
-            _phantom1: PhantomData,
-            _phantom2: PhantomData,
-        };
-
-        engine.recover_from_queues()?;
-        Ok(engine)
-    }
-
-    fn recover_from_queues(&mut self) -> Result<()> {
-        let mut rewrite_memtables = MemTableAccessor::new(self.memtables.initializer.clone());
-        Self::recover(
-            &mut rewrite_memtables,
-            &mut self.pipe_log,
-            LogQueue::Rewrite,
-            RecoveryMode::TolerateCorruptedTailRecords,
-        )?;
-
-        Self::recover(
-            &mut self.memtables,
-            &mut self.pipe_log,
-            LogQueue::Append,
-            self.cfg.recovery_mode,
-        )?;
-
-        let ids = self.memtables.cleaned_region_ids();
-        for slot in rewrite_memtables.slots.into_iter() {
-            for (id, raft_rewrite) in mem::take(&mut *slot.wl()) {
-                if let Some(raft_append) = self.memtables.get(id) {
-                    raft_append.wl().merge_lower_prio(&mut *raft_rewrite.wl());
-                } else if !ids.contains(&id) {
-                    self.memtables.insert(id, raft_rewrite);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    // Recover from disk.
-    fn recover(
-        memtables: &mut MemTableAccessor,
-        pipe_log: &mut FilePipeLog,
-        queue: LogQueue,
-        recovery_mode: RecoveryMode,
-    ) -> Result<()> {
-        // Get first file number and last file number.
-        let first_file = pipe_log.first_file_id(queue);
-        let active_file = pipe_log.active_file_id(queue);
-        trace!("recovering queue {:?}", queue);
-
-        // Iterate and recover from files one by one.
-        let start = Instant::now();
-        let mut batches = Vec::new();
-        let mut file_id = first_file;
-        while file_id <= active_file {
-            pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
-            for mut batch in batches.drain(..) {
-                Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
-            }
-            file_id = file_id.forward(1);
-        }
-        info!("Recover raft log takes {:?}", start.elapsed());
-        Ok(())
-    }
-}
-
-impl<E, W, P> Engine<E, W, P>
-where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone + 'static,
-    P: PipeLog + 'static,
-{
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
         self.pipe_log.sync(LogQueue::Append)
@@ -471,15 +455,11 @@ where
 
         let mut log_batch = LogBatch::default();
         log_batch.add_command(region_id, Command::Compact { index });
-        self.write(&mut log_batch, false).map(|_| ()).unwrap();
+        if let Err(e) = self.write(&mut log_batch, false) {
+            error!("Failed to write Compact command: {}", e);
+        }
 
         self.first_index(region_id).unwrap_or(index) - first_index
-    }
-
-    /// Write the content of LogBatch into the engine and return written bytes.
-    /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        self.write_impl(log_batch, sync)
     }
 
     pub fn raft_groups(&self) -> Vec<u64> {
@@ -579,7 +559,7 @@ mod tests {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(80);
-        let engine = RaftLogEngine::new(cfg.clone());
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
 
         append_log(&engine, 1, &Entry::new());
         assert!(engine.memtables.get(1).is_some());
@@ -603,7 +583,7 @@ mod tests {
             let mut cfg = Config::default();
             cfg.dir = dir.path().to_str().unwrap().to_owned();
 
-            let engine = RaftLogEngine::new(cfg.clone());
+            let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size].into());
             for i in 10..20 {
@@ -622,7 +602,7 @@ mod tests {
             drop(engine);
 
             // Recover the engine.
-            let engine = RaftLogEngine::new(cfg.clone());
+            let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             for i in 10..20 {
                 entry.set_index(i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
@@ -646,7 +626,7 @@ mod tests {
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(150);
 
-        let engine = RaftLogEngine::new(cfg.clone());
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024].into());
         for i in 0..100 {
@@ -706,7 +686,7 @@ mod tests {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.target_file_size = ReadableSize::kb(5);
         cfg.purge_threshold = ReadableSize::kb(80);
-        let engine = RaftLogEngine::new(cfg.clone());
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
 
         // Put 100 entries into 10 regions.
         let mut entry = Entry::new();
@@ -741,7 +721,7 @@ mod tests {
 
         // Recover with rewrite queue and append queue.
         drop(engine);
-        let engine = RaftLogEngine::new(cfg.clone());
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
         for i in 1..=10 {
             for j in 1..=10 {
                 let e = engine.get_entry(j, i).unwrap().unwrap();
@@ -784,7 +764,7 @@ mod tests {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.target_file_size = ReadableSize::kb(128);
         cfg.purge_threshold = ReadableSize::kb(512);
-        let engine = RaftLogEngine::new(cfg.clone());
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
 
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024].into());
@@ -853,7 +833,7 @@ mod tests {
 
         // After the engine recovers, the removed raft group shouldn't appear again.
         drop(engine);
-        let engine = RaftLogEngine::new(cfg.clone());
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
         assert!(engine.memtables.get(1).is_none());
     }
 
@@ -945,10 +925,7 @@ mod tests {
         cfg.batch_compression_threshold = ReadableSize::kb(0);
 
         let hook = Arc::new(Hook::default());
-
-        let mut options = EngineOptions::default();
-        options.listeners = vec![hook.clone()];
-        let engine = RaftLogEngine::with_options(cfg.clone(), options).unwrap();
+        let engine = RaftLogEngine::open_with_listeners(cfg.clone(), vec![hook.clone()]).unwrap();
         assert_eq!(hook.0[&LogQueue::Append].files(), 1);
         assert_eq!(hook.0[&LogQueue::Rewrite].files(), 1);
 
@@ -1042,6 +1019,6 @@ mod tests {
 
         // Drop and then recover.
         drop(engine);
-        drop(RaftLogEngine::new(cfg));
+        drop(RaftLogEngine::open(cfg).unwrap());
     }
 }
