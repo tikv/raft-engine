@@ -637,7 +637,9 @@ mod tests {
         // GC all log entries. Won't trigger purge because total size is not enough.
         let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
-        assert!(!engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(!engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
 
         // Append more logs to make total size greater than `purge_threshold`.
         for i in 100..250 {
@@ -649,7 +651,9 @@ mod tests {
         let count = engine.compact_to(1, 101);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
 
         let old_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
@@ -664,7 +668,9 @@ mod tests {
         let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
         let old_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
         let will_force_compact = engine.purge_expired_files().unwrap();
         let new_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
@@ -699,7 +705,9 @@ mod tests {
         }
 
         // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1.into());
 
@@ -738,7 +746,9 @@ mod tests {
             }
         }
 
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
 
         let new_active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
@@ -756,7 +766,7 @@ mod tests {
     // We need to ensure that these raft groups won't appear again after recover.
     fn test_clean_raft_with_only_rewrite(purge_before_recover: bool) {
         let dir = tempfile::Builder::new()
-            .prefix("test_clean_raft_with_rewrite")
+            .prefix("test_clean_raft_with_only_rewrite")
             .tempdir()
             .unwrap();
 
@@ -797,7 +807,9 @@ mod tests {
         }
 
         // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1.into());
 
@@ -859,7 +871,7 @@ mod tests {
         #[derive(Default)]
         struct QueueHook {
             files: AtomicUsize,
-            batches: AtomicUsize,
+            appends: AtomicUsize,
             applys: AtomicUsize,
             purged: AtomicU64,
         }
@@ -867,8 +879,8 @@ mod tests {
             fn files(&self) -> usize {
                 self.files.load(Ordering::Acquire)
             }
-            fn batches(&self) -> usize {
-                self.batches.load(Ordering::Acquire)
+            fn appends(&self) -> usize {
+                self.appends.load(Ordering::Acquire)
             }
             fn applys(&self) -> usize {
                 self.applys.load(Ordering::Acquire)
@@ -894,7 +906,7 @@ mod tests {
             }
 
             fn on_append_log_file(&self, queue: LogQueue, _: FileId) {
-                self.0[&queue].batches.fetch_add(1, Ordering::Release);
+                self.0[&queue].appends.fetch_add(1, Ordering::Release);
             }
 
             fn post_apply_memtables(&self, queue: LogQueue, _: FileId) {
@@ -914,7 +926,7 @@ mod tests {
         }
 
         let dir = tempfile::Builder::new()
-            .prefix("test_clean_raft_with_rewrite")
+            .prefix("test_pipe_log_listeners")
             .tempdir()
             .unwrap();
 
@@ -937,31 +949,34 @@ mod tests {
             let region_id = (i as u64 - 1) % 2 + 1;
             entry.set_index((i as u64 + 1) / 2);
             append_log(&engine, region_id, &entry);
-            assert_eq!(hook.0[&LogQueue::Append].batches(), i);
+            assert_eq!(hook.0[&LogQueue::Append].appends(), i);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i);
         }
         assert_eq!(hook.0[&LogQueue::Append].files(), 10);
 
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
         engine.purge_manager.purge_expired_files().unwrap();
         assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
 
         // All things in a region will in one write batch.
         assert_eq!(hook.0[&LogQueue::Rewrite].files(), 2);
-        assert_eq!(hook.0[&LogQueue::Rewrite].batches(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].appends(), 2);
         assert_eq!(hook.0[&LogQueue::Rewrite].applys(), 2);
 
-        // Compact so that almost all content of rewrite queue will become garbage.
+        // Append 5 logs for region 1, 5 logs for region 2.
         for i in 21..=30 {
             let region_id = (i as u64 - 1) % 2 + 1;
             entry.set_index((i as u64 + 1) / 2);
             append_log(&engine, region_id, &entry);
-            assert_eq!(hook.0[&LogQueue::Append].batches(), i);
+            assert_eq!(hook.0[&LogQueue::Append].appends(), i);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i);
         }
-        engine.compact_to(1, 28);
-        engine.compact_to(2, 28);
-        assert_eq!(hook.0[&LogQueue::Append].batches(), 32);
+        // Compact so that almost all content of rewrite queue will become garbage.
+        engine.compact_to(1, 14);
+        engine.compact_to(2, 14);
+        assert_eq!(hook.0[&LogQueue::Append].appends(), 32);
         assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
 
         engine.purge_manager.purge_expired_files().unwrap();
@@ -989,19 +1004,21 @@ mod tests {
 
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
         std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(hook.0[&LogQueue::Append].batches(), 33);
+        assert_eq!(hook.0[&LogQueue::Append].appends(), 33);
         assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
 
         for i in 31..=40 {
             let region_id = (i as u64 - 1) % 2 + 1;
             entry.set_index((i as u64 + 1) / 2);
             append_log(&engine, region_id, &entry);
-            assert_eq!(hook.0[&LogQueue::Append].batches(), i + 3);
+            assert_eq!(hook.0[&LogQueue::Append].appends(), i + 3);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
         }
 
         // Can't purge because `purge_pender` is still not written to memtables.
-        assert!(engine.purge_manager.needs_purge_log_files(LogQueue::Append));
+        assert!(engine
+            .purge_manager
+            .needs_rewrite_log_files(LogQueue::Append));
         let old_first = engine.pipe_log.first_file_id(LogQueue::Append);
         engine.purge_manager.purge_expired_files().unwrap();
         let new_first = engine.pipe_log.first_file_id(LogQueue::Append);

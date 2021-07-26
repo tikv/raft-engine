@@ -71,31 +71,34 @@ where
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let guard = self.purge_mutex.try_lock();
-        if guard.is_err() || !self.needs_purge_log_files(LogQueue::Append) {
-            return Ok(vec![]);
+        let mut should_compact = vec![];
+        if guard.is_err() {
+            return Ok(should_compact);
         }
 
-        let (rewrite_watermark, compact_watermark) = self.watermark_file_ids();
-        if !self
-            .listeners
-            .iter()
-            .all(|l| l.ready_for_purge(LogQueue::Append, rewrite_watermark))
-        {
-            // Generally it means some entries or kvs are not written into memtables, skip.
-            debug!("Append file {} is not ready for purge", rewrite_watermark);
-            return Ok(vec![]);
+        if self.needs_rewrite_log_files(LogQueue::Append) {
+            let (rewrite_watermark, compact_watermark) = self.append_queue_watermarks();
+            if !self
+                .listeners
+                .iter()
+                .all(|l| l.ready_for_purge(LogQueue::Append, rewrite_watermark))
+            {
+                // Generally it means some entries or kvs are not written into memtables, skip.
+                debug!("Append file {} is not ready for purge", rewrite_watermark);
+                return Ok(should_compact);
+            }
+            should_compact =
+                self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
         }
 
-        let should_force_compact =
-            self.rewrite_or_force_compact(rewrite_watermark, compact_watermark)?;
-
-        if self.needs_purge_log_files(LogQueue::Rewrite) {
-            self.compact_rewrite_queue()?;
+        if self.needs_rewrite_log_files(LogQueue::Rewrite) {
+            self.rewrite_rewrite_queue()?;
         }
 
         let (min_file_1, min_file_2) = self.memtables.fold(
             (
-                rewrite_watermark.forward(1),
+                // Don't purge active file, new region could slip in and write after this iteration.
+                self.pipe_log.active_file_id(LogQueue::Append),
                 self.pipe_log.active_file_id(LogQueue::Rewrite),
             ),
             |(min1, min2), t| {
@@ -118,10 +121,10 @@ where
             }
         }
 
-        Ok(should_force_compact)
+        Ok(should_compact)
     }
 
-    pub(crate) fn needs_purge_log_files(&self, queue: LogQueue) -> bool {
+    pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
         let active_file = self.pipe_log.active_file_id(queue);
         let first_file = self.pipe_log.first_file_id(queue);
         if active_file == first_file {
@@ -144,7 +147,7 @@ where
     // Returns (rewrite_watermark, compact_watermark).
     // Files older than compact_watermark should be compacted;
     // Files between compact_watermark and rewrite_watermark should be rewritten.
-    fn watermark_file_ids(&self) -> (FileId, FileId) {
+    fn append_queue_watermarks(&self) -> (FileId, FileId) {
         let queue = LogQueue::Append;
 
         let first_file = self.pipe_log.first_file_id(queue);
@@ -162,24 +165,28 @@ where
         )
     }
 
-    fn rewrite_or_force_compact(
+    fn rewrite_or_compact_append_queue(
         &self,
         rewrite_watermark: FileId,
         compact_watermark: FileId,
     ) -> Result<Vec<u64>> {
         assert!(compact_watermark <= rewrite_watermark);
-        let mut should_force_compact = Vec::new();
+        let mut should_compact = Vec::new();
 
         let mut log_batch = self
             .memtables
             .take_clean_region_logs_before(rewrite_watermark);
-        self.rewrite_impl(&mut log_batch, None /**/, true /*sync*/)?;
+        self.rewrite_to_log(
+            &mut log_batch,
+            None, /*rewrite_watermark*/
+            true, /*sync*/
+        )?;
 
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_id(LogQueue::Append) {
                 let sparse = t.entries_count() < MAX_REWRITE_ENTRIES_PER_REGION;
                 if f < compact_watermark && !sparse {
-                    should_force_compact.push(t.region_id());
+                    should_compact.push(t.region_id());
                 } else if f < rewrite_watermark {
                     return sparse;
                 }
@@ -189,35 +196,36 @@ where
 
         self.rewrite_memtables(
             memtables,
-            MAX_REWRITE_ENTRIES_PER_REGION, /*expect_count*/
+            MAX_REWRITE_ENTRIES_PER_REGION,
             Some(rewrite_watermark),
         )?;
 
-        Ok(should_force_compact)
+        Ok(should_compact)
     }
 
-    // Compact the entire rewrite queue into new rewrite files.
-    fn compact_rewrite_queue(&self) -> Result<()> {
+    // Compacts the entire rewrite queue into new rewrite files.
+    // Returns smallest rewrite files.
+    fn rewrite_rewrite_queue(&self) -> Result<()> {
         self.pipe_log.new_log_file(LogQueue::Rewrite)?;
 
         let memtables = self
             .memtables
             .collect(|t| t.min_file_id(LogQueue::Rewrite).is_some());
 
-        self.rewrite_memtables(memtables, 0 /*expect_count*/, None)
+        self.rewrite_memtables(memtables, 0 /*expect_rewrites_per_memtable*/, None)
     }
 
     fn rewrite_memtables(
         &self,
         memtables: Vec<Arc<RwLock<MemTable>>>,
-        expect_count: usize,
+        expect_rewrites_per_memtable: usize,
         rewrite: Option<FileId>,
     ) -> Result<()> {
         let mut log_batch = LogBatch::<E, W>::default();
         let mut total_size = 0;
         for memtable in memtables {
-            let mut entry_indexes = Vec::with_capacity(expect_count);
-            let mut entries = Vec::with_capacity(expect_count);
+            let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
+            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.rl();
@@ -243,14 +251,14 @@ where
 
             let target_file_size = self.cfg.target_file_size.0 as usize;
             if total_size as usize > cmp::min(MAX_REWRITE_BATCH_BYTES, target_file_size) {
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                self.rewrite_to_log(&mut log_batch, rewrite, false)?;
                 total_size = 0;
             }
         }
-        self.rewrite_impl(&mut log_batch, rewrite, true)
+        self.rewrite_to_log(&mut log_batch, rewrite, true)
     }
 
-    fn rewrite_impl(
+    fn rewrite_to_log(
         &self,
         log_batch: &mut LogBatch<E, W>,
         rewrite_watermark: Option<FileId>,
@@ -311,13 +319,9 @@ where
 }
 
 pub struct PurgeHook {
-    // There could be a gap between a write batch is written into a file and applied to memtables.
-    // If a log-rewrite happens at the time, entries and kvs in the batch can be omited. So after
-    // the log file gets purged, those entries and kvs will be lost.
-    //
-    // Maintain a per-file reference counter to forbid this bad case. Log files `active_log_files`
-    // can't be purged.
-    // It's only used for the append queue. The rewrite queue doesn't need this.
+    // Append queue log files that are not yet fully applied to MemTable.
+    // They must not be purged even when not referenced by any MemTable.
+    // No need to track rewrite queue because it is only written by purge thread.
     active_log_files: RwLock<VecDeque<(FileId, AtomicUsize)>>,
 }
 
@@ -365,6 +369,7 @@ impl EventListener for PurgeHook {
         }
     }
 
+    // Inclusive.
     fn ready_for_purge(&self, queue: LogQueue, file_id: FileId) -> bool {
         if queue == LogQueue::Append {
             let active_log_files = self.active_log_files.rl();
