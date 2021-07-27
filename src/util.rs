@@ -6,7 +6,6 @@ use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
 use std::ops::{Div, Mul};
 use std::str::FromStr;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -195,19 +194,5 @@ pub(crate) fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -
         (&first[low..high], &[])
     } else {
         (&first[low..], &second[..high - first.len()])
-    }
-}
-
-pub(crate) trait HandyRwLock<T> {
-    fn wl(&self) -> RwLockWriteGuard<'_, T>;
-    fn rl(&self) -> RwLockReadGuard<'_, T>;
-}
-
-impl<T> HandyRwLock<T> for RwLock<T> {
-    fn wl(&self) -> RwLockWriteGuard<'_, T> {
-        self.write().unwrap()
-    }
-    fn rl(&self) -> RwLockReadGuard<'_, T> {
-        self.read().unwrap()
     }
 }

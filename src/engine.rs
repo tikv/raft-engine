@@ -1,10 +1,12 @@
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
 use std::{mem, u64};
 
+use fail::fail_point;
 use log::{debug, error, info, trace};
+use parking_lot::{Mutex, RwLock};
 use protobuf::Message;
 
 use crate::config::{Config, RecoveryMode};
@@ -17,7 +19,7 @@ use crate::log_batch::{
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::{HandyRwLock, HashMap};
+use crate::util::HashMap;
 use crate::{codec, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -49,7 +51,7 @@ impl MemTableAccessor {
     }
 
     pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
-        let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT].wl();
+        let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT].write();
         let memtable = memtables
             .entry(raft_group_id)
             .or_insert_with(|| Arc::new(RwLock::new((self.initializer)(raft_group_id))));
@@ -58,31 +60,31 @@ impl MemTableAccessor {
 
     pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
-            .rl()
+            .read()
             .get(&raft_group_id)
             .cloned()
     }
 
     pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable>>) {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
-            .wl()
+            .write()
             .insert(raft_group_id, memtable);
     }
 
     pub fn remove(&self, raft_group_id: u64, queue: LogQueue, _: FileId) {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
-            .wl()
+            .write()
             .remove(&raft_group_id);
         if queue == LogQueue::Append {
-            let mut removed_memtables = self.removed_memtables.lock().unwrap();
+            let mut removed_memtables = self.removed_memtables.lock();
             removed_memtables.push_back(raft_group_id);
         }
     }
 
     pub fn fold<B, F: Fn(B, &MemTable) -> B>(&self, mut init: B, fold: F) -> B {
         for tables in &self.slots {
-            for memtable in tables.rl().values() {
-                init = fold(init, &*memtable.rl());
+            for memtable in tables.read().values() {
+                init = fold(init, &*memtable.read());
             }
         }
         init
@@ -94,8 +96,8 @@ impl MemTableAccessor {
     ) -> Vec<Arc<RwLock<MemTable>>> {
         let mut memtables = Vec::new();
         for tables in &self.slots {
-            memtables.extend(tables.rl().values().filter_map(|t| {
-                if condition(&*t.rl()) {
+            memtables.extend(tables.read().values().filter_map(|t| {
+                if condition(&*t.read()) {
                     return Some(t.clone());
                 }
                 None
@@ -111,7 +113,7 @@ impl MemTableAccessor {
         W: EntryExt<E>,
     {
         let mut log_batch = LogBatch::<E, W>::default();
-        let mut removed_memtables = self.removed_memtables.lock().unwrap();
+        let mut removed_memtables = self.removed_memtables.lock();
         for id in removed_memtables.drain(..) {
             log_batch.clean_region(id);
         }
@@ -122,7 +124,7 @@ impl MemTableAccessor {
     // Only used for recover.
     pub fn cleaned_region_ids(&self) -> HashSet<u64> {
         let mut ids = HashSet::default();
-        let removed_memtables = self.removed_memtables.lock().unwrap();
+        let removed_memtables = self.removed_memtables.lock();
         for raft_id in removed_memtables.iter() {
             ids.insert(*raft_id);
         }
@@ -222,9 +224,11 @@ where
 
         let ids = self.memtables.cleaned_region_ids();
         for slot in rewrite_memtables.slots.into_iter() {
-            for (id, raft_rewrite) in mem::take(&mut *slot.wl()) {
+            for (id, raft_rewrite) in mem::take(&mut *slot.write()) {
                 if let Some(raft_append) = self.memtables.get(id) {
-                    raft_append.wl().merge_lower_prio(&mut *raft_rewrite.wl());
+                    raft_append
+                        .write()
+                        .merge_lower_prio(&mut *raft_rewrite.write());
                 } else if !ids.contains(&id) {
                     self.memtables.insert(id, raft_rewrite);
                 }
@@ -256,7 +260,11 @@ where
             }
             file_id = file_id.forward(1);
         }
-        info!("Recover raft log takes {:?}", start.elapsed());
+        info!(
+            "Recovering raft logs from {:?} queue takes {:?}",
+            queue,
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -269,6 +277,7 @@ where
         for item in log_batch.items.drain(..) {
             let raft = item.raft_group_id;
             let memtable = memtables.get_or_insert(raft);
+            fail_point!("apply_memtable_region_3", raft == 3, |_| {});
             match item.content {
                 LogItemContent::Entries(entries_to_add) => {
                     let entries_index = entries_to_add.entries_index;
@@ -282,9 +291,9 @@ where
                         entries_index.last().map(|x| x.index + 1),
                     );
                     if queue == LogQueue::Rewrite {
-                        memtable.wl().append_rewrite(entries_index);
+                        memtable.write().append_rewrite(entries_index);
                     } else {
-                        memtable.wl().append(entries_index);
+                        memtable.write().append(entries_index);
                     }
                 }
                 LogItemContent::Command(Command::Clean) => {
@@ -296,7 +305,7 @@ where
                         "{} append to {:?}.{}, Compact({})",
                         raft, queue, file_id, index
                     );
-                    memtable.wl().compact_to(index);
+                    memtable.write().compact_to(index);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => {
@@ -310,8 +319,8 @@ where
                             hex::encode(&value)
                         );
                         match queue {
-                            LogQueue::Append => memtable.wl().put(key, value, file_id),
-                            LogQueue::Rewrite => memtable.wl().put_rewrite(key, value, file_id),
+                            LogQueue::Append => memtable.write().put(key, value, file_id),
+                            LogQueue::Rewrite => memtable.write().put_rewrite(key, value, file_id),
                         }
                     }
                     OpType::Del => {
@@ -323,14 +332,16 @@ where
                             file_id,
                             hex::encode(&key),
                         );
-                        memtable.wl().delete(key.as_slice());
+                        memtable.write().delete(key.as_slice());
                     }
                 },
             }
         }
     }
 
-    fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
+    /// Write the content of LogBatch into the engine and return written bytes.
+    /// If set sync true, the data will be persisted on disk by `fsync`.
+    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
         if log_batch.items.is_empty() {
             if sync {
                 self.pipe_log.sync(LogQueue::Append)?;
@@ -346,12 +357,6 @@ where
             }
             Ok(bytes)
         }
-    }
-
-    /// Write the content of LogBatch into the engine and return written bytes.
-    /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        self.write_impl(log_batch, sync)
     }
 
     /// Synchronize the Raft engine.
@@ -373,7 +378,7 @@ where
 
     pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let memtable = self.memtables.get(region_id);
-        Ok(memtable.and_then(|t| t.rl().get(key)))
+        Ok(memtable.and_then(|t| t.read().get(key)))
     }
 
     pub fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
@@ -389,7 +394,7 @@ where
 
     pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<E>> {
         if let Some(memtable) = self.memtables.get(region_id) {
-            if let Some(idx) = memtable.rl().get_entry(log_idx) {
+            if let Some(idx) = memtable.read().get_entry(log_idx) {
                 let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?;
                 return Ok(Some(entry));
             }
@@ -416,7 +421,7 @@ where
             let old_len = vec.len();
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
             memtable
-                .rl()
+                .read()
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
             for i in ents_idx {
                 vec.push(read_entry_from_file::<_, W, _>(&self.pipe_log, &i)?);
@@ -428,14 +433,14 @@ where
 
     pub fn first_index(&self, region_id: u64) -> Option<u64> {
         if let Some(memtable) = self.memtables.get(region_id) {
-            return memtable.rl().first_index();
+            return memtable.read().first_index();
         }
         None
     }
 
     pub fn last_index(&self, region_id: u64) -> Option<u64> {
         if let Some(memtable) = self.memtables.get(region_id) {
-            return memtable.rl().last_index();
+            return memtable.read().last_index();
         }
         None
     }
@@ -810,8 +815,11 @@ mod tests {
 
         // All entries of region 1 has been rewritten.
         let memtable_1 = engine.memtables.get(1).unwrap();
-        assert!(memtable_1.rl().max_file_id(LogQueue::Append).is_none());
-        assert!(memtable_1.rl().kvs_max_file_id(LogQueue::Append).is_none());
+        assert!(memtable_1.read().max_file_id(LogQueue::Append).is_none());
+        assert!(memtable_1
+            .read()
+            .kvs_max_file_id(LogQueue::Append)
+            .is_none());
         // Entries of region 1 after the clean command should be still valid.
         for j in 2..=11 {
             let entry_j = engine.get_entry(1, j).unwrap().unwrap();
@@ -858,9 +866,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "failpoints")]
     fn test_pipe_log_listeners() {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-        use std::sync::mpsc;
         use std::time::Duration;
 
         #[derive(Default)]
@@ -977,24 +985,15 @@ mod tests {
         assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
         assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
 
-        // Use an another thread to lock memtable of region 3.
-        let (tx, rx) = mpsc::sync_channel(1);
-        let table_3 = engine.memtables.get_or_insert(3);
-        let th1 = std::thread::spawn(move || {
-            let x = table_3.rl();
-            let _ = rx.recv().unwrap();
-            drop(x);
-        });
-
-        std::thread::sleep(Duration::from_millis(200));
-
-        // Use an another thread to push something to region 3.
+        // Write region 3 without applying.
         let engine_clone = engine.clone();
         let mut entry_clone = entry.clone();
-        let th2 = std::thread::spawn(move || {
+        let th = std::thread::spawn(move || {
             entry_clone.set_index(1);
             append_log(&engine_clone, 3, &entry_clone);
         });
+        let apply_memtable_region_3_fp = "apply_memtable_region_3";
+        fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
 
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
         std::thread::sleep(Duration::from_millis(200));
@@ -1019,9 +1018,8 @@ mod tests {
         assert_eq!(file_not_applied, first);
 
         // Release the lock on region 3. Then can purge.
-        tx.send(0i32).unwrap();
-        th1.join().unwrap();
-        th2.join().unwrap();
+        fail::remove(apply_memtable_region_3_fp);
+        th.join().unwrap();
 
         std::thread::sleep(Duration::from_millis(200));
         engine.purge_manager.purge_expired_files().unwrap();
@@ -1030,6 +1028,6 @@ mod tests {
 
         // Drop and then recover.
         drop(engine);
-        drop(RaftLogEngine::open(cfg).unwrap());
+        RaftLogEngine::open(cfg).unwrap();
     }
 }

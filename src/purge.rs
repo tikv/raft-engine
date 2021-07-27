@@ -2,9 +2,10 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
 use log::{debug, info};
+use parking_lot::{Mutex, RwLock};
 use protobuf::Message;
 
 use crate::config::Config;
@@ -13,7 +14,6 @@ use crate::event_listener::EventListener;
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::memtable::MemTable;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
 
 // Force compact region with oldest 20% logs.
@@ -72,7 +72,7 @@ where
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
-        if guard.is_err() {
+        if guard.is_none() {
             return Ok(should_compact);
         }
 
@@ -206,7 +206,7 @@ where
 
     fn rewrite_append_queue_tombstones(&self) -> Result<()> {
         let mut log_batch = self.memtables.take_cleaned_region_logs();
-        self.rewrite_to_log(
+        self.rewrite_impl(
             &mut log_batch,
             None, /*rewrite_watermark*/
             true, /*sync*/
@@ -226,7 +226,7 @@ where
             let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut kvs = Vec::new();
             let region_id = {
-                let m = memtable.rl();
+                let m = memtable.read();
                 if let Some(rewrite) = rewrite {
                     m.fetch_entry_indexes_before(rewrite, &mut entry_indexes)?;
                     m.fetch_kvs_before(rewrite, &mut kvs);
@@ -249,14 +249,14 @@ where
 
             let target_file_size = self.cfg.target_file_size.0 as usize;
             if total_size as usize > cmp::min(MAX_REWRITE_BATCH_BYTES, target_file_size) {
-                self.rewrite_to_log(&mut log_batch, rewrite, false)?;
+                self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 total_size = 0;
             }
         }
-        self.rewrite_to_log(&mut log_batch, rewrite, true)
+        self.rewrite_impl(&mut log_batch, rewrite, true)
     }
 
-    fn rewrite_to_log(
+    fn rewrite_impl(
         &self,
         log_batch: &mut LogBatch<E, W>,
         rewrite_watermark: Option<FileId>,
@@ -286,7 +286,7 @@ where
                             entries_index.first().map(|x| x.index),
                             entries_index.last().map(|x| x.index + 1),
                         );
-                        memtable.wl().rewrite(entries_index, rewrite_watermark);
+                        memtable.write().rewrite(entries_index, rewrite_watermark);
                     }
                     LogItemContent::Kv(kv) => match kv.op_type {
                         OpType::Put => {
@@ -298,7 +298,9 @@ where
                                 file_id,
                                 hex::encode(&key),
                             );
-                            memtable.wl().rewrite_key(key, rewrite_watermark, file_id);
+                            memtable
+                                .write()
+                                .rewrite_key(key, rewrite_watermark, file_id);
                         }
                         _ => unreachable!(),
                     },
@@ -336,7 +338,7 @@ impl PurgeHook {
 impl EventListener for PurgeHook {
     fn post_new_log_file(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
-            let mut active_log_files = self.active_log_files.wl();
+            let mut active_log_files = self.active_log_files.write();
             if let Some(id) = active_log_files.back().map(|x| x.0) {
                 assert_eq!(
                     id.forward(1),
@@ -351,7 +353,7 @@ impl EventListener for PurgeHook {
 
     fn on_append_log_file(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
-            let active_log_files = self.active_log_files.rl();
+            let active_log_files = self.active_log_files.read();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
             let counter = &active_log_files[file_id.step_after(&front).unwrap()].1;
@@ -361,7 +363,7 @@ impl EventListener for PurgeHook {
 
     fn post_apply_memtables(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
-            let active_log_files = self.active_log_files.rl();
+            let active_log_files = self.active_log_files.read();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
             let counter = &active_log_files[file_id.step_after(&front).unwrap()].1;
@@ -371,7 +373,7 @@ impl EventListener for PurgeHook {
 
     fn first_file_not_ready_for_purge(&self, queue: LogQueue) -> FileId {
         if queue == LogQueue::Append {
-            let active_log_files = self.active_log_files.rl();
+            let active_log_files = self.active_log_files.read();
             for (id, counter) in active_log_files.iter() {
                 if counter.load(Ordering::Acquire) > 0 {
                     return *id;
@@ -383,7 +385,7 @@ impl EventListener for PurgeHook {
 
     fn post_purge(&self, queue: LogQueue, file_id: FileId) {
         if queue == LogQueue::Append {
-            let mut active_log_files = self.active_log_files.wl();
+            let mut active_log_files = self.active_log_files.write();
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
             if front <= file_id {

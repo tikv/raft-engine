@@ -3,8 +3,7 @@ use std::fs;
 use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::{cmp, u64};
+use std::sync::Arc;
 
 use log::{debug, info, warn};
 use nix::errno::Errno;
@@ -13,13 +12,13 @@ use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use protobuf::Message;
 
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::HandyRwLock;
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -258,7 +257,7 @@ impl LogManager {
         if self.active_log_size > self.active_log_capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let reserve = self.active_log_size - self.active_log_capacity;
-            let alloc_size = cmp::max(reserve, FILE_ALLOCATE_SIZE);
+            let alloc_size = std::cmp::max(reserve, FILE_ALLOCATE_SIZE);
             fcntl::fallocate(
                 fd.0,
                 fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
@@ -293,8 +292,8 @@ impl FilePipeLog {
     fn new(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> FilePipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(cfg, LogQueue::Append)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, LogQueue::Rewrite)));
-        appender.wl().listeners = listeners.clone();
-        rewriter.wl().listeners = listeners.clone();
+        appender.write().listeners = listeners.clone();
+        rewriter.write().listeners = listeners.clone();
         FilePipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -400,15 +399,15 @@ impl FilePipeLog {
 
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager> {
         match queue {
-            LogQueue::Append => self.appender.rl(),
-            LogQueue::Rewrite => self.rewriter.rl(),
+            LogQueue::Append => self.appender.read(),
+            LogQueue::Rewrite => self.rewriter.read(),
         }
     }
 
     fn mut_queue(&self, queue: LogQueue) -> RwLockWriteGuard<LogManager> {
         match queue {
-            LogQueue::Append => self.appender.wl(),
-            LogQueue::Rewrite => self.rewriter.wl(),
+            LogQueue::Append => self.appender.write(),
+            LogQueue::Rewrite => self.rewriter.write(),
         }
     }
 
@@ -429,8 +428,8 @@ impl FilePipeLog {
 
 impl PipeLog for FilePipeLog {
     fn close(&self) -> Result<()> {
-        self.appender.wl().truncate_active_log(None)?;
-        self.rewriter.wl().truncate_active_log(None)?;
+        self.appender.write().truncate_active_log(None)?;
+        self.rewriter.write().truncate_active_log(None)?;
         Ok(())
     }
 
@@ -572,8 +571,8 @@ impl PipeLog for FilePipeLog {
 
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize> {
         let mut manager = match queue {
-            LogQueue::Append => self.appender.wl(),
-            LogQueue::Rewrite => self.rewriter.wl(),
+            LogQueue::Append => self.appender.write(),
+            LogQueue::Rewrite => self.rewriter.write(),
         };
         let purge_count = manager.purge_to(file_id)?;
         drop(manager);
