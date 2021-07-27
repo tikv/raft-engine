@@ -413,7 +413,7 @@ where
         let mut entry = None;
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.rl().get_entry(log_idx) {
-                entry.insert(read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?);
+                entry = Some(read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?);
             }
         }
         ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
