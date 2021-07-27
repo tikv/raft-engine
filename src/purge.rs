@@ -78,15 +78,6 @@ where
 
         if self.needs_rewrite_log_files(LogQueue::Append) {
             let (rewrite_watermark, compact_watermark) = self.append_queue_watermarks();
-            if !self
-                .listeners
-                .iter()
-                .all(|l| l.ready_for_purge(LogQueue::Append, rewrite_watermark))
-            {
-                // Generally it means some entries or kvs are not written into memtables, skip.
-                debug!("Append file {} is not ready for purge", rewrite_watermark);
-                return Ok(should_compact);
-            }
             should_compact =
                 self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
         }
@@ -95,10 +86,18 @@ where
             self.rewrite_rewrite_queue()?;
         }
 
+        let append_queue_barrier = self.listeners.iter().fold(
+            self.pipe_log.active_file_id(LogQueue::Append),
+            |barrier, l| FileId::min(barrier, l.first_file_not_ready_for_purge(LogQueue::Append)),
+        );
+
+        // Must rewrite tombstones after acquiring the barrier, in case the log file is rotated
+        // shortly after a tombstone is written.
+        self.rewrite_append_queue_tombstones()?;
+
         let (min_file_1, min_file_2) = self.memtables.fold(
             (
-                // Don't purge active file, new region could slip in and write after this iteration.
-                self.pipe_log.active_file_id(LogQueue::Append),
+                append_queue_barrier,
                 self.pipe_log.active_file_id(LogQueue::Rewrite),
             ),
             |(min1, min2), t| {
@@ -108,7 +107,7 @@ where
                 )
             },
         );
-        assert!(min_file_1.valid() && min_file_2.valid());
+        debug_assert!(min_file_1.valid() && min_file_2.valid());
 
         for (purge_to, queue) in &[
             (min_file_1, LogQueue::Append),
@@ -173,15 +172,6 @@ where
         assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::new();
 
-        let mut log_batch = self
-            .memtables
-            .take_clean_region_logs_before(rewrite_watermark);
-        self.rewrite_to_log(
-            &mut log_batch,
-            None, /*rewrite_watermark*/
-            true, /*sync*/
-        )?;
-
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_id(LogQueue::Append) {
                 let sparse = t.entries_count() < MAX_REWRITE_ENTRIES_PER_REGION;
@@ -203,8 +193,7 @@ where
         Ok(should_compact)
     }
 
-    // Compacts the entire rewrite queue into new rewrite files.
-    // Returns smallest rewrite files.
+    // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<()> {
         self.pipe_log.new_log_file(LogQueue::Rewrite)?;
 
@@ -213,6 +202,15 @@ where
             .collect(|t| t.min_file_id(LogQueue::Rewrite).is_some());
 
         self.rewrite_memtables(memtables, 0 /*expect_rewrites_per_memtable*/, None)
+    }
+
+    fn rewrite_append_queue_tombstones(&self) -> Result<()> {
+        let mut log_batch = self.memtables.take_cleaned_region_logs();
+        self.rewrite_to_log(
+            &mut log_batch,
+            None, /*rewrite_watermark*/
+            true, /*sync*/
+        )
     }
 
     fn rewrite_memtables(
@@ -369,20 +367,16 @@ impl EventListener for PurgeHook {
         }
     }
 
-    // Inclusive.
-    fn ready_for_purge(&self, queue: LogQueue, file_id: FileId) -> bool {
+    fn first_file_not_ready_for_purge(&self, queue: LogQueue) -> FileId {
         if queue == LogQueue::Append {
             let active_log_files = self.active_log_files.rl();
-            assert!(!active_log_files.is_empty());
             for (id, counter) in active_log_files.iter() {
-                if *id > file_id {
-                    break;
-                } else if counter.load(Ordering::Acquire) > 0 {
-                    return false;
+                if counter.load(Ordering::Acquire) > 0 {
+                    return *id;
                 }
             }
         }
-        true
+        Default::default()
     }
 
     fn post_purge(&self, queue: LogQueue, file_id: FileId) {

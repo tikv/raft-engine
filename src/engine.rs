@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -32,7 +32,7 @@ pub struct MemTableAccessor {
     initializer: Arc<dyn Fn(u64) -> MemTable + Send + Sync>,
 
     // Deleted region memtables that are not yet rewritten.
-    removed_memtables: Arc<Mutex<HashMap<FileId, u64>>>,
+    removed_memtables: Arc<Mutex<VecDeque<u64>>>,
 }
 
 impl MemTableAccessor {
@@ -69,13 +69,13 @@ impl MemTableAccessor {
             .insert(raft_group_id, memtable);
     }
 
-    pub fn remove(&self, raft_group_id: u64, queue: LogQueue, file_id: FileId) {
+    pub fn remove(&self, raft_group_id: u64, queue: LogQueue, _: FileId) {
         self.slots[raft_group_id as usize % SLOTS_COUNT]
             .wl()
             .remove(&raft_group_id);
         if queue == LogQueue::Append {
             let mut removed_memtables = self.removed_memtables.lock().unwrap();
-            removed_memtables.insert(file_id, raft_group_id);
+            removed_memtables.push_back(raft_group_id);
         }
     }
 
@@ -104,22 +104,17 @@ impl MemTableAccessor {
         memtables
     }
 
-    // Returns a `LogBatch` containing all Clean commands cleaned not after `max_file_id`.
-    pub fn take_clean_region_logs_before<E, W>(&self, max_file_id: FileId) -> LogBatch<E, W>
+    // Returns a `LogBatch` containing Clean commands for all the removed MemTables.
+    pub fn take_cleaned_region_logs<E, W>(&self) -> LogBatch<E, W>
     where
         E: Message + Clone,
         W: EntryExt<E>,
     {
         let mut log_batch = LogBatch::<E, W>::default();
         let mut removed_memtables = self.removed_memtables.lock().unwrap();
-        removed_memtables.retain(|&file_id, raft_id| {
-            if file_id <= max_file_id {
-                log_batch.clean_region(*raft_id);
-                false
-            } else {
-                true
-            }
-        });
+        for id in removed_memtables.drain(..) {
+            log_batch.clean_region(id);
+        }
         log_batch
     }
 
@@ -128,7 +123,7 @@ impl MemTableAccessor {
     pub fn cleaned_region_ids(&self) -> HashSet<u64> {
         let mut ids = HashSet::default();
         let removed_memtables = self.removed_memtables.lock().unwrap();
-        for (_, raft_id) in removed_memtables.iter() {
+        for raft_id in removed_memtables.iter() {
             ids.insert(*raft_id);
         }
         ids
@@ -913,9 +908,8 @@ mod tests {
                 self.0[&queue].applys.fetch_add(1, Ordering::Release);
             }
 
-            fn ready_for_purge(&self, _: LogQueue, _: FileId) -> bool {
-                // To test the default hook's logic.
-                true
+            fn first_file_not_ready_for_purge(&self, _: LogQueue) -> FileId {
+                Default::default()
             }
 
             fn post_purge(&self, queue: LogQueue, file_id: FileId) {
@@ -1005,6 +999,7 @@ mod tests {
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(hook.0[&LogQueue::Append].appends(), 33);
+        let file_not_applied = engine.pipe_log.active_file_id(LogQueue::Append);
         assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
 
         for i in 31..=40 {
@@ -1019,10 +1014,9 @@ mod tests {
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
-        let old_first = engine.pipe_log.first_file_id(LogQueue::Append);
         engine.purge_manager.purge_expired_files().unwrap();
-        let new_first = engine.pipe_log.first_file_id(LogQueue::Append);
-        assert_eq!(old_first, new_first);
+        let first = engine.pipe_log.first_file_id(LogQueue::Append);
+        assert_eq!(file_not_applied, first);
 
         // Release the lock on region 3. Then can purge.
         tx.send(0i32).unwrap();
@@ -1032,7 +1026,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         engine.purge_manager.purge_expired_files().unwrap();
         let new_first = engine.pipe_log.first_file_id(LogQueue::Append);
-        assert_ne!(old_first, new_first);
+        assert_ne!(file_not_applied, new_first);
 
         // Drop and then recover.
         drop(engine);
