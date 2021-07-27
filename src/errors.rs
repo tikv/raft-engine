@@ -27,6 +27,8 @@ pub enum Error {
     StorageUnavailable,
     #[error("The entry acquired has been compacted")]
     StorageCompacted,
+    #[error("Unrecognized log version (prefix): {0:?}")]
+    UnrecognizedLogVersion(Vec<u8>),
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;

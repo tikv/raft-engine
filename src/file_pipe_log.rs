@@ -35,7 +35,67 @@ const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX_LEN;
 const INIT_FILE_NUM: u64 = 1;
 
 pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-pub const VERSION: &[u8] = b"v1.0.0";
+
+/// build_version!(current_ident; v1_ident=>v1_buf, v2_ident=>v2_buf);
+macro_rules! build_version {
+    ($current:ident; $($ident:ident => $bytes:expr,)+) => {
+        #[non_exhaustive]
+        #[derive(PartialEq, Debug)]
+        pub enum Version{
+            $($ident,)*
+        }
+
+        impl Version{
+            fn current()->Self{
+                Self::$current
+            }
+
+            fn max_len()->usize{
+                Self::iter().fold(0,|max,ident| cmp::max(max,ident.as_bytes().len()))
+            }
+
+            fn iter()->std::slice::Iter<'static,Self>{
+                [$(Self::$ident,)*].iter()
+            }
+
+            fn as_bytes(&self)->&[u8]{
+                match self{
+                    $(Self::$ident=>$bytes,)*
+                }
+            }
+
+            fn detect(buf:&[u8])->Option<Self>{
+                $(
+                    if buf.starts_with($bytes) {
+                        return Some(Self::$ident)
+                    }
+                )*
+                return None
+            }
+
+            fn detect_file(fd:RawFd)->Result<Self>{
+                // If the format of the latest log file is an old version,
+                // switch active log to an new log file of the current version.
+                // Note: The version identifier is not defined in a fixed size,
+                // we need to read the longest of all legal identifiers into the buffer.
+                let mut buf = vec![0; Self::max_len()];
+                if let Err(e) = pread(fd, &mut buf, FILE_MAGIC_HEADER.len() as i64) {
+                    return Err(parse_nix_error(e, "detect version"));
+                }
+                match Self::detect(&buf){
+                    Some(version)=>Ok(version),
+                    None=>Err(Error::UnrecognizedLogVersion(buf.to_owned()))
+                }
+            }
+        }
+    };
+}
+
+build_version!(
+    V1_0_0;
+    V1_0_0=>b"v1.0.0",
+);
+
 const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
@@ -78,6 +138,10 @@ struct LogManager {
 
 impl LogManager {
     fn new(cfg: &Config, name_suffix: &'static str) -> Self {
+        debug!(
+            "supported log format versions: {:?}",
+            Version::iter().collect::<Vec<_>>()
+        );
         Self {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -100,36 +164,50 @@ impl LogManager {
         min_file_id: FileId,
         max_file_id: FileId,
     ) -> Result<()> {
-        if !logs.is_empty() {
-            self.first_file_id = min_file_id;
-            self.active_file_id = max_file_id;
-            let queue = queue_from_suffix(self.name_suffix);
+        if logs.is_empty() {
+            return Ok(());
+        }
+        self.first_file_id = min_file_id;
+        self.active_file_id = max_file_id;
+        let queue = queue_from_suffix(self.name_suffix);
 
-            for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
-                let mut path = PathBuf::from(&self.dir);
-                path.push(file_name);
-                let fd = Arc::new(LogFd(open_frozen_file(&path)?));
-                self.all_files.push_back(fd);
-                for listener in &self.listeners {
-                    listener.post_new_log_file(queue, self.first_file_id.forward(i));
-                }
-            }
-
+        for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
             let mut path = PathBuf::from(&self.dir);
-            path.push(logs.last().unwrap());
-            let fd = Arc::new(LogFd(open_active_file(&path)?));
-            fd.sync()?;
-
-            self.active_log_size = file_size(fd.0)?;
-            self.active_log_capacity = self.active_log_size;
-            self.last_sync_size = self.active_log_size;
+            path.push(file_name);
+            let fd = Arc::new(LogFd(open_frozen_file(&path)?));
             self.all_files.push_back(fd);
-
             for listener in &self.listeners {
-                listener.post_new_log_file(queue, self.active_file_id);
+                listener.post_new_log_file(queue, self.first_file_id.forward(i));
             }
         }
-        Ok(())
+
+        let mut path = PathBuf::from(&self.dir);
+        path.push(logs.last().unwrap());
+        let fd = Arc::new(LogFd(open_active_file(&path)?));
+        fd.sync()?;
+
+        let active_raw_fd = fd.0.clone();
+
+        self.active_log_size = file_size(fd.0)?;
+        self.active_log_capacity = self.active_log_size;
+        self.last_sync_size = self.active_log_size;
+        self.all_files.push_back(fd);
+
+        for listener in &self.listeners {
+            listener.post_new_log_file(queue, self.active_file_id);
+        }
+
+        // Switch active log to a new log file if it's not current version.
+        match Version::detect_file(active_raw_fd) {
+            Err(e) => Err(e),
+            Ok(version) => {
+                if version == Version::current() {
+                    Ok(())
+                } else {
+                    self.new_log_file()
+                }
+            }
+        }
     }
 
     fn new_log_file(&mut self) -> Result<()> {
@@ -175,7 +253,7 @@ impl LogManager {
         }
         let active_fd = self.get_active_fd().unwrap();
         ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
-        if offset < FILE_MAGIC_HEADER.len() + VERSION.len() {
+        if offset < FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len() {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }
@@ -480,8 +558,8 @@ impl PipeLog for FilePipeLog {
             }
         }
         let start_ptr = buf.as_ptr();
-        buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
-        let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
+        buf.consume(FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len());
+        let mut offset = (FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len()) as u64;
         loop {
             debug!("recovering log batch at {:?}.{}", file_id, offset);
             let mut log_batch = match LogBatch::from_bytes(&mut buf, file_id, offset) {
@@ -682,10 +760,10 @@ fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
 }
 
 fn write_file_header(fd: RawFd) -> Result<usize> {
-    let len = FILE_MAGIC_HEADER.len() + VERSION.len();
+    let len = FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len();
     let mut header = Vec::with_capacity(len);
     header.extend_from_slice(FILE_MAGIC_HEADER);
-    header.extend_from_slice(VERSION);
+    header.extend_from_slice(Version::current().as_bytes());
     pwrite_exact(fd, 0, &header)?;
     Ok(len)
 }
@@ -734,7 +812,7 @@ mod tests {
         assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_NUM.into());
         assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_NUM.into());
 
-        let header_size = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
+        let header_size = (FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len()) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
@@ -771,7 +849,7 @@ mod tests {
 
         assert_eq!(
             pipe_log.active_log_size(queue),
-            FILE_MAGIC_HEADER.len() + VERSION.len() + 2 * s_content.len()
+            FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len() + 2 * s_content.len()
         );
 
         let content_readed = pipe_log
@@ -786,15 +864,18 @@ mod tests {
 
         // truncate file
         pipe_log
-            .truncate_active_log(queue, Some(FILE_MAGIC_HEADER.len() + VERSION.len()))
+            .truncate_active_log(
+                queue,
+                Some(FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len()),
+            )
             .unwrap();
         assert_eq!(
             pipe_log.active_log_size(queue,),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
+            FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len()
         );
         let trunc_big_offset = pipe_log.truncate_active_log(
             queue,
-            Some(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len()),
+            Some(FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len() + s_content.len()),
         );
         assert!(trunc_big_offset.is_err());
 
@@ -802,7 +883,7 @@ mod tests {
         // read next file
         let mut header: Vec<u8> = vec![];
         header.extend(FILE_MAGIC_HEADER);
-        header.extend(VERSION);
+        header.extend(Version::current().as_bytes());
         let content = pipe_log.read_next_file_id().unwrap().unwrap();
         assert_eq!(header, content);
         assert!(pipe_log.read_next_file_id().unwrap().is_none());
@@ -815,11 +896,11 @@ mod tests {
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
             pipe_log.active_log_size(queue),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
+            FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len()
         );
         assert_eq!(
             pipe_log.active_log_capacity(queue),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
+            FILE_MAGIC_HEADER.len() + Version::current().as_bytes().len()
         );
     }
 
@@ -832,4 +913,7 @@ mod tests {
     fn test_pipe_log_rewrite() {
         test_pipe_log_impl(LogQueue::Rewrite)
     }
+
+    #[test]
+    fn test_detect_version() {}
 }
