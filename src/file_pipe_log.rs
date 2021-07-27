@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 use std::{cmp, u64};
 
@@ -16,7 +16,6 @@ use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use protobuf::Message;
 
-use crate::cache_evict::CacheSubmitor;
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
@@ -267,16 +266,11 @@ pub struct FilePipeLog {
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
-    cache_submitor: Arc<Mutex<CacheSubmitor>>,
     listeners: Vec<Arc<dyn EventListener>>,
 }
 
 impl FilePipeLog {
-    fn new(
-        cfg: &Config,
-        cache_submitor: CacheSubmitor,
-        listeners: Vec<Arc<dyn EventListener>>,
-    ) -> FilePipeLog {
+    fn new(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> FilePipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, REWRITE_SUFFIX)));
         appender.wl().listeners = listeners.clone();
@@ -288,16 +282,11 @@ impl FilePipeLog {
             compression_threshold: cfg.batch_compression_threshold.0 as usize,
             appender,
             rewriter,
-            cache_submitor: Arc::new(Mutex::new(cache_submitor)),
             listeners,
         }
     }
 
-    pub fn open(
-        cfg: &Config,
-        cache_submitor: CacheSubmitor,
-        listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<FilePipeLog> {
+    pub fn open(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> Result<FilePipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -307,7 +296,7 @@ impl FilePipeLog {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let pipe_log = FilePipeLog::new(cfg, cache_submitor, listeners);
+        let pipe_log = FilePipeLog::new(cfg, listeners);
 
         let (mut min_file_id, mut max_file_id) = (Default::default(), Default::default());
         let (mut min_rewrite_num, mut max_rewrite_num) = (Default::default(), Default::default());
@@ -378,12 +367,7 @@ impl FilePipeLog {
         Ok(pipe_log)
     }
 
-    pub fn set_recovery_mode(&self, recovery_mode: bool) {
-        let mut submitor = self.cache_submitor.lock().unwrap();
-        submitor.set_block_on_full(recovery_mode);
-    }
-
-    fn read_file_bytes_for_recovery(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
+    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
         let mut path = PathBuf::from(&self.dir);
         path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
         let meta = fs::metadata(&path)?;
@@ -401,12 +385,14 @@ impl FilePipeLog {
         content: &[u8],
         sync: &mut bool,
     ) -> Result<(FileId, u64, Arc<LogFd>)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).on_append(content.len(), sync)?;
+        // Must hold lock until file is written to avoid corrupted holes.
+        let mut log_manager = self.mut_queue(queue);
+        let (file_id, offset, fd) = log_manager.on_append(content.len(), sync)?;
+        pwrite_exact(fd.0, offset, content)?;
         for listener in &self.listeners {
             listener.on_append_log_file(queue, file_id);
         }
 
-        pwrite_exact(fd.0, offset, content)?;
         Ok((file_id, offset, fd))
     }
 
@@ -448,7 +434,6 @@ impl FilePipeLog {
 
 impl PipeLog for FilePipeLog {
     fn close(&self) -> Result<()> {
-        let _write_lock = self.cache_submitor.lock().unwrap();
         self.appender.wl().truncate_active_log(None)?;
         self.rewriter.wl().truncate_active_log(None)?;
         Ok(())
@@ -493,7 +478,7 @@ impl PipeLog for FilePipeLog {
         mode: RecoveryMode,
         batches: &mut Vec<LogBatch<E, W>>,
     ) -> Result<()> {
-        let content = self.read_file_bytes_for_recovery(queue, file_id)?;
+        let content = self.read_file_bytes(queue, file_id)?;
         let mut buf = content.as_slice();
         if !buf.starts_with(FILE_MAGIC_HEADER) {
             if self.active_file_id(queue) == file_id {
@@ -530,17 +515,7 @@ impl PipeLog for FilePipeLog {
                     }
                 }
             };
-            if queue == LogQueue::Append {
-                let size = log_batch.entries_size();
-                let mut submitor = self.cache_submitor.lock().unwrap();
-                if let Some(chunk) = submitor.submit_new_block(file_id, offset, size) {
-                    for item in log_batch.items.iter_mut() {
-                        if let LogItemContent::Entries(entries) = &mut item.content {
-                            entries.set_chunk_cache(&chunk);
-                        }
-                    }
-                }
-            } else {
+            if queue == LogQueue::Rewrite {
                 for item in log_batch.items.iter_mut() {
                     if let LogItemContent::Entries(entries) = &mut item.content {
                         entries.set_queue(LogQueue::Rewrite);
@@ -560,23 +535,14 @@ impl PipeLog for FilePipeLog {
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
             let start = Instant::now();
-            // TODO: `pwrite` is performed in the mutex. Is it possible for concurrence?
-            let mut chunk = None;
-            let (file_id, offset, fd) = if queue == LogQueue::Append {
-                let mut cache_submitor = self.cache_submitor.lock().unwrap();
-                let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
-                chunk = cache_submitor.submit_new_block(file_id, offset, batch.entries_size());
-                (file_id, offset, fd)
-            } else {
-                self.append_bytes(queue, &content, &mut sync)?
-            };
+            let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
             }
 
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.set_position(queue, file_id, offset, &chunk);
+                    entries.set_position(queue, file_id, offset);
                 }
             }
 
@@ -756,32 +722,18 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use crossbeam::channel::Receiver;
-    use raft::eraftpb::Entry;
     use tempfile::Builder;
 
     use super::*;
-    use crate::cache_evict::{CacheSubmitor, CacheTask};
-    use crate::util::{ReadableSize, Worker};
-    use crate::GlobalStats;
+    use crate::util::ReadableSize;
 
-    fn new_test_pipe_log(
-        path: &str,
-        bytes_per_sync: usize,
-        rotate_size: usize,
-    ) -> (FilePipeLog, Receiver<Option<CacheTask>>) {
+    fn new_test_pipe_log(path: &str, bytes_per_sync: usize, rotate_size: usize) -> FilePipeLog {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        let mut worker = Worker::new("test".to_owned(), None);
-        let stats = Arc::new(GlobalStats::default());
-        let submitor = CacheSubmitor::new(usize::MAX, 4096, worker.scheduler(), stats);
-        let log = FilePipeLog::open(&cfg, submitor, vec![]).unwrap();
-        (log, worker.take_receiver())
+        FilePipeLog::open(&cfg, vec![]).unwrap()
     }
 
     #[test]
@@ -808,7 +760,7 @@ mod tests {
 
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
-        let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_NUM.into());
         assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_NUM.into());
 
@@ -889,7 +841,7 @@ mod tests {
         pipe_log.close().unwrap();
 
         // reopen
-        let (pipe_log, _) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
             pipe_log.active_log_size(queue),
@@ -909,81 +861,5 @@ mod tests {
     #[test]
     fn test_pipe_log_rewrite() {
         test_pipe_log_impl(LogQueue::Rewrite)
-    }
-
-    #[test]
-    fn test_cache_submitor() {
-        let dir = Builder::new().prefix("test_pipe_log").tempdir().unwrap();
-        let path = dir.path().to_str().unwrap();
-
-        let rotate_size = 6 * 1024; // 6K to rotate.
-        let bytes_per_sync = 32 * 1024;
-        let (pipe_log, receiver) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-
-        let get_1m_batch = || {
-            let mut entry = Entry::new();
-            entry.set_data(vec![b'a'; 1024].into()); // 1K data.
-            let mut log_batch = LogBatch::<Entry, Entry>::default();
-            log_batch.add_entries(1, vec![entry]);
-            log_batch
-        };
-
-        // Collect `LogBatch`s to avoid `CacheTracker::drop` is called.
-        let mut log_batches = Vec::new();
-        // Collect received tasks.
-        let mut tasks = Vec::new();
-
-        // After 4 batches are written into pipe log, no `CacheTask::NewChunk`
-        // task should be triggered. However the last batch will trigger it.
-        for i in 0..5 {
-            let mut log_batch = get_1m_batch();
-            pipe_log
-                .append(LogQueue::Append, &mut log_batch, true)
-                .unwrap();
-            log_batches.push(log_batch);
-            let x = receiver.recv_timeout(Duration::from_millis(100));
-            if i < 4 {
-                assert!(x.is_err());
-            } else {
-                tasks.push(x.unwrap());
-            }
-        }
-
-        // Write more 2 batches into pipe log. A `CacheTask::NewChunk` will be
-        // emit on the second batch because log file is switched.
-        for i in 5..7 {
-            let mut log_batch = get_1m_batch();
-            pipe_log
-                .append(LogQueue::Append, &mut log_batch, true)
-                .unwrap();
-            log_batches.push(log_batch);
-            let x = receiver.recv_timeout(Duration::from_millis(100));
-            if i < 6 {
-                assert!(x.is_err());
-            } else {
-                tasks.push(x.unwrap());
-            }
-        }
-
-        // Write more batches. No `CacheTask::NewChunk` will be emit because
-        // `CacheTracker`s accociated in `EntryIndex`s are droped.
-        drop(log_batches);
-        for _ in 7..20 {
-            let mut log_batch = get_1m_batch();
-            pipe_log
-                .append(LogQueue::Append, &mut log_batch, true)
-                .unwrap();
-            drop(log_batch);
-            assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
-        }
-
-        // All task's size should be 0 because all cached entries are released.
-        for task in &tasks {
-            if let Some(CacheTask::NewChunk(ref chunk)) = task {
-                chunk.self_check(0);
-                continue;
-            }
-            unreachable!();
-        }
     }
 }
