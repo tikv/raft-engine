@@ -36,35 +36,59 @@ const INIT_FILE_NUM: u64 = 1;
 
 pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 
-/// build_version!(current_ident; v1_ident=>v1_buf, v2_ident=>v2_buf);
+/// build_version!(version_ident, current_ident; v1_ident=>v1_buf, v2_ident=>v2_buf);
 macro_rules! build_version {
-    ($current:ident; $($ident:ident => $bytes:expr,)+) => {
+    ($version:ident,$current:ident; $($ident:ident => $bytes:expr,)+) => {
         #[non_exhaustive]
         #[derive(PartialEq, Debug)]
-        pub enum Version{
+        pub enum $version{
             $($ident,)*
         }
 
-        impl Version{
-            fn current()->Self{
+        #[allow(dead_code)]
+        impl $version{
+            /// Get current log file version.
+            pub fn current()->Self{
                 Self::$current
             }
 
+            /// Get the longest bytes of all version byte string use.
             fn max_len()->usize{
                 Self::iter().fold(0,|max,ident| cmp::max(max,ident.as_bytes().len()))
             }
 
-            fn iter()->std::slice::Iter<'static,Self>{
+            /// Check if some version byte strings contains another one.
+            /// Self-containing must be avoided. Self-containing may lead to
+            /// version detection returns a wrong version.
+            /// Note: Must assert that `is_self_contained` returns false.
+            pub fn is_self_contained()->bool{
+                for (l, vl) in Self::iter().enumerate() {
+                    for (r, vr) in Self::iter().enumerate() {
+                        if l==r {continue}
+                        let bl = vl.as_bytes();
+                        let br = vr.as_bytes();
+                        if bl.windows(br.len()).position(|window|window==br) != None{
+                            return true
+                        }
+                    }
+                }
+                false
+            }
+
+            /// Return an iterator on all versions.
+            pub fn iter()->std::slice::Iter<'static,Self>{
                 [$(Self::$ident,)*].iter()
             }
 
-            fn as_bytes(&self)->&[u8]{
+            /// Format version to byte slice.
+            pub fn as_bytes(&self)->&[u8]{
                 match self{
                     $(Self::$ident=>$bytes,)*
                 }
             }
 
-            fn detect(buf:&[u8])->Option<Self>{
+            /// Detect if there is a valid version identifier at the begining of the buffer.
+            pub fn detect(buf:&[u8])->Option<Self>{
                 $(
                     if buf.starts_with($bytes) {
                         return Some(Self::$ident)
@@ -73,7 +97,8 @@ macro_rules! build_version {
                 return None
             }
 
-            fn detect_file(fd:RawFd)->Result<Self>{
+            /// Detect if there is valid version identifier at the proper position of the file.
+            pub fn detect_file(fd:RawFd)->Result<Self>{
                 // If the format of the latest log file is an old version,
                 // switch active log to an new log file of the current version.
                 // Note: The version identifier is not defined in a fixed size,
@@ -92,7 +117,7 @@ macro_rules! build_version {
 }
 
 build_version!(
-    V1_0_0;
+    Version, V1_0_0;
     V1_0_0=>b"v1.0.0",
 );
 
@@ -142,6 +167,7 @@ impl LogManager {
             "supported log format versions: {:?}",
             Version::iter().collect::<Vec<_>>()
         );
+        assert!(!Version::is_self_contained());
         Self {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -914,6 +940,44 @@ mod tests {
         test_pipe_log_impl(LogQueue::Rewrite)
     }
 
+    #[allow(dead_code)]
+    build_version!(
+        T1, V1;
+        V1=>b"v1.",
+        V2=>b"v2.",
+        V10=>b"v10.",
+    );
+
+    fn assert_detect_version(v: T1, suffix: &[u8]) {
+        let mut buf = v.as_bytes().to_owned();
+        buf.extend(suffix);
+        let dv = T1::detect(&buf);
+        assert!(dv.is_some());
+        assert_eq!(dv.unwrap(), v);
+    }
+
     #[test]
-    fn test_detect_version() {}
+    fn test_detect_version() {
+        assert!(!Version::is_self_contained());
+        assert_detect_version(T1::V1, b"");
+        assert_detect_version(T1::V10, b"");
+        assert_detect_version(T1::V1, b"###########");
+        assert_detect_version(T1::V10, b"###########");
+    }
+
+    #[test]
+    fn test_is_self_contained() {
+        build_version!(
+            T2,V1;
+            V1=>b"v1",
+            V2=>b"v2",
+        );
+        build_version!(
+            T3,V1;
+            V1=>b"v1",
+            V10=>b"v10",
+        );
+        assert!(!T2::is_self_contained());
+        assert!(T3::is_self_contained());
+    }
 }
