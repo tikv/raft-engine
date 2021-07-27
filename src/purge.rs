@@ -317,9 +317,11 @@ where
 }
 
 pub struct PurgeHook {
-    // Append queue log files that are not yet fully applied to MemTable.
-    // They must not be purged even when not referenced by any MemTable.
-    // No need to track rewrite queue because it is only written by purge thread.
+    // Append queue log files that are not yet fully applied to MemTable must not be
+    // purged even when not referenced by any MemTable.
+    // In order to identify them, maintain a per-file reference counter for all active
+    // log files in append queue. No need to track rewrite queue because it is only
+    // written by purge thread.
     active_log_files: RwLock<VecDeque<(FileId, AtomicUsize)>>,
 }
 
