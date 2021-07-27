@@ -106,9 +106,9 @@ impl LogManager {
         max_file_id: FileId,
     ) -> Result<()> {
         if !logs.is_empty() {
+            let queue = queue_from_suffix(self.name_suffix);
             self.first_file_id = min_file_id;
             self.active_file_id = max_file_id;
-            let queue = queue_from_suffix(self.name_suffix);
 
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
@@ -134,6 +134,9 @@ impl LogManager {
                 listener.post_new_log_file(queue, self.active_file_id);
             }
         }
+
+        self.update_metrics();
+
         Ok(())
     }
 
@@ -162,6 +165,8 @@ impl LogManager {
             let queue = queue_from_suffix(self.name_suffix);
             listener.post_new_log_file(queue, self.active_file_id);
         }
+
+        self.update_metrics();
 
         Ok(())
     }
@@ -212,6 +217,7 @@ impl LogManager {
         let end_offset = file_id.step_after(&self.first_file_id).unwrap();
         self.all_files.drain(..end_offset);
         self.first_file_id = file_id;
+        self.update_metrics();
         Ok(end_offset)
     }
 
@@ -254,6 +260,13 @@ impl LogManager {
             *sync = true;
         }
         Ok((active_file_id, active_log_size as u64, fd))
+    }
+
+    fn update_metrics(&self) {
+        match queue_from_suffix(self.name_suffix) {
+            LogQueue::Append => LOG_FILE_COUNT.append.set(self.all_files.len() as i64),
+            LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(self.all_files.len() as i64),
+        }
     }
 }
 
@@ -463,12 +476,7 @@ impl PipeLog for FilePipeLog {
         len: u64,
     ) -> Result<Vec<u8>> {
         let fd = self.get_queue(queue).get_fd(file_id)?;
-        let res = pread_exact(fd.0, offset, len as usize);
-        match queue {
-            LogQueue::Rewrite => LOG_READ_SIZE_HISTOGRAM_VEC.rewrite.observe(len as f64),
-            LogQueue::Append => LOG_READ_SIZE_HISTOGRAM_VEC.append.observe(len as f64),
-        }
-        res
+        pread_exact(fd.0, offset, len as usize)
     }
 
     fn read_file_for_recovery<E: Message, W: EntryExt<E>>(
@@ -551,17 +559,11 @@ impl PipeLog for FilePipeLog {
                     LOG_APPEND_TIME_HISTOGRAM_VEC
                         .rewrite
                         .observe(start.saturating_elapsed().as_secs_f64());
-                    LOG_APPEND_SIZE_HISTOGRAM_VEC
-                        .rewrite
-                        .observe(content.len() as f64);
                 }
                 LogQueue::Append => {
                     LOG_APPEND_TIME_HISTOGRAM_VEC
                         .append
                         .observe(start.saturating_elapsed().as_secs_f64());
-                    LOG_APPEND_SIZE_HISTOGRAM_VEC
-                        .append
-                        .observe(content.len() as f64);
                 }
             }
 

@@ -248,6 +248,7 @@ where
             bytes
         };
         ENGINE_WRITE_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        ENGINE_WRITE_SIZE_HISTOGRAM.observe(bytes as f64);
         Ok(bytes)
     }
 }
@@ -408,13 +409,15 @@ where
     }
 
     pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<E>> {
+        let start = Instant::now();
+        let mut entry = None;
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.rl().get_entry(log_idx) {
-                let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?;
-                return Ok(Some(entry));
+                entry.insert(read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?);
             }
         }
-        Ok(None)
+        ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        Ok(entry)
     }
 
     /// Purge expired logs files and return a set of Raft group ids
@@ -432,6 +435,7 @@ where
         max_size: Option<usize>,
         vec: &mut Vec<E>,
     ) -> Result<usize> {
+        let start = Instant::now();
         if let Some(memtable) = self.memtables.get(region_id) {
             let old_len = vec.len();
             fetch_entries(
@@ -441,6 +445,7 @@ where
                 (end - begin) as usize,
                 |t, ents_idx| t.fetch_entries_to(begin, end, max_size, ents_idx),
             )?;
+            ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
             return Ok(vec.len() - old_len);
         }
         Ok(0)
