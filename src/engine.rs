@@ -986,14 +986,14 @@ mod tests {
         assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
 
         // Write region 3 without applying.
+        let apply_memtable_region_3_fp = "apply_memtable_region_3";
+        fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
         let engine_clone = engine.clone();
         let mut entry_clone = entry.clone();
         let th = std::thread::spawn(move || {
             entry_clone.set_index(1);
             append_log(&engine_clone, 3, &entry_clone);
         });
-        let apply_memtable_region_3_fp = "apply_memtable_region_3";
-        fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
 
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
         std::thread::sleep(Duration::from_millis(200));
@@ -1009,7 +1009,7 @@ mod tests {
             assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
         }
 
-        // Can't purge because `purge_pender` is still not written to memtables.
+        // Can't purge because region 3 is not yet applied.
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
@@ -1017,7 +1017,7 @@ mod tests {
         let first = engine.pipe_log.first_file_id(LogQueue::Append);
         assert_eq!(file_not_applied, first);
 
-        // Release the lock on region 3. Then can purge.
+        // Resume write on region 3.
         fail::remove(apply_memtable_region_3_fp);
         th.join().unwrap();
 
