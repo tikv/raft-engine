@@ -21,18 +21,18 @@ pub const CHECKSUM_LEN: usize = 4;
 
 const TYPE_ENTRIES: u8 = 0x01;
 const TYPE_COMMAND: u8 = 0x02;
-const TYPE_KV: u8 = 0x3;
+const TYPE_STATE: u8 = 0x3;
 
 const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
 const DEFAULT_BATCH_CAP: usize = 64;
 
-pub trait MessageExt: Send + Sync {
+pub trait MessageExt: Send + Sync + std::fmt::Debug {
     type Entry: Message + Clone + PartialEq;
     type State: Message + Clone + PartialEq;
 
-    fn entry_index(m: &Self::Entry) -> u64;
+    fn entry_index(e: &Self::Entry) -> u64;
 }
 
 #[repr(u8)]
@@ -55,10 +55,7 @@ impl CompressionType {
 type SliceReader<'a> = &'a [u8];
 
 #[derive(Debug)]
-pub struct Entries<M>
-where
-    M: MessageExt,
-{
+pub struct Entries<M: MessageExt> {
     pub entries: Vec<M::Entry>,
     // EntryIndex may be update after write to file.
     pub entries_index: Vec<EntryIndex>,
@@ -213,22 +210,22 @@ impl OpType {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct KeyValue {
+pub struct State<M: MessageExt> {
     pub op_type: OpType,
     pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
+    pub state: Option<M::State>,
 }
 
-impl KeyValue {
-    pub fn new(op_type: OpType, key: Vec<u8>, value: Option<Vec<u8>>) -> KeyValue {
-        KeyValue {
+impl<M: MessageExt> State<M> {
+    pub fn new(op_type: OpType, key: Vec<u8>, state: Option<M::State>) -> State<M> {
+        State {
             op_type,
             key,
-            value,
+            state,
         }
     }
 
-    pub fn from_bytes(buf: &mut SliceReader<'_>) -> Result<KeyValue> {
+    pub fn from_bytes(buf: &mut SliceReader<'_>) -> Result<State<M>> {
         let op_type = OpType::from_bytes(buf)?;
         let k_len = codec::decode_var_u64(buf)? as usize;
         let key = &buf[..k_len];
@@ -238,25 +235,24 @@ impl KeyValue {
                 let v_len = codec::decode_var_u64(buf)? as usize;
                 let value = &buf[..v_len];
                 buf.consume(v_len);
-                Ok(KeyValue::new(
-                    OpType::Put,
-                    key.to_vec(),
-                    Some(value.to_vec()),
-                ))
+                let mut s = M::State::new();
+                s.merge_from_bytes(value)?;
+                Ok(State::new(OpType::Put, key.to_vec(), Some(s)))
             }
-            OpType::Del => Ok(KeyValue::new(OpType::Del, key.to_vec(), None)),
+            OpType::Del => Ok(State::new(OpType::Del, key.to_vec(), None)),
         }
     }
 
     pub fn encode_to(&self, vec: &mut Vec<u8>) -> Result<()> {
-        // layout = { op_type | k_len | key | v_len | value }
+        // layout = { op_type | k_len | key | v_len | state }
         self.op_type.encode_to(vec);
         vec.encode_var_u64(self.key.len() as u64)?;
         vec.extend_from_slice(self.key.as_slice());
         match self.op_type {
             OpType::Put => {
-                vec.encode_var_u64(self.value.as_ref().unwrap().len() as u64)?;
-                vec.extend_from_slice(self.value.as_ref().unwrap().as_slice());
+                let content = self.state.as_ref().unwrap().write_to_bytes()?;
+                vec.encode_var_u64(content.len() as u64)?;
+                vec.extend_from_slice(&content);
             }
             OpType::Del => {}
         }
@@ -265,22 +261,16 @@ impl KeyValue {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LogItem<M>
-where
-    M: MessageExt,
-{
+pub struct LogItem<M: MessageExt> {
     pub raft_group_id: u64,
     pub content: LogItemContent<M>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum LogItemContent<M>
-where
-    M: MessageExt,
-{
+pub enum LogItemContent<M: MessageExt> {
     Entries(Entries<M>),
     Command(Command),
-    Kv(KeyValue),
+    State(State<M>),
 }
 
 impl<M: MessageExt> LogItem<M> {
@@ -298,15 +288,15 @@ impl<M: MessageExt> LogItem<M> {
         }
     }
 
-    pub fn from_kv(
+    pub fn from_state(
         raft_group_id: u64,
         op_type: OpType,
         key: Vec<u8>,
-        value: Option<Vec<u8>>,
+        state: Option<M::State>,
     ) -> LogItem<M> {
         LogItem {
             raft_group_id,
-            content: LogItemContent::Kv(KeyValue::new(op_type, key, value)),
+            content: LogItemContent::State(State::new(op_type, key, state)),
         }
     }
 
@@ -322,9 +312,9 @@ impl<M: MessageExt> LogItem<M> {
                 vec.push(TYPE_COMMAND);
                 command.encode_to(vec);
             }
-            LogItemContent::Kv(kv) => {
-                vec.push(TYPE_KV);
-                kv.encode_to(vec)?;
+            LogItemContent::State(state) => {
+                vec.push(TYPE_STATE);
+                state.encode_to(vec)?;
             }
         }
         Ok(())
@@ -354,10 +344,10 @@ impl<M: MessageExt> LogItem<M> {
                 trace!("decoding command: {:?}", cmd);
                 LogItemContent::Command(cmd)
             }
-            TYPE_KV => {
-                let kv = KeyValue::from_bytes(buf)?;
-                trace!("decoding kv: {:?}", kv);
-                LogItemContent::Kv(kv)
+            TYPE_STATE => {
+                let state = State::from_bytes(buf)?;
+                trace!("decoding state: {:?}", state);
+                LogItemContent::State(state)
             }
             _ => return Err(Error::Codec(CodecError::KeyNotFound)),
         };
@@ -369,19 +359,13 @@ impl<M: MessageExt> LogItem<M> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct LogBatch<M>
-where
-    M: MessageExt,
-{
+pub struct LogBatch<M: MessageExt> {
     pub items: Vec<LogItem<M>>,
     entries_size: usize,
     _phantom: PhantomData<M>,
 }
 
-impl<M> Default for LogBatch<M>
-where
-    M: MessageExt,
-{
+impl<M: MessageExt> Default for LogBatch<M> {
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(DEFAULT_BATCH_CAP),
@@ -391,10 +375,7 @@ where
     }
 }
 
-impl<M> LogBatch<M>
-where
-    M: MessageExt,
-{
+impl<M: MessageExt> LogBatch<M> {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
@@ -414,20 +395,12 @@ where
     }
 
     pub fn delete_state(&mut self, region_id: u64, key: Vec<u8>) {
-        let item = LogItem::from_kv(region_id, OpType::Del, key, None);
+        let item = LogItem::from_state(region_id, OpType::Del, key, None);
         self.items.push(item);
     }
 
-    pub fn put_state(&mut self, region_id: u64, key: Vec<u8>, m: &M::State) -> Result<()> {
-        let value = m.write_to_bytes()?;
-        let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
-        self.items.push(item);
-        Ok(())
-    }
-
-    // Only used for rewrite
-    pub(crate) fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
+    pub fn put_state(&mut self, region_id: u64, key: Vec<u8>, s: M::State) -> Result<()> {
+        let item = LogItem::from_state(region_id, OpType::Put, key, Some(s.clone()));
         self.items.push(item);
         Ok(())
     }
@@ -556,6 +529,7 @@ pub fn decompress(buf: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
     #[test]
@@ -592,15 +566,20 @@ mod tests {
         assert_eq!(cmd, decoded_cmd);
     }
 
+    // TODO(tabokie)
     #[test]
-    fn test_kv_enc_dec() {
-        let kv = KeyValue::new(OpType::Put, b"key".to_vec(), Some(b"value".to_vec()));
+    fn test_state_enc_dec() {
+        let state = State::<RaftLocalState>::new(
+            OpType::Put,
+            b"key".to_vec(),
+            Some(RaftLocalState::default()),
+        );
         let mut encoded = vec![];
-        kv.encode_to(&mut encoded).unwrap();
+        state.encode_to(&mut encoded).unwrap();
         let mut bytes_slice = encoded.as_slice();
-        let decoded_kv = KeyValue::from_bytes(&mut bytes_slice).unwrap();
+        let decoded_state = State::from_bytes(&mut bytes_slice).unwrap();
         assert_eq!(bytes_slice.len(), 0);
-        assert_eq!(kv, decoded_kv);
+        assert_eq!(state, decoded_state);
     }
 
     #[test]
@@ -609,11 +588,11 @@ mod tests {
         let items = vec![
             LogItem::<Entry>::from_entries(region_id, vec![Entry::new(); 10]),
             LogItem::from_command(region_id, Command::Clean),
-            LogItem::from_kv(
+            LogItem::<Entry>::from_state(
                 region_id,
                 OpType::Put,
                 b"key".to_vec(),
-                Some(b"value".to_vec()),
+                Some(RaftLocalState::default()),
             ),
         ];
 
@@ -637,7 +616,7 @@ mod tests {
         batch.add_entries(region_id, vec![entry; 10]);
         batch.add_command(region_id, Command::Clean);
         batch
-            .put(region_id, b"key".to_vec(), b"value".to_vec())
+            .put_state(region_id, b"key".to_vec(), RaftLocalState::default())
             .unwrap();
         batch.delete_state(region_id, b"key2".to_vec());
 

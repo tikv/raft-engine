@@ -33,7 +33,7 @@ where
     P: PipeLog,
 {
     cfg: Arc<Config>,
-    memtables: MemTableAccessor,
+    memtables: MemTableAccessor<M>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
     listeners: Vec<Arc<dyn EventListener>>,
@@ -51,7 +51,7 @@ where
 {
     pub fn new(
         cfg: Arc<Config>,
-        memtables: MemTableAccessor,
+        memtables: MemTableAccessor<M>,
         pipe_log: P,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
@@ -213,7 +213,7 @@ where
 
     fn rewrite_memtables(
         &self,
-        memtables: Vec<Arc<RwLock<MemTable>>>,
+        memtables: Vec<Arc<RwLock<MemTable<M>>>>,
         expect_rewrites_per_memtable: usize,
         rewrite: Option<FileId>,
     ) -> Result<()> {
@@ -222,15 +222,15 @@ where
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut kvs = Vec::new();
+            let mut states = Vec::new();
             let region_id = {
                 let m = memtable.read();
                 if let Some(rewrite) = rewrite {
                     m.fetch_entry_indexes_before(rewrite, &mut entry_indexes)?;
-                    m.fetch_kvs_before(rewrite, &mut kvs);
+                    m.fetch_states_before(rewrite, &mut states);
                 } else {
                     m.fetch_rewritten_entry_indexes(&mut entry_indexes)?;
-                    m.fetch_rewritten_kvs(&mut kvs);
+                    m.fetch_rewritten_states(&mut states);
                 }
                 m.region_id()
             };
@@ -241,8 +241,8 @@ where
                 entries.push(entry);
             }
             log_batch.add_entries(region_id, entries);
-            for (k, v) in kvs {
-                log_batch.put(region_id, k, v)?;
+            for (k, v) in states {
+                log_batch.put_state(region_id, k, v)?;
             }
 
             let target_file_size = self.cfg.target_file_size.0 as usize;
@@ -286,9 +286,9 @@ where
                         );
                         memtable.write().rewrite(entries_index, rewrite_watermark);
                     }
-                    LogItemContent::Kv(kv) => match kv.op_type {
+                    LogItemContent::State(state) => match state.op_type {
                         OpType::Put => {
-                            let key = kv.key;
+                            let key = state.key;
                             debug!(
                                 "{} append to {:?}.{}, Put({})",
                                 raft,
@@ -298,7 +298,7 @@ where
                             );
                             memtable
                                 .write()
-                                .rewrite_key(key, rewrite_watermark, file_id);
+                                .rewrite_state(key, rewrite_watermark, file_id);
                         }
                         _ => unreachable!(),
                     },
