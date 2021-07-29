@@ -1,3 +1,5 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;

@@ -1,3 +1,5 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 use raft_engine::{Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};

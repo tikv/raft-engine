@@ -1,4 +1,4 @@
-// Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 pub use std::collections::hash_map::Entry as HashMapEntry;
 use std::collections::{HashMap as StdHashMap, VecDeque};

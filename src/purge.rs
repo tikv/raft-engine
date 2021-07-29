@@ -1,3 +1,5 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use std::cmp;
 use std::collections::VecDeque;
 use std::marker::PhantomData;

@@ -1,3 +1,5 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use std::borrow::{Borrow, Cow};
 use std::io::BufRead;
 use std::marker::PhantomData;

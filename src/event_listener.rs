@@ -1,3 +1,5 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use crate::pipe_log::{FileId, LogQueue};
 
 pub trait EventListener: Sync + Send {
