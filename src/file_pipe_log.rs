@@ -15,6 +15,7 @@ use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use protobuf::Message;
 
+use crate::codec::NumberEncoder;
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
@@ -35,10 +36,15 @@ const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX_LEN;
 const INIT_FILE_NUM: u64 = 1;
 
 pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-pub const VERSION: &[u8] = b"v1.0.0";
 const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
+
+pub enum Version {
+    V1 = 1,
+}
+pub const VERSION: Version = Version::V1;
+pub const VERSION_LEN: usize = 8;
 
 pub struct LogFd(RawFd);
 
@@ -175,7 +181,7 @@ impl LogManager {
         }
         let active_fd = self.get_active_fd().unwrap();
         ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
-        if offset < FILE_MAGIC_HEADER.len() + VERSION.len() {
+        if offset < FILE_MAGIC_HEADER.len() + VERSION_LEN {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }
@@ -480,8 +486,8 @@ impl PipeLog for FilePipeLog {
             }
         }
         let start_ptr = buf.as_ptr();
-        buf.consume(FILE_MAGIC_HEADER.len() + VERSION.len());
-        let mut offset = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
+        buf.consume(FILE_MAGIC_HEADER.len() + VERSION_LEN);
+        let mut offset = (FILE_MAGIC_HEADER.len() + VERSION_LEN) as u64;
         loop {
             debug!("recovering log batch at {:?}.{}", file_id, offset);
             let mut log_batch = match LogBatch::from_bytes(&mut buf, file_id, offset) {
@@ -682,10 +688,10 @@ fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
 }
 
 fn write_file_header(fd: RawFd) -> Result<usize> {
-    let len = FILE_MAGIC_HEADER.len() + VERSION.len();
+    let len = FILE_MAGIC_HEADER.len() + VERSION_LEN;
     let mut header = Vec::with_capacity(len);
     header.extend_from_slice(FILE_MAGIC_HEADER);
-    header.extend_from_slice(VERSION);
+    header.encode_u64(VERSION as u64).unwrap();
     pwrite_exact(fd, 0, &header)?;
     Ok(len)
 }
@@ -734,7 +740,7 @@ mod tests {
         assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_NUM.into());
         assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_NUM.into());
 
-        let header_size = (FILE_MAGIC_HEADER.len() + VERSION.len()) as u64;
+        let header_size = (FILE_MAGIC_HEADER.len() + VERSION_LEN) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
@@ -771,7 +777,7 @@ mod tests {
 
         assert_eq!(
             pipe_log.active_log_size(queue),
-            FILE_MAGIC_HEADER.len() + VERSION.len() + 2 * s_content.len()
+            FILE_MAGIC_HEADER.len() + VERSION_LEN + 2 * s_content.len()
         );
 
         let content_readed = pipe_log
@@ -786,15 +792,15 @@ mod tests {
 
         // truncate file
         pipe_log
-            .truncate_active_log(queue, Some(FILE_MAGIC_HEADER.len() + VERSION.len()))
+            .truncate_active_log(queue, Some(FILE_MAGIC_HEADER.len() + VERSION_LEN))
             .unwrap();
         assert_eq!(
             pipe_log.active_log_size(queue,),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
+            FILE_MAGIC_HEADER.len() + VERSION_LEN
         );
         let trunc_big_offset = pipe_log.truncate_active_log(
             queue,
-            Some(FILE_MAGIC_HEADER.len() + VERSION.len() + s_content.len()),
+            Some(FILE_MAGIC_HEADER.len() + VERSION_LEN + s_content.len()),
         );
         assert!(trunc_big_offset.is_err());
 
@@ -815,11 +821,11 @@ mod tests {
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
             pipe_log.active_log_size(queue),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
+            FILE_MAGIC_HEADER.len() + VERSION_LEN
         );
         assert_eq!(
             pipe_log.active_log_capacity(queue),
-            FILE_MAGIC_HEADER.len() + VERSION.len()
+            FILE_MAGIC_HEADER.len() + VERSION_LEN
         );
     }
 
