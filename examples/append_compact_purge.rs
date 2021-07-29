@@ -1,15 +1,18 @@
 use std::convert::TryInto;
 
 use raft::eraftpb::Entry;
-use raft_engine::{Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
+use raft_engine::{Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
 
 #[derive(Clone)]
-struct EntryExtImpl;
-impl EntryExt<Entry> for EntryExtImpl {
-    fn index(entry: &Entry) -> u64 {
-        entry.index
+pub struct MessageExtTyped;
+
+impl MessageExt for MessageExtTyped {
+    type Entry = raft::eraftpb::Entry;
+    type State = kvproto::raft_serverpb::RaftLocalState;
+    fn entry_index(e: &Self::Entry) -> u64 {
+        e.index
     }
 }
 
@@ -22,7 +25,7 @@ fn main() {
     config.dir = "append-compact-purge-data".to_owned();
     config.purge_threshold = ReadableSize::gb(2);
     config.batch_compression_threshold = ReadableSize::kb(0);
-    let engine = RaftLogEngine::<Entry, EntryExtImpl>::open(config).expect("Open raft engine");
+    let engine = RaftLogEngine::<MessageExtTyped>::open(config).expect("Open raft engine");
 
     let compact_offset = 32; // In src/purge.rs, it's the limit for rewrite.
 

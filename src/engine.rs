@@ -13,7 +13,7 @@ use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
 use crate::log_batch::{
-    self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
+    self, Command, CompressionType, LogBatch, LogItemContent, MessageExt, OpType, CHECKSUM_LEN,
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
@@ -107,12 +107,11 @@ impl MemTableAccessor {
     }
 
     // Returns a `LogBatch` containing Clean commands for all the removed MemTables.
-    pub fn take_cleaned_region_logs<E, W>(&self) -> LogBatch<E, W>
+    pub fn take_cleaned_region_logs<M>(&self) -> LogBatch<M>
     where
-        E: Message + Clone,
-        W: EntryExt<E>,
+        M: MessageExt,
     {
-        let mut log_batch = LogBatch::<E, W>::default();
+        let mut log_batch = LogBatch::<M>::default();
         let mut removed_memtables = self.removed_memtables.lock();
         for id in removed_memtables.drain(..) {
             log_batch.clean_region(id);
@@ -133,37 +132,34 @@ impl MemTableAccessor {
 }
 
 #[derive(Clone)]
-pub struct Engine<E, W, P>
+pub struct Engine<M, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
+    M: MessageExt + Clone,
     P: PipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
-    purge_manager: PurgeManager<E, W, P>,
+    purge_manager: PurgeManager<M, P>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 
-    _phantom1: PhantomData<E>,
-    _phantom2: PhantomData<W>,
+    _phantom: PhantomData<M>,
 }
 
-impl<E, W> Engine<E, W, FilePipeLog>
+impl<M> Engine<M, FilePipeLog>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone + 'static,
+    M: MessageExt + Clone,
 {
-    pub fn open(cfg: Config) -> Result<Engine<E, W, FilePipeLog>> {
+    pub fn open(cfg: Config) -> Result<Engine<M, FilePipeLog>> {
         Self::open_with_listeners(cfg, vec![])
     }
 
     fn open_with_listeners(
         cfg: Config,
         mut listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<Engine<E, W, FilePipeLog>> {
+    ) -> Result<Engine<M, FilePipeLog>> {
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
         let global_stats = Arc::new(GlobalStats::default());
@@ -191,8 +187,7 @@ where
             global_stats,
             purge_manager,
             listeners,
-            _phantom1: PhantomData,
-            _phantom2: PhantomData,
+            _phantom: PhantomData,
         };
 
         engine.recover()?;
@@ -200,10 +195,9 @@ where
     }
 }
 
-impl<E, W, P> Engine<E, W, P>
+impl<M, P> Engine<M, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone + 'static,
+    M: MessageExt + Clone,
     P: PipeLog,
 {
     fn recover(&mut self) -> Result<()> {
@@ -270,7 +264,7 @@ where
 
     fn apply_to_memtable(
         memtables: &MemTableAccessor,
-        log_batch: &mut LogBatch<E, W>,
+        log_batch: &mut LogBatch<M>,
         queue: LogQueue,
         file_id: FileId,
     ) {
@@ -341,7 +335,7 @@ where
 
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
+    pub fn write(&self, log_batch: &mut LogBatch<M>, sync: bool) -> Result<usize> {
         if log_batch.items.is_empty() {
             if sync {
                 self.pipe_log.sync(LogQueue::Append)?;
@@ -370,7 +364,7 @@ where
         self.write(&mut log_batch, false).map(|_| ())
     }
 
-    pub fn put_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8], m: &M) -> Result<()> {
+    pub fn put_msg(&self, region_id: u64, key: &[u8], m: &M::State) -> Result<()> {
         let mut log_batch = LogBatch::default();
         log_batch.put_msg(region_id, key.to_vec(), m)?;
         self.write(&mut log_batch, false).map(|_| ())
@@ -381,10 +375,10 @@ where
         Ok(memtable.and_then(|t| t.read().get(key)))
     }
 
-    pub fn get_msg<M: protobuf::Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<M>> {
+    pub fn get_msg(&self, region_id: u64, key: &[u8]) -> Result<Option<M::State>> {
         match self.get(region_id, key)? {
             Some(value) => {
-                let mut m = M::new();
+                let mut m = M::State::new();
                 m.merge_from_bytes(&value)?;
                 Ok(Some(m))
             }
@@ -392,10 +386,10 @@ where
         }
     }
 
-    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<E>> {
+    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<M::Entry>> {
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.read().get_entry(log_idx) {
-                let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?;
+                let entry = read_entry_from_file::<M, _>(&self.pipe_log, &idx)?;
                 return Ok(Some(entry));
             }
         }
@@ -415,7 +409,7 @@ where
         begin: u64,
         end: u64,
         max_size: Option<usize>,
-        vec: &mut Vec<E>,
+        vec: &mut Vec<M::Entry>,
     ) -> Result<usize> {
         if let Some(memtable) = self.memtables.get(region_id) {
             let old_len = vec.len();
@@ -424,7 +418,7 @@ where
                 .read()
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
             for i in ents_idx {
-                vec.push(read_entry_from_file::<_, W, _>(&self.pipe_log, &i)?);
+                vec.push(read_entry_from_file::<M, _>(&self.pipe_log, &i)?);
             }
             return Ok(vec.len() - old_len);
         }
@@ -470,10 +464,9 @@ where
     }
 }
 
-pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex) -> Result<E>
+pub fn read_entry_from_file<M, P>(pipe_log: &P, entry_index: &EntryIndex) -> Result<M::Entry>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
+    M: MessageExt + Clone,
     P: PipeLog,
 {
     let queue = entry_index.queue;
@@ -503,9 +496,9 @@ where
         }
     };
 
-    let mut e = E::new();
+    let mut e = M::Entry::new();
     e.merge_from_bytes(&entry_content)?;
-    assert_eq!(W::index(&e), entry_index.index);
+    assert_eq!(M::entry_index(&e), entry_index.index);
     Ok(e)
 }
 
@@ -515,18 +508,17 @@ mod tests {
     use crate::util::ReadableSize;
     use raft::eraftpb::Entry;
 
-    impl<E, W, P> Engine<E, W, P>
+    impl<M, P> Engine<M, P>
     where
-        E: Message + Clone,
-        W: EntryExt<E> + Clone + 'static,
+        M: MessageExt + Clone,
         P: PipeLog,
     {
-        pub fn purge_manager(&self) -> &PurgeManager<E, W, P> {
+        pub fn purge_manager(&self) -> &PurgeManager<M, P> {
             &self.purge_manager
         }
     }
 
-    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog>;
+    type RaftLogEngine = Engine<Entry, FilePipeLog>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();

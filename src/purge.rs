@@ -11,7 +11,7 @@ use protobuf::Message;
 use crate::config::Config;
 use crate::engine::{read_entry_from_file, MemTableAccessor};
 use crate::event_listener::EventListener;
-use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
+use crate::log_batch::{Command, LogBatch, LogItemContent, MessageExt, OpType};
 use crate::memtable::MemTable;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};
@@ -25,10 +25,9 @@ const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
-pub struct PurgeManager<E, W, P>
+pub struct PurgeManager<M, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
+    M: MessageExt + Clone,
     P: PipeLog,
 {
     cfg: Arc<Config>,
@@ -40,14 +39,12 @@ where
     // Only one thread can run `purge_expired_files` at a time.
     purge_mutex: Arc<Mutex<()>>,
 
-    _phantom1: PhantomData<E>,
-    _phantom2: PhantomData<W>,
+    _phantom: PhantomData<M>,
 }
 
-impl<E, W, P> PurgeManager<E, W, P>
+impl<M, P> PurgeManager<M, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
+    M: MessageExt + Clone,
     P: PipeLog,
 {
     pub fn new(
@@ -56,7 +53,7 @@ where
         pipe_log: P,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
-    ) -> PurgeManager<E, W, P> {
+    ) -> PurgeManager<M, P> {
         PurgeManager {
             cfg,
             memtables,
@@ -64,8 +61,7 @@ where
             global_stats,
             listeners,
             purge_mutex: Arc::new(Mutex::new(())),
-            _phantom1: PhantomData,
-            _phantom2: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -219,7 +215,7 @@ where
         expect_rewrites_per_memtable: usize,
         rewrite: Option<FileId>,
     ) -> Result<()> {
-        let mut log_batch = LogBatch::<E, W>::default();
+        let mut log_batch = LogBatch::<M>::default();
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
@@ -238,7 +234,7 @@ where
             };
 
             for i in entry_indexes {
-                let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &i)?;
+                let entry = read_entry_from_file::<M, _>(&self.pipe_log, &i)?;
                 total_size += entry.compute_size();
                 entries.push(entry);
             }
@@ -258,7 +254,7 @@ where
 
     fn rewrite_impl(
         &self,
-        log_batch: &mut LogBatch<E, W>,
+        log_batch: &mut LogBatch<M>,
         rewrite_watermark: Option<FileId>,
         sync: bool,
     ) -> Result<()> {

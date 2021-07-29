@@ -13,11 +13,10 @@ use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use protobuf::Message;
 
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
+use crate::log_batch::{LogBatch, LogItemContent, MessageExt};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::{Error, Result};
 
@@ -460,12 +459,12 @@ impl PipeLog for FilePipeLog {
         pread_exact(fd.0, offset, len as usize)
     }
 
-    fn read_file_into_log_batch<E: Message, W: EntryExt<E>>(
+    fn read_file_into_log_batch<M: MessageExt>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<E, W>>,
+        batches: &mut Vec<LogBatch<M>>,
     ) -> Result<()> {
         let mut path = PathBuf::from(&self.dir);
         path.push(build_file_name(queue, file_id));
@@ -518,10 +517,10 @@ impl PipeLog for FilePipeLog {
         }
     }
 
-    fn append<E: Message, W: EntryExt<E>>(
+    fn append<M: MessageExt>(
         &self,
         queue: LogQueue,
-        batch: &mut LogBatch<E, W>,
+        batch: &mut LogBatch<M>,
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {

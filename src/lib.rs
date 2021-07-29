@@ -31,9 +31,9 @@ use crate::file_pipe_log::FilePipeLog;
 
 pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
-pub use self::log_batch::{EntryExt, LogBatch};
+pub use self::log_batch::{LogBatch, MessageExt};
 pub use self::util::ReadableSize;
-pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
+pub type RaftLogEngine<X> = self::engine::Engine<X, FilePipeLog>;
 
 #[derive(Default)]
 pub struct GlobalStats {
@@ -61,7 +61,7 @@ impl GlobalStats {
 
 #[cfg(test)]
 mod tests {
-    use crate::log_batch::EntryExt;
+    use crate::log_batch::MessageExt;
     use raft::eraftpb::Entry;
 
     #[ctor::ctor]
@@ -69,9 +69,11 @@ mod tests {
         env_logger::init();
     }
 
-    impl EntryExt<Entry> for Entry {
-        fn index(e: &Entry) -> u64 {
-            e.get_index()
+    impl MessageExt for Entry {
+        type Entry = Entry;
+        type State = kvproto::raft_serverpb::RaftLocalState;
+        fn entry_index(e: &Self::Entry) -> u64 {
+            e.index
         }
     }
 }

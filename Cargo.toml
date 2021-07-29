@@ -28,6 +28,7 @@ thiserror = "1.0"
 [dev-dependencies]
 ctor = "0.1"
 env_logger = "0.7"
+kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 rand = "0.7"
 rand_distr = "0.3"
@@ -35,7 +36,9 @@ tempfile = "3.1"
 toml = "0.5"
 
 [patch.crates-io]
+raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
+protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
 
 [[example]]
 name = "append-compact-purge"
