@@ -240,7 +240,7 @@ where
             }
             log_batch.add_entries(region_id, entries);
             for (k, v) in kvs {
-                log_batch.put(region_id, k, v);
+                log_batch.put(region_id, k, v)?;
             }
 
             let target_file_size = self.cfg.target_file_size.0 as usize;

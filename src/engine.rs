@@ -114,7 +114,7 @@ impl MemTableAccessor {
         let mut log_batch = LogBatch::<M>::default();
         let mut removed_memtables = self.removed_memtables.lock();
         for id in removed_memtables.drain(..) {
-            log_batch.clean_region(id);
+            log_batch.add_command(id, Command::Clean);
         }
         log_batch
     }
@@ -358,32 +358,21 @@ where
         self.pipe_log.sync(LogQueue::Append)
     }
 
-    pub fn put(&self, region_id: u64, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put_state(&self, region_id: u64, key: &[u8], m: &M::State) -> Result<()> {
         let mut log_batch = LogBatch::default();
-        log_batch.put(region_id, key.to_vec(), value.to_vec());
+        log_batch.put_state(region_id, key.to_vec(), m)?;
         self.write(&mut log_batch, false).map(|_| ())
     }
 
-    pub fn put_msg(&self, region_id: u64, key: &[u8], m: &M::State) -> Result<()> {
-        let mut log_batch = LogBatch::default();
-        log_batch.put_msg(region_id, key.to_vec(), m)?;
-        self.write(&mut log_batch, false).map(|_| ())
-    }
-
-    pub fn get(&self, region_id: u64, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let memtable = self.memtables.get(region_id);
-        Ok(memtable.and_then(|t| t.read().get(key)))
-    }
-
-    pub fn get_msg(&self, region_id: u64, key: &[u8]) -> Result<Option<M::State>> {
-        match self.get(region_id, key)? {
-            Some(value) => {
+    pub fn get_state(&self, region_id: u64, key: &[u8]) -> Result<Option<M::State>> {
+        if let Some(memtable) = self.memtables.get(region_id) {
+            if let Some(value) = memtable.read().get(key) {
                 let mut m = M::State::new();
                 m.merge_from_bytes(&value)?;
-                Ok(Some(m))
+                return Ok(Some(m));
             }
-            None => Ok(None),
         }
+        Ok(None)
     }
 
     pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<M::Entry>> {
@@ -506,6 +495,7 @@ where
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
+    use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
     impl<M, P> Engine<M, P>
@@ -530,14 +520,25 @@ mod tests {
     fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
         let mut log_batch = LogBatch::default();
         log_batch.add_entries(raft, vec![entry.clone()]);
-        let last_index = format!("{}", entry.index).into_bytes();
-        log_batch.put(raft, b"last_index".to_vec(), last_index);
+        log_batch
+            .put_state(
+                raft,
+                b"last_index".to_vec(),
+                &RaftLocalState {
+                    last_index: entry.index,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         engine.write(&mut log_batch, false).unwrap();
     }
 
     fn last_index(engine: &RaftLogEngine, raft: u64) -> u64 {
-        let s = engine.get(raft, b"last_index").unwrap().unwrap();
-        std::str::from_utf8(&s).unwrap().parse().unwrap()
+        engine
+            .get_state(raft, b"last_index")
+            .unwrap()
+            .unwrap()
+            .last_index
     }
 
     #[test]
@@ -557,7 +558,7 @@ mod tests {
         assert!(engine.memtables.get(1).is_some());
 
         let mut log_batch = LogBatch::default();
-        log_batch.clean_region(1);
+        log_batch.add_command(1, Command::Clean);
         engine.write(&mut log_batch, false).unwrap();
         assert!(engine.memtables.get(1).is_none());
     }
@@ -778,7 +779,7 @@ mod tests {
             append_log(&engine, 1, &entry);
         }
         let mut log_batch = LogBatch::with_capacity(1);
-        log_batch.clean_region(1);
+        log_batch.add_command(1, Command::Clean);
         engine.write(&mut log_batch, false).unwrap();
         assert!(engine.memtables.get(1).is_none());
 
@@ -820,7 +821,7 @@ mod tests {
 
         // Clean the raft group again.
         let mut log_batch = LogBatch::with_capacity(1);
-        log_batch.clean_region(1);
+        log_batch.add_command(1, Command::Clean);
         engine.write(&mut log_batch, false).unwrap();
         assert!(engine.memtables.get(1).is_none());
 

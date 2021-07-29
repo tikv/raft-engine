@@ -1,5 +1,4 @@
-use std::convert::TryInto;
-
+use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 use raft_engine::{Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};
 use rand::thread_rng;
@@ -9,8 +8,8 @@ use rand_distr::{Distribution, Normal};
 pub struct MessageExtTyped;
 
 impl MessageExt for MessageExtTyped {
-    type Entry = raft::eraftpb::Entry;
-    type State = kvproto::raft_serverpb::RaftLocalState;
+    type Entry = Entry;
+    type State = RaftLocalState;
     fn entry_index(e: &Self::Entry) -> u64 {
         e.index
     }
@@ -41,36 +40,43 @@ fn main() {
     let mut batch = LogBatch::with_capacity(256);
     let mut entry = Entry::new();
     entry.set_data(vec![b'x'; 1024 * 32].into());
+    let init_state = RaftLocalState {
+        last_index: 0,
+        ..Default::default()
+    };
     loop {
         for _ in 0..1024 {
             let region = rand_regions.next().unwrap();
-            let index = match engine.get(region, b"last_index").unwrap() {
-                Some(value) => u64::from_le_bytes(value.try_into().unwrap()) + 1,
-                None => 1,
-            };
+            let state = engine
+                .get_state(region, b"last_index")
+                .unwrap()
+                .unwrap_or(init_state.clone());
 
             let mut e = entry.clone();
-            e.index = index;
+            e.index = state.last_index + 1;
             batch.add_entries(region, vec![e; 1]);
-            batch.put(region, b"last_index".to_vec(), index.to_le_bytes().to_vec());
+            batch
+                .put_state(region, b"last_index".to_vec(), &state)
+                .unwrap();
             engine.write(&mut batch, false).unwrap();
 
-            if index % compact_offset == 0 {
+            if state.last_index % compact_offset == 0 {
                 let rand_compact_offset = rand_compacts.next().unwrap();
-                if index > rand_compact_offset {
-                    let compact_to = index - rand_compact_offset;
+                if state.last_index > rand_compact_offset {
+                    let compact_to = state.last_index - rand_compact_offset;
                     engine.compact_to(region, compact_to);
                     println!("[EXAMPLE] compact {} to {}", region, compact_to);
                 }
             }
         }
         for region in engine.purge_expired_files().unwrap() {
-            let index = match engine.get(region, b"last_index").unwrap() {
-                Some(value) => u64::from_le_bytes(value.try_into().unwrap()) + 1,
-                None => unreachable!(),
-            };
-            engine.compact_to(region, index - 8);
-            println!("[EXAMPLE] force compact {} to {}", region, index - 8);
+            let state = engine.get_state(region, b"last_index").unwrap().unwrap();
+            engine.compact_to(region, state.last_index - 7);
+            println!(
+                "[EXAMPLE] force compact {} to {}",
+                region,
+                state.last_index - 7
+            );
         }
     }
 }

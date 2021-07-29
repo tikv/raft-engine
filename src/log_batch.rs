@@ -406,28 +406,27 @@ where
         self.items.push(item);
     }
 
-    pub fn clean_region(&mut self, region_id: u64) {
-        self.add_command(region_id, Command::Clean);
-    }
-
     pub fn add_command(&mut self, region_id: u64, cmd: Command) {
         let item = LogItem::from_command(region_id, cmd);
         self.items.push(item);
     }
 
-    pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
+    pub fn delete_state(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Del, key, None);
         self.items.push(item);
     }
 
-    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
+    pub fn put_state(&mut self, region_id: u64, key: Vec<u8>, m: &M::State) -> Result<()> {
+        let value = m.write_to_bytes()?;
         let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
         self.items.push(item);
+        Ok(())
     }
 
-    pub fn put_msg(&mut self, region_id: u64, key: Vec<u8>, m: &M::State) -> Result<()> {
-        let value = m.write_to_bytes()?;
-        self.put(region_id, key, value);
+    // Only used for rewrite
+    pub(crate) fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
+        self.items.push(item);
         Ok(())
     }
 
@@ -635,8 +634,10 @@ mod tests {
         entry.set_data(vec![b'x'; 1024].into());
         batch.add_entries(region_id, vec![entry; 10]);
         batch.add_command(region_id, Command::Clean);
-        batch.put(region_id, b"key".to_vec(), b"value".to_vec());
-        batch.delete(region_id, b"key2".to_vec());
+        batch
+            .put(region_id, b"key".to_vec(), b"value".to_vec())
+            .unwrap();
+        batch.delete_state(region_id, b"key2".to_vec());
 
         let encoded = batch.encode_to_bytes(0).unwrap();
         let mut s = encoded.as_slice();
