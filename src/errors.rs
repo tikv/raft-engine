@@ -27,6 +27,10 @@ pub enum Error {
     StorageUnavailable,
     #[error("The entry acquired has been compacted")]
     StorageCompacted,
+    #[error("Unrecognized log file version: {0}")]
+    UnrecognizedLogFileVersion(u64),
+    #[error("Unrecognized log file magic header")]
+    UnrecognizedLogFileMagicHeader,
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;

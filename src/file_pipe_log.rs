@@ -15,7 +15,7 @@ use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
 use protobuf::Message;
 
-use crate::codec::NumberEncoder;
+use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
@@ -40,13 +40,33 @@ const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
 pub enum Version {
     V1 = 1,
 }
-pub const VERSION: Version = Version::V1;
-pub const VERSION_LEN: usize = 8;
 
-pub struct LogFd(RawFd);
+impl Version {
+    fn current() -> Self {
+        Self::V1
+    }
+
+    fn len() -> usize {
+        8
+    }
+
+    fn as_u64(&self) -> u64 {
+        *self as u64
+    }
+
+    fn from_u64(v: u64) -> Result<Self> {
+        match v {
+            1 => Ok(Self::V1),
+            _ => Err(Error::UnrecognizedLogFileVersion(v)),
+        }
+    }
+}
+
+pub struct LogFd(RawFd, Version);
 
 impl LogFd {
     fn close(&self) -> Result<()> {
@@ -114,7 +134,7 @@ impl LogManager {
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
                 path.push(file_name);
-                let fd = Arc::new(LogFd(open_frozen_file(&path)?));
+                let fd = Arc::new(open_frozen_file(&path)?);
                 self.all_files.push_back(fd);
                 for listener in &self.listeners {
                     listener.post_new_log_file(queue, self.first_file_id.forward(i));
@@ -123,7 +143,7 @@ impl LogManager {
 
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
-            let fd = Arc::new(LogFd(open_active_file(&path)?));
+            let fd = Arc::new(open_active_file(&path)?);
             fd.sync()?;
 
             self.active_log_size = file_size(fd.0)?;
@@ -150,8 +170,8 @@ impl LogManager {
 
         let mut path = PathBuf::from(&self.dir);
         path.push(generate_file_name(self.active_file_id, self.name_suffix));
-        let fd = Arc::new(LogFd(open_active_file(&path)?));
-        let bytes = write_file_header(fd.0)?;
+        let (fd, bytes) = create_active_file(&path)?;
+        let fd = Arc::new(fd);
 
         self.active_log_size = bytes;
         self.active_log_capacity = bytes;
@@ -181,7 +201,7 @@ impl LogManager {
         }
         let active_fd = self.get_active_fd().unwrap();
         ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
-        if offset < FILE_MAGIC_HEADER.len() + VERSION_LEN {
+        if offset < FILE_MAGIC_HEADER.len() + Version::len() {
             // After truncate to 0, write header is necessary.
             offset = write_file_header(active_fd.0)?;
         }
@@ -476,18 +496,9 @@ impl PipeLog for FilePipeLog {
     ) -> Result<()> {
         let content = self.read_file_bytes(queue, file_id)?;
         let mut buf = content.as_slice();
-        if !buf.starts_with(FILE_MAGIC_HEADER) {
-            if self.active_file_id(queue) == file_id {
-                warn!("Raft log header is corrupted at {:?}.{:?}", queue, file_id);
-                return Err(box_err!("Raft log file header is corrupted"));
-            } else {
-                self.truncate_active_log(queue, Some(0))?;
-                return Ok(());
-            }
-        }
         let start_ptr = buf.as_ptr();
-        buf.consume(FILE_MAGIC_HEADER.len() + VERSION_LEN);
-        let mut offset = (FILE_MAGIC_HEADER.len() + VERSION_LEN) as u64;
+        buf.consume(FILE_MAGIC_HEADER.len() + Version::len());
+        let mut offset = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
         loop {
             debug!("recovering log batch at {:?}.{}", file_id, offset);
             let mut log_batch = match LogBatch::from_bytes(&mut buf, file_id, offset) {
@@ -640,16 +651,44 @@ fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
     }
 }
 
-fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
+    let raw = open_active_file_raw(path)?;
+    Ok(LogFd(raw, check_version(raw)?))
+}
+
+fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
+    let raw = open_frozen_file_raw(path)?;
+    Ok(LogFd(raw, check_version(raw)?))
+}
+
+fn create_active_file<P: ?Sized + NixPath>(path: &P) -> Result<(LogFd, usize)> {
+    let raw = open_active_file_raw(path)?;
+    let bytes = write_file_header(raw)?;
+    Ok((LogFd(raw, Version::current()), bytes))
+}
+
+fn open_active_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDWR | OFlag::O_CREAT;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
     fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_active_file"))
 }
 
-fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+fn open_frozen_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDONLY;
     let mode = Mode::S_IRWXU;
     fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_frozen_file"))
+}
+
+fn check_version(fd: RawFd) -> Result<Version> {
+    if file_size(fd)? < FILE_MAGIC_HEADER.len() + Version::len() {
+        return Err(Error::TooShort);
+    }
+    let buf = pread_exact(fd, 0, FILE_MAGIC_HEADER.len() + Version::len())?;
+    if !buf.starts_with(FILE_MAGIC_HEADER) {
+        return Err(Error::UnrecognizedLogFileMagicHeader);
+    }
+    let v = codec::decode_u64(&mut &buf[FILE_MAGIC_HEADER.len()..])?;
+    Version::from_u64(v)
 }
 
 fn file_size(fd: RawFd) -> Result<usize> {
@@ -688,10 +727,10 @@ fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
 }
 
 fn write_file_header(fd: RawFd) -> Result<usize> {
-    let len = FILE_MAGIC_HEADER.len() + VERSION_LEN;
+    let len = FILE_MAGIC_HEADER.len() + Version::len();
     let mut header = Vec::with_capacity(len);
     header.extend_from_slice(FILE_MAGIC_HEADER);
-    header.encode_u64(VERSION as u64).unwrap();
+    header.encode_u64(Version::current().as_u64()).unwrap();
     pwrite_exact(fd, 0, &header)?;
     Ok(len)
 }
@@ -740,7 +779,7 @@ mod tests {
         assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_NUM.into());
         assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_NUM.into());
 
-        let header_size = (FILE_MAGIC_HEADER.len() + VERSION_LEN) as u64;
+        let header_size = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
@@ -777,7 +816,7 @@ mod tests {
 
         assert_eq!(
             pipe_log.active_log_size(queue),
-            FILE_MAGIC_HEADER.len() + VERSION_LEN + 2 * s_content.len()
+            FILE_MAGIC_HEADER.len() + Version::len() + 2 * s_content.len()
         );
 
         let content_readed = pipe_log
@@ -792,15 +831,15 @@ mod tests {
 
         // truncate file
         pipe_log
-            .truncate_active_log(queue, Some(FILE_MAGIC_HEADER.len() + VERSION_LEN))
+            .truncate_active_log(queue, Some(FILE_MAGIC_HEADER.len() + Version::len()))
             .unwrap();
         assert_eq!(
             pipe_log.active_log_size(queue,),
-            FILE_MAGIC_HEADER.len() + VERSION_LEN
+            FILE_MAGIC_HEADER.len() + Version::len()
         );
         let trunc_big_offset = pipe_log.truncate_active_log(
             queue,
-            Some(FILE_MAGIC_HEADER.len() + VERSION_LEN + s_content.len()),
+            Some(FILE_MAGIC_HEADER.len() + Version::len() + s_content.len()),
         );
         assert!(trunc_big_offset.is_err());
 
@@ -821,11 +860,11 @@ mod tests {
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
             pipe_log.active_log_size(queue),
-            FILE_MAGIC_HEADER.len() + VERSION_LEN
+            FILE_MAGIC_HEADER.len() + Version::len()
         );
         assert_eq!(
             pipe_log.active_log_capacity(queue),
-            FILE_MAGIC_HEADER.len() + VERSION_LEN
+            FILE_MAGIC_HEADER.len() + Version::len()
         );
     }
 
