@@ -134,7 +134,7 @@ impl LogManager {
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
                 path.push(file_name);
-                let fd = Arc::new(LogFd(open_file_readonly(&path)?));
+                let fd = Arc::new(LogFd(open_file_for_read(&path)?));
                 self.all_files.push_back(fd);
                 for listener in &self.listeners {
                     listener.post_new_log_file(self.queue, self.first_file_id.forward(i));
@@ -143,7 +143,7 @@ impl LogManager {
 
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
-            let fd = Arc::new(LogFd(open_file(&path)?));
+            let fd = Arc::new(LogFd(create_file(&path)?));
             fd.sync()?;
 
             self.active_log_size = file_size(fd.0)?;
@@ -170,7 +170,7 @@ impl LogManager {
 
         let mut path = PathBuf::from(&self.dir);
         path.push(build_file_name(self.queue, self.active_file_id));
-        let fd = Arc::new(LogFd(open_file(&path)?));
+        let fd = Arc::new(LogFd(create_file(&path)?));
         let bytes = write_file_header(fd.0)?;
 
         self.active_log_size = bytes;
@@ -602,16 +602,16 @@ fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
     }
 }
 
-fn open_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+fn create_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDWR | OFlag::O_CREAT;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
-    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_file"))
+    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "create_file"))
 }
 
-fn open_file_readonly<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
+fn open_file_for_read<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDONLY;
     let mode = Mode::S_IRWXU;
-    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_file_readonly"))
+    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_file_for_read"))
 }
 
 fn file_size(fd: RawFd) -> Result<usize> {
