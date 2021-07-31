@@ -742,6 +742,8 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use tempfile::Builder;
 
     use super::*;
@@ -881,5 +883,42 @@ mod tests {
     #[test]
     fn test_pipe_log_rewrite() {
         test_pipe_log_impl(LogQueue::Rewrite)
+    }
+
+    fn test_write_tmp_file(buf: &[u8]) -> RawFd {
+        let dir = Builder::new().prefix("test_pipe_log").tempfile().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let flags = OFlag::O_RDWR | OFlag::O_CREAT;
+        let mode = Mode::S_IRUSR | Mode::S_IWUSR;
+        let fd = fcntl::open(path, flags, mode)
+            .map_err(|e| parse_nix_error(e, "open_active_file"))
+            .unwrap();
+        pwrite(fd, buf, 0).unwrap();
+        fd
+    }
+
+    #[test]
+    fn test_check_version() {
+        // magic header corruption
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        buf.write(b"RAFT-LOG-FILE-HEADER-********************************")
+            .unwrap();
+        buf.encode_u64(Version::current().as_u64()).unwrap();
+        let fd = test_write_tmp_file(&buf);
+        assert!(check_version(fd).is_err());
+
+        // unrecognized version
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        buf.write(FILE_MAGIC_HEADER).unwrap();
+        buf.encode_u64(u64::MAX).unwrap();
+        let fd = test_write_tmp_file(&buf);
+        assert!(check_version(fd).is_err());
+
+        // correct
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        buf.write(FILE_MAGIC_HEADER).unwrap();
+        buf.encode_u64(Version::current().as_u64()).unwrap();
+        let fd = test_write_tmp_file(&buf);
+        assert!(check_version(fd).is_ok());
     }
 }
