@@ -58,15 +58,15 @@ impl Version {
         *self as u64
     }
 
-    fn from_u64(v: u64) -> Result<Self> {
+    fn from_u64(v: u64) -> Option<Self> {
         match v {
-            1 => Ok(Self::V1),
-            _ => Err(Error::UnrecognizedLogFileVersion(v)),
+            1 => Some(Self::V1),
+            _ => None,
         }
     }
 }
 
-pub struct LogFd(RawFd, Version);
+pub struct LogFd(RawFd);
 
 impl LogFd {
     fn close(&self) -> Result<()> {
@@ -368,12 +368,12 @@ impl FilePipeLog {
             );
         }
         if log_files.len() != max_file_id.step_after(&min_file_id).unwrap() + 1 {
-            return Err(box_err!("Corruption occurs on log files"));
+            return Err(box_corruption!("Corruption occurs on log files"));
         }
         if !rewrite_files.is_empty()
             && rewrite_files.len() != max_rewrite_num.step_after(&min_rewrite_num).unwrap() + 1
         {
-            return Err(box_err!("Corruption occurs on rewrite files"));
+            return Err(box_corruption!("Corruption occurs on rewrite files"));
         }
 
         pipe_log
@@ -518,7 +518,7 @@ impl PipeLog for FilePipeLog {
                         self.truncate_active_log(queue, Some(offset as usize))?;
                         return Ok(());
                     } else {
-                        return Err(box_err!("Raft log content is corrupted"));
+                        return Err(box_corruption!("Raft log content is corrupted"));
                     }
                 }
             };
@@ -653,18 +653,20 @@ fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
 
 fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
     let raw = open_active_file_raw(path)?;
-    Ok(LogFd(raw, check_version(raw)?))
+    check_version(raw)?;
+    Ok(LogFd(raw))
 }
 
 fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
     let raw = open_frozen_file_raw(path)?;
-    Ok(LogFd(raw, check_version(raw)?))
+    check_version(raw)?;
+    Ok(LogFd(raw))
 }
 
 fn create_active_file<P: ?Sized + NixPath>(path: &P) -> Result<(LogFd, usize)> {
     let raw = open_active_file_raw(path)?;
     let bytes = write_file_header(raw)?;
-    Ok((LogFd(raw, Version::current()), bytes))
+    Ok((LogFd(raw), bytes))
 }
 
 fn open_active_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
@@ -681,14 +683,17 @@ fn open_frozen_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
 
 fn check_version(fd: RawFd) -> Result<Version> {
     if file_size(fd)? < FILE_MAGIC_HEADER.len() + Version::len() {
-        return Err(Error::TooShort);
+        return Err(box_corruption!("log file too short"));
     }
     let buf = pread_exact(fd, 0, FILE_MAGIC_HEADER.len() + Version::len())?;
     if !buf.starts_with(FILE_MAGIC_HEADER) {
-        return Err(Error::UnrecognizedLogFileMagicHeader);
+        return Err(box_corruption!("log file magic header mismatch"));
     }
     let v = codec::decode_u64(&mut &buf[FILE_MAGIC_HEADER.len()..])?;
-    Version::from_u64(v)
+    match Version::from_u64(v) {
+        Some(v) => Ok(v),
+        None => Err(box_corruption!("unrecognized log file version: {}", v)),
+    }
 }
 
 fn file_size(fd: RawFd) -> Result<usize> {

@@ -1,9 +1,19 @@
 use std::error;
+use std::fmt::Display;
 use std::io::Error as IoError;
 
 use thiserror::Error;
 
 use crate::codec::Error as CodecError;
+
+#[derive(Debug, Error)]
+pub struct Corruption(pub Box<dyn error::Error + Send + Sync>);
+
+impl Display for Corruption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -27,10 +37,8 @@ pub enum Error {
     StorageUnavailable,
     #[error("The entry acquired has been compacted")]
     StorageCompacted,
-    #[error("Unrecognized log file version: {0}")]
-    UnrecognizedLogFileVersion(u64),
-    #[error("Unrecognized log file magic header")]
-    UnrecognizedLogFileMagicHeader,
+    #[error("Corruption: {0}")]
+    Corruption(#[from] Corruption),
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;

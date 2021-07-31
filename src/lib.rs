@@ -14,6 +14,16 @@ macro_rules! box_err {
     });
 }
 
+macro_rules! box_corruption {
+    ($e:expr) => {{
+        use crate::errors::Corruption;
+        Corruption(box_err!($e)).into()
+    }};
+    ($f:tt, $($arg:expr),+) => ({
+        box_corruption!(format!($f, $($arg),+))
+    });
+}
+
 pub mod codec;
 
 mod config;
