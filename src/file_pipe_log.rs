@@ -388,6 +388,7 @@ impl FilePipeLog {
         Ok(pipe_log)
     }
 
+    // TODO: use `LogFd` for reading file bytes instead of `std::fs`
     fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
         let mut path = PathBuf::from(&self.dir);
         path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
