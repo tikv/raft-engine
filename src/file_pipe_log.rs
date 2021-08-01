@@ -368,12 +368,16 @@ impl FilePipeLog {
             );
         }
         if log_files.len() != max_file_id.step_after(&min_file_id).unwrap() + 1 {
-            return Err(box_corruption!("Corruption occurs on log files"));
+            return Err(Error::Corruption(
+                "Corruption occurs on log files".to_owned(),
+            ));
         }
         if !rewrite_files.is_empty()
             && rewrite_files.len() != max_rewrite_num.step_after(&min_rewrite_num).unwrap() + 1
         {
-            return Err(box_corruption!("Corruption occurs on rewrite files"));
+            return Err(Error::Corruption(
+                "Corruption occurs on rewrite files".to_owned(),
+            ));
         }
 
         pipe_log
@@ -519,7 +523,9 @@ impl PipeLog for FilePipeLog {
                         self.truncate_active_log(queue, Some(offset as usize))?;
                         return Ok(());
                     } else {
-                        return Err(box_corruption!("Raft log content is corrupted"));
+                        return Err(Error::Corruption(
+                            "Raft log content is corrupted".to_owned(),
+                        ));
                     }
                 }
             };
@@ -684,16 +690,21 @@ fn open_frozen_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
 
 fn check_version(fd: RawFd) -> Result<Version> {
     if file_size(fd)? < FILE_MAGIC_HEADER.len() + Version::len() {
-        return Err(box_corruption!("log file too short"));
+        return Err(Error::Corruption("log file too short".to_owned()));
     }
     let buf = pread_exact(fd, 0, FILE_MAGIC_HEADER.len() + Version::len())?;
     if !buf.starts_with(FILE_MAGIC_HEADER) {
-        return Err(box_corruption!("log file magic header mismatch"));
+        return Err(Error::Corruption(
+            "log file magic header mismatch".to_owned(),
+        ));
     }
     let v = codec::decode_u64(&mut &buf[FILE_MAGIC_HEADER.len()..])?;
     match Version::from_u64(v) {
         Some(v) => Ok(v),
-        None => Err(box_corruption!("unrecognized log file version: {}", v)),
+        None => Err(Error::Corruption(format!(
+            "unrecognized log file version: {}",
+            v
+        ))),
     }
 }
 
