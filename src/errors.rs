@@ -27,6 +27,8 @@ pub enum Error {
     StorageUnavailable,
     #[error("The entry acquired has been compacted")]
     StorageCompacted,
+    #[error("Corruption: {0}")]
+    Corruption(String),
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;
