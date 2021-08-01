@@ -115,13 +115,13 @@ impl CompressionType {
     }
 }
 
-type SliceReader<'a> = &'a [u8];
+pub type SliceReader<'a> = &'a [u8];
 
 pub trait EntryExt<M: Message>: Send + Sync {
     fn index(m: &M) -> u64;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Entries<E>
 where
     E: Message,
@@ -233,7 +233,7 @@ impl<E: Message> Entries<E> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Clean,
     Compact { index: u64 },
@@ -282,7 +282,7 @@ impl OpType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeyValue {
     pub op_type: OpType,
     pub key: Vec<u8>,
@@ -334,7 +334,7 @@ impl KeyValue {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogItem<E>
 where
     E: Message,
@@ -343,7 +343,7 @@ where
     pub content: LogItemContent<E>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LogItemContent<E>
 where
     E: Message,
@@ -446,7 +446,7 @@ impl<E: Message> LogItem<E> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogBatch<E, W>
 where
     E: Message,

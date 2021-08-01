@@ -25,9 +25,9 @@ const REWRITE_BATCH_SIZE: usize = 1024 * 1024;
 #[derive(Clone)]
 pub struct PurgeManager<E, W, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
-    P: PipeLog,
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+    P: PipeLog<E, W>,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
@@ -41,9 +41,9 @@ where
 
 impl<E, W, P> PurgeManager<E, W, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
-    P: PipeLog,
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+    P: PipeLog<E, W>,
 {
     pub fn new(
         cfg: Arc<Config>,

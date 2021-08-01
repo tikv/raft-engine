@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{mem, u64};
 
 use log::{debug, info, trace};
@@ -9,6 +9,7 @@ use protobuf::Message;
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
+use crate::hint::{HintManager, HintTask, Runner as HintRunner};
 use crate::log_batch::{
     self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
     HEADER_LEN,
@@ -16,7 +17,7 @@ use crate::log_batch::{
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::{HandyRwLock, HashMap};
+use crate::util::{HandyRwLock, HashMap, Worker};
 use crate::{codec, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -137,9 +138,9 @@ where
 #[derive(Clone)]
 pub struct Engine<E, W, P>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
-    P: PipeLog,
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+    P: PipeLog<E, W>,
 {
     cfg: Arc<Config>,
     pub(crate) memtables: MemTableAccessor<E, W>,
@@ -147,16 +148,16 @@ where
     global_stats: Arc<GlobalStats>,
     purge_manager: PurgeManager<E, W, P>,
 
-    workers: Arc<RwLock<Workers>>,
+    workers: Arc<RwLock<Workers<E, W>>>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 }
 
 impl<E, W, P> Engine<E, W, P>
 where
-    E: Message + Clone,
+    E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog,
+    P: PipeLog<E, W>,
 {
     fn apply_to_memtable(
         memtables: &MemTableAccessor<E, W>,
@@ -248,7 +249,13 @@ where
     }
 }
 
-struct Workers {}
+struct Workers<E, W>
+where
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+{
+    hint_worker: Worker<HintTask<E, W>>,
+}
 
 // An internal structure for tests.
 struct EngineOptions {
@@ -261,22 +268,32 @@ impl Default for EngineOptions {
     }
 }
 
-impl<E, W> Engine<E, W, FilePipeLog>
+impl<E, W> Engine<E, W, FilePipeLog<E, W>>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone + 'static,
 {
-    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog> {
+    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog<E, W>> {
         let options = Default::default();
         Self::with_options(cfg, options).unwrap()
     }
 
-    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
+    fn with_options(
+        cfg: Config,
+        mut options: EngineOptions,
+    ) -> Result<Engine<E, W, FilePipeLog<E, W>>> {
         let global_stats = Arc::new(GlobalStats::default());
 
         let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener>];
         listeners.extend(options.listeners.drain(..));
-        let pipe_log = FilePipeLog::open(&cfg, listeners.clone()).expect("Open raft log");
+
+        let mut hint_worker = Worker::new("hint_worker".to_owned());
+        let hint_runner = HintRunner::new();
+        let hint_manager = HintManager::new(hint_worker.scheduler());
+        hint_worker.start(hint_runner, Some(Duration::from_secs(1)));
+
+        let pipe_log =
+            FilePipeLog::open(&cfg, hint_manager, listeners.clone()).expect("Open raft log");
 
         let memtables = {
             let stats = global_stats.clone();
@@ -298,7 +315,7 @@ where
             pipe_log,
             global_stats,
             purge_manager,
-            workers: Arc::new(RwLock::new(Workers {})),
+            workers: Arc::new(RwLock::new(Workers { hint_worker })),
             listeners,
         };
 
@@ -339,7 +356,7 @@ where
     // Recover from disk.
     fn recover(
         memtables: &mut MemTableAccessor<E, W>,
-        pipe_log: &mut FilePipeLog,
+        pipe_log: &mut FilePipeLog<E, W>,
         queue: LogQueue,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -366,9 +383,9 @@ where
 
 impl<E, W, P> Engine<E, W, P>
 where
-    E: Message + Clone,
+    E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog + 'static,
+    P: PipeLog<E, W> + 'static,
 {
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
@@ -493,9 +510,9 @@ pub fn fetch_entries<E, W, P, F>(
     mut fetch: F,
 ) -> Result<()>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
-    P: PipeLog,
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+    P: PipeLog<E, W>,
     F: FnMut(&MemTable<E, W>, &mut Vec<EntryIndex>) -> Result<()>,
 {
     let mut ents_idx = Vec::with_capacity(count);
@@ -509,9 +526,9 @@ where
 
 pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex) -> Result<E>
 where
-    E: Message + Clone,
-    W: EntryExt<E> + Clone,
-    P: PipeLog,
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+    P: PipeLog<E, W>,
 {
     let queue = entry_index.queue;
     let file_id = entry_index.file_id;
@@ -554,16 +571,16 @@ mod tests {
 
     impl<E, W, P> Engine<E, W, P>
     where
-        E: Message + Clone,
+        E: Message + Clone + 'static,
         W: EntryExt<E> + Clone + 'static,
-        P: PipeLog,
+        P: PipeLog<E, W>,
     {
         pub fn purge_manager(&self) -> &PurgeManager<E, W, P> {
             &self.purge_manager
         }
     }
 
-    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog>;
+    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog<Entry, Entry>>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();

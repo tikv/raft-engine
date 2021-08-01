@@ -21,6 +21,7 @@ mod engine;
 mod errors;
 mod event_listener;
 mod file_pipe_log;
+mod hint;
 mod log_batch;
 mod memtable;
 mod pipe_log;
@@ -33,7 +34,7 @@ pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
 pub use self::util::ReadableSize;
-pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
+pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog<X, Y>>;
 
 #[derive(Default)]
 pub struct GlobalStats {

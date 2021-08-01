@@ -5,7 +5,8 @@ use std::{cmp, u64};
 
 use protobuf::Message;
 
-use crate::log_batch::{CompressionType, EntryExt};
+use crate::codec::{self, NumberEncoder};
+use crate::log_batch::{CompressionType, EntryExt, SliceReader};
 use crate::pipe_log::{FileId, LogQueue};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, GlobalStats, Result};
@@ -41,6 +42,37 @@ impl Default for EntryIndex {
             offset: 0,
             len: 0,
         }
+    }
+}
+
+impl EntryIndex {
+    pub fn encode_to_bytes(&self, buf: &mut Vec<u8>) {
+        buf.encode_u64(self.index).unwrap();
+        buf.encode_u64(self.base_offset).unwrap();
+        buf.encode_u64(self.batch_len).unwrap();
+        buf.encode_u64(self.offset).unwrap();
+        buf.encode_u64(self.len << 8 | self.compression_type.to_byte() as u64)
+            .unwrap();
+    }
+
+    pub fn from_bytes(buf: &mut SliceReader<'_>, file_id: FileId, queue: LogQueue) -> Result<Self> {
+        let index = codec::decode_u64(buf)?;
+        let base_offset = codec::decode_u64(buf)?;
+        let batch_len = codec::decode_u64(buf)?;
+        let offset = codec::decode_u64(buf)?;
+        let len = codec::decode_u64(buf)?;
+        let compression_type = CompressionType::from_byte(len as u8);
+        let len = len >> 8;
+        Ok(EntryIndex {
+            index,
+            queue,
+            file_id,
+            base_offset,
+            compression_type,
+            batch_len,
+            offset,
+            len,
+        })
     }
 }
 
@@ -513,9 +545,11 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_pipe_log::FilePipeLog;
+    use crate::file_pipe_log::FilePipeLog as RawFilePipeLog;
     use crate::pipe_log::PipeLog;
     use raft::eraftpb::Entry;
+
+    type FilePipeLog = RawFilePipeLog<Entry, Entry>;
 
     impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         pub fn max_file_id(&self, queue: LogQueue) -> Option<FileId> {
@@ -981,7 +1015,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
     }
 
-    fn generate_ents<P: PipeLog>(
+    fn generate_ents<P: PipeLog<Entry, Entry>>(
         begin_idx: u64,
         end_idx: u64,
         queue: LogQueue,
