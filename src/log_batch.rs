@@ -400,7 +400,7 @@ impl<M: MessageExt> LogBatch<M> {
     }
 
     pub fn put_state(&mut self, region_id: u64, key: Vec<u8>, s: M::State) -> Result<()> {
-        let item = LogItem::from_state(region_id, OpType::Put, key, Some(s.clone()));
+        let item = LogItem::from_state(region_id, OpType::Put, key, Some(s));
         self.items.push(item);
         Ok(())
     }
