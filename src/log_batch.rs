@@ -1,7 +1,7 @@
 use std::borrow::{Borrow, Cow};
 use std::io::BufRead;
 use std::marker::PhantomData;
-use std::{mem, u64};
+use std::{mem, u64, vec};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
@@ -618,6 +618,30 @@ where
 
     pub fn entries_size(&self) -> usize {
         self.entries_size
+    }
+
+    pub fn add_raw_entries_index(&mut self, region_id: u64, entries_index: Vec<EntryIndex>) {
+        let item = LogItem {
+            raft_group_id: region_id,
+            content: LogItemContent::Entries(Entries::new(vec![], Some(entries_index))),
+        };
+        self.items.push(item);
+    }
+
+    pub fn add_raw_kv(&mut self, region_id: u64, kv: KeyValue) {
+        let item = LogItem {
+            raft_group_id: region_id,
+            content: LogItemContent::Kv(kv),
+        };
+        self.items.push(item);
+    }
+
+    pub fn add_raw_command(&mut self, region_id: u64, command: Command) {
+        let item = LogItem {
+            raft_group_id: region_id,
+            content: LogItemContent::Command(command),
+        };
+        self.items.push(item);
     }
 }
 

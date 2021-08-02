@@ -254,6 +254,7 @@ where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
 {
+    #[allow(dead_code)]
     hint_worker: Worker<HintTask<E, W>>,
 }
 
@@ -289,7 +290,7 @@ where
 
         let mut hint_worker = Worker::new("hint_worker".to_owned());
         let hint_runner = HintRunner::new();
-        let hint_manager = HintManager::new(hint_worker.scheduler());
+        let hint_manager = HintManager::open(hint_worker.scheduler());
         hint_worker.start(hint_runner, Some(Duration::from_secs(1)));
 
         let pipe_log =
@@ -370,10 +371,20 @@ where
         let mut batches = Vec::new();
         let mut file_id = first_file;
         while file_id <= active_file {
-            pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
-            for mut batch in batches.drain(..) {
-                Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
+            match HintManager::read_hint_file(pipe_log.dir(), queue, file_id) {
+                Ok(mut batch) => Self::apply_to_memtable(memtables, &mut batch, queue, file_id),
+                Err(e) => {
+                    trace!(
+                        "recover from hint file failed [queue:{:?}, id:{}], use origin log file instead: {:?}",
+                        queue,file_id,e
+                    );
+                    pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
+                    for mut batch in batches.drain(..) {
+                        Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
+                    }
+                }
             }
+
             file_id = file_id.forward(1);
         }
         info!("Recover raft log takes {:?}", start.elapsed());

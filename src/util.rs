@@ -1,10 +1,18 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::Error;
+use crate::Result as RaftLogEngineResult;
+
+use nix::errno::Errno;
+use nix::sys::uio::{pread, pwrite};
+use nix::unistd::{lseek, Whence};
 pub use std::collections::hash_map::Entry as HashMapEntry;
 use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
+use std::io::Error as IoError;
 use std::ops::{Div, Mul};
+use std::os::unix::io::RawFd;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::{Builder, JoinHandle};
@@ -260,11 +268,6 @@ impl<T: Clone> Worker<T> {
         }
     }
 
-    #[cfg(test)]
-    pub fn take_receiver(&mut self) -> Receiver<Option<T>> {
-        self.receiver.take().unwrap()
-    }
-
     pub fn scheduler(&self) -> Scheduler<T> {
         self.scheduler.clone()
     }
@@ -317,4 +320,49 @@ impl<T: Clone> Drop for Worker<T> {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+pub fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
+    match e {
+        nix::Error::Sys(no) => {
+            let kind = IoError::from(no).kind();
+            Error::Io(IoError::new(kind, custom))
+        }
+        e => box_err!("{}: {:?}", custom, e),
+    }
+}
+
+pub fn file_size(fd: RawFd) -> RaftLogEngineResult<usize> {
+    lseek(fd, 0, Whence::SeekEnd)
+        .map(|n| n as usize)
+        .map_err(|e| parse_nix_error(e, "lseek"))
+}
+
+pub fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> RaftLogEngineResult<Vec<u8>> {
+    let mut result = vec![0; len as usize];
+    let mut readed = 0;
+    while readed < len {
+        let bytes = match pread(fd, &mut result[readed..], offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pread")),
+        };
+        readed += bytes;
+        offset += bytes as u64;
+    }
+    Ok(result)
+}
+
+pub fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> RaftLogEngineResult<()> {
+    let mut written = 0;
+    while written < content.len() {
+        let bytes = match pwrite(fd, &content[written..], offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pwrite")),
+        };
+        written += bytes;
+        offset += bytes as u64;
+    }
+    Ok(())
 }

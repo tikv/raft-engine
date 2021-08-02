@@ -184,12 +184,19 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     }
 
     pub fn append(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex>) {
-        assert_eq!(entries.len(), entries_index.len());
-        if entries.is_empty() {
+        // if entries.len() is 0 but entries_index.len() is not,
+        // the log batch is created from hint file without read entries.
+        if !entries.is_empty() {
+            assert_eq!(entries.len(), entries_index.len());
+        }
+        if entries.is_empty() && entries_index.is_empty() {
             return;
         }
 
-        let first_index_to_add = W::index(&entries[0]);
+        let first_index_to_add = match entries.is_empty() {
+            true => entries_index.first().unwrap().index,
+            false => W::index(&entries[0]),
+        };
         self.cut_entries_index(first_index_to_add);
 
         if let Some(index) = self.entries_index.back().map(|e| e.index) {

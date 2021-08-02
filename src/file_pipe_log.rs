@@ -7,11 +7,9 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
 use log::{debug, info, warn};
-use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
-use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
+use nix::unistd::{close, fsync, ftruncate};
 use nix::NixPath;
 use protobuf::Message;
 
@@ -20,7 +18,7 @@ use crate::event_listener::EventListener;
 use crate::hint::HintManager;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::HandyRwLock;
+use crate::util::{file_size, parse_nix_error, pread_exact, pwrite_exact, HandyRwLock};
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -221,12 +219,9 @@ impl LogManager {
         sync: &mut bool,
     ) -> Result<(FileId, u64, Arc<LogFd>, Option<FileId>)> {
         let mut old_file_id = None;
-        println!("before: old: {:?}", self.active_file_id);
         if self.active_log_size >= self.rotate_size {
             old_file_id = Some(self.active_file_id);
-            println!("old: {:?}", self.active_file_id);
             self.new_log_file()?;
-            println!("new: {:?}", self.active_file_id);
         }
 
         let active_file_id = self.active_file_id;
@@ -389,6 +384,10 @@ where
         Ok(pipe_log)
     }
 
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+
     fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
         let mut path = PathBuf::from(&self.dir);
         path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
@@ -416,7 +415,10 @@ where
         }
 
         if let Some(old_file_id) = old_file_id {
-            self.hint_manager.lock().unwrap().submit_flush(old_file_id);
+            self.hint_manager
+                .lock()
+                .unwrap()
+                .submit_flush(&self.dir, queue, old_file_id);
         }
         Ok((file_id, offset, fd))
     }
@@ -572,7 +574,7 @@ where
             self.hint_manager
                 .lock()
                 .unwrap()
-                .submit_log_batch(file_id, batch.clone());
+                .submit_log_batch(queue, file_id, batch.clone());
 
             return Ok((file_id, content.len()));
         }
@@ -663,16 +665,6 @@ fn queue_from_suffix(suffix: &str) -> LogQueue {
     }
 }
 
-fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
-    match e {
-        nix::Error::Sys(no) => {
-            let kind = IoError::from(no).kind();
-            Error::Io(IoError::new(kind, custom))
-        }
-        e => box_err!("{}: {:?}", custom, e),
-    }
-}
-
 fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDWR | OFlag::O_CREAT;
     let mode = Mode::S_IRUSR | Mode::S_IWUSR;
@@ -683,41 +675,6 @@ fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
     let flags = OFlag::O_RDONLY;
     let mode = Mode::S_IRWXU;
     fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_frozen_file"))
-}
-
-fn file_size(fd: RawFd) -> Result<usize> {
-    lseek(fd, 0, Whence::SeekEnd)
-        .map(|n| n as usize)
-        .map_err(|e| parse_nix_error(e, "lseek"))
-}
-
-fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> Result<Vec<u8>> {
-    let mut result = vec![0; len as usize];
-    let mut readed = 0;
-    while readed < len {
-        let bytes = match pread(fd, &mut result[readed..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pread")),
-        };
-        readed += bytes;
-        offset += bytes as u64;
-    }
-    Ok(result)
-}
-
-fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
-    let mut written = 0;
-    while written < content.len() {
-        let bytes = match pwrite(fd, &content[written..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pwrite")),
-        };
-        written += bytes;
-        offset += bytes as u64;
-    }
-    Ok(())
 }
 
 fn write_file_header(fd: RawFd) -> Result<usize> {
@@ -733,7 +690,6 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 mod tests {
     use std::time::Duration;
 
-    use crossbeam::channel::Receiver;
     use tempfile::Builder;
 
     use super::*;
@@ -755,7 +711,7 @@ mod tests {
 
         let mut hint_worker = Worker::new("test_hint_worker".to_owned());
         let hint_runner = HintRunner::new();
-        let hint_manager = HintManager::new(hint_worker.scheduler());
+        let hint_manager = HintManager::open(hint_worker.scheduler());
         hint_worker.start(hint_runner, Some(Duration::from_secs(1)));
 
         let log = FilePipeLog::open(&cfg, hint_manager, vec![]).unwrap();
