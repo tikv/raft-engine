@@ -1,4 +1,5 @@
 use core::panic;
+use std::fmt::Debug;
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::vec;
@@ -11,6 +12,7 @@ use nix::NixPath;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
+use crate::event_listener::EventListener;
 use crate::log_batch::{Command, KeyValue, SliceReader};
 
 use crate::pipe_log::{FileId, LogQueue};
@@ -27,6 +29,7 @@ where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
 {
+    dir: String,
     scheduler: Scheduler<HintTask<E, W>>,
 }
 
@@ -35,8 +38,8 @@ where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
 {
-    pub fn open(scheduler: Scheduler<HintTask<E, W>>) -> Self {
-        Self { scheduler }
+    pub fn open(dir: String, scheduler: Scheduler<HintTask<E, W>>) -> Self {
+        Self { dir, scheduler }
     }
 
     pub fn submit_log_batch(&self, queue: LogQueue, file_id: FileId, batch: LogBatch<E, W>) {
@@ -61,8 +64,8 @@ where
         }
     }
 
-    pub fn read_hint_file(dir: &str, queue: LogQueue, file_id: FileId) -> Result<LogBatch<E, W>> {
-        let mut path = PathBuf::from(&dir);
+    pub fn read_hint_file(&self, queue: LogQueue, file_id: FileId) -> Result<LogBatch<E, W>> {
+        let mut path = PathBuf::from(&self.dir);
         path.push(generate_filename(queue, file_id));
         let fd = open_hint_file_r(&path)?;
         let size = file_size(fd)?;
@@ -95,6 +98,16 @@ where
     }
 }
 
+impl<E, W> EventListener for HintManager<E, W>
+where
+    E: Message + Clone + 'static,
+    W: EntryExt<E> + Clone + 'static,
+{
+    fn post_log_file_frozen(&self, queue: LogQueue, file_id: FileId) {
+        self.submit_flush(&self.dir, queue, file_id)
+    }
+}
+
 enum HintItem {
     EntriesIndex(u64, Vec<EntryIndex>),
     KV(u64, KeyValue),
@@ -103,6 +116,7 @@ enum HintItem {
 
 impl HintItem {
     pub fn encode_to(&self, buf: &mut Vec<u8>) -> Result<()> {
+        // format = { item type | raft_group_id | <content> }
         match self {
             HintItem::EntriesIndex(raft_group_id, entries_index) => {
                 buf.encode_var_u64(1)?;
@@ -113,12 +127,12 @@ impl HintItem {
                 });
             }
             HintItem::KV(raft_group_id, kv) => {
-                buf.encode_var_u64(1)?;
+                buf.encode_var_u64(2)?;
                 buf.encode_u64(*raft_group_id)?;
                 kv.encode_to(buf)?;
             }
             HintItem::Command(raft_group_id, command) => {
-                buf.encode_var_u64(1)?;
+                buf.encode_var_u64(3)?;
                 buf.encode_u64(*raft_group_id)?;
                 command.encode_to(buf);
             }
@@ -175,7 +189,7 @@ impl Hint {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        // layout = { [ raft_group_id | N | [EntryIndex] ] }
+        // layout = { [item] }
         let mut buf: Vec<u8> = Vec::with_capacity(1024);
         for item in self.items.iter() {
             if let Err(e) = item.encode_to(&mut buf) {
@@ -187,7 +201,11 @@ impl Hint {
 }
 
 #[derive(Clone, Debug)]
-pub enum HintTask<E: Message + 'static, W: EntryExt<E> + 'static> {
+pub enum HintTask<E, W>
+where
+    E: Message + 'static,
+    W: EntryExt<E> + 'static,
+{
     Append {
         queue: LogQueue,
         file_id: FileId,
@@ -224,13 +242,18 @@ impl Runner {
     }
 
     fn flush(&mut self, dir: String, queue: LogQueue, file_id: FileId) -> Result<()> {
-        if let Some(hint) = self.hints.remove(&(queue, file_id)) {
-            let mut path = PathBuf::from(&dir);
-            path.push(generate_filename(queue, file_id));
-            let buf = hint.to_bytes()?;
-            let fd = open_hint_file_w(&path)?;
-            // TODO(MrCroxx): write header & version
-            pwrite_exact(fd, 0, &buf)?;
+        match self.hints.remove(&(queue, file_id)) {
+            Some(hint) => {
+                let mut path = PathBuf::from(&dir);
+                path.push(generate_filename(queue, file_id));
+                let buf = hint.to_bytes()?;
+                let fd = open_hint_file_w(&path)?;
+                // TODO(MrCroxx): write header & version
+                pwrite_exact(fd, 0, &buf)?;
+            }
+            None => {
+                warn!("hint {:?}:{:?} buffer not found", queue, file_id);
+            }
         }
         Ok(())
     }

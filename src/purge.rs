@@ -9,6 +9,7 @@ use protobuf::Message;
 use crate::config::Config;
 use crate::engine::{fetch_entries, MemTableAccessor};
 use crate::event_listener::EventListener;
+use crate::hint::HintManager;
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
@@ -27,12 +28,15 @@ pub struct PurgeManager<E, W, P>
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W>,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor<E, W>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
+
+    hint_manager: Arc<HintManager<E, W>>,
+
     listeners: Vec<Arc<dyn EventListener>>,
 
     // Only one thread can run `purge_expired_files` at a time.
@@ -43,13 +47,14 @@ impl<E, W, P> PurgeManager<E, W, P>
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W>,
+    P: PipeLog,
 {
     pub fn new(
         cfg: Arc<Config>,
         memtables: MemTableAccessor<E, W>,
         pipe_log: P,
         global_stats: Arc<GlobalStats>,
+        hint_manager: Arc<HintManager<E, W>>,
         listeners: Vec<Arc<dyn EventListener>>,
     ) -> PurgeManager<E, W, P> {
         PurgeManager {
@@ -57,6 +62,7 @@ where
             memtables,
             pipe_log,
             global_stats,
+            hint_manager,
             listeners,
             purge_mutex: Arc::new(Mutex::new(())),
         }
@@ -201,6 +207,10 @@ where
 
     fn squeeze_rewrite_queue(&self) {
         // Switch the active rewrite file.
+        let old_file_id = self.pipe_log.active_file_id(LogQueue::Rewrite);
+        for listener in &self.listeners {
+            listener.post_log_file_frozen(LogQueue::Rewrite, old_file_id);
+        }
         self.pipe_log.new_log_file(LogQueue::Rewrite).unwrap();
 
         let memtables = self
@@ -266,6 +276,10 @@ where
         }
 
         let (file_id, _) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
+
+        self.hint_manager
+            .submit_log_batch(LogQueue::Rewrite, file_id, log_batch.clone());
+
         if file_id.valid() {
             self.rewrite_to_memtable(log_batch, file_id, latest_rewrite);
             for listener in &self.listeners {

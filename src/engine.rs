@@ -140,14 +140,14 @@ pub struct Engine<E, W, P>
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W>,
+    P: PipeLog,
 {
     cfg: Arc<Config>,
     pub(crate) memtables: MemTableAccessor<E, W>,
     pipe_log: P,
     global_stats: Arc<GlobalStats>,
     purge_manager: PurgeManager<E, W, P>,
-
+    hint_manager: Arc<HintManager<E, W>>,
     workers: Arc<RwLock<Workers<E, W>>>,
 
     listeners: Vec<Arc<dyn EventListener>>,
@@ -157,7 +157,7 @@ impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W>,
+    P: PipeLog,
 {
     fn apply_to_memtable(
         memtables: &MemTableAccessor<E, W>,
@@ -238,6 +238,8 @@ where
             Ok(0)
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
+            self.hint_manager
+                .submit_log_batch(LogQueue::Append, file_id, log_batch.clone());
             if file_id.valid() {
                 Self::apply_to_memtable(&self.memtables, log_batch, LogQueue::Append, file_id);
                 for listener in &self.listeners {
@@ -269,32 +271,35 @@ impl Default for EngineOptions {
     }
 }
 
-impl<E, W> Engine<E, W, FilePipeLog<E, W>>
+impl<E, W> Engine<E, W, FilePipeLog>
 where
     E: Message + Clone,
     W: EntryExt<E> + Clone + 'static,
 {
-    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog<E, W>> {
+    pub fn new(cfg: Config) -> Engine<E, W, FilePipeLog> {
         let options = Default::default();
         Self::with_options(cfg, options).unwrap()
     }
 
-    fn with_options(
-        cfg: Config,
-        mut options: EngineOptions,
-    ) -> Result<Engine<E, W, FilePipeLog<E, W>>> {
+    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
         let global_stats = Arc::new(GlobalStats::default());
-
-        let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener>];
-        listeners.extend(options.listeners.drain(..));
 
         let mut hint_worker = Worker::new("hint_worker".to_owned());
         let hint_runner = HintRunner::new();
-        let hint_manager = HintManager::open(hint_worker.scheduler());
+        let hint_manager = Arc::new(HintManager::open(
+            cfg.dir.to_owned(),
+            hint_worker.scheduler(),
+        ));
+
+        let mut listeners = vec![
+            Arc::new(PurgeHook::new()) as Arc<dyn EventListener>,
+            Arc::clone(&hint_manager) as Arc<dyn EventListener>,
+        ];
+        listeners.extend(options.listeners.drain(..));
+
         hint_worker.start(hint_runner, Some(Duration::from_secs(1)));
 
-        let pipe_log =
-            FilePipeLog::open(&cfg, hint_manager, listeners.clone()).expect("Open raft log");
+        let pipe_log = FilePipeLog::open(&cfg, listeners.clone()).expect("Open raft log");
 
         let memtables = {
             let stats = global_stats.clone();
@@ -307,6 +312,7 @@ where
             memtables.clone(),
             pipe_log.clone(),
             global_stats.clone(),
+            Arc::clone(&hint_manager),
             listeners.clone(),
         );
 
@@ -316,6 +322,7 @@ where
             pipe_log,
             global_stats,
             purge_manager,
+            hint_manager: Arc::clone(&hint_manager),
             workers: Arc::new(RwLock::new(Workers { hint_worker })),
             listeners,
         };
@@ -329,6 +336,7 @@ where
         Self::recover(
             &mut rewrite_memtables,
             &mut self.pipe_log,
+            &self.hint_manager,
             LogQueue::Rewrite,
             RecoveryMode::TolerateCorruptedTailRecords,
         )?;
@@ -336,6 +344,7 @@ where
         Self::recover(
             &mut self.memtables,
             &mut self.pipe_log,
+            &self.hint_manager,
             LogQueue::Append,
             self.cfg.recovery_mode,
         )?;
@@ -357,7 +366,8 @@ where
     // Recover from disk.
     fn recover(
         memtables: &mut MemTableAccessor<E, W>,
-        pipe_log: &mut FilePipeLog<E, W>,
+        pipe_log: &mut FilePipeLog,
+        hint_manager: &HintManager<E, W>,
         queue: LogQueue,
         recovery_mode: RecoveryMode,
     ) -> Result<()> {
@@ -371,10 +381,17 @@ where
         let mut batches = Vec::new();
         let mut file_id = first_file;
         while file_id <= active_file {
-            match HintManager::read_hint_file(pipe_log.dir(), queue, file_id) {
-                Ok(mut batch) => Self::apply_to_memtable(memtables, &mut batch, queue, file_id),
+            // TODO(MrCroxx): dir
+            match hint_manager.read_hint_file(queue, file_id) {
+                Ok(mut batch) => {
+                    info!(
+                        "recover from hint file success [queue:{:?}, id:{}]",
+                        queue, file_id
+                    );
+                    Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
+                }
                 Err(e) => {
-                    trace!(
+                    info!(
                         "recover from hint file failed [queue:{:?}, id:{}], use origin log file instead: {:?}",
                         queue,file_id,e
                     );
@@ -384,7 +401,6 @@ where
                     }
                 }
             }
-
             file_id = file_id.forward(1);
         }
         info!("Recover raft log takes {:?}", start.elapsed());
@@ -396,7 +412,7 @@ impl<E, W, P> Engine<E, W, P>
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W> + 'static,
+    P: PipeLog + 'static,
 {
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
@@ -523,7 +539,7 @@ pub fn fetch_entries<E, W, P, F>(
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W>,
+    P: PipeLog,
     F: FnMut(&MemTable<E, W>, &mut Vec<EntryIndex>) -> Result<()>,
 {
     let mut ents_idx = Vec::with_capacity(count);
@@ -539,7 +555,7 @@ pub fn read_entry_from_file<E, W, P>(pipe_log: &P, entry_index: &EntryIndex) -> 
 where
     E: Message + Clone + 'static,
     W: EntryExt<E> + Clone + 'static,
-    P: PipeLog<E, W>,
+    P: PipeLog,
 {
     let queue = entry_index.queue;
     let file_id = entry_index.file_id;
@@ -584,14 +600,14 @@ mod tests {
     where
         E: Message + Clone + 'static,
         W: EntryExt<E> + Clone + 'static,
-        P: PipeLog<E, W>,
+        P: PipeLog,
     {
         pub fn purge_manager(&self) -> &PurgeManager<E, W, P> {
             &self.purge_manager
         }
     }
 
-    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog<Entry, Entry>>;
+    type RaftLogEngine = Engine<Entry, Entry, FilePipeLog>;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();

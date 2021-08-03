@@ -34,7 +34,7 @@ pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
 pub use self::log_batch::{EntryExt, LogBatch};
 pub use self::util::ReadableSize;
-pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog<X, Y>>;
+pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
 
 #[derive(Default)]
 pub struct GlobalStats {

@@ -79,12 +79,7 @@ impl FileId {
     }
 }
 
-pub trait PipeLog<E, W>
-where
-    E: Message + Clone + 'static,
-    W: EntryExt<E> + Clone + 'static,
-    Self: Sized + Clone + Send,
-{
+pub trait PipeLog: Sized + Clone + Send {
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
 
@@ -102,7 +97,7 @@ where
         len: u64,
     ) -> Result<Vec<u8>>;
 
-    fn read_file(
+    fn read_file<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         file_id: FileId,
@@ -111,7 +106,7 @@ where
     ) -> Result<()>;
 
     /// Write a batch into the append queue.
-    fn append(
+    fn append<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         batch: &mut LogBatch<E, W>,

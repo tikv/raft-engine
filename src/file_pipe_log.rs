@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
 use log::{debug, info, warn};
@@ -15,7 +15,6 @@ use protobuf::Message;
 
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::hint::HintManager;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::util::{file_size, parse_nix_error, pread_exact, pwrite_exact, HandyRwLock};
@@ -215,13 +214,16 @@ impl LogManager {
 
     fn on_append(
         &mut self,
+        queue: LogQueue,
         content_len: usize,
         sync: &mut bool,
-    ) -> Result<(FileId, u64, Arc<LogFd>, Option<FileId>)> {
-        let mut old_file_id = None;
+    ) -> Result<(FileId, u64, Arc<LogFd>)> {
         if self.active_log_size >= self.rotate_size {
-            old_file_id = Some(self.active_file_id);
+            let old_file_id = self.active_file_id;
             self.new_log_file()?;
+            for listener in &self.listeners {
+                listener.post_log_file_frozen(queue, old_file_id)
+            }
         }
 
         let active_file_id = self.active_file_id;
@@ -249,16 +251,12 @@ impl LogManager {
             self.last_sync_size = self.active_log_size;
             *sync = true;
         }
-        Ok((active_file_id, active_log_size as u64, fd, old_file_id))
+        Ok((active_file_id, active_log_size as u64, fd))
     }
 }
 
 #[derive(Clone)]
-pub struct FilePipeLog<E, W>
-where
-    E: Message + Clone + 'static,
-    W: EntryExt<E> + Clone + 'static,
-{
+pub struct FilePipeLog {
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
@@ -266,25 +264,13 @@ where
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
-
-    hint_manager: Arc<Mutex<HintManager<E, W>>>,
-
     listeners: Vec<Arc<dyn EventListener>>,
 }
 
-impl<E, W> FilePipeLog<E, W>
-where
-    E: Message + Clone + 'static,
-    W: EntryExt<E> + Clone + 'static,
-{
-    fn new(
-        cfg: &Config,
-        hint_manager: HintManager<E, W>,
-        listeners: Vec<Arc<dyn EventListener>>,
-    ) -> FilePipeLog<E, W> {
+impl FilePipeLog {
+    fn new(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> FilePipeLog {
         let appender = Arc::new(RwLock::new(LogManager::new(cfg, LOG_SUFFIX)));
         let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, REWRITE_SUFFIX)));
-        let hint_manager = Arc::new(Mutex::new(hint_manager));
         appender.wl().listeners = listeners.clone();
         rewriter.wl().listeners = listeners.clone();
         FilePipeLog {
@@ -294,16 +280,11 @@ where
             compression_threshold: cfg.batch_compression_threshold.0 as usize,
             appender,
             rewriter,
-            hint_manager,
             listeners,
         }
     }
 
-    pub fn open(
-        cfg: &Config,
-        hint_manager: HintManager<E, W>,
-        listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<FilePipeLog<E, W>> {
+    pub fn open(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> Result<FilePipeLog> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -313,7 +294,7 @@ where
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
 
-        let pipe_log = FilePipeLog::new(cfg, hint_manager, listeners);
+        let pipe_log = FilePipeLog::new(cfg, listeners);
 
         let (mut min_file_id, mut max_file_id) = (Default::default(), Default::default());
         let (mut min_rewrite_num, mut max_rewrite_num) = (Default::default(), Default::default());
@@ -331,7 +312,6 @@ where
                     Ok(num) => num,
                     Err(_) => continue,
                 };
-                println!("file id = {}", file_id);
                 min_file_id = FileId::min(min_file_id, file_id);
                 max_file_id = FileId::max(max_file_id, file_id);
                 log_files.push(file_name.to_string());
@@ -408,17 +388,10 @@ where
     ) -> Result<(FileId, u64, Arc<LogFd>)> {
         // Must hold lock until file is written to avoid corrupted holes.
         let mut log_manager = self.mut_queue(queue);
-        let (file_id, offset, fd, old_file_id) = log_manager.on_append(content.len(), sync)?;
+        let (file_id, offset, fd) = log_manager.on_append(queue, content.len(), sync)?;
         pwrite_exact(fd.0, offset, content)?;
         for listener in &self.listeners {
             listener.on_append_log_file(queue, file_id);
-        }
-
-        if let Some(old_file_id) = old_file_id {
-            self.hint_manager
-                .lock()
-                .unwrap()
-                .submit_flush(&self.dir, queue, old_file_id);
         }
         Ok((file_id, offset, fd))
     }
@@ -459,11 +432,7 @@ where
     }
 }
 
-impl<E, W> PipeLog<E, W> for FilePipeLog<E, W>
-where
-    E: Message + Clone + 'static,
-    W: EntryExt<E> + Clone + 'static,
-{
+impl PipeLog for FilePipeLog {
     fn close(&self) -> Result<()> {
         self.appender.wl().truncate_active_log(None)?;
         self.rewriter.wl().truncate_active_log(None)?;
@@ -497,7 +466,7 @@ where
         pread_exact(fd.0, offset, len as usize)
     }
 
-    fn read_file(
+    fn read_file<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         file_id: FileId,
@@ -553,7 +522,7 @@ where
         }
     }
 
-    fn append(
+    fn append<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         batch: &mut LogBatch<E, W>,
@@ -570,12 +539,6 @@ where
                     entries.set_position(queue, file_id, offset);
                 }
             }
-
-            self.hint_manager
-                .lock()
-                .unwrap()
-                .submit_log_batch(queue, file_id, batch.clone());
-
             return Ok((file_id, content.len()));
         }
         Ok((Default::default(), 0))
@@ -688,34 +651,19 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use tempfile::Builder;
 
     use super::*;
-    use crate::{
-        hint::{HintTask, Runner as HintRunner},
-        util::{ReadableSize, Worker},
-    };
-    use raft::prelude::Entry;
+    use crate::util::ReadableSize;
 
-    fn new_test_pipe_log(
-        path: &str,
-        bytes_per_sync: usize,
-        rotate_size: usize,
-    ) -> (FilePipeLog<Entry, Entry>, Worker<HintTask<Entry, Entry>>) {
+    fn new_test_pipe_log(path: &str, bytes_per_sync: usize, rotate_size: usize) -> FilePipeLog {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        let mut hint_worker = Worker::new("test_hint_worker".to_owned());
-        let hint_runner = HintRunner::new();
-        let hint_manager = HintManager::open(hint_worker.scheduler());
-        hint_worker.start(hint_runner, Some(Duration::from_secs(1)));
-
-        let log = FilePipeLog::open(&cfg, hint_manager, vec![]).unwrap();
-        (log, hint_worker)
+        FilePipeLog::open(&cfg, vec![]).unwrap()
     }
 
     #[test]
@@ -742,7 +690,7 @@ mod tests {
 
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
-        let (pipe_log, hint_worker) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_NUM.into());
         assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_NUM.into());
 
@@ -821,10 +769,9 @@ mod tests {
         **************************/
 
         pipe_log.close().unwrap();
-        drop(hint_worker);
 
         // reopen
-        let (pipe_log, hint_worker) = new_test_pipe_log(path, bytes_per_sync, rotate_size);
+        let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
             pipe_log.active_log_size(queue),
@@ -834,7 +781,6 @@ mod tests {
             pipe_log.active_log_capacity(queue),
             FILE_MAGIC_HEADER.len() + VERSION.len()
         );
-        drop(hint_worker);
     }
 
     #[test]

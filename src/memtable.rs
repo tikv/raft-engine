@@ -552,11 +552,9 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_pipe_log::FilePipeLog as RawFilePipeLog;
+    use crate::file_pipe_log::FilePipeLog;
     use crate::pipe_log::PipeLog;
     use raft::eraftpb::Entry;
-
-    type FilePipeLog = RawFilePipeLog<Entry, Entry>;
 
     impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         pub fn max_file_id(&self, queue: LogQueue) -> Option<FileId> {
@@ -1022,7 +1020,7 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
     }
 
-    fn generate_ents<P: PipeLog<Entry, Entry>>(
+    fn generate_ents<P: PipeLog>(
         begin_idx: u64,
         end_idx: u64,
         queue: LogQueue,
