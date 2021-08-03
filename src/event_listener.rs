@@ -20,4 +20,7 @@ pub trait EventListener: Sync + Send {
 
     /// Called *after* a log file get purged.
     fn post_purge(&self, _queue: LogQueue, _file_id: FileId) {}
+
+    /// Called *after* a log file is actually removed.
+    fn post_removed(&self, _queue: LogQueue, _file_id: FileId) {}
 }

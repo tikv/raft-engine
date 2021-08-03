@@ -2,7 +2,7 @@ use core::panic;
 use std::fmt::Debug;
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
-use std::vec;
+use std::{fs, vec};
 
 use log::warn;
 use nix::fcntl;
@@ -52,10 +52,18 @@ where
 
     pub fn submit_flush(&self, dir: &str, queue: LogQueue, file_id: FileId) {
         self.submit(HintTask::Flush {
-            queue,
             dir: dir.to_owned(),
+            queue,
             file_id,
         });
+    }
+
+    pub fn submit_remove(&self, dir: &str, queue: LogQueue, file_id: FileId) {
+        self.submit(HintTask::Remove {
+            dir: dir.to_owned(),
+            queue,
+            file_id,
+        })
     }
 
     fn submit(&self, task: HintTask<E, W>) {
@@ -104,7 +112,21 @@ where
     W: EntryExt<E> + Clone + 'static,
 {
     fn post_log_file_frozen(&self, queue: LogQueue, file_id: FileId) {
-        self.submit_flush(&self.dir, queue, file_id)
+        self.submit_flush(&self.dir, queue, file_id);
+        #[cfg(test)]
+        {
+            use crate::file_pipe_log::log_file_size;
+            println!(
+                "frozen log file {:?}:{:?} size : {}",
+                queue,
+                file_id,
+                log_file_size(&self.dir, queue, file_id)
+            );
+        }
+    }
+
+    fn post_removed(&self, queue: LogQueue, file_id: FileId) {
+        self.submit_remove(&self.dir, queue, file_id);
     }
 }
 
@@ -165,7 +187,7 @@ impl HintItem {
     }
 }
 
-pub struct Hint {
+struct Hint {
     items: Vec<HintItem>,
 }
 
@@ -216,6 +238,11 @@ where
         queue: LogQueue,
         file_id: FileId,
     },
+    Remove {
+        dir: String,
+        queue: LogQueue,
+        file_id: FileId,
+    },
 }
 
 pub struct Runner {
@@ -250,12 +277,30 @@ impl Runner {
                 let fd = open_hint_file_w(&path)?;
                 // TODO(MrCroxx): write header & version
                 pwrite_exact(fd, 0, &buf)?;
+                #[cfg(test)]
+                {
+                    println!(
+                        "hint file {:?}:{:?} size : {}",
+                        queue,
+                        file_id,
+                        hint_file_size(&dir, queue, file_id)
+                    );
+                }
             }
             None => {
                 warn!("hint {:?}:{:?} buffer not found", queue, file_id);
             }
         }
         Ok(())
+    }
+
+    fn remove(&self, dir: String, queue: LogQueue, file_id: FileId) -> Result<()> {
+        let mut path = PathBuf::from(&dir);
+        path.push(generate_filename(queue, file_id));
+        match fs::remove_file(&path) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -280,12 +325,22 @@ where
                     warn!("flush hint file error: {}", e);
                 }
             }
+            HintTask::Remove {
+                dir,
+                queue,
+                file_id,
+            } => {
+                if let Err(e) = self.remove(dir, queue, file_id) {
+                    warn!(
+                        "Remove expired hint file {:?}:{:?} fail: {}",
+                        queue, file_id, e
+                    );
+                }
+            }
         }
         true
     }
-    fn on_tick(&mut self) {
-        // todo!()
-    }
+    fn on_tick(&mut self) {}
 }
 
 fn open_hint_file_w<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
@@ -305,4 +360,12 @@ fn generate_filename(queue: LogQueue, file_id: FileId) -> String {
         LogQueue::Append => format!("{:016}{}", file_id, HINT_SUFFIX),
         LogQueue::Rewrite => format!("{:08}{}", file_id, HINT_SUFFIX),
     }
+}
+
+#[cfg(test)]
+pub fn hint_file_size(dir: &str, queue: LogQueue, file_id: FileId) -> usize {
+    let mut path = PathBuf::from(dir);
+    path.push(generate_filename(queue, file_id));
+    let fd = open_hint_file_r(&path).unwrap();
+    file_size(fd).unwrap()
 }

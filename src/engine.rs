@@ -381,7 +381,6 @@ where
         let mut batches = Vec::new();
         let mut file_id = first_file;
         while file_id <= active_file {
-            // TODO(MrCroxx): dir
             match hint_manager.read_hint_file(queue, file_id) {
                 Ok(mut batch) => {
                     info!(

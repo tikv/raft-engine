@@ -650,6 +650,20 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 }
 
 #[cfg(test)]
+pub fn log_file_size(dir: &str, queue: LogQueue, file_id: FileId) -> usize {
+    let mut path = PathBuf::from(dir);
+    path.push(generate_file_name(
+        file_id,
+        match queue {
+            LogQueue::Append => LOG_SUFFIX,
+            LogQueue::Rewrite => REWRITE_SUFFIX,
+        },
+    ));
+    let fd = open_frozen_file(&path).unwrap();
+    file_size(fd).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
 
     use tempfile::Builder;
