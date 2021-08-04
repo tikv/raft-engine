@@ -233,9 +233,9 @@ impl<E: Message> Entries<E> {
     }
 
     fn compute_size(&self) -> usize {
-        let mut size = 8;
+        let mut size = 8 /*count*/;
         for e in self.entries.iter() {
-            size += 8 + e.compute_size() as usize;
+            size += 8 /*len*/ + e.compute_size() as usize;
         }
         size
     }
@@ -274,8 +274,8 @@ impl Command {
 
     fn compute_size(&self) -> usize {
         match &self {
-            Command::Clean => 1,
-            Command::Compact { .. } => 1 + 8,
+            Command::Clean => 1,              /*type*/
+            Command::Compact { .. } => 1 + 8, /*type + index*/
         }
     }
 }
@@ -349,7 +349,7 @@ impl KeyValue {
     }
 
     fn compute_size(&self) -> usize {
-        1 + 8 + self.key.len() + 8 + self.value.as_ref().map_or_else(|| 0, |v| v.len())
+        1 /*op*/ + 8 /*k_len*/ + self.key.len() + 8 /*v_len*/ + self.value.as_ref().map_or_else(|| 0, |v| v.len())
     }
 }
 
@@ -401,9 +401,9 @@ impl<E: Message> LogItem<E> {
 
     fn compute_size(&self) -> usize {
         match &self.content {
-            LogItemContent::Entries(entries) => entries.compute_size() + 9,
-            LogItemContent::Command(cmd) => cmd.compute_size() + 9,
-            LogItemContent::Kv(kv) => kv.compute_size() + 9,
+            LogItemContent::Entries(entries) => 8 /*r_id*/ + 1 /*type*/ + entries.compute_size(),
+            LogItemContent::Command(cmd) => 8 + 1 + cmd.compute_size(),
+            LogItemContent::Kv(kv) => 8 + 1 + kv.compute_size(),
         }
     }
 
@@ -654,11 +654,12 @@ where
         Some(vec)
     }
 
+    // Don't account for compression and varint encoding.
     pub fn approximate_size(&self) -> usize {
         if self.items.is_empty() {
             0
         } else {
-            self.items_size + 20
+            8 /*len*/ + 8 /*count*/ + self.items_size + 4 /*checksum*/
         }
     }
 }
