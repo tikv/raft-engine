@@ -231,6 +231,14 @@ impl<E: Message> Entries<E> {
             idx.batch_len = batch_len;
         }
     }
+
+    fn compute_size(&self) -> usize {
+        let mut size = 8 /*count*/;
+        for e in self.entries.iter() {
+            size += 8 /*len*/ + e.compute_size() as usize;
+        }
+        size
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -261,6 +269,13 @@ impl Command {
                 Ok(Command::Compact { index })
             }
             _ => unreachable!(),
+        }
+    }
+
+    fn compute_size(&self) -> usize {
+        match &self {
+            Command::Clean => 1,              /*type*/
+            Command::Compact { .. } => 1 + 8, /*type + index*/
         }
     }
 }
@@ -332,6 +347,10 @@ impl KeyValue {
         }
         Ok(())
     }
+
+    fn compute_size(&self) -> usize {
+        1 /*op*/ + 8 /*k_len*/ + self.key.len() + 8 /*v_len*/ + self.value.as_ref().map_or_else(|| 0, |v| v.len())
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -377,6 +396,14 @@ impl<E: Message> LogItem<E> {
         LogItem {
             raft_group_id,
             content: LogItemContent::Kv(KeyValue::new(op_type, key, value)),
+        }
+    }
+
+    fn compute_size(&self) -> usize {
+        match &self.content {
+            LogItemContent::Entries(entries) => 8 /*r_id*/ + 1 /*type*/ + entries.compute_size(),
+            LogItemContent::Command(cmd) => 8 + 1 + cmd.compute_size(),
+            LogItemContent::Kv(kv) => 8 + 1 + kv.compute_size(),
         }
     }
 
@@ -453,7 +480,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
-    entries_size: usize,
+    items_size: usize,
     _phantom: PhantomData<W>,
 }
 
@@ -465,7 +492,7 @@ where
     fn default() -> Self {
         Self {
             items: Vec::with_capacity(DEFAULT_BATCH_CAP),
-            entries_size: 0,
+            items_size: 0,
             _phantom: PhantomData,
         }
     }
@@ -479,13 +506,19 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
-            entries_size: 0,
+            items_size: 0,
             _phantom: PhantomData,
         }
     }
 
+    pub fn merge(&mut self, rhs: Self) {
+        self.items_size += rhs.items_size;
+        self.items.extend(rhs.items);
+    }
+
     pub fn add_entries(&mut self, region_id: u64, entries: Vec<E>) {
         let item = LogItem::from_entries(region_id, entries);
+        self.items_size += item.compute_size();
         self.items.push(item);
     }
 
@@ -495,16 +528,19 @@ where
 
     pub fn add_command(&mut self, region_id: u64, cmd: Command) {
         let item = LogItem::from_command(region_id, cmd);
+        self.items_size += item.compute_size();
         self.items.push(item);
     }
 
     pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Del, key, None);
+        self.items_size += item.compute_size();
         self.items.push(item);
     }
 
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
+        self.items_size += item.compute_size();
         self.items.push(item);
     }
 
@@ -553,6 +589,7 @@ where
         let mut items_count = codec::decode_var_u64(&mut reader)? as usize;
         assert!(items_count > 0 && !reader.is_empty());
         let mut log_batch = LogBatch::with_capacity(items_count);
+        let mut entries_size = 0;
         while items_count > 0 {
             let content_offset = (content_len - reader.len()) as u64;
             let item = LogItem::from_bytes::<W>(
@@ -560,8 +597,9 @@ where
                 file_id,
                 base_offset,
                 content_offset,
-                &mut log_batch.entries_size,
+                &mut entries_size,
             )?;
+            log_batch.items_size += item.compute_size();
             log_batch.items.push(item);
             items_count -= 1;
         }
@@ -585,11 +623,11 @@ where
 
         // layout = { 8 bytes len | item count | multiple items | 4 bytes checksum }
         let mut vec = Vec::with_capacity(4096);
+        let mut entries_size = 0;
         vec.encode_u64(0).unwrap();
         vec.encode_var_u64(self.items.len() as u64).unwrap();
         for item in self.items.iter_mut() {
-            item.encode_to::<W>(&mut vec, &mut self.entries_size)
-                .unwrap();
+            item.encode_to::<W>(&mut vec, &mut entries_size).unwrap();
         }
 
         let compression_type = if compression_threshold > 0 && vec.len() > compression_threshold {
@@ -616,8 +654,13 @@ where
         Some(vec)
     }
 
-    pub fn entries_size(&self) -> usize {
-        self.entries_size
+    // Don't account for compression and varint encoding.
+    pub fn approximate_size(&self) -> usize {
+        if self.items.is_empty() {
+            0
+        } else {
+            8 /*len*/ + 8 /*count*/ + self.items_size + 4 /*checksum*/
+        }
     }
 }
 
