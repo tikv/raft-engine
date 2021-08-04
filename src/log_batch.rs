@@ -655,7 +655,11 @@ where
     }
 
     pub fn approximate_size(&self) -> usize {
-        self.items_size + 20
+        if self.items.is_empty() {
+            0
+        } else {
+            self.items_size + 20
+        }
     }
 }
 
