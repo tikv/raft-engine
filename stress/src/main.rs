@@ -1,0 +1,404 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
+extern crate hdrhistogram;
+
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
+use std::time::{Duration, Instant};
+
+use clap::{App, Arg};
+use const_format::formatcp;
+use hdrhistogram::Histogram;
+use raft::eraftpb::Entry;
+use raft_engine::{Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
+use rand::thread_rng;
+use rand_distr::{Distribution, Normal};
+
+#[derive(Clone)]
+struct EntryExtTyped;
+impl EntryExt<Entry> for EntryExtTyped {
+    fn index(entry: &Entry) -> u64 {
+        entry.index
+    }
+}
+
+type Engine = RaftLogEngine<Entry, EntryExtTyped>;
+
+const DEFAULT_TIME: Duration = Duration::from_secs(60);
+const DEFAULT_REGIONS: u64 = 1;
+const DEFAULT_PURGE_INTERVAL: Duration = Duration::from_millis(10 * 1000);
+const DEFAULT_COMPACT_TTL: Duration = Duration::from_millis(0);
+const DEFAULT_COMPACT_COUNT: u64 = 0;
+const DEFAULT_FORCE_COMPACT_FACTOR_STR: &str = "0.5";
+const DEFAULT_WRITE_THREADS: u64 = 1;
+const DEFAULT_WRITE_OPS_PER_THREAD: u64 = 0;
+const DEFAULT_READ_THREADS: u64 = 0;
+const DEFAULT_READ_OPS_PER_THREAD: u64 = 0;
+
+#[derive(Debug, Clone)]
+struct TestArgs {
+    time: Duration,
+    regions: u64,
+    purge_interval: Duration,
+    compact_ttl: Duration,
+    compact_count: u64,
+    force_compact_factor: f32,
+    write_threads: u64,
+    write_ops_per_thread: u64,
+    read_threads: u64,
+    read_ops_per_thread: u64,
+}
+
+impl Default for TestArgs {
+    fn default() -> Self {
+        TestArgs {
+            time: DEFAULT_TIME,
+            regions: DEFAULT_REGIONS,
+            purge_interval: DEFAULT_PURGE_INTERVAL,
+            compact_ttl: DEFAULT_COMPACT_TTL,
+            compact_count: DEFAULT_COMPACT_COUNT,
+            force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR_STR.parse::<f32>().unwrap(),
+            write_threads: DEFAULT_WRITE_THREADS,
+            write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
+            read_threads: DEFAULT_READ_THREADS,
+            read_ops_per_thread: DEFAULT_READ_OPS_PER_THREAD,
+        }
+    }
+}
+
+struct ThreadSummary {
+    hist: Histogram<u64>,
+    first: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl ThreadSummary {
+    fn new() -> Self {
+        ThreadSummary {
+            hist: Histogram::new(3 /*significant figures*/).unwrap(),
+            first: None,
+            last: None,
+        }
+    }
+
+    fn record(&mut self, now: Instant, sample: Duration) {
+        self.hist.record(sample.as_micros() as u64);
+        if self.first.is_none() {
+            self.first.insert(now.clone());
+        }
+        self.last.insert(now);
+    }
+
+    fn qps(&self) -> f64 {
+        if let (Some(first), Some(last)) = (self.first, self.last) {
+            self.hist.count() as f64 - 1.0 / last.duration_since(first).as_secs_f64()
+        } else {
+            0.0
+        }
+    }
+}
+
+struct Summary {
+    hist: Option<Histogram<u64>>,
+    thread_qps: Vec<f64>,
+}
+
+impl Summary {
+    fn new() -> Self {
+        Summary {
+            hist: None,
+            thread_qps: Vec::new(),
+        }
+    }
+    fn add(&mut self, s: ThreadSummary) {
+        self.thread_qps.push(s.qps());
+        if let Some(hist) = &mut self.hist {
+            *hist += s.hist;
+        } else {
+            self.hist.insert(s.hist);
+        }
+    }
+    fn print(&self, name: &str) {
+        if !self.thread_qps.is_empty() {
+            println!("[{}]", name);
+            println!(
+                "Throughput(qps) = {}",
+                self.thread_qps.iter().fold(0.0, |sum, qps| { sum + qps })
+            );
+            let hist = self.hist.as_ref().unwrap();
+            println!(
+                "Latency min = {}, avg = {}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
+                hist.min(),
+                hist.mean(),
+                hist.value_at_quantile(0.5),
+                hist.value_at_quantile(0.9),
+                hist.value_at_quantile(0.95),
+                hist.value_at_quantile(0.99),
+                hist.value_at_quantile(0.999),
+                hist.max()
+            );
+            let median = statistical::median(&self.thread_qps);
+            let stddev = statistical::standard_deviation(&self.thread_qps, None);
+            println!("Fairness = {}%", stddev / median);
+        }
+    }
+}
+
+fn run_write(
+    engine: Arc<Engine>,
+    args: TestArgs,
+    index: u64,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<ThreadSummary> {
+    ThreadBuilder::new()
+        .name(format!("stress-write-thread-{}", index))
+        .spawn(move || ThreadSummary::new())
+        .unwrap()
+}
+
+fn run_read(
+    engine: Arc<Engine>,
+    args: TestArgs,
+    index: u64,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<ThreadSummary> {
+    ThreadBuilder::new()
+        .name(format!("stress-read-thread-{}", index))
+        .spawn(move || ThreadSummary::new())
+        .unwrap()
+}
+
+fn run_purge(
+    engine: Arc<Engine>,
+    args: TestArgs,
+    index: u64,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    ThreadBuilder::new()
+        .name(format!("stress-purge-thread-{}", index))
+        .spawn(move || {
+            while !shutdown.load(Ordering::Relaxed) {
+                sleep(args.purge_interval);
+                let regions = engine.purge_expired_files().unwrap();
+                for region in regions.into_iter() {
+                    let first = engine.first_index(region).unwrap();
+                    let last = engine.last_index(region).unwrap();
+                    engine.compact_to(
+                        region,
+                        last - ((last - first) as f32 * args.force_compact_factor) as u64,
+                    );
+                }
+            }
+        })
+        .unwrap()
+}
+
+fn main() {
+    let mut args = TestArgs::default();
+    let mut config = Config::default();
+    let matches = App::new("Engine Stress (stress)")
+        .about("A stress test tool for Raft Engine")
+        .arg(
+            Arg::with_name("path")
+                .long("path")
+                .default_value("")
+                .help("Set the data path for Raft Engine")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("time")
+                .long("time")
+                .value_name("time[s]")
+                .default_value(&formatcp!("{}", DEFAULT_TIME.as_secs()))
+                .help("Set the stress test time")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("regions")
+                .long("regions")
+                .default_value(&formatcp!("{}", DEFAULT_REGIONS))
+                .help("Set the region count")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("purge_interval")
+                .long("purge-interval")
+                .value_name("interval[ms]")
+                .default_value(&formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_millis()))
+                .help("Set the interval to purge obsolete log files")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("compact_ttl")
+                .conflicts_with("compact_count")
+                .long("compact_ttl")
+                .value_name("ttl[ms]")
+                .default_value(&formatcp!("{}", DEFAULT_COMPACT_COUNT))
+                .help("Compact log entries older than TTL")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("compact_count")
+                .conflicts_with("compact_ttl")
+                .long("compact_count")
+                .value_name("n")
+                .default_value(&formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
+                .help("Compact log entries exceeding this threshold")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("force_compact_factor")
+                .long("force-compact-factor")
+                .value_name("factor")
+                .default_value("0.5")
+                .validator(|s| {
+                    let factor = s.parse::<f32>().unwrap();
+                    if factor >= 1.0 {
+                        Err(String::from("Factor must be smaller than 1.0"))
+                    } else if factor <= 0.0 {
+                        Err(String::from("Factor must be positive"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .help("Factor to shrink raft log during force compact")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("write_threads")
+                .long("write-threads")
+                .default_value(&formatcp!("{}", DEFAULT_WRITE_THREADS))
+                .help("Set the thread count for writing logs")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("write_ops_per_thread")
+                .long("write-ops-per-thread")
+                .value_name("ops")
+                .default_value(&formatcp!("{}", DEFAULT_WRITE_OPS_PER_THREAD))
+                .help("Set the per-thread OPS for writing logs")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("read_threads")
+                .long("read-threads")
+                .value_name("threads")
+                .default_value(&formatcp!("{}", DEFAULT_READ_THREADS))
+                .help("Set the thread count for reading logs")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("read_ops_per_thread")
+                .long("read-ops-per-thread")
+                .value_name("ops")
+                .default_value(&formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD))
+                .help("Set the per-thread OPS for read entry requests")
+                .takes_value(true),
+        )
+        // Raft Engine configurations
+        .arg(
+            Arg::with_name("target_file_size")
+                .long("target-file-size")
+                .value_name("size")
+                .default_value("128MB")
+                .help("Target log file size for Raft Engine")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("purge_threshold")
+                .long("purge-threshold")
+                .value_name("size")
+                .default_value("10GB")
+                .help("Purge if log files are greater than this threshold")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("batch_compression_threshold")
+                .long("compression-threshold")
+                .value_name("size")
+                .default_value("8KB")
+                .help("Compress log batch bigger than this threshold")
+                .takes_value(true),
+        )
+        .get_matches();
+    if let Some(s) = matches.value_of("time") {
+        args.time = Duration::from_secs(s.parse::<u64>().unwrap());
+    }
+    if let Some(s) = matches.value_of("regions") {
+        args.regions = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("purge_interval") {
+        args.purge_interval = Duration::from_millis(s.parse::<u64>().unwrap());
+    }
+    if let Some(s) = matches.value_of("compact_ttl") {
+        args.compact_ttl = Duration::from_millis(s.parse::<u64>().unwrap());
+    }
+    if let Some(s) = matches.value_of("compact_count") {
+        args.compact_count = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("force_compact_factor") {
+        args.force_compact_factor = s.parse::<f32>().unwrap();
+    }
+    if let Some(s) = matches.value_of("write_threads") {
+        args.write_threads = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("write_ops_per_thread") {
+        args.write_ops_per_thread = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("read_threads") {
+        args.read_threads = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("read_ops_per_thread") {
+        args.read_ops_per_thread = s.parse::<u64>().unwrap();
+    }
+    // Raft Engine configurations
+    if let Some(s) = matches.value_of("path") {
+        config.dir = s.to_string();
+    }
+    if let Some(s) = matches.value_of("target_file_size") {
+        config.target_file_size = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("purge_threshold") {
+        config.purge_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("batch_compression_threshold") {
+        config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    let engine = Arc::new(Engine::new(config));
+    let mut write_threads = Vec::new();
+    let mut read_threads = Vec::new();
+    let mut misc_threads = Vec::new();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    if args.purge_interval.as_millis() > 0 {
+        misc_threads.push(run_purge(engine.clone(), args.clone(), 0, shutdown.clone()));
+    }
+    if args.read_threads > 0 {
+        for i in 0..args.read_threads {
+            read_threads.push(run_read(engine.clone(), args.clone(), i, shutdown.clone()));
+        }
+    }
+    if args.write_threads > 0 {
+        for i in 0..args.write_threads {
+            write_threads.push(run_write(engine.clone(), args.clone(), i, shutdown.clone()));
+        }
+    }
+    sleep(args.time);
+    shutdown.store(true, Ordering::Relaxed);
+    write_threads
+        .into_iter()
+        .fold(Summary::new(), |mut s, t| {
+            s.add(t.join().unwrap());
+            s
+        })
+        .print("write summary");
+    read_threads
+        .into_iter()
+        .fold(Summary::new(), |mut s, t| {
+            s.add(t.join().unwrap());
+            s
+        })
+        .print("read summary");
+    misc_threads.into_iter().for_each(|t| t.join().unwrap());
+}

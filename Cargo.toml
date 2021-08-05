@@ -1,8 +1,12 @@
 [package]
 name = "raft-engine"
 version = "0.1.0"
-authors = ["zhangjinpeng1987 <zhangjinpeng@pingcap.com>"]
+authors = ["The TiKV Authors"]
 edition = "2018"
+
+[[example]]
+name = "append-compact-purge"
+path = "examples/append_compact_purge.rs"
 
 [dependencies]
 protobuf = "=2.8.0"
@@ -30,6 +34,5 @@ ctor = "0.1"
 [patch.crates-io]
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
 
-[[example]]
-name = "append-compact-purge"
-path = "examples/append_compact_purge.rs"
+[workspace]
+members = [ "stress" ]
