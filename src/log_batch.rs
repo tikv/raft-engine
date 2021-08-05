@@ -229,6 +229,20 @@ impl<E: Message> Entries<E> {
             }
         }
     }
+
+    fn compute_approximate_size(&self) -> usize {
+        let mut size = 8 /*count*/;
+        if !self.entries.is_empty() {
+            for e in self.entries.iter() {
+                size += (8/*index*/+8/*tail_offset*/) + e.compute_size() as usize;
+            }
+        } else {
+            for ei in self.entries_index.iter() {
+                size += (8/*index*/+8/*tail_offset*/) + ei.len as usize;
+            }
+        }
+        size
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -259,6 +273,13 @@ impl Command {
                 Ok(Command::Compact { index })
             }
             _ => unreachable!(),
+        }
+    }
+
+    fn compute_approximate_size(&self) -> usize {
+        match &self {
+            Command::Clean => 1,              /*type*/
+            Command::Compact { .. } => 1 + 8, /*type + index*/
         }
     }
 }
@@ -329,6 +350,10 @@ impl KeyValue {
             OpType::Del => {}
         }
         Ok(())
+    }
+
+    fn compute_approximate_size(&self) -> usize {
+        1 /*op*/ + 8 /*k_len*/ + self.key.len() + 8 /*v_len*/ + self.value.as_ref().map_or_else(|| 0, |v| v.len())
     }
 }
 
@@ -435,6 +460,16 @@ impl<E: Message> LogItem<E> {
             content,
         })
     }
+
+    fn compute_approximate_size(&self) -> usize {
+        match &self.content {
+            LogItemContent::Entries(entries) => {
+                8 /*r_id*/ + 1 /*type*/ + entries.compute_approximate_size()
+            }
+            LogItemContent::Command(cmd) => 8 + 1 + cmd.compute_approximate_size(),
+            LogItemContent::Kv(kv) => 8 + 1 + kv.compute_approximate_size(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -444,6 +479,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
+    approximate_size: usize,
     _phantom: PhantomData<W>,
 }
 
@@ -453,10 +489,7 @@ where
     W: EntryExt<E>,
 {
     fn default() -> Self {
-        Self {
-            items: Vec::with_capacity(DEFAULT_BATCH_CAP),
-            _phantom: PhantomData,
-        }
+        Self::with_capacity(DEFAULT_BATCH_CAP)
     }
 }
 
@@ -468,12 +501,19 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
+            approximate_size: 0,
             _phantom: PhantomData,
         }
     }
 
+    pub fn merge(&mut self, rhs: &mut Self) {
+        self.approximate_size += rhs.approximate_size;
+        self.items.append(&mut rhs.items);
+    }
+
     pub fn add_entries(&mut self, region_id: u64, entries: Vec<E>) {
         let item = LogItem::from_entries(region_id, entries);
+        self.approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
@@ -483,16 +523,19 @@ where
 
     pub fn add_command(&mut self, region_id: u64, cmd: Command) {
         let item = LogItem::from_command(region_id, cmd);
+        self.approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
     pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Del, key, None);
+        self.approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
+        self.approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
@@ -535,6 +578,7 @@ where
         let mut log_batch = LogBatch::with_capacity(items_count);
         while items_count > 0 {
             let item = LogItem::from_bytes::<W>(buf, &mut 0)?;
+            log_batch.approximate_size += item.compute_approximate_size();
             log_batch.items.push(item);
             items_count -= 1;
         }
@@ -616,6 +660,16 @@ where
         }
 
         Some(buf)
+    }
+
+    // Don't account for compression and varint encoding.
+    pub fn approximate_size(&self) -> usize {
+        if self.items.is_empty() {
+            0
+        } else {
+            8 /*len*/ + 8 /*section offset*/ + 8/*items count*/
+            +self.approximate_size + CHECKSUM_LEN * 2 /*checksum*/
+        }
     }
 }
 
