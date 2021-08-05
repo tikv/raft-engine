@@ -1,17 +1,15 @@
 use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
+use std::fs::{self};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::{cmp, u64};
 
 use log::{debug, info, warn};
-use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
-use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
+use nix::unistd::{close, fsync, ftruncate};
 use nix::NixPath;
 use protobuf::Message;
 
@@ -20,7 +18,8 @@ use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::HandyRwLock;
+use crate::reader::LogBatchFileReader;
+use crate::util::{file_size, parse_nix_error, pread_exact, pwrite_exact, HandyRwLock};
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -39,6 +38,9 @@ pub const FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8
 const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
+
+// TODO(MrCroxx): [PLEASE REVIEW] benchmark needed, 4k or 512?
+const RECOVERY_FILE_READ_SIZE: usize = 512;
 
 #[derive(Clone, Copy)]
 pub enum Version {
@@ -392,19 +394,6 @@ impl FilePipeLog {
         Ok(pipe_log)
     }
 
-    // TODO: use `LogFd` for reading file bytes instead of `std::fs`
-    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
-        let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
-        let meta = fs::metadata(&path)?;
-        let mut vec = Vec::with_capacity(meta.len() as usize);
-
-        // Read the whole file.
-        let mut file = File::open(&path)?;
-        file.read_to_end(&mut vec)?;
-        Ok(vec)
-    }
-
     fn append_bytes(
         &self,
         queue: LogQueue,
@@ -436,13 +425,7 @@ impl FilePipeLog {
         }
     }
 
-    fn get_name_suffix(&self, queue: LogQueue) -> &'static str {
-        match queue {
-            LogQueue::Append => LOG_SUFFIX,
-            LogQueue::Rewrite => REWRITE_SUFFIX,
-        }
-    }
-
+    #[cfg(test)]
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
         self.mut_queue(queue).truncate_active_log(offset)
     }
@@ -499,47 +482,77 @@ impl PipeLog for FilePipeLog {
         mode: RecoveryMode,
         batches: &mut Vec<LogBatch<E, W>>,
     ) -> Result<()> {
-        let content = self.read_file_bytes(queue, file_id)?;
-        let mut buf = content.as_slice();
-        let start_ptr = buf.as_ptr();
-        buf.consume(FILE_MAGIC_HEADER.len() + Version::len());
-        let mut offset = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
+        debug!("recover from log file {:?}:{:?}", queue, file_id);
+        let fd = self.get_queue(queue).get_fd(file_id)?;
+        let mut reader = LogBatchFileReader::new(
+            fd.0,
+            (FILE_MAGIC_HEADER.len() + Version::len()) as u64,
+            RECOVERY_FILE_READ_SIZE,
+        )?;
         loop {
-            debug!("recovering log batch at {:?}.{}", file_id, offset);
-            let mut log_batch = match LogBatch::from_bytes(&mut buf, offset) {
-                Ok(Some((log_batch, skip))) => {
-                    buf.consume(skip);
-                    log_batch
+            match reader.next::<E, W>() {
+                Ok(Some(mut batch)) => {
+                    for item in batch.items.iter_mut() {
+                        if let LogItemContent::Entries(entries) = &mut item.content {
+                            entries.set_queue_and_file_id(queue, file_id);
+                        }
+                    }
+                    batches.push(batch);
                 }
-                Ok(None) => {
-                    info!("Recovered raft log {:?}.{:?}.", queue, file_id);
-                    return Ok(());
-                }
+                Ok(None) => return Ok(()),
                 Err(e) => {
-                    warn!(
-                        "Raft log content is corrupted at {:?}.{:?}:{}, error: {}",
-                        queue, file_id, offset, e
-                    );
-                    if file_id == self.active_file_id(queue)
-                        && mode == RecoveryMode::TolerateCorruptedTailRecords
-                    {
-                        self.truncate_active_log(queue, Some(offset as usize))?;
-                        return Ok(());
-                    } else {
-                        return Err(Error::Corruption(
-                            "Raft log content is corrupted".to_owned(),
-                        ));
+                    return match mode {
+                        RecoveryMode::TolerateCorruptedTailRecords => Ok(()),
+                        RecoveryMode::AbsoluteConsistency => Err(Error::Corruption(format!(
+                            "Raft log content is corrupted: {}",
+                            e
+                        ))),
                     }
                 }
-            };
-            for item in log_batch.items.iter_mut() {
-                if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.set_queue_and_file_id(queue, file_id);
-                }
             }
-            batches.push(log_batch);
-            offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
         }
+
+        // let content = self.read_file_bytes(queue, file_id)?;
+        // let mut buf = content.as_slice();
+        // let start_ptr = buf.as_ptr();
+        // buf.consume(FILE_MAGIC_HEADER.len() + Version::len());
+        // let mut offset = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
+        // loop {
+        //     debug!("recovering log batch at {:?}.{}", file_id, offset);
+        //     let mut log_batch = match LogBatch::from_bytes(&mut buf, offset) {
+        //         Ok(Some((log_batch, skip))) => {
+        //             buf.consume(skip);
+        //             log_batch
+        //         }
+        //         Ok(None) => {
+        //             info!("Recovered raft log {:?}.{:?}.", queue, file_id);
+        //             return Ok(());
+        //         }
+        //         Err(e) => {
+        //             warn!(
+        //                 "Raft log content is corrupted at {:?}.{:?}:{}, error: {}",
+        //                 queue, file_id, offset, e
+        //             );
+        //             if file_id == self.active_file_id(queue)
+        //                 && mode == RecoveryMode::TolerateCorruptedTailRecords
+        //             {
+        //                 self.truncate_active_log(queue, Some(offset as usize))?;
+        //                 return Ok(());
+        //             } else {
+        //                 return Err(Error::Corruption(
+        //                     "Raft log content is corrupted".to_owned(),
+        //                 ));
+        //             }
+        //         }
+        //     };
+        //     for item in log_batch.items.iter_mut() {
+        //         if let LogItemContent::Entries(entries) = &mut item.content {
+        //             entries.set_queue_and_file_id(queue, file_id);
+        //         }
+        //     }
+        //     batches.push(log_batch);
+        //     offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
+        // }
     }
 
     fn append<E: Message, W: EntryExt<E>>(
@@ -649,16 +662,6 @@ fn queue_from_suffix(suffix: &str) -> LogQueue {
     }
 }
 
-fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
-    match e {
-        nix::Error::Sys(no) => {
-            let kind = IoError::from(no).kind();
-            Error::Io(IoError::new(kind, custom))
-        }
-        e => box_err!("{}: {:?}", custom, e),
-    }
-}
-
 fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
     let raw = open_active_file_raw(path)?;
     check_version(raw)?;
@@ -709,41 +712,6 @@ fn check_version(fd: RawFd) -> Result<Version> {
     }
 }
 
-fn file_size(fd: RawFd) -> Result<usize> {
-    lseek(fd, 0, Whence::SeekEnd)
-        .map(|n| n as usize)
-        .map_err(|e| parse_nix_error(e, "lseek"))
-}
-
-fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> Result<Vec<u8>> {
-    let mut result = vec![0; len as usize];
-    let mut readed = 0;
-    while readed < len {
-        let bytes = match pread(fd, &mut result[readed..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pread")),
-        };
-        readed += bytes;
-        offset += bytes as u64;
-    }
-    Ok(result)
-}
-
-fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
-    let mut written = 0;
-    while written < content.len() {
-        let bytes = match pwrite(fd, &content[written..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pwrite")),
-        };
-        written += bytes;
-        offset += bytes as u64;
-    }
-    Ok(())
-}
-
 fn write_file_header(fd: RawFd) -> Result<usize> {
     let len = FILE_MAGIC_HEADER.len() + Version::len();
     let mut header = Vec::with_capacity(len);
@@ -757,6 +725,7 @@ fn write_file_header(fd: RawFd) -> Result<usize> {
 mod tests {
     use std::io::Write;
 
+    use nix::sys::uio::pwrite;
     use tempfile::Builder;
 
     use super::*;

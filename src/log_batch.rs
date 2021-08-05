@@ -13,10 +13,10 @@ use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileId, LogQueue};
 use crate::{Error, Result};
 
-pub const BATCH_MIN_SIZE: usize = HEADER_LEN + SECTION_OFFSET_LEN + CHECKSUM_LEN;
+pub const BATCH_MIN_SIZE: usize = HEADER_LEN + SECTION_OFFSET_LEN + CHECKSUM_LEN * 2;
 pub const HEADER_LEN: usize = 8;
-pub const CHECKSUM_LEN: usize = 4;
 pub const SECTION_OFFSET_LEN: usize = 8;
+pub const CHECKSUM_LEN: usize = 4;
 
 const TYPE_ENTRIES: u8 = 0x01;
 const TYPE_COMMAND: u8 = 0x02;
@@ -670,6 +670,21 @@ where
             8 /*len*/ + 8 /*section offset*/ + 8/*items count*/
             +self.approximate_size + CHECKSUM_LEN * 2 /*checksum*/
         }
+    }
+
+    /// min buffer size to decide `min_buffer_size_for_recovery`
+    pub fn header_size() -> usize {
+        // 8 /*len*/ + 8 /*section offset*/
+        16
+    }
+
+    /// min buffer size for recover memtable ()
+    pub fn recovery_size(buf: &mut SliceReader<'_>) -> Result<usize> {
+        debug_assert!(buf.len() >= Self::header_size());
+        let mut reader = buf.as_ref();
+        reader.consume(8);
+        let section_offset = codec::decode_u64(&mut reader)? as usize;
+        Ok(section_offset + 16)
     }
 }
 

@@ -25,6 +25,7 @@ mod log_batch;
 mod memtable;
 mod pipe_log;
 mod purge;
+mod reader;
 mod util;
 
 use crate::file_pipe_log::FilePipeLog;

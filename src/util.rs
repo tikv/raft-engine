@@ -4,10 +4,17 @@ pub use std::collections::hash_map::Entry as HashMapEntry;
 use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
+use std::io::Error as IoError;
 use std::ops::{Div, Mul};
+use std::os::unix::prelude::RawFd;
 use std::str::FromStr;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::{Error, Result as RaftEngineResult};
+
+use nix::errno::Errno;
+use nix::sys::uio::{pread, pwrite};
+use nix::unistd::{lseek, Whence};
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -210,4 +217,49 @@ impl<T> HandyRwLock<T> for RwLock<T> {
     fn rl(&self) -> RwLockReadGuard<'_, T> {
         self.read().unwrap()
     }
+}
+
+pub fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
+    match e {
+        nix::Error::Sys(no) => {
+            let kind = IoError::from(no).kind();
+            Error::Io(IoError::new(kind, custom))
+        }
+        e => box_err!("{}: {:?}", custom, e),
+    }
+}
+
+pub fn file_size(fd: RawFd) -> RaftEngineResult<usize> {
+    lseek(fd, 0, Whence::SeekEnd)
+        .map(|n| n as usize)
+        .map_err(|e| parse_nix_error(e, "lseek"))
+}
+
+pub fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> RaftEngineResult<Vec<u8>> {
+    let mut result = vec![0; len as usize];
+    let mut readed = 0;
+    while readed < len {
+        let bytes = match pread(fd, &mut result[readed..], offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pread")),
+        };
+        readed += bytes;
+        offset += bytes as u64;
+    }
+    Ok(result)
+}
+
+pub fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> RaftEngineResult<()> {
+    let mut written = 0;
+    while written < content.len() {
+        let bytes = match pwrite(fd, &content[written..], offset as _) {
+            Ok(bytes) => bytes,
+            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+            Err(e) => return Err(parse_nix_error(e, "pwrite")),
+        };
+        written += bytes;
+        offset += bytes as u64;
+    }
+    Ok(())
 }
