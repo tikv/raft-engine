@@ -511,48 +511,6 @@ impl PipeLog for FilePipeLog {
                 }
             }
         }
-
-        // let content = self.read_file_bytes(queue, file_id)?;
-        // let mut buf = content.as_slice();
-        // let start_ptr = buf.as_ptr();
-        // buf.consume(FILE_MAGIC_HEADER.len() + Version::len());
-        // let mut offset = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
-        // loop {
-        //     debug!("recovering log batch at {:?}.{}", file_id, offset);
-        //     let mut log_batch = match LogBatch::from_bytes(&mut buf, offset) {
-        //         Ok(Some((log_batch, skip))) => {
-        //             buf.consume(skip);
-        //             log_batch
-        //         }
-        //         Ok(None) => {
-        //             info!("Recovered raft log {:?}.{:?}.", queue, file_id);
-        //             return Ok(());
-        //         }
-        //         Err(e) => {
-        //             warn!(
-        //                 "Raft log content is corrupted at {:?}.{:?}:{}, error: {}",
-        //                 queue, file_id, offset, e
-        //             );
-        //             if file_id == self.active_file_id(queue)
-        //                 && mode == RecoveryMode::TolerateCorruptedTailRecords
-        //             {
-        //                 self.truncate_active_log(queue, Some(offset as usize))?;
-        //                 return Ok(());
-        //             } else {
-        //                 return Err(Error::Corruption(
-        //                     "Raft log content is corrupted".to_owned(),
-        //                 ));
-        //             }
-        //         }
-        //     };
-        //     for item in log_batch.items.iter_mut() {
-        //         if let LogItemContent::Entries(entries) = &mut item.content {
-        //             entries.set_queue_and_file_id(queue, file_id);
-        //         }
-        //     }
-        //     batches.push(log_batch);
-        //     offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
-        // }
     }
 
     fn append<E: Message, W: EntryExt<E>>(
