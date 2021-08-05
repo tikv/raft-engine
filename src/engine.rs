@@ -164,7 +164,7 @@ where
         queue: LogQueue,
         file_id: FileId,
     ) {
-        for item in log_batch.items.drain(..) {
+        for item in log_batch.drain() {
             let raft = item.raft_group_id;
             let memtable = memtables.get_or_insert(raft);
             match item.content {
@@ -230,7 +230,7 @@ where
     }
 
     fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        if log_batch.items.is_empty() {
+        if log_batch.is_empty() {
             if sync {
                 self.pipe_log.sync(LogQueue::Append)?;
             }
