@@ -17,14 +17,15 @@ const SHRINK_CACHE_LIMIT: usize = 512;
 pub struct EntryIndex {
     pub index: u64,
 
-    // Log batch physical position in file.
+    // Compressed section physical position in file.
     pub queue: LogQueue,
     pub file_id: FileId,
-    pub base_offset: u64,
     pub compression_type: CompressionType,
-    pub batch_len: u64,
+    pub base_offset: u64,
+    pub section_offset: u64, // section offset of batch
+    pub section_len: u64,
 
-    // Entry position in log batch.
+    // Entry content position in uncompressed section.
     pub offset: u64,
     pub len: u64,
 }
@@ -35,9 +36,10 @@ impl Default for EntryIndex {
             index: 0,
             queue: LogQueue::Append,
             file_id: Default::default(),
-            base_offset: 0,
             compression_type: CompressionType::None,
-            batch_len: 0,
+            base_offset: 0,
+            section_offset: 0,
+            section_len: 0,
             offset: 0,
             len: 0,
         }
@@ -152,12 +154,15 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
     }
 
     pub fn append(&mut self, entries: Vec<E>, entries_index: Vec<EntryIndex>) {
-        assert_eq!(entries.len(), entries_index.len());
-        if entries.is_empty() {
+        assert!(entries.is_empty() || entries.len() == entries_index.len());
+        if entries_index.is_empty() {
             return;
         }
 
-        let first_index_to_add = W::index(&entries[0]);
+        let first_index_to_add = match entries.is_empty() {
+            true => entries_index.first().unwrap().index,
+            false => W::index(&entries[0]),
+        };
         self.cut_entries_index(first_index_to_add);
 
         if let Some(index) = self.entries_index.back().map(|e| e.index) {
@@ -210,7 +215,8 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
         let first = cmp::max(entries_index[0].index as usize, front);
         let last = cmp::min(entries_index[ents_len - 1].index as usize, back);
 
-        if last < front {
+        // TODO(MrCroxx): [PLEASE REVIEW] was this a bug?
+        if last < first {
             // All entries are compacted, update the counter.
             self.global_stats.add_compacted_rewrite(entries_index.len());
             return;
@@ -247,11 +253,13 @@ impl<E: Message + Clone, W: EntryExt<E>> MemTable<E, W> {
             }
 
             self.entries_index[i + distance].file_id = ei.file_id;
-            self.entries_index[i + distance].base_offset = ei.base_offset;
             self.entries_index[i + distance].compression_type = ei.compression_type;
-            self.entries_index[i + distance].batch_len = ei.batch_len;
+            self.entries_index[i + distance].base_offset = ei.base_offset;
+            self.entries_index[i + distance].section_offset = ei.section_offset;
+            self.entries_index[i + distance].section_len = ei.section_len;
             self.entries_index[i + distance].offset = ei.offset;
             self.entries_index[i + distance].len = ei.len;
+            debug_assert_eq!(&self.entries_index[i + distance], ei);
         }
 
         self.rewrite_count = distance + ents_len;

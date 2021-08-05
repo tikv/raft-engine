@@ -11,13 +11,12 @@ use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
 use crate::log_batch::{
     self, Command, CompressionType, EntryExt, LogBatch, LogItemContent, OpType, CHECKSUM_LEN,
-    HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HandyRwLock, HashMap};
-use crate::{codec, GlobalStats, Result};
+use crate::{GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
@@ -515,28 +514,21 @@ where
 {
     let queue = entry_index.queue;
     let file_id = entry_index.file_id;
-    let base_offset = entry_index.base_offset;
-    let batch_len = entry_index.batch_len;
-    let offset = entry_index.offset;
-    let len = entry_index.len;
+    let section_offset = entry_index.base_offset + 16 + entry_index.section_offset;
+    let section_len = entry_index.section_len;
+    let offset = entry_index.offset as usize;
+    let len = entry_index.len as usize;
+
+    let buf = pipe_log.read_bytes(queue, file_id, section_offset, section_len)?;
+    log_batch::test_checksum(&buf[..])?;
 
     let entry_content = match entry_index.compression_type {
-        CompressionType::None => {
-            let offset = base_offset + offset;
-            pipe_log.read_bytes(queue, file_id, offset, len)?
-        }
+        CompressionType::None => buf[offset..offset + len].to_owned(),
         CompressionType::Lz4 => {
-            let read_len = batch_len + HEADER_LEN as u64;
-            let compressed = pipe_log.read_bytes(queue, file_id, base_offset, read_len)?;
-            let mut reader = compressed.as_ref();
-            let header = codec::decode_u64(&mut reader)?;
-            assert_eq!(header >> 8, batch_len);
-
-            log_batch::test_batch_checksum(reader)?;
-            let buf = log_batch::decompress(&reader[..batch_len as usize - CHECKSUM_LEN]);
-            let start = offset as usize - HEADER_LEN;
-            let end = (offset + len) as usize - HEADER_LEN;
-            buf[start..end].to_vec()
+            let reader = &buf[..];
+            let decompressed =
+                log_batch::decompress(&reader[..section_len as usize - CHECKSUM_LEN]);
+            decompressed[offset..offset + len].to_vec()
         }
     };
 
@@ -634,6 +626,8 @@ mod tests {
                 // Test get_entry from file.
                 entry.set_index(i);
                 assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+                entry.set_index(i + 1);
+                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
             }
 
             drop(engine);

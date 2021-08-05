@@ -506,8 +506,11 @@ impl PipeLog for FilePipeLog {
         let mut offset = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
         loop {
             debug!("recovering log batch at {:?}.{}", file_id, offset);
-            let mut log_batch = match LogBatch::from_bytes(&mut buf, file_id, offset) {
-                Ok(Some(log_batch)) => log_batch,
+            let mut log_batch = match LogBatch::from_bytes(&mut buf, offset) {
+                Ok(Some((log_batch, skip))) => {
+                    buf.consume(skip);
+                    log_batch
+                }
                 Ok(None) => {
                     info!("Recovered raft log {:?}.{:?}.", queue, file_id);
                     return Ok(());
@@ -529,11 +532,9 @@ impl PipeLog for FilePipeLog {
                     }
                 }
             };
-            if queue == LogQueue::Rewrite {
-                for item in log_batch.items.iter_mut() {
-                    if let LogItemContent::Entries(entries) = &mut item.content {
-                        entries.set_queue(LogQueue::Rewrite);
-                    }
+            for item in log_batch.items.iter_mut() {
+                if let LogItemContent::Entries(entries) = &mut item.content {
+                    entries.set_queue_and_file_id(queue, file_id);
                 }
             }
             batches.push(log_batch);

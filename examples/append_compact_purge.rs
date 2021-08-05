@@ -5,7 +5,7 @@ use raft_engine::{Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct EntryExtImpl;
 impl EntryExt<Entry> for EntryExtImpl {
     fn index(entry: &Entry) -> u64 {
