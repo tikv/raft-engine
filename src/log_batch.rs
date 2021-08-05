@@ -479,7 +479,7 @@ where
     W: EntryExt<E>,
 {
     pub items: Vec<LogItem<E>>,
-    approximate_size: usize,
+    items_approximate_size: usize,
     _phantom: PhantomData<W>,
 }
 
@@ -501,19 +501,19 @@ where
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
-            approximate_size: 0,
+            items_approximate_size: 0,
             _phantom: PhantomData,
         }
     }
 
     pub fn merge(&mut self, rhs: &mut Self) {
-        self.approximate_size += rhs.approximate_size;
+        self.items_approximate_size += rhs.items_approximate_size;
         self.items.append(&mut rhs.items);
     }
 
     pub fn add_entries(&mut self, region_id: u64, entries: Vec<E>) {
         let item = LogItem::from_entries(region_id, entries);
-        self.approximate_size += item.compute_approximate_size();
+        self.items_approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
@@ -523,19 +523,19 @@ where
 
     pub fn add_command(&mut self, region_id: u64, cmd: Command) {
         let item = LogItem::from_command(region_id, cmd);
-        self.approximate_size += item.compute_approximate_size();
+        self.items_approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
     pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Del, key, None);
-        self.approximate_size += item.compute_approximate_size();
+        self.items_approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Put, key, Some(value));
-        self.approximate_size += item.compute_approximate_size();
+        self.items_approximate_size += item.compute_approximate_size();
         self.items.push(item);
     }
 
@@ -578,7 +578,7 @@ where
         let mut log_batch = LogBatch::with_capacity(items_count);
         while items_count > 0 {
             let item = LogItem::from_bytes::<W>(buf, &mut 0)?;
-            log_batch.approximate_size += item.compute_approximate_size();
+            log_batch.items_approximate_size += item.compute_approximate_size();
             log_batch.items.push(item);
             items_count -= 1;
         }
@@ -668,7 +668,7 @@ where
             0
         } else {
             8 /*len*/ + 8 /*section offset*/ + 8/*items count*/
-            +self.approximate_size + CHECKSUM_LEN * 2 /*checksum*/
+            +self.items_approximate_size + CHECKSUM_LEN * 2 /*checksum*/
         }
     }
 
