@@ -468,7 +468,6 @@ where
     /// Like `cut_logs` but the range could be very large. Return the deleted count.
     /// Generally, `from` can be passed in `0`.
     pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
-        // FIXME: potential race?
         let first_index = match self.first_index(region_id) {
             Some(index) => index,
             None => return 0,
