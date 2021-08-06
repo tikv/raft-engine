@@ -159,12 +159,12 @@ impl Summary {
         if !self.thread_qps.is_empty() {
             println!("[{}]", name);
             println!(
-                "Throughput(qps) = {}",
+                "Throughput(qps) = {:.02}",
                 self.thread_qps.iter().fold(0.0, |sum, qps| { sum + qps })
             );
             let hist = self.hist.as_ref().unwrap();
             println!(
-                "Latency(us) min = {}, avg = {}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
+                "Latency(us) min = {}, avg = {:.02}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
                 hist.min(),
                 hist.mean(),
                 hist.value_at_quantile(0.5),
