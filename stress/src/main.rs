@@ -16,6 +16,9 @@ use raft::eraftpb::Entry;
 use raft_engine::{Command, Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
 use rand::{thread_rng, Rng};
 
+type Engine = RaftLogEngine<Entry, EntryExtTyped>;
+type WriteBatch = LogBatch<Entry, EntryExtTyped>;
+
 #[derive(Clone)]
 struct EntryExtTyped;
 impl EntryExt<Entry> for EntryExtTyped {
@@ -23,38 +26,6 @@ impl EntryExt<Entry> for EntryExtTyped {
         entry.index
     }
 }
-
-fn prepare_entries(entries: &Vec<Entry>, mut start_index: u64) -> Vec<Entry> {
-    let mut entries = entries.clone();
-    for e in &mut entries {
-        e.set_index(start_index);
-        start_index += 1;
-    }
-    entries
-}
-
-fn wait_til(now: &mut Instant, t: Instant) {
-    const MAX_SPIN_MICROS: u64 = 10;
-    if t > *now {
-        let mut spin = SpinWait::new();
-        let wait_duration = t - *now;
-        if wait_duration.as_micros() > MAX_SPIN_MICROS.into() {
-            sleep(wait_duration - Duration::from_micros(MAX_SPIN_MICROS));
-        }
-        // Spin for at most 0.01ms
-        loop {
-            *now = Instant::now();
-            if *now >= t {
-                break;
-            } else {
-                spin.spin_no_yield();
-            }
-        }
-    }
-}
-
-type Engine = RaftLogEngine<Entry, EntryExtTyped>;
-type WriteBatch = LogBatch<Entry, EntryExtTyped>;
 
 const DEFAULT_TIME: Duration = Duration::from_secs(60);
 const DEFAULT_REGIONS: u64 = 1;
@@ -210,7 +181,7 @@ impl Summary {
             } else {
                 let first = *self.thread_qps.first().unwrap() as f64;
                 let last = *self.thread_qps.last().unwrap() as f64;
-                (first - last) / (first + last)
+                f64::abs(first - last) / (first + last)
             };
             println!("Fairness = {:.01}%", 100.0 - fairness * 100.0);
         }
@@ -346,6 +317,35 @@ fn spawn_purge(
             }
         })
         .unwrap()
+}
+
+fn prepare_entries(entries: &Vec<Entry>, mut start_index: u64) -> Vec<Entry> {
+    let mut entries = entries.clone();
+    for e in &mut entries {
+        e.set_index(start_index);
+        start_index += 1;
+    }
+    entries
+}
+
+fn wait_til(now: &mut Instant, t: Instant) {
+    // Spin for at most 0.01ms
+    const MAX_SPIN_MICROS: u64 = 10;
+    if t > *now {
+        let mut spin = SpinWait::new();
+        let wait_duration = t - *now;
+        if wait_duration.as_micros() > MAX_SPIN_MICROS.into() {
+            sleep(wait_duration - Duration::from_micros(MAX_SPIN_MICROS));
+        }
+        loop {
+            *now = Instant::now();
+            if *now >= t {
+                break;
+            } else {
+                spin.spin_no_yield();
+            }
+        }
+    }
 }
 
 fn main() {
