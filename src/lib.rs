@@ -1,6 +1,9 @@
 #![feature(shrink_to)]
 #![feature(cell_update)]
 
+#[macro_use]
+extern crate lazy_static;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 macro_rules! box_err {
@@ -23,6 +26,7 @@ mod event_listener;
 mod file_pipe_log;
 mod log_batch;
 mod memtable;
+mod metrics;
 mod pipe_log;
 mod purge;
 mod util;

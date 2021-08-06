@@ -14,9 +14,10 @@ use crate::log_batch::{
     HEADER_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::{HandyRwLock, HashMap};
+use crate::util::{HandyRwLock, HashMap, InstantExt};
 use crate::{codec, GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -230,11 +231,12 @@ where
     }
 
     fn write_impl(&self, log_batch: &mut LogBatch<E, W>, sync: bool) -> Result<usize> {
-        if log_batch.is_empty() {
+        let start = Instant::now();
+        let bytes = if log_batch.is_empty() {
             if sync {
                 self.pipe_log.sync(LogQueue::Append)?;
             }
-            Ok(0)
+            0
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
             if file_id.valid() {
@@ -243,8 +245,11 @@ where
                     listener.post_apply_memtables(LogQueue::Append, file_id);
                 }
             }
-            Ok(bytes)
-        }
+            bytes
+        };
+        ENGINE_WRITE_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        ENGINE_WRITE_SIZE_HISTOGRAM.observe(bytes as f64);
+        Ok(bytes)
     }
 }
 
@@ -353,7 +358,7 @@ where
         let mut batches = Vec::new();
         let mut file_id = first_file;
         while file_id <= active_file {
-            pipe_log.read_file(queue, file_id, recovery_mode, &mut batches)?;
+            pipe_log.read_file_for_recovery(queue, file_id, recovery_mode, &mut batches)?;
             for mut batch in batches.drain(..) {
                 Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
             }
@@ -404,13 +409,15 @@ where
     }
 
     pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<E>> {
+        let start = Instant::now();
+        let mut entry = None;
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.rl().get_entry(log_idx) {
-                let entry = read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?;
-                return Ok(Some(entry));
+                entry = Some(read_entry_from_file::<_, W, _>(&self.pipe_log, &idx)?);
             }
         }
-        Ok(None)
+        ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        Ok(entry)
     }
 
     /// Purge expired logs files and return a set of Raft group ids
@@ -428,6 +435,7 @@ where
         max_size: Option<usize>,
         vec: &mut Vec<E>,
     ) -> Result<usize> {
+        let start = Instant::now();
         if let Some(memtable) = self.memtables.get(region_id) {
             let old_len = vec.len();
             fetch_entries(
@@ -437,6 +445,7 @@ where
                 (end - begin) as usize,
                 |t, ents_idx| t.fetch_entries_to(begin, end, max_size, ents_idx),
             )?;
+            ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
             return Ok(vec.len() - old_len);
         }
         Ok(0)
