@@ -31,7 +31,7 @@ use crate::file_pipe_log::FilePipeLog;
 
 pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
-pub use self::log_batch::{EntryExt, LogBatch};
+pub use self::log_batch::{Command, EntryExt, LogBatch};
 pub use self::util::ReadableSize;
 pub type RaftLogEngine<X, Y> = self::engine::Engine<X, Y, FilePipeLog>;
 

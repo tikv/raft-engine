@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use clap::{App, Arg};
 use const_format::formatcp;
 use hdrhistogram::Histogram;
+use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
-use raft_engine::{Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
-use rand::thread_rng;
-use rand_distr::{Distribution, Normal};
+use raft_engine::{Command, Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
+use rand::{thread_rng, Rng};
 
 #[derive(Clone)]
 struct EntryExtTyped;
@@ -24,7 +24,37 @@ impl EntryExt<Entry> for EntryExtTyped {
     }
 }
 
+fn prepare_entries(entries: &Vec<Entry>, mut start_index: u64) -> Vec<Entry> {
+    let mut entries = entries.clone();
+    for e in &mut entries {
+        e.set_index(start_index);
+        start_index += 1;
+    }
+    entries
+}
+
+fn wait_til(now: &mut Instant, t: Instant) {
+    const MAX_SPIN_MICROS: u64 = 10;
+    if t > *now {
+        let mut spin = SpinWait::new();
+        let wait_duration = t - *now;
+        if wait_duration.as_micros() > MAX_SPIN_MICROS.into() {
+            sleep(wait_duration - Duration::from_micros(MAX_SPIN_MICROS));
+        }
+        // Spin for at most 0.01ms
+        loop {
+            *now = Instant::now();
+            if *now >= t {
+                break;
+            } else {
+                spin.spin_no_yield();
+            }
+        }
+    }
+}
+
 type Engine = RaftLogEngine<Entry, EntryExtTyped>;
+type WriteBatch = LogBatch<Entry, EntryExtTyped>;
 
 const DEFAULT_TIME: Duration = Duration::from_secs(60);
 const DEFAULT_REGIONS: u64 = 1;
@@ -36,6 +66,10 @@ const DEFAULT_WRITE_THREADS: u64 = 1;
 const DEFAULT_WRITE_OPS_PER_THREAD: u64 = 0;
 const DEFAULT_READ_THREADS: u64 = 0;
 const DEFAULT_READ_OPS_PER_THREAD: u64 = 0;
+const DEFAULT_ENTRY_SIZE: usize = 1024;
+const DEFAULT_WRITE_ENTRY_COUNT: u64 = 4;
+const DEFAULT_WRITE_REGION_COUNT: u64 = 4;
+const DEFAULT_WRITE_SYNC: bool = true;
 
 #[derive(Debug, Clone)]
 struct TestArgs {
@@ -49,6 +83,10 @@ struct TestArgs {
     write_ops_per_thread: u64,
     read_threads: u64,
     read_ops_per_thread: u64,
+    entry_size: usize,
+    write_entry_count: u64,
+    write_region_count: u64,
+    write_sync: bool,
 }
 
 impl Default for TestArgs {
@@ -64,7 +102,28 @@ impl Default for TestArgs {
             write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
             read_threads: DEFAULT_READ_THREADS,
             read_ops_per_thread: DEFAULT_READ_OPS_PER_THREAD,
+            entry_size: DEFAULT_ENTRY_SIZE,
+            write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
+            write_region_count: DEFAULT_WRITE_REGION_COUNT,
+            write_sync: DEFAULT_WRITE_SYNC,
         }
+    }
+}
+
+impl TestArgs {
+    fn validate(&self) -> Result<(), String> {
+        if self.regions < self.write_threads {
+            return Err("Write thread count must be smaller than region count.".to_owned());
+        }
+        if self.regions < self.read_threads {
+            return Err("Read thread count must be smaller than region count.".to_owned());
+        }
+        if self.write_region_count > self.regions / self.write_threads {
+            return Err(
+                "Write region count must be smaller than region-count / write-threads.".to_owned(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -83,17 +142,20 @@ impl ThreadSummary {
         }
     }
 
-    fn record(&mut self, now: Instant, sample: Duration) {
-        self.hist.record(sample.as_micros() as u64);
+    fn record(&mut self, start: Instant, end: Instant) {
+        self.hist
+            .record(end.duration_since(start).as_micros() as u64)
+            .unwrap();
         if self.first.is_none() {
-            self.first.insert(now.clone());
+            self.first = Some(start.clone());
+        } else {
+            self.last = Some(start);
         }
-        self.last.insert(now);
     }
 
     fn qps(&self) -> f64 {
         if let (Some(first), Some(last)) = (self.first, self.last) {
-            self.hist.count() as f64 - 1.0 / last.duration_since(first).as_secs_f64()
+            (self.hist.len() as f64 - 1.0) / last.duration_since(first).as_secs_f64()
         } else {
             0.0
         }
@@ -112,14 +174,16 @@ impl Summary {
             thread_qps: Vec::new(),
         }
     }
+
     fn add(&mut self, s: ThreadSummary) {
         self.thread_qps.push(s.qps());
         if let Some(hist) = &mut self.hist {
             *hist += s.hist;
         } else {
-            self.hist.insert(s.hist);
+            self.hist = Some(s.hist);
         }
     }
+
     fn print(&self, name: &str) {
         if !self.thread_qps.is_empty() {
             println!("[{}]", name);
@@ -129,7 +193,7 @@ impl Summary {
             );
             let hist = self.hist.as_ref().unwrap();
             println!(
-                "Latency min = {}, avg = {}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
+                "Latency(us) min = {}, avg = {}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
                 hist.min(),
                 hist.mean(),
                 hist.value_at_quantile(0.5),
@@ -139,14 +203,21 @@ impl Summary {
                 hist.value_at_quantile(0.999),
                 hist.max()
             );
-            let median = statistical::median(&self.thread_qps);
-            let stddev = statistical::standard_deviation(&self.thread_qps, None);
-            println!("Fairness = {}%", stddev / median);
+            let fairness = if self.thread_qps.len() > 2 {
+                let median = statistical::median(&self.thread_qps);
+                let stddev = statistical::standard_deviation(&self.thread_qps, None);
+                stddev / median
+            } else {
+                let first = *self.thread_qps.first().unwrap() as f64;
+                let last = *self.thread_qps.last().unwrap() as f64;
+                (first - last) / (first + last)
+            };
+            println!("Fairness = {:.01}%", 100.0 - fairness * 100.0);
         }
     }
 }
 
-fn run_write(
+fn spawn_write(
     engine: Arc<Engine>,
     args: TestArgs,
     index: u64,
@@ -154,11 +225,60 @@ fn run_write(
 ) -> JoinHandle<ThreadSummary> {
     ThreadBuilder::new()
         .name(format!("stress-write-thread-{}", index))
-        .spawn(move || ThreadSummary::new())
+        .spawn(move || {
+            let mut summary = ThreadSummary::new();
+            let mut log_batch = WriteBatch::with_capacity(4 * 1024);
+            let mut entry_batch = Vec::with_capacity(args.write_entry_count as usize);
+            let min_interval = if args.write_ops_per_thread > 0 {
+                Some(Duration::from_secs_f64(
+                    1.0 / args.write_ops_per_thread as f64,
+                ))
+            } else {
+                None
+            };
+            for _ in 0..args.write_entry_count {
+                entry_batch.push(Entry {
+                    data: vec![0u8; args.entry_size].into(),
+                    ..Default::default()
+                });
+            }
+            while !shutdown.load(Ordering::Relaxed) {
+                // TODO(tabokie): scattering regions in one batch
+                let mut rid = thread_rng().gen_range(0, args.regions / args.write_threads)
+                    * args.write_threads
+                    + index;
+                for _ in 0..args.write_region_count {
+                    let first = engine.first_index(rid).unwrap_or(0);
+                    let last = engine.last_index(rid).unwrap_or(0);
+                    let entries = prepare_entries(&entry_batch, last + 1);
+                    log_batch.add_entries(0, entries);
+                    if args.compact_count > 0 && last - first + 1 > args.compact_count {
+                        log_batch.add_command(
+                            rid,
+                            Command::Compact {
+                                index: last - args.compact_count + 1,
+                            },
+                        );
+                    }
+                    rid += args.write_threads;
+                }
+                let mut start = Instant::now();
+                if let (Some(i), Some(last)) = (min_interval, summary.last) {
+                    // TODO(tabokie): compensate for slow requests
+                    wait_til(&mut start, last + i);
+                }
+                if let Err(e) = engine.write(&mut log_batch, args.write_sync) {
+                    println!("write error {:?} in thread {}", e, index);
+                }
+                let end = Instant::now();
+                summary.record(start, end);
+            }
+            summary
+        })
         .unwrap()
 }
 
-fn run_read(
+fn spawn_read(
     engine: Arc<Engine>,
     args: TestArgs,
     index: u64,
@@ -166,11 +286,38 @@ fn run_read(
 ) -> JoinHandle<ThreadSummary> {
     ThreadBuilder::new()
         .name(format!("stress-read-thread-{}", index))
-        .spawn(move || ThreadSummary::new())
+        .spawn(move || {
+            let mut summary = ThreadSummary::new();
+            let min_interval = if args.read_ops_per_thread > 0 {
+                Some(Duration::from_secs_f64(
+                    1.0 / args.read_ops_per_thread as f64,
+                ))
+            } else {
+                None
+            };
+            while !shutdown.load(Ordering::Relaxed) {
+                let rid = thread_rng().gen_range(0, args.regions / args.read_threads)
+                    * args.read_threads
+                    + index;
+                let mut start = Instant::now();
+                if let (Some(i), Some(last)) = (min_interval, summary.last) {
+                    wait_til(&mut start, last + i);
+                }
+                // Read newest entry to avoid conflicting with compact
+                if let Some(last) = engine.last_index(rid) {
+                    if let Err(e) = engine.get_entry(rid, last) {
+                        println!("read error {:?} in thread {}", e, index);
+                    }
+                    let end = Instant::now();
+                    summary.record(start, end);
+                }
+            }
+            summary
+        })
         .unwrap()
 }
 
-fn run_purge(
+fn spawn_purge(
     engine: Arc<Engine>,
     args: TestArgs,
     index: u64,
@@ -181,14 +328,20 @@ fn run_purge(
         .spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
                 sleep(args.purge_interval);
-                let regions = engine.purge_expired_files().unwrap();
-                for region in regions.into_iter() {
-                    let first = engine.first_index(region).unwrap();
-                    let last = engine.last_index(region).unwrap();
-                    engine.compact_to(
-                        region,
-                        last - ((last - first) as f32 * args.force_compact_factor) as u64,
-                    );
+                match engine.purge_expired_files() {
+                    Ok(regions) => {
+                        for region in regions.into_iter() {
+                            let first = engine.first_index(region).unwrap_or(0);
+                            let last = engine.last_index(region).unwrap_or(0);
+                            engine.compact_to(
+                                region,
+                                last - ((last - first + 1) as f32 * args.force_compact_factor)
+                                    as u64
+                                    + 1,
+                            );
+                        }
+                    }
+                    Err(e) => println!("purge error {:?} in thread {}", e, index),
                 }
             }
         })
@@ -203,7 +356,7 @@ fn main() {
         .arg(
             Arg::with_name("path")
                 .long("path")
-                .default_value("")
+                .required(true)
                 .help("Set the data path for Raft Engine")
                 .takes_value(true),
         )
@@ -235,7 +388,7 @@ fn main() {
                 .conflicts_with("compact_count")
                 .long("compact_ttl")
                 .value_name("ttl[ms]")
-                .default_value(&formatcp!("{}", DEFAULT_COMPACT_COUNT))
+                .default_value(&formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
                 .help("Compact log entries older than TTL")
                 .takes_value(true),
         )
@@ -244,7 +397,7 @@ fn main() {
                 .conflicts_with("compact_ttl")
                 .long("compact_count")
                 .value_name("n")
-                .default_value(&formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
+                .default_value(&formatcp!("{}", DEFAULT_COMPACT_COUNT))
                 .help("Compact log entries exceeding this threshold")
                 .takes_value(true),
         )
@@ -297,6 +450,38 @@ fn main() {
                 .help("Set the per-thread OPS for read entry requests")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("entry_size")
+                .long("entry-size")
+                .value_name("size")
+                .default_value(&formatcp!("{}", DEFAULT_ENTRY_SIZE))
+                .help("Set the average size of log entry")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("write_entry_count")
+                .long("write-entry-count")
+                .value_name("count")
+                .default_value(&formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT))
+                .help("Set the average number of entries in a log batch")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("write_region_count")
+                .long("write-region-count")
+                .value_name("count")
+                .default_value(&formatcp!("{}", DEFAULT_WRITE_REGION_COUNT))
+                .help("Set the average number of regions in a log batch")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("write_sync")
+                .long("write-sync")
+                .value_name("sync")
+                .default_value(&formatcp!("{}", DEFAULT_WRITE_SYNC))
+                .help("Whether to sync write raft logs")
+                .takes_value(true),
+        )
         // Raft Engine configurations
         .arg(
             Arg::with_name("target_file_size")
@@ -334,6 +519,10 @@ fn main() {
     }
     if let Some(s) = matches.value_of("compact_ttl") {
         args.compact_ttl = Duration::from_millis(s.parse::<u64>().unwrap());
+        if args.compact_ttl.as_millis() > 0 {
+            println!("Not supported");
+            std::process::exit(1);
+        }
     }
     if let Some(s) = matches.value_of("compact_count") {
         args.compact_count = s.parse::<u64>().unwrap();
@@ -353,6 +542,18 @@ fn main() {
     if let Some(s) = matches.value_of("read_ops_per_thread") {
         args.read_ops_per_thread = s.parse::<u64>().unwrap();
     }
+    if let Some(s) = matches.value_of("entry_size") {
+        args.entry_size = s.parse::<usize>().unwrap();
+    }
+    if let Some(s) = matches.value_of("write_entry_count") {
+        args.write_entry_count = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("write_region_count") {
+        args.write_region_count = s.parse::<u64>().unwrap();
+    }
+    if let Some(s) = matches.value_of("write_sync") {
+        args.write_sync = s.parse::<bool>().unwrap();
+    }
     // Raft Engine configurations
     if let Some(s) = matches.value_of("path") {
         config.dir = s.to_string();
@@ -366,22 +567,38 @@ fn main() {
     if let Some(s) = matches.value_of("batch_compression_threshold") {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
     }
+    args.validate().unwrap();
     let engine = Arc::new(Engine::new(config));
     let mut write_threads = Vec::new();
     let mut read_threads = Vec::new();
     let mut misc_threads = Vec::new();
     let shutdown = Arc::new(AtomicBool::new(false));
     if args.purge_interval.as_millis() > 0 {
-        misc_threads.push(run_purge(engine.clone(), args.clone(), 0, shutdown.clone()));
+        misc_threads.push(spawn_purge(
+            engine.clone(),
+            args.clone(),
+            0,
+            shutdown.clone(),
+        ));
     }
     if args.read_threads > 0 {
         for i in 0..args.read_threads {
-            read_threads.push(run_read(engine.clone(), args.clone(), i, shutdown.clone()));
+            read_threads.push(spawn_read(
+                engine.clone(),
+                args.clone(),
+                i,
+                shutdown.clone(),
+            ));
         }
     }
     if args.write_threads > 0 {
         for i in 0..args.write_threads {
-            write_threads.push(run_write(engine.clone(), args.clone(), i, shutdown.clone()));
+            write_threads.push(spawn_write(
+                engine.clone(),
+                args.clone(),
+                i,
+                shutdown.clone(),
+            ));
         }
     }
     sleep(args.time);

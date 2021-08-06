@@ -335,7 +335,6 @@ impl FilePipeLog {
                     Ok(num) => num,
                     Err(_) => continue,
                 };
-                println!("file id = {}", file_id);
                 min_file_id = FileId::min(min_file_id, file_id);
                 max_file_id = FileId::max(max_file_id, file_id);
                 log_files.push(file_name.to_string());

@@ -271,11 +271,11 @@ where
         Self::with_options(cfg, options).unwrap()
     }
 
-    fn with_options(cfg: Config, mut options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
+    fn with_options(cfg: Config, options: EngineOptions) -> Result<Engine<E, W, FilePipeLog>> {
         let global_stats = Arc::new(GlobalStats::default());
 
         let mut listeners = vec![Arc::new(PurgeHook::new()) as Arc<dyn EventListener>];
-        listeners.extend(options.listeners.drain(..));
+        listeners.extend(options.listeners);
         let pipe_log = FilePipeLog::open(&cfg, listeners.clone()).expect("Open raft log");
 
         let memtables = {
@@ -459,6 +459,7 @@ where
     /// Like `cut_logs` but the range could be very large. Return the deleted count.
     /// Generally, `from` can be passed in `0`.
     pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
+        // FIXME: potential race?
         let first_index = match self.first_index(region_id) {
             Some(index) => index,
             None => return 0,
