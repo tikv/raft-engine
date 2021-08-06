@@ -19,7 +19,7 @@ use protobuf::Message;
 use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
+use crate::log_batch::{EntryExt, LogBatch};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::util::{HandyRwLock, InstantExt};
@@ -548,11 +548,7 @@ impl PipeLog for FilePipeLog {
                 }
             };
             if queue == LogQueue::Rewrite {
-                for item in log_batch.items.iter_mut() {
-                    if let LogItemContent::Entries(entries) = &mut item.content {
-                        entries.set_queue(LogQueue::Rewrite);
-                    }
-                }
+                log_batch.set_queue(LogQueue::Rewrite);
             }
             batches.push(log_batch);
             offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
@@ -572,11 +568,7 @@ impl PipeLog for FilePipeLog {
                 fd.sync()?;
             }
 
-            for item in batch.items.iter_mut() {
-                if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.set_position(queue, file_id, offset);
-                }
-            }
+            batch.set_position(queue, file_id, offset);
 
             match queue {
                 LogQueue::Rewrite => {

@@ -288,7 +288,7 @@ where
         latest_rewrite: Option<FileId>,
     ) {
         let queue = LogQueue::Rewrite;
-        for item in log_batch.items.drain(..) {
+        for item in log_batch.drain() {
             let raft = item.raft_group_id;
             let memtable = self.memtables.get_or_insert(raft);
             match item.content {
