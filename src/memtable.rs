@@ -1,8 +1,10 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{cmp, u64};
 
-use crate::log_batch::{CompressionType, MessageExt};
+use crate::log_batch::CompressionType;
 use crate::pipe_log::{FileId, LogQueue};
 use crate::util::{slices_in_range, HashMap};
 use crate::{Error, GlobalStats, Result};
@@ -50,7 +52,7 @@ impl Default for EntryIndex {
  *                      |                                        |
  *                 first entry                               last entry
  */
-pub struct MemTable<M: MessageExt> {
+pub struct MemTable {
     region_id: u64,
 
     // Entries are pushed back with continuously ascending indexes.
@@ -60,18 +62,18 @@ pub struct MemTable<M: MessageExt> {
     rewrite_count: usize,
 
     // key -> (value, queue, file_id)
-    states: HashMap<Vec<u8>, (M::State, LogQueue, FileId)>,
+    kvs: HashMap<Vec<u8>, (Vec<u8>, LogQueue, FileId)>,
 
     global_stats: Arc<GlobalStats>,
 }
 
-impl<M: MessageExt> MemTable<M> {
-    pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable<M> {
+impl MemTable {
+    pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable {
         MemTable {
             region_id,
             entries_index: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
             rewrite_count: 0,
-            states: HashMap::default(),
+            kvs: HashMap::default(),
 
             global_stats,
         }
@@ -93,12 +95,12 @@ impl<M: MessageExt> MemTable<M> {
         Some(entry_index)
     }
 
-    pub fn get_state(&self, key: &[u8]) -> Option<M::State> {
-        self.states.get(key).map(|v| v.0.clone())
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.kvs.get(key).map(|v| v.0.clone())
     }
 
-    pub fn delete_state(&mut self, key: &[u8]) {
-        if let Some(value) = self.states.remove(key) {
+    pub fn delete(&mut self, key: &[u8]) {
+        if let Some(value) = self.kvs.remove(key) {
             if value.1 == LogQueue::Rewrite {
                 self.global_stats.add_compacted_rewrite(1);
             }
@@ -210,22 +212,22 @@ impl<M: MessageExt> MemTable<M> {
         self.rewrite_count = distance + ents_len;
     }
 
-    pub fn put_state(&mut self, key: Vec<u8>, state: M::State, file_id: FileId) {
-        if let Some(origin) = self.states.insert(key, (state, LogQueue::Append, file_id)) {
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
+        if let Some(origin) = self.kvs.insert(key, (value, LogQueue::Append, file_id)) {
             if origin.1 == LogQueue::Rewrite {
                 self.global_stats.add_compacted_rewrite(1);
             }
         }
     }
 
-    pub fn put_rewrite_state(&mut self, key: Vec<u8>, state: M::State, file_id: FileId) {
-        self.states.insert(key, (state, LogQueue::Rewrite, file_id));
+    pub fn put_rewrite(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
+        self.kvs.insert(key, (value, LogQueue::Rewrite, file_id));
         self.global_stats.add_rewrite(1);
     }
 
-    pub fn rewrite_state(&mut self, key: Vec<u8>, latest_rewrite: Option<FileId>, file_id: FileId) {
+    pub fn rewrite_key(&mut self, key: Vec<u8>, latest_rewrite: Option<FileId>, file_id: FileId) {
         self.global_stats.add_rewrite(1);
-        if let Some(value) = self.states.get_mut(&key) {
+        if let Some(value) = self.kvs.get_mut(&key) {
             if value.1 == LogQueue::Append {
                 if let Some(latest_rewrite) = latest_rewrite {
                     if value.2 <= latest_rewrite {
@@ -323,8 +325,8 @@ impl<M: MessageExt> MemTable<M> {
             }
         }
 
-        for (key, (value, queue, file_id)) in std::mem::take(&mut self.states) {
-            rhs.states.insert(key, (value, queue, file_id));
+        for (key, (value, queue, file_id)) in std::mem::take(&mut self.kvs) {
+            rhs.kvs.insert(key, (value, queue, file_id));
         }
 
         std::mem::swap(self, rhs);
@@ -403,16 +405,16 @@ impl<M: MessageExt> MemTable<M> {
         Ok(())
     }
 
-    pub fn fetch_states_before(&self, latest_rewrite: FileId, vec: &mut Vec<(Vec<u8>, M::State)>) {
-        for (key, (value, queue, file_id)) in &self.states {
+    pub fn fetch_kvs_before(&self, latest_rewrite: FileId, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+        for (key, (value, queue, file_id)) in &self.kvs {
             if *queue == LogQueue::Append && *file_id <= latest_rewrite {
                 vec.push((key.clone(), value.clone()));
             }
         }
     }
 
-    pub fn fetch_rewritten_states(&self, vec: &mut Vec<(Vec<u8>, M::State)>) {
-        for (key, (value, queue, _)) in &self.states {
+    pub fn fetch_rewritten_kvs(&self, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+        for (key, (value, queue, _)) in &self.kvs {
             if *queue == LogQueue::Rewrite {
                 vec.push((key.clone(), value.clone()));
             }
@@ -426,8 +428,8 @@ impl<M: MessageExt> MemTable<M> {
             LogQueue::Rewrite => self.entries_index.front(),
         };
         let ents_min = entry.map(|e| e.file_id);
-        let states_min = self
-            .states
+        let kvs_min = self
+            .kvs
             .values()
             .filter(|v| v.1 == queue)
             .fold(None, |min, v| {
@@ -437,10 +439,10 @@ impl<M: MessageExt> MemTable<M> {
                     Some(v.2)
                 }
             });
-        match (ents_min, states_min) {
-            (Some(ents_min), Some(states_min)) => Some(FileId::min(states_min, ents_min)),
+        match (ents_min, kvs_min) {
+            (Some(ents_min), Some(kvs_min)) => Some(FileId::min(kvs_min, ents_min)),
             (Some(ents_min), None) => Some(ents_min),
-            (None, Some(states_min)) => Some(states_min),
+            (None, Some(kvs_min)) => Some(kvs_min),
             (None, None) => None,
         }
     }
@@ -465,9 +467,8 @@ impl<M: MessageExt> MemTable<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kvproto::raft_serverpb::RaftLocalState;
 
-    impl<M: MessageExt> MemTable<M> {
+    impl MemTable {
         pub fn max_file_id(&self, queue: LogQueue) -> Option<FileId> {
             let entry = match queue {
                 LogQueue::Append if self.rewrite_count == self.entries_index.len() => None,
@@ -477,17 +478,17 @@ mod tests {
             };
             let ents_max = entry.map(|e| e.file_id);
 
-            let states_max = self.states_max_file_id(queue);
-            match (ents_max, states_max) {
-                (Some(ents_max), Some(states_max)) => Some(FileId::max(states_max, ents_max)),
+            let kvs_max = self.kvs_max_file_id(queue);
+            match (ents_max, kvs_max) {
+                (Some(ents_max), Some(kvs_max)) => Some(FileId::max(kvs_max, ents_max)),
                 (Some(ents_max), None) => Some(ents_max),
-                (None, Some(states_max)) => Some(states_max),
+                (None, Some(kvs_max)) => Some(kvs_max),
                 (None, None) => None,
             }
         }
 
-        pub fn states_max_file_id(&self, queue: LogQueue) -> Option<FileId> {
-            self.states
+        pub fn kvs_max_file_id(&self, queue: LogQueue) -> Option<FileId> {
+            self.kvs
                 .values()
                 .filter(|v| v.1 == queue)
                 .fold(None, |max, v| {
@@ -531,12 +532,12 @@ mod tests {
     fn test_memtable_append() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats.clone());
 
         // Append entries [10, 20) file_num = 1.
         // after appending
         // [10, 20) file_num = 1
-        let ents_idx = build_entry_indexes(10, 20, LogQueue::Append, 1.into());
+        let ents_idx = generate_entry_indexes(10, 20, LogQueue::Append, 1.into());
         memtable.append(ents_idx);
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1.into());
@@ -547,7 +548,7 @@ mod tests {
         // after appending:
         // [10, 20) file_num = 1
         // [20, 30) file_num = 2
-        let ents_idx = build_entry_indexes(20, 30, LogQueue::Append, 2.into());
+        let ents_idx = generate_entry_indexes(20, 30, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
         assert_eq!(memtable.entries_size(), 20);
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1.into());
@@ -560,7 +561,7 @@ mod tests {
         // [10, 20) file_num = 1
         // [20, 25) file_num = 2
         // [25, 35) file_num = 3
-        let ents_idx = build_entry_indexes(25, 35, LogQueue::Append, 3.into());
+        let ents_idx = generate_entry_indexes(25, 35, LogQueue::Append, 3.into());
         memtable.append(ents_idx);
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1.into());
@@ -571,7 +572,7 @@ mod tests {
         // Append entries [10, 40) file_num = 4.
         // After appending:
         // [10, 40) file_num = 4
-        let ents_idx = build_entry_indexes(10, 40, LogQueue::Append, 4.into());
+        let ents_idx = generate_entry_indexes(10, 40, LogQueue::Append, 4.into());
         memtable.append(ents_idx);
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 4.into());
@@ -583,19 +584,19 @@ mod tests {
     fn test_memtable_compact() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = build_entry_indexes(0, 10, LogQueue::Append, 1.into());
+        let ents_idx = generate_entry_indexes(0, 10, LogQueue::Append, 1.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(10, 15, LogQueue::Append, 2.into());
+        let ents_idx = generate_entry_indexes(10, 15, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(15, 20, LogQueue::Append, 2.into());
+        let ents_idx = generate_entry_indexes(15, 20, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(20, 25, LogQueue::Append, 3.into());
+        let ents_idx = generate_entry_indexes(20, 25, LogQueue::Append, 3.into());
         memtable.append(ents_idx);
 
         assert_eq!(memtable.entries_size(), 25);
@@ -629,18 +630,18 @@ mod tests {
     fn test_memtable_fetch() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 15) file_num = 2
         // [15, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = build_entry_indexes(0, 10, LogQueue::Append, 1.into());
+        let ents_idx = generate_entry_indexes(0, 10, LogQueue::Append, 1.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(10, 20, LogQueue::Append, 2.into());
+        let ents_idx = generate_entry_indexes(10, 20, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(20, 25, LogQueue::Append, 3.into());
+        let ents_idx = generate_entry_indexes(20, 25, LogQueue::Append, 3.into());
         memtable.append(ents_idx);
 
         // Fetching all
@@ -716,29 +717,29 @@ mod tests {
     fn test_memtable_fetch_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats.clone());
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = build_entry_indexes(0, 10, LogQueue::Append, 1.into());
+        let ents_idx = generate_entry_indexes(0, 10, LogQueue::Append, 1.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"k1".to_vec(), build_state(1), 1.into());
-        let ents_idx = build_entry_indexes(10, 20, LogQueue::Append, 2.into());
+        memtable.put(b"k1".to_vec(), b"v1".to_vec(), 1.into());
+        let ents_idx = generate_entry_indexes(10, 20, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"k2".to_vec(), build_state(2), 2.into());
-        let ents_idx = build_entry_indexes(20, 25, LogQueue::Append, 3.into());
+        memtable.put(b"k2".to_vec(), b"v2".to_vec(), 2.into());
+        let ents_idx = generate_entry_indexes(20, 25, LogQueue::Append, 3.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"k3".to_vec(), build_state(3), 3.into());
+        memtable.put(b"k3".to_vec(), b"v3".to_vec(), 3.into());
 
         // After rewriting:
         // [0, 10) queue = rewrite, file_num = 50,
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = build_entry_indexes(0, 10, LogQueue::Rewrite, 50.into());
+        let ents_idx = generate_entry_indexes(0, 10, LogQueue::Rewrite, 50.into());
         memtable.rewrite(ents_idx, Some(1.into()));
-        memtable.rewrite_state(b"k1".to_vec(), Some(1.into()), 50.into());
+        memtable.rewrite_key(b"k1".to_vec(), Some(1.into()), 50.into());
         assert_eq!(memtable.entries_size(), 25);
 
         let mut ents_idx = vec![];
@@ -758,35 +759,35 @@ mod tests {
     }
 
     #[test]
-    fn test_memtable_state_operations() {
+    fn test_memtable_kv_operations() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, stats);
 
-        let (k1, v1) = (b"key1", build_state(1));
-        let (k5, v5) = (b"key5", build_state(5));
-        memtable.put_state(k1.to_vec(), v1, 1.into());
-        memtable.put_state(k5.to_vec(), v5, 5.into());
+        let (k1, v1) = (b"key1", b"value1");
+        let (k5, v5) = (b"key5", b"value5");
+        memtable.put(k1.to_vec(), v1.to_vec(), 1.into());
+        memtable.put(k5.to_vec(), v5.to_vec(), 5.into());
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 1.into());
         assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 5.into());
-        assert_eq!(memtable.get_state(k1.as_ref()), Some(build_state(1)));
-        assert_eq!(memtable.get_state(k5.as_ref()), Some(build_state(5)));
+        assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
+        assert_eq!(memtable.get(k5.as_ref()), Some(v5.to_vec()));
 
-        memtable.delete_state(k5.as_ref());
-        assert_eq!(memtable.get_state(k5.as_ref()), None);
+        memtable.delete(k5.as_ref());
+        assert_eq!(memtable.get(k5.as_ref()), None);
     }
 
     #[test]
     fn test_memtable_get_entry() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats.clone());
 
         // [5, 10) file_num = 1
         // [10, 20) file_num = 2
-        let ents_idx = build_entry_indexes(5, 10, LogQueue::Append, 1.into());
+        let ents_idx = generate_entry_indexes(5, 10, LogQueue::Append, 1.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(10, 20, LogQueue::Append, 2.into());
+        let ents_idx = generate_entry_indexes(10, 20, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
 
         // Not in range.
@@ -801,21 +802,21 @@ mod tests {
     fn test_memtable_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::<RaftLocalState>::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats.clone());
 
         // After appending and compacting:
         // [10, 20) file_num = 2
         // [20, 30) file_num = 3
         // [30, 40) file_num = 4
-        let ents_idx = build_entry_indexes(10, 20, LogQueue::Append, 2.into());
+        let ents_idx = generate_entry_indexes(10, 20, LogQueue::Append, 2.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"kk1".to_vec(), build_state(1), 2.into());
-        let ents_idx = build_entry_indexes(20, 30, LogQueue::Append, 3.into());
+        memtable.put(b"kk1".to_vec(), b"vv1".to_vec(), 2.into());
+        let ents_idx = generate_entry_indexes(20, 30, LogQueue::Append, 3.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"kk2".to_vec(), build_state(2), 3.into());
-        let ents_idx = build_entry_indexes(30, 40, LogQueue::Append, 4.into());
+        memtable.put(b"kk2".to_vec(), b"vv2".to_vec(), 3.into());
+        let ents_idx = generate_entry_indexes(30, 40, LogQueue::Append, 4.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"kk3".to_vec(), build_state(3), 4.into());
+        memtable.put(b"kk3".to_vec(), b"vv3".to_vec(), 4.into());
 
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 2.into());
@@ -823,71 +824,71 @@ mod tests {
         memtable.check_entries_index();
 
         // Rewrite compacted entries.
-        let ents_idx = build_entry_indexes(0, 10, LogQueue::Rewrite, 50.into());
+        let ents_idx = generate_entry_indexes(0, 10, LogQueue::Rewrite, 50.into());
         memtable.rewrite(ents_idx, Some(1.into()));
-        memtable.rewrite_state(b"kk0".to_vec(), Some(1.into()), 50.into());
+        memtable.rewrite_key(b"kk0".to_vec(), Some(1.into()), 50.into());
 
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 2.into());
         assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4.into());
         assert!(memtable.min_file_id(LogQueue::Rewrite).is_none());
         assert!(memtable.max_file_id(LogQueue::Rewrite).is_none());
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.get_state(b"kk0"), None);
+        assert_eq!(memtable.get(b"kk0"), None);
         assert_eq!(memtable.global_stats.rewrite_operations(), 11);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 11);
 
         // Rewrite compacted entries + valid entries.
-        let ents_idx = build_entry_indexes(0, 20, LogQueue::Rewrite, 100.into());
+        let ents_idx = generate_entry_indexes(0, 20, LogQueue::Rewrite, 100.into());
         memtable.rewrite(ents_idx, Some(2.into()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 31);
-        memtable.rewrite_state(b"kk0".to_vec(), Some(1.into()), 50.into());
-        memtable.rewrite_state(b"kk1".to_vec(), Some(2.into()), 100.into());
+        memtable.rewrite_key(b"kk0".to_vec(), Some(1.into()), 50.into());
+        memtable.rewrite_key(b"kk1".to_vec(), Some(2.into()), 100.into());
 
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 3.into());
         assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4.into());
         assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100.into());
         assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 100.into());
         assert_eq!(memtable.rewrite_count, 10);
-        assert_eq!(memtable.get_state(b"kk1"), Some(build_state(1)));
+        assert_eq!(memtable.get(b"kk1"), Some(b"vv1".to_vec()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 33);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Rewrite vaild entries.
-        let ents_idx = build_entry_indexes(20, 30, LogQueue::Rewrite, 101.into());
+        let ents_idx = generate_entry_indexes(20, 30, LogQueue::Rewrite, 101.into());
         memtable.rewrite(ents_idx, Some(3.into()));
-        memtable.rewrite_state(b"kk2".to_vec(), Some(3.into()), 101.into());
+        memtable.rewrite_key(b"kk2".to_vec(), Some(3.into()), 101.into());
 
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 4.into());
         assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 4.into());
         assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100.into());
         assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 101.into());
         assert_eq!(memtable.rewrite_count, 20);
-        assert_eq!(memtable.get_state(b"kk2"), Some(build_state(2)));
+        assert_eq!(memtable.get(b"kk2"), Some(b"vv2".to_vec()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 44);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
 
         // Put some entries overwritting entires in file 4.
-        let ents_idx = build_entry_indexes(35, 36, LogQueue::Append, 5.into());
+        let ents_idx = generate_entry_indexes(35, 36, LogQueue::Append, 5.into());
         memtable.append(ents_idx);
-        memtable.put_state(b"kk3".to_vec(), build_state(3), 5.into());
+        memtable.put(b"kk3".to_vec(), b"vv33".to_vec(), 5.into());
         assert_eq!(memtable.entries_index.back().unwrap().index, 35);
 
         // Rewrite valid + overwritten entries.
-        let ents_idx = build_entry_indexes(30, 40, LogQueue::Rewrite, 102.into());
+        let ents_idx = generate_entry_indexes(30, 40, LogQueue::Rewrite, 102.into());
         memtable.rewrite(ents_idx, Some(4.into()));
-        memtable.rewrite_state(b"kk3".to_vec(), Some(4.into()), 102.into());
+        memtable.rewrite_key(b"kk3".to_vec(), Some(4.into()), 102.into());
 
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 5.into());
         assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 5.into());
         assert_eq!(memtable.min_file_id(LogQueue::Rewrite).unwrap(), 100.into());
         assert_eq!(memtable.max_file_id(LogQueue::Rewrite).unwrap(), 102.into());
         assert_eq!(memtable.rewrite_count, 25);
-        assert_eq!(memtable.get_state(b"kk3"), Some(build_state(3)));
+        assert_eq!(memtable.get(b"kk3"), Some(b"vv33".to_vec()));
         assert_eq!(memtable.global_stats.rewrite_operations(), 55);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 27);
 
         // Compact after rewrite.
-        let ents_idx = build_entry_indexes(35, 50, LogQueue::Append, 6.into());
+        let ents_idx = generate_entry_indexes(35, 50, LogQueue::Append, 6.into());
         memtable.append(ents_idx);
         memtable.compact_to(30);
         assert_eq!(memtable.entries_index.back().unwrap().index, 49);
@@ -899,9 +900,9 @@ mod tests {
         assert_eq!(memtable.global_stats.rewrite_operations(), 55);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 52);
 
-        let ents_idx = build_entry_indexes(30, 36, LogQueue::Rewrite, 103.into());
+        let ents_idx = generate_entry_indexes(30, 36, LogQueue::Rewrite, 103.into());
         memtable.rewrite(ents_idx, Some(5.into()));
-        memtable.rewrite_state(b"kk3".to_vec(), Some(5.into()), 103.into());
+        memtable.rewrite_key(b"kk3".to_vec(), Some(5.into()), 103.into());
 
         assert_eq!(memtable.min_file_id(LogQueue::Append).unwrap(), 6.into());
         assert_eq!(memtable.max_file_id(LogQueue::Append).unwrap(), 6.into());
@@ -912,28 +913,28 @@ mod tests {
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 58);
 
         // Rewrite after cut.
-        let ents_idx = build_entry_indexes(50, 55, LogQueue::Append, 7.into());
+        let ents_idx = generate_entry_indexes(50, 55, LogQueue::Append, 7.into());
         memtable.append(ents_idx);
-        let ents_idx = build_entry_indexes(30, 50, LogQueue::Rewrite, 104.into());
+        let ents_idx = generate_entry_indexes(30, 50, LogQueue::Rewrite, 104.into());
         memtable.rewrite(ents_idx, Some(6.into()));
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 68);
 
-        let ents_idx = build_entry_indexes(45, 50, LogQueue::Append, 7.into());
+        let ents_idx = generate_entry_indexes(45, 50, LogQueue::Append, 7.into());
         memtable.append(ents_idx);
         assert_eq!(memtable.rewrite_count, 5);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 73);
 
-        let ents_idx = build_entry_indexes(40, 50, LogQueue::Append, 7.into());
+        let ents_idx = generate_entry_indexes(40, 50, LogQueue::Append, 7.into());
         memtable.append(ents_idx);
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
     }
 
-    fn build_entry_indexes(
+    fn generate_entry_indexes(
         begin_idx: u64,
         end_idx: u64,
         queue: LogQueue,
@@ -952,12 +953,5 @@ mod tests {
             ents_idx.push(ent_idx);
         }
         ents_idx
-    }
-
-    fn build_state(idx: u64) -> RaftLocalState {
-        RaftLocalState {
-            last_index: idx,
-            ..Default::default()
-        }
     }
 }

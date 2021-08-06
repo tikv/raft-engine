@@ -79,7 +79,6 @@ impl GlobalStats {
 #[cfg(test)]
 mod tests {
     use crate::log_batch::MessageExt;
-    use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
     #[ctor::ctor]
@@ -88,14 +87,6 @@ mod tests {
     }
 
     impl MessageExt for Entry {
-        type Entry = Entry;
-        type State = kvproto::raft_serverpb::RaftLocalState;
-        fn entry_index(e: &Self::Entry) -> u64 {
-            e.index
-        }
-    }
-
-    impl MessageExt for RaftLocalState {
         type Entry = Entry;
         type State = kvproto::raft_serverpb::RaftLocalState;
         fn entry_index(e: &Self::Entry) -> u64 {

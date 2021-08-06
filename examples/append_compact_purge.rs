@@ -6,7 +6,7 @@ use raft_engine::{Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MessageExtTyped;
 
 impl MessageExt for MessageExtTyped {
@@ -58,7 +58,7 @@ fn main() {
             e.index = state.last_index + 1;
             batch.add_entries(region, vec![e; 1]);
             batch
-                .put_state(region, b"last_index".to_vec(), state.clone())
+                .put_state(region, b"last_index".to_vec(), &state)
                 .unwrap();
             engine.write(&mut batch, false).unwrap();
 
