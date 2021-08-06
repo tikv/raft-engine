@@ -11,6 +11,7 @@ use crate::engine::{fetch_entries, MemTableAccessor};
 use crate::event_listener::EventListener;
 use crate::log_batch::{Command, EntryExt, LogBatch, LogItemContent, OpType};
 use crate::memtable::{EntryIndex, MemTable};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::util::HandyRwLock;
 use crate::{GlobalStats, Result};
@@ -265,11 +266,16 @@ where
             return Ok(());
         }
 
-        let (file_id, _) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
+        let (file_id, bytes) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
         if file_id.valid() {
             self.rewrite_to_memtable(log_batch, file_id, latest_rewrite);
             for listener in &self.listeners {
                 listener.post_apply_memtables(LogQueue::Rewrite, file_id);
+            }
+            if latest_rewrite.is_none() {
+                BACKGROUND_REWRITE_BYTES.rewrite.inc_by(bytes as u64);
+            } else {
+                BACKGROUND_REWRITE_BYTES.append.inc_by(bytes as u64);
             }
         }
         Ok(())

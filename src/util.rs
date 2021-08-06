@@ -1,12 +1,12 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-pub use std::collections::hash_map::Entry as HashMapEntry;
 use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
 use std::ops::{Div, Mul};
 use std::str::FromStr;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -179,6 +179,17 @@ impl<'de> Deserialize<'de> for ReadableSize {
         }
 
         deserializer.deserialize_any(SizeVisitor)
+    }
+}
+
+pub trait InstantExt {
+    fn saturating_elapsed(&self) -> Duration;
+}
+
+impl InstantExt for Instant {
+    #[inline]
+    fn saturating_elapsed(&self) -> Duration {
+        Instant::now().saturating_duration_since(*self)
     }
 }
 
