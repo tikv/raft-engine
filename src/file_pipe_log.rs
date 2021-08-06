@@ -6,6 +6,7 @@ use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use log::{debug, info, warn};
 use nix::errno::Errno;
@@ -19,8 +20,10 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::log_batch::{LogBatch, LogItemContent, MessageExt};
+use crate::log_batch::{LogBatch, MessageExt};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
+use crate::util::InstantExt;
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -88,9 +91,11 @@ impl LogFd {
     fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
-
     fn sync(&self) -> Result<()> {
-        fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"))
+        let start = Instant::now();
+        let res = fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"));
+        LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        res
     }
 
     fn read(&self, mut offset: i64, len: usize) -> Result<Vec<u8>> {
@@ -268,6 +273,9 @@ impl LogManager {
                 listener.post_new_log_file(self.queue, self.active_file_id);
             }
         }
+
+        self.update_metrics();
+
         Ok(())
     }
 
@@ -295,6 +303,8 @@ impl LogManager {
         for listener in &self.listeners {
             listener.post_new_log_file(self.queue, self.active_file_id);
         }
+
+        self.update_metrics();
 
         Ok(())
     }
@@ -341,6 +351,7 @@ impl LogManager {
         let end_offset = file_id.step_after(&self.first_file_id).unwrap();
         self.all_files.drain(..end_offset);
         self.first_file_id = file_id;
+        self.update_metrics();
         Ok(end_offset)
     }
 
@@ -383,6 +394,13 @@ impl LogManager {
             *sync = true;
         }
         Ok((active_file_id, active_log_size as u64, fd))
+    }
+
+    fn update_metrics(&self) {
+        match self.queue {
+            LogQueue::Append => LOG_FILE_COUNT.append.set(self.all_files.len() as i64),
+            LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(self.all_files.len() as i64),
+        }
     }
 }
 
@@ -615,11 +633,7 @@ impl PipeLog for FilePipeLog {
                 }
             };
             if queue == LogQueue::Rewrite {
-                for item in log_batch.items.iter_mut() {
-                    if let LogItemContent::Entries(entries) = &mut item.content {
-                        entries.set_queue(LogQueue::Rewrite);
-                    }
-                }
+                log_batch.set_queue(LogQueue::Rewrite);
             }
             batches.push(log_batch);
             offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
@@ -633,14 +647,24 @@ impl PipeLog for FilePipeLog {
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
+            let start = Instant::now();
             let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
             }
 
-            for item in batch.items.iter_mut() {
-                if let LogItemContent::Entries(entries) = &mut item.content {
-                    entries.set_position(queue, file_id, offset);
+            batch.set_position(queue, file_id, offset);
+
+            match queue {
+                LogQueue::Rewrite => {
+                    LOG_APPEND_TIME_HISTOGRAM_VEC
+                        .rewrite
+                        .observe(start.saturating_elapsed().as_secs_f64());
+                }
+                LogQueue::Append => {
+                    LOG_APPEND_TIME_HISTOGRAM_VEC
+                        .append
+                        .observe(start.saturating_elapsed().as_secs_f64());
                 }
             }
 

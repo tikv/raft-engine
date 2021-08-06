@@ -15,6 +15,7 @@ use crate::engine::{read_entry_from_file, MemTableAccessor};
 use crate::event_listener::EventListener;
 use crate::log_batch::{Command, LogBatch, LogItemContent, MessageExt, OpType};
 use crate::memtable::MemTable;
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};
 
@@ -267,10 +268,10 @@ where
             return Ok(());
         }
 
-        let (file_id, _) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
+        let (file_id, bytes) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
         if file_id.valid() {
             let queue = LogQueue::Rewrite;
-            for item in log_batch.items.drain(..) {
+            for item in log_batch.drain() {
                 let raft = item.raft_group_id;
                 let memtable = self.memtables.get_or_insert(raft);
                 match item.content {
@@ -310,6 +311,11 @@ where
             }
             for listener in &self.listeners {
                 listener.post_apply_memtables(LogQueue::Rewrite, file_id);
+            }
+            if rewrite_watermark.is_none() {
+                BACKGROUND_REWRITE_BYTES.rewrite.inc_by(bytes as u64);
+            } else {
+                BACKGROUND_REWRITE_BYTES.append.inc_by(bytes as u64);
             }
         }
         Ok(())

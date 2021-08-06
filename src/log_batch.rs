@@ -387,7 +387,7 @@ impl<M: MessageExt> LogItem<M> {
 
 #[derive(Debug, PartialEq)]
 pub struct LogBatch<M: MessageExt> {
-    pub items: Vec<LogItem<M>>,
+    items: Vec<LogItem<M>>,
     items_size: usize,
     _phantom: PhantomData<M>,
 }
@@ -414,6 +414,27 @@ impl<M: MessageExt> LogBatch<M> {
     pub fn merge(&mut self, rhs: Self) {
         self.items_size += rhs.items_size;
         self.items.extend(rhs.items);
+    }
+
+    pub fn drain(&mut self) -> std::vec::Drain<'_, LogItem<M>> {
+        self.items_size = 0;
+        self.items.drain(..)
+    }
+
+    pub fn set_position(&mut self, queue: LogQueue, file_id: FileId, offset: u64) {
+        for item in self.items.iter_mut() {
+            if let LogItemContent::Entries(entries) = &mut item.content {
+                entries.set_position(queue, file_id, offset);
+            }
+        }
+    }
+
+    pub fn set_queue(&mut self, queue: LogQueue) {
+        for item in self.items.iter_mut() {
+            if let LogItemContent::Entries(entries) = &mut item.content {
+                entries.set_queue(queue);
+            }
+        }
     }
 
     pub fn add_entries(&mut self, region_id: u64, entries: Vec<M::Entry>) {
