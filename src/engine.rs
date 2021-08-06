@@ -365,16 +365,16 @@ where
         self.pipe_log.sync(LogQueue::Append)
     }
 
-    pub fn put_state(&self, region_id: u64, key: &[u8], m: &M::State) -> Result<()> {
+    pub fn put_message<S: Message>(&self, region_id: u64, key: &[u8], m: &S) -> Result<()> {
         let mut log_batch = LogBatch::default();
-        log_batch.put_state(region_id, key.to_vec(), m)?;
+        log_batch.put_message(region_id, key.to_vec(), m)?;
         self.write(&mut log_batch, false).map(|_| ())
     }
 
-    pub fn get_state(&self, region_id: u64, key: &[u8]) -> Result<Option<M::State>> {
+    pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(value) = memtable.read().get(key) {
-                let mut m = M::State::new();
+                let mut m = S::new();
                 m.merge_from_bytes(&value)?;
                 return Ok(Some(m));
             }
@@ -498,7 +498,7 @@ where
 
     let mut e = M::Entry::new();
     e.merge_from_bytes(&entry_content)?;
-    assert_eq!(M::entry_index(&e), entry_index.index);
+    assert_eq!(M::index(&e), entry_index.index);
     Ok(e)
 }
 
@@ -532,7 +532,7 @@ mod tests {
         let mut log_batch = LogBatch::default();
         log_batch.add_entries(raft, vec![entry.clone()]);
         log_batch
-            .put_state(
+            .put_message(
                 raft,
                 b"last_index".to_vec(),
                 &RaftLocalState {
@@ -546,7 +546,7 @@ mod tests {
 
     fn last_index(engine: &RaftLogEngine, raft: u64) -> u64 {
         engine
-            .get_state(raft, b"last_index")
+            .get_message::<RaftLocalState>(raft, b"last_index")
             .unwrap()
             .unwrap()
             .last_index

@@ -30,9 +30,8 @@ const DEFAULT_BATCH_CAP: usize = 64;
 
 pub trait MessageExt: Send + Sync {
     type Entry: Message + Clone + PartialEq;
-    type State: Message + Clone + PartialEq;
 
-    fn entry_index(m: &Self::Entry) -> u64;
+    fn index(e: &Self::Entry) -> u64;
 }
 
 #[repr(u8)]
@@ -99,7 +98,7 @@ impl<M: MessageExt> Entries<M> {
             e.merge_from_bytes(&buf[..len])?;
 
             let entry_index = EntryIndex {
-                index: M::entry_index(&e),
+                index: M::index(&e),
                 file_id,
                 base_offset,
                 offset: batch_offset + content_len - buf.len() as u64,
@@ -127,7 +126,7 @@ impl<M: MessageExt> Entries<M> {
             vec.encode_var_u64(content.len() as u64)?;
 
             if !self.entries_index[i].file_id.valid() {
-                self.entries_index[i].index = M::entry_index(e);
+                self.entries_index[i].index = M::index(e);
                 // This offset doesn't count the header.
                 self.entries_index[i].offset = vec.len() as u64;
                 self.entries_index[i].len = content.len() as u64;
@@ -465,13 +464,13 @@ where
         self.items.push(item);
     }
 
-    pub fn delete_state(&mut self, region_id: u64, key: Vec<u8>) {
+    pub fn delete_message(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::from_kv(region_id, OpType::Del, key, None);
         self.items_size += item.compute_size();
         self.items.push(item);
     }
 
-    pub fn put_state(&mut self, region_id: u64, key: Vec<u8>, s: &M::State) -> Result<()> {
+    pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
         self.put(region_id, key, s.write_to_bytes()?)
     }
 
@@ -501,6 +500,9 @@ where
 
         let header = codec::decode_u64(buf)? as usize;
         let batch_len = header >> 8;
+        if batch_len > buf.len() {
+            return Err(Error::TooShort);
+        }
         let batch_type = CompressionType::from_byte(header as u8);
         test_batch_checksum(&buf[..batch_len])?;
         trace!("decoding log batch({}, {:?})", batch_len, batch_type);
@@ -697,7 +699,7 @@ mod tests {
         batch
             .put(region_id, b"key".to_vec(), b"value".to_vec())
             .unwrap();
-        batch.delete_state(region_id, b"key2".to_vec());
+        batch.delete_message(region_id, b"key2".to_vec());
 
         let encoded = batch.encode_to_bytes(0).unwrap();
         let mut s = encoded.as_slice();

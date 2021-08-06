@@ -88,8 +88,8 @@ mod tests {
 
     impl MessageExt for Entry {
         type Entry = Entry;
-        type State = kvproto::raft_serverpb::RaftLocalState;
-        fn entry_index(e: &Self::Entry) -> u64 {
+
+        fn index(e: &Self::Entry) -> u64 {
             e.index
         }
     }

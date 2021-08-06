@@ -11,8 +11,8 @@ pub struct MessageExtTyped;
 
 impl MessageExt for MessageExtTyped {
     type Entry = Entry;
-    type State = RaftLocalState;
-    fn entry_index(e: &Self::Entry) -> u64 {
+
+    fn index(e: &Self::Entry) -> u64 {
         e.index
     }
 }
@@ -50,7 +50,7 @@ fn main() {
         for _ in 0..1024 {
             let region = rand_regions.next().unwrap();
             let state = engine
-                .get_state(region, b"last_index")
+                .get_message::<RaftLocalState>(region, b"last_index")
                 .unwrap()
                 .unwrap_or(init_state.clone());
 
@@ -58,7 +58,7 @@ fn main() {
             e.index = state.last_index + 1;
             batch.add_entries(region, vec![e; 1]);
             batch
-                .put_state(region, b"last_index".to_vec(), &state)
+                .put_message(region, b"last_index".to_vec(), &state)
                 .unwrap();
             engine.write(&mut batch, false).unwrap();
 
@@ -72,7 +72,10 @@ fn main() {
             }
         }
         for region in engine.purge_expired_files().unwrap() {
-            let state = engine.get_state(region, b"last_index").unwrap().unwrap();
+            let state = engine
+                .get_message::<RaftLocalState>(region, b"last_index")
+                .unwrap()
+                .unwrap();
             engine.compact_to(region, state.last_index - 7);
             println!(
                 "[EXAMPLE] force compact {} to {}",
