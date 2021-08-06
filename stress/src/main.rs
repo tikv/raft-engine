@@ -386,7 +386,7 @@ fn main() {
         .arg(
             Arg::with_name("compact_ttl")
                 .conflicts_with("compact_count")
-                .long("compact_ttl")
+                .long("compact-ttl")
                 .value_name("ttl[ms]")
                 .default_value(&formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
                 .help("Compact log entries older than TTL")
@@ -395,7 +395,7 @@ fn main() {
         .arg(
             Arg::with_name("compact_count")
                 .conflicts_with("compact_ttl")
-                .long("compact_count")
+                .long("compact-count")
                 .value_name("n")
                 .default_value(&formatcp!("{}", DEFAULT_COMPACT_COUNT))
                 .help("Compact log entries exceeding this threshold")
