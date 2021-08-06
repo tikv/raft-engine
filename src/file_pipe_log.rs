@@ -4,6 +4,7 @@ use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 use std::{cmp, u64};
 
 use log::{debug, info, warn};
@@ -19,8 +20,9 @@ use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::log_batch::{EntryExt, LogBatch, LogItemContent};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::HandyRwLock;
+use crate::util::{HandyRwLock, InstantExt};
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -73,7 +75,10 @@ impl LogFd {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
     pub fn sync(&self) -> Result<()> {
-        fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"))
+        let start = Instant::now();
+        let res = fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"));
+        LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        res
     }
 }
 
@@ -127,9 +132,9 @@ impl LogManager {
         max_file_id: FileId,
     ) -> Result<()> {
         if !logs.is_empty() {
+            let queue = queue_from_suffix(self.name_suffix);
             self.first_file_id = min_file_id;
             self.active_file_id = max_file_id;
-            let queue = queue_from_suffix(self.name_suffix);
 
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
@@ -155,6 +160,9 @@ impl LogManager {
                 listener.post_new_log_file(queue, self.active_file_id);
             }
         }
+
+        self.update_metrics();
+
         Ok(())
     }
 
@@ -183,6 +191,8 @@ impl LogManager {
             let queue = queue_from_suffix(self.name_suffix);
             listener.post_new_log_file(queue, self.active_file_id);
         }
+
+        self.update_metrics();
 
         Ok(())
     }
@@ -233,6 +243,7 @@ impl LogManager {
         let end_offset = file_id.step_after(&self.first_file_id).unwrap();
         self.all_files.drain(..end_offset);
         self.first_file_id = file_id;
+        self.update_metrics();
         Ok(end_offset)
     }
 
@@ -275,6 +286,13 @@ impl LogManager {
             *sync = true;
         }
         Ok((active_file_id, active_log_size as u64, fd))
+    }
+
+    fn update_metrics(&self) {
+        match queue_from_suffix(self.name_suffix) {
+            LogQueue::Append => LOG_FILE_COUNT.append.set(self.all_files.len() as i64),
+            LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(self.all_files.len() as i64),
+        }
     }
 }
 
@@ -492,7 +510,7 @@ impl PipeLog for FilePipeLog {
         pread_exact(fd.0, offset, len as usize)
     }
 
-    fn read_file<E: Message, W: EntryExt<E>>(
+    fn read_file_for_recovery<E: Message, W: EntryExt<E>>(
         &self,
         queue: LogQueue,
         file_id: FileId,
@@ -548,6 +566,7 @@ impl PipeLog for FilePipeLog {
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
+            let start = Instant::now();
             let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
@@ -556,6 +575,19 @@ impl PipeLog for FilePipeLog {
             for item in batch.items.iter_mut() {
                 if let LogItemContent::Entries(entries) = &mut item.content {
                     entries.set_position(queue, file_id, offset);
+                }
+            }
+
+            match queue {
+                LogQueue::Rewrite => {
+                    LOG_APPEND_TIME_HISTOGRAM_VEC
+                        .rewrite
+                        .observe(start.saturating_elapsed().as_secs_f64());
+                }
+                LogQueue::Append => {
+                    LOG_APPEND_TIME_HISTOGRAM_VEC
+                        .append
+                        .observe(start.saturating_elapsed().as_secs_f64());
                 }
             }
 
