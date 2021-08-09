@@ -37,9 +37,10 @@ const DEFAULT_WRITE_THREADS: u64 = 1;
 const DEFAULT_WRITE_OPS_PER_THREAD: u64 = 0;
 const DEFAULT_READ_THREADS: u64 = 0;
 const DEFAULT_READ_OPS_PER_THREAD: u64 = 0;
+// Default 50KB log batch size.
 const DEFAULT_ENTRY_SIZE: usize = 1024;
-const DEFAULT_WRITE_ENTRY_COUNT: u64 = 4;
-const DEFAULT_WRITE_REGION_COUNT: u64 = 4;
+const DEFAULT_WRITE_ENTRY_COUNT: u64 = 10;
+const DEFAULT_WRITE_REGION_COUNT: u64 = 5;
 const DEFAULT_WRITE_SYNC: bool = true;
 
 #[derive(Debug, Clone)]
@@ -159,12 +160,12 @@ impl Summary {
         if !self.thread_qps.is_empty() {
             println!("[{}]", name);
             println!(
-                "Throughput(qps) = {:.02}",
+                "Throughput(QPS) = {:.02}",
                 self.thread_qps.iter().fold(0.0, |sum, qps| { sum + qps })
             );
             let hist = self.hist.as_ref().unwrap();
             println!(
-                "Latency(us) min = {}, avg = {:.02}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
+                "Latency(μs) min = {}, avg = {:.02}, p50 = {}, p90 = {}, p95 = {}, p99 = {}, p99.9 = {}, max = {}",
                 hist.min(),
                 hist.mean(),
                 hist.value_at_quantile(0.5),
@@ -609,13 +610,13 @@ fn main() {
             s.add(t.join().unwrap());
             s
         })
-        .print("write summary");
+        .print("write");
     read_threads
         .into_iter()
         .fold(Summary::new(), |mut s, t| {
             s.add(t.join().unwrap());
             s
         })
-        .print("read summary");
+        .print("read");
     misc_threads.into_iter().for_each(|t| t.join().unwrap());
 }
