@@ -83,8 +83,11 @@ impl<M: MessageExt> Entries<M> {
     pub fn from_bytes(buf: &mut SliceReader<'_>, entries_size: &mut usize) -> Result<Entries<M>> {
         let mut count = codec::decode_var_u64(buf)?;
         let mut entries_index = Vec::with_capacity(count as usize);
+        let mut index = 0;
+        if count > 0 {
+            index = codec::decode_var_u64(buf)?;
+        }
         while count > 0 {
-            let index = codec::decode_var_u64(buf)?;
             let len = codec::decode_var_u64(buf)? - *entries_size as u64;
             let entry_index = EntryIndex {
                 index,
@@ -94,6 +97,7 @@ impl<M: MessageExt> Entries<M> {
             };
             *entries_size += len as usize;
             entries_index.push(entry_index);
+            index += 1;
             count -= 1;
         }
         Ok(Entries::new(vec![], Some(entries_index)))
@@ -105,9 +109,13 @@ impl<M: MessageExt> Entries<M> {
         entries_buf: &mut Vec<u8>,
         entries_size: &mut usize,
     ) -> Result<()> {
-        // buf layout = { entries count | [ entry_index | entry_tail_offset ] }
+        // buf layout = { entries count | first_index | [ entry_tail_offset ] }
         // entries_buf layout = { [ content ] }
-        buf.encode_var_u64(self.entries.len() as u64)?;
+        let count = self.entries.len() as u64;
+        buf.encode_var_u64(count)?;
+        if count > 0 {
+            buf.encode_var_u64(M::index(&self.entries[0]))?;
+        }
         for (i, e) in self.entries.iter().enumerate() {
             let content = e.write_to_bytes()?;
             if !self.entries_index[i].file_id.valid() {
@@ -116,7 +124,6 @@ impl<M: MessageExt> Entries<M> {
                 self.entries_index[i].len = content.len() as u64;
                 *entries_size += self.entries_index[i].len as usize;
             }
-            buf.encode_var_u64(M::index(e))?;
             buf.encode_var_u64(*entries_size as u64)?;
             entries_buf.extend_from_slice(&content);
         }
@@ -639,6 +646,19 @@ mod tests {
     use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
 
+    fn entries(first_index: u64, len: usize, data: Option<Vec<u8>>) -> Vec<Entry> {
+        let mut v = vec![Entry::new(); len];
+        let mut index = first_index;
+        for e in v.iter_mut() {
+            e.index = index;
+            if let Some(ref data) = data {
+                e.data = data.clone();
+            }
+            index += 1;
+        }
+        v
+    }
+
     fn decode_entries_from_bytes<E: Message>(
         buf: &[u8],
         entries_index: &[EntryIndex],
@@ -664,7 +684,7 @@ mod tests {
     #[test]
     fn test_entries_enc_dec() {
         for pb_entries in vec![
-            vec![Entry::new(); 10],
+            entries(1, 10, None),
             vec![], // Empty entries.
         ] {
             let mut entries = Entries::<Entry>::new(pb_entries, None);
@@ -716,7 +736,7 @@ mod tests {
     fn test_log_item_enc_dec() {
         let region_id = 8;
         let items = vec![
-            LogItem::<Entry>::from_entries(region_id, vec![Entry::new(); 10]),
+            LogItem::<Entry>::from_entries(region_id, entries(1, 10, None)),
             LogItem::from_command(region_id, Command::Clean),
             LogItem::from_kv(
                 region_id,
@@ -753,9 +773,7 @@ mod tests {
     fn test_log_batch_enc_dec() {
         let region_id = 8;
         let mut batch = LogBatch::<Entry>::default();
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024].into());
-        batch.add_entries(region_id, vec![entry; 10]);
+        batch.add_entries(region_id, entries(1, 10, Some(vec![b'x'; 1024].into())));
         batch.add_command(region_id, Command::Clean);
         batch
             .put(region_id, b"key".to_vec(), b"value".to_vec())
