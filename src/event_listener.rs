@@ -1,3 +1,5 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use crate::pipe_log::{FileId, LogQueue};
 
 pub trait EventListener: Sync + Send {
@@ -11,7 +13,7 @@ pub trait EventListener: Sync + Send {
     fn post_apply_memtables(&self, queue: LogQueue, file_id: FileId);
 
     /// Test whether a log file can be purged or not.
-    fn ready_for_purge(&self, queue: LogQueue, file_id: FileId) -> bool;
+    fn first_file_not_ready_for_purge(&self, queue: LogQueue) -> FileId;
 
     /// Called *after* a log file get purged.
     fn post_purge(&self, queue: LogQueue, file_id: FileId);

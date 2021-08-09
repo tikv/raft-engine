@@ -1,11 +1,12 @@
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read};
+use std::fs;
+use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
 use std::time::Instant;
-use std::{cmp, u64};
 
 use log::{debug, info, warn};
 use nix::errno::Errno;
@@ -14,26 +15,24 @@ use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
-use protobuf::Message;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::log_batch::{EntryExt, LogBatch};
+use crate::log_batch::{LogBatch, MessageExt};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::util::{HandyRwLock, InstantExt};
+use crate::util::InstantExt;
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
-const LOG_SUFFIX_LEN: usize = 8;
 const LOG_NUM_LEN: usize = 16;
-const LOG_NAME_LEN: usize = LOG_NUM_LEN + LOG_SUFFIX_LEN;
+const LOG_NAME_LEN: usize = LOG_NUM_LEN + LOG_SUFFIX.len();
 
 const REWRITE_SUFFIX: &str = ".rewrite";
-const REWRITE_SUFFIX_LEN: usize = 8;
 const REWRITE_NUM_LEN: usize = 8;
-const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX_LEN;
+const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX.len();
 
 const INIT_FILE_NUM: u64 = 1;
 
@@ -68,17 +67,108 @@ impl Version {
     }
 }
 
-pub struct LogFd(RawFd);
+struct LogFd(RawFd);
 
 impl LogFd {
+    fn open<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
+        let flags = OFlag::O_RDWR;
+        let mode = Mode::S_IRWXU;
+        let fd = fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open"))?;
+        let fd = LogFd(fd);
+        fd.read_header()?;
+        Ok(fd)
+    }
+
+    fn create<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
+        let flags = OFlag::O_RDWR | OFlag::O_CREAT;
+        let mode = Mode::S_IRWXU;
+        let fd = fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open"))?;
+        let fd = LogFd(fd);
+        fd.write_header()?;
+        Ok(fd)
+    }
+
     fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
-    pub fn sync(&self) -> Result<()> {
+    fn sync(&self) -> Result<()> {
         let start = Instant::now();
         let res = fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"));
         LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
         res
+    }
+
+    fn read(&self, mut offset: i64, len: usize) -> Result<Vec<u8>> {
+        let mut result = vec![0; len as usize];
+        let mut readed = 0;
+        while readed < len {
+            let bytes = match pread(self.0, &mut result[readed..], offset) {
+                Ok(bytes) => bytes,
+                Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+                Err(e) => return Err(parse_nix_error(e, "pread")),
+            };
+            readed += bytes;
+            offset += bytes as i64;
+        }
+        Ok(result)
+    }
+
+    fn write(&self, mut offset: i64, content: &[u8]) -> Result<()> {
+        let mut written = 0;
+        while written < content.len() {
+            let bytes = match pwrite(self.0, &content[written..], offset) {
+                Ok(bytes) => bytes,
+                Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+                Err(e) => return Err(parse_nix_error(e, "pwrite")),
+            };
+            written += bytes;
+            offset += bytes as i64;
+        }
+        Ok(())
+    }
+
+    fn file_size(&self) -> Result<usize> {
+        lseek(self.0, 0, Whence::SeekEnd)
+            .map(|n| n as usize)
+            .map_err(|e| parse_nix_error(e, "lseek"))
+    }
+
+    fn truncate(&self, offset: i64) -> Result<i64> {
+        if FILE_MAGIC_HEADER.len() + Version::len() > offset as usize {
+            Ok((FILE_MAGIC_HEADER.len() + Version::len()) as i64)
+        } else {
+            ftruncate(self.0, offset).map_err(|e| parse_nix_error(e, "ftruncate"))?;
+            Ok(offset)
+        }
+    }
+
+    fn read_header(&self) -> Result<()> {
+        if self.file_size()? < FILE_MAGIC_HEADER.len() + Version::len() {
+            return Err(Error::Corruption("log file too short".to_owned()));
+        }
+        let buf = self.read(0, FILE_MAGIC_HEADER.len() + Version::len())?;
+        if !buf.starts_with(FILE_MAGIC_HEADER) {
+            return Err(Error::Corruption(
+                "log file magic header mismatch".to_owned(),
+            ));
+        }
+        let v = codec::decode_u64(&mut &buf[FILE_MAGIC_HEADER.len()..])?;
+        if Version::from_u64(v).is_none() {
+            return Err(Error::Corruption(format!(
+                "unrecognized log file version: {}",
+                v
+            )));
+        }
+        Ok(())
+    }
+
+    fn write_header(&self) -> Result<usize> {
+        let len = FILE_MAGIC_HEADER.len() + Version::len();
+        let mut header = Vec::with_capacity(len);
+        header.extend_from_slice(FILE_MAGIC_HEADER);
+        header.encode_u64(Version::current().as_u64()).unwrap();
+        self.write(0, &header)?;
+        Ok(len)
     }
 }
 
@@ -90,11 +180,36 @@ impl Drop for LogFd {
     }
 }
 
+fn build_file_name(queue: LogQueue, file_id: FileId) -> String {
+    match queue {
+        LogQueue::Append => format!("{:0width$}{}", file_id, LOG_SUFFIX, width = LOG_NUM_LEN),
+        LogQueue::Rewrite => format!(
+            "{:0width$}{}",
+            file_id,
+            REWRITE_SUFFIX,
+            width = REWRITE_NUM_LEN
+        ),
+    }
+}
+
+fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
+    if file_name.ends_with(LOG_SUFFIX) && file_name.len() == LOG_NAME_LEN {
+        if let Ok(num) = file_name[..LOG_NUM_LEN].parse::<u64>() {
+            return Ok((LogQueue::Append, num.into()));
+        }
+    } else if file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN {
+        if let Ok(num) = file_name[..REWRITE_NUM_LEN].parse::<u64>() {
+            return Ok((LogQueue::Rewrite, num.into()));
+        }
+    }
+    Err(Error::ParseFileName(file_name.to_owned()))
+}
+
 struct LogManager {
+    queue: LogQueue,
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
-    name_suffix: &'static str,
     listeners: Vec<Arc<dyn EventListener>>,
 
     pub first_file_id: FileId,
@@ -108,12 +223,12 @@ struct LogManager {
 }
 
 impl LogManager {
-    fn new(cfg: &Config, name_suffix: &'static str) -> Self {
+    fn new(cfg: &Config, queue: LogQueue) -> Self {
         Self {
+            queue,
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
-            name_suffix,
             listeners: vec![],
 
             first_file_id: INIT_FILE_NUM.into(),
@@ -132,32 +247,30 @@ impl LogManager {
         max_file_id: FileId,
     ) -> Result<()> {
         if !logs.is_empty() {
-            let queue = queue_from_suffix(self.name_suffix);
             self.first_file_id = min_file_id;
             self.active_file_id = max_file_id;
 
             for (i, file_name) in logs[0..logs.len() - 1].iter().enumerate() {
                 let mut path = PathBuf::from(&self.dir);
                 path.push(file_name);
-                let fd = Arc::new(open_frozen_file(&path)?);
+                let fd = Arc::new(LogFd::open(&path)?);
                 self.all_files.push_back(fd);
                 for listener in &self.listeners {
-                    listener.post_new_log_file(queue, self.first_file_id.forward(i));
+                    listener.post_new_log_file(self.queue, self.first_file_id.forward(i));
                 }
             }
 
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
-            let fd = Arc::new(open_active_file(&path)?);
-            fd.sync()?;
+            let fd = Arc::new(LogFd::open(&path)?);
 
-            self.active_log_size = file_size(fd.0)?;
+            self.active_log_size = fd.file_size()?;
             self.active_log_capacity = self.active_log_size;
             self.last_sync_size = self.active_log_size;
             self.all_files.push_back(fd);
 
             for listener in &self.listeners {
-                listener.post_new_log_file(queue, self.active_file_id);
+                listener.post_new_log_file(self.queue, self.active_file_id);
             }
         }
 
@@ -177,9 +290,9 @@ impl LogManager {
         };
 
         let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(self.active_file_id, self.name_suffix));
-        let (fd, bytes) = create_active_file(&path)?;
-        let fd = Arc::new(fd);
+        path.push(build_file_name(self.queue, self.active_file_id));
+        let fd = Arc::new(LogFd::create(&path)?);
+        let bytes = fd.file_size()?;
 
         self.active_log_size = bytes;
         self.active_log_capacity = bytes;
@@ -188,8 +301,7 @@ impl LogManager {
         self.sync_dir()?;
 
         for listener in &self.listeners {
-            let queue = queue_from_suffix(self.name_suffix);
-            listener.post_new_log_file(queue, self.active_file_id);
+            listener.post_new_log_file(self.queue, self.active_file_id);
         }
 
         self.update_metrics();
@@ -210,11 +322,7 @@ impl LogManager {
             return Err(Error::Io(io_error));
         }
         let active_fd = self.get_active_fd().unwrap();
-        ftruncate(active_fd.0, offset as _).map_err(|e| parse_nix_error(e, "ftruncate"))?;
-        if offset < FILE_MAGIC_HEADER.len() + Version::len() {
-            // After truncate to 0, write header is necessary.
-            offset = write_file_header(active_fd.0)?;
-        }
+        offset = active_fd.truncate(offset as i64)? as usize;
         active_fd.sync()?;
         self.active_log_size = offset;
         self.active_log_capacity = offset;
@@ -270,7 +378,7 @@ impl LogManager {
         if self.active_log_size > self.active_log_capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let reserve = self.active_log_size - self.active_log_capacity;
-            let alloc_size = cmp::max(reserve, FILE_ALLOCATE_SIZE);
+            let alloc_size = std::cmp::max(reserve, FILE_ALLOCATE_SIZE);
             fcntl::fallocate(
                 fd.0,
                 fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
@@ -289,7 +397,7 @@ impl LogManager {
     }
 
     fn update_metrics(&self) {
-        match queue_from_suffix(self.name_suffix) {
+        match self.queue {
             LogQueue::Append => LOG_FILE_COUNT.append.set(self.all_files.len() as i64),
             LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(self.all_files.len() as i64),
         }
@@ -310,10 +418,10 @@ pub struct FilePipeLog {
 
 impl FilePipeLog {
     fn new(cfg: &Config, listeners: Vec<Arc<dyn EventListener>>) -> FilePipeLog {
-        let appender = Arc::new(RwLock::new(LogManager::new(cfg, LOG_SUFFIX)));
-        let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, REWRITE_SUFFIX)));
-        appender.wl().listeners = listeners.clone();
-        rewriter.wl().listeners = listeners.clone();
+        let appender = Arc::new(RwLock::new(LogManager::new(cfg, LogQueue::Append)));
+        let rewriter = Arc::new(RwLock::new(LogManager::new(cfg, LogQueue::Rewrite)));
+        appender.write().listeners = listeners.clone();
+        rewriter.write().listeners = listeners.clone();
         FilePipeLog {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
@@ -348,22 +456,17 @@ impl FilePipeLog {
             }
 
             let file_name = file_path.file_name().unwrap().to_str().unwrap();
-            if is_log_file(file_name) {
-                let file_id = match extract_file_id(file_name, LOG_NUM_LEN) {
-                    Ok(num) => num,
-                    Err(_) => continue,
-                };
-                min_file_id = FileId::min(min_file_id, file_id);
-                max_file_id = FileId::max(max_file_id, file_id);
-                log_files.push(file_name.to_string());
-            } else if is_rewrite_file(file_name) {
-                let file_id = match extract_file_id(file_name, REWRITE_NUM_LEN) {
-                    Ok(num) => num,
-                    Err(_) => continue,
-                };
-                min_rewrite_num = FileId::min(min_rewrite_num, file_id);
-                max_rewrite_num = FileId::max(max_rewrite_num, file_id);
-                rewrite_files.push(file_name.to_string());
+            match parse_file_name(file_name)? {
+                (LogQueue::Append, file_id) => {
+                    min_file_id = FileId::min(min_file_id, file_id);
+                    max_file_id = FileId::max(max_file_id, file_id);
+                    log_files.push(file_name.to_string());
+                }
+                (LogQueue::Rewrite, file_id) => {
+                    min_rewrite_num = FileId::min(min_rewrite_num, file_id);
+                    max_rewrite_num = FileId::max(max_rewrite_num, file_id);
+                    rewrite_files.push(file_name.to_string());
+                }
             }
         }
 
@@ -409,19 +512,6 @@ impl FilePipeLog {
         Ok(pipe_log)
     }
 
-    // TODO: use `LogFd` for reading file bytes instead of `std::fs`
-    fn read_file_bytes(&self, queue: LogQueue, file_id: FileId) -> Result<Vec<u8>> {
-        let mut path = PathBuf::from(&self.dir);
-        path.push(generate_file_name(file_id, self.get_name_suffix(queue)));
-        let meta = fs::metadata(&path)?;
-        let mut vec = Vec::with_capacity(meta.len() as usize);
-
-        // Read the whole file.
-        let mut file = File::open(&path)?;
-        file.read_to_end(&mut vec)?;
-        Ok(vec)
-    }
-
     fn append_bytes(
         &self,
         queue: LogQueue,
@@ -431,7 +521,7 @@ impl FilePipeLog {
         // Must hold lock until file is written to avoid corrupted holes.
         let mut log_manager = self.mut_queue(queue);
         let (file_id, offset, fd) = log_manager.on_append(content.len(), sync)?;
-        pwrite_exact(fd.0, offset, content)?;
+        fd.write(offset as i64, content)?;
         for listener in &self.listeners {
             listener.on_append_log_file(queue, file_id);
         }
@@ -441,22 +531,15 @@ impl FilePipeLog {
 
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager> {
         match queue {
-            LogQueue::Append => self.appender.rl(),
-            LogQueue::Rewrite => self.rewriter.rl(),
+            LogQueue::Append => self.appender.read(),
+            LogQueue::Rewrite => self.rewriter.read(),
         }
     }
 
     fn mut_queue(&self, queue: LogQueue) -> RwLockWriteGuard<LogManager> {
         match queue {
-            LogQueue::Append => self.appender.wl(),
-            LogQueue::Rewrite => self.rewriter.wl(),
-        }
-    }
-
-    fn get_name_suffix(&self, queue: LogQueue) -> &'static str {
-        match queue {
-            LogQueue::Append => LOG_SUFFIX,
-            LogQueue::Rewrite => REWRITE_SUFFIX,
+            LogQueue::Append => self.appender.write(),
+            LogQueue::Rewrite => self.rewriter.write(),
         }
     }
 
@@ -477,15 +560,15 @@ impl FilePipeLog {
 
 impl PipeLog for FilePipeLog {
     fn close(&self) -> Result<()> {
-        self.appender.wl().truncate_active_log(None)?;
-        self.rewriter.wl().truncate_active_log(None)?;
+        self.appender.write().truncate_active_log(None)?;
+        self.rewriter.write().truncate_active_log(None)?;
         Ok(())
     }
 
     fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64> {
         self.get_queue(queue)
             .get_fd(file_id)
-            .map(|fd| file_size(fd.0).unwrap() as u64)
+            .map(|fd| fd.file_size().unwrap() as u64)
     }
 
     fn total_size(&self, queue: LogQueue) -> usize {
@@ -506,17 +589,20 @@ impl PipeLog for FilePipeLog {
         len: u64,
     ) -> Result<Vec<u8>> {
         let fd = self.get_queue(queue).get_fd(file_id)?;
-        pread_exact(fd.0, offset, len as usize)
+        fd.read(offset as i64, len as usize)
     }
 
-    fn read_file_for_recovery<E: Message, W: EntryExt<E>>(
+    fn read_file_into_log_batch<M: MessageExt>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<E, W>>,
+        batches: &mut Vec<LogBatch<M>>,
     ) -> Result<()> {
-        let content = self.read_file_bytes(queue, file_id)?;
+        let mut path = PathBuf::from(&self.dir);
+        path.push(build_file_name(queue, file_id));
+        // TODO: use `LogFd` for reading file bytes instead of `std::fs`
+        let content = fs::read(&path)?;
         let mut buf = content.as_slice();
         let start_ptr = buf.as_ptr();
         buf.consume(FILE_MAGIC_HEADER.len() + Version::len());
@@ -554,10 +640,10 @@ impl PipeLog for FilePipeLog {
         }
     }
 
-    fn append<E: Message, W: EntryExt<E>>(
+    fn append<M: MessageExt>(
         &self,
         queue: LogQueue,
-        batch: &mut LogBatch<E, W>,
+        batch: &mut LogBatch<M>,
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
         if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
@@ -616,9 +702,9 @@ impl PipeLog for FilePipeLog {
     }
 
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize> {
-        let (mut manager, name_suffix) = match queue {
-            LogQueue::Append => (self.appender.wl(), LOG_SUFFIX),
-            LogQueue::Rewrite => (self.rewriter.wl(), REWRITE_SUFFIX),
+        let mut manager = match queue {
+            LogQueue::Append => self.appender.write(),
+            LogQueue::Rewrite => self.rewriter.write(),
         };
         let purge_count = manager.purge_to(file_id)?;
         drop(manager);
@@ -626,7 +712,7 @@ impl PipeLog for FilePipeLog {
         let mut cur_file_id = file_id.backward(purge_count);
         for i in 0..purge_count {
             let mut path = PathBuf::from(&self.dir);
-            path.push(generate_file_name(cur_file_id, name_suffix));
+            path.push(build_file_name(queue, cur_file_id));
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
                 return Ok(i);
@@ -634,40 +720,6 @@ impl PipeLog for FilePipeLog {
             cur_file_id = cur_file_id.forward(1);
         }
         Ok(purge_count)
-    }
-}
-
-fn generate_file_name(file_id: FileId, suffix: &'static str) -> String {
-    match suffix {
-        LOG_SUFFIX => format!("{:016}{}", file_id, suffix),
-        REWRITE_SUFFIX => format!("{:08}{}", file_id, suffix),
-        _ => unreachable!(),
-    }
-}
-
-fn extract_file_id(file_name: &str, file_num_len: usize) -> Result<FileId> {
-    if file_name.len() < file_num_len {
-        return Err(Error::ParseFileName(file_name.to_owned()));
-    }
-    match file_name[..file_num_len].parse::<u64>() {
-        Ok(num) => Ok(num.into()),
-        Err(_) => Err(Error::ParseFileName(file_name.to_owned())),
-    }
-}
-
-fn is_log_file(file_name: &str) -> bool {
-    file_name.ends_with(LOG_SUFFIX) && file_name.len() == LOG_NAME_LEN
-}
-
-fn is_rewrite_file(file_name: &str) -> bool {
-    file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN
-}
-
-fn queue_from_suffix(suffix: &str) -> LogQueue {
-    match suffix {
-        LOG_SUFFIX => LogQueue::Append,
-        REWRITE_SUFFIX => LogQueue::Rewrite,
-        _ => unreachable!(),
     }
 }
 
@@ -679,100 +731,6 @@ fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
         }
         e => box_err!("{}: {:?}", custom, e),
     }
-}
-
-fn open_active_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
-    let raw = open_active_file_raw(path)?;
-    check_version(raw)?;
-    Ok(LogFd(raw))
-}
-
-fn open_frozen_file<P: ?Sized + NixPath>(path: &P) -> Result<LogFd> {
-    let raw = open_frozen_file_raw(path)?;
-    check_version(raw)?;
-    Ok(LogFd(raw))
-}
-
-fn create_active_file<P: ?Sized + NixPath>(path: &P) -> Result<(LogFd, usize)> {
-    let raw = open_active_file_raw(path)?;
-    let bytes = write_file_header(raw)?;
-    Ok((LogFd(raw), bytes))
-}
-
-fn open_active_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
-    let flags = OFlag::O_RDWR | OFlag::O_CREAT;
-    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
-    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_active_file"))
-}
-
-fn open_frozen_file_raw<P: ?Sized + NixPath>(path: &P) -> Result<RawFd> {
-    let flags = OFlag::O_RDONLY;
-    let mode = Mode::S_IRWXU;
-    fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open_frozen_file"))
-}
-
-fn check_version(fd: RawFd) -> Result<Version> {
-    if file_size(fd)? < FILE_MAGIC_HEADER.len() + Version::len() {
-        return Err(Error::Corruption("log file too short".to_owned()));
-    }
-    let buf = pread_exact(fd, 0, FILE_MAGIC_HEADER.len() + Version::len())?;
-    if !buf.starts_with(FILE_MAGIC_HEADER) {
-        return Err(Error::Corruption(
-            "log file magic header mismatch".to_owned(),
-        ));
-    }
-    let v = codec::decode_u64(&mut &buf[FILE_MAGIC_HEADER.len()..])?;
-    match Version::from_u64(v) {
-        Some(v) => Ok(v),
-        None => Err(Error::Corruption(format!(
-            "unrecognized log file version: {}",
-            v
-        ))),
-    }
-}
-
-fn file_size(fd: RawFd) -> Result<usize> {
-    lseek(fd, 0, Whence::SeekEnd)
-        .map(|n| n as usize)
-        .map_err(|e| parse_nix_error(e, "lseek"))
-}
-
-fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> Result<Vec<u8>> {
-    let mut result = vec![0; len as usize];
-    let mut readed = 0;
-    while readed < len {
-        let bytes = match pread(fd, &mut result[readed..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pread")),
-        };
-        readed += bytes;
-        offset += bytes as u64;
-    }
-    Ok(result)
-}
-
-fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> Result<()> {
-    let mut written = 0;
-    while written < content.len() {
-        let bytes = match pwrite(fd, &content[written..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pwrite")),
-        };
-        written += bytes;
-        offset += bytes as u64;
-    }
-    Ok(())
-}
-
-fn write_file_header(fd: RawFd) -> Result<usize> {
-    let len = FILE_MAGIC_HEADER.len() + Version::len();
-    let mut header = Vec::with_capacity(len);
-    header.extend_from_slice(FILE_MAGIC_HEADER);
-    header.encode_u64(Version::current().as_u64()).unwrap();
-    pwrite_exact(fd, 0, &header)?;
-    Ok(len)
 }
 
 #[cfg(test)]
@@ -796,19 +754,22 @@ mod tests {
     #[test]
     fn test_file_name() {
         let file_name: &str = "0000000000000123.raftlog";
-        assert_eq!(extract_file_id(file_name, LOG_NUM_LEN).unwrap(), 123.into());
-        assert_eq!(generate_file_name(123.into(), LOG_SUFFIX), file_name);
+        assert_eq!(
+            parse_file_name(file_name).unwrap(),
+            (LogQueue::Append, 123.into())
+        );
+        assert_eq!(build_file_name(LogQueue::Append, 123.into()), file_name);
 
         let file_name: &str = "00000123.rewrite";
         assert_eq!(
-            extract_file_id(file_name, REWRITE_NUM_LEN).unwrap(),
-            123.into()
+            parse_file_name(file_name).unwrap(),
+            (LogQueue::Rewrite, 123.into())
         );
-        assert_eq!(generate_file_name(123.into(), REWRITE_SUFFIX), file_name);
+        assert_eq!(build_file_name(LogQueue::Rewrite, 123.into()), file_name);
 
         let invalid_file_name: &str = "123.log";
-        assert!(extract_file_id(invalid_file_name, LOG_NUM_LEN).is_err());
-        assert!(extract_file_id(invalid_file_name, REWRITE_NUM_LEN).is_err());
+        assert!(parse_file_name(invalid_file_name).is_err());
+        assert!(parse_file_name(invalid_file_name).is_err());
     }
 
     fn test_pipe_log_impl(queue: LogQueue) {
@@ -885,19 +846,8 @@ mod tests {
         );
         assert!(trunc_big_offset.is_err());
 
-        /**************************
-        // read next file
-        let mut header: Vec<u8> = vec![];
-        header.extend(FILE_MAGIC_HEADER);
-        header.extend(VERSION);
-        let content = pipe_log.read_next_file_id().unwrap().unwrap();
-        assert_eq!(header, content);
-        assert!(pipe_log.read_next_file_id().unwrap().is_none());
-        **************************/
-
-        pipe_log.close().unwrap();
-
         // reopen
+        pipe_log.close().unwrap();
         let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
         assert_eq!(pipe_log.active_file_id(queue), 3.into());
         assert_eq!(
@@ -920,38 +870,24 @@ mod tests {
         test_pipe_log_impl(LogQueue::Rewrite)
     }
 
-    fn create_tmp_file() -> RawFd {
-        let dir = Builder::new().prefix("test_pipe_log").tempfile().unwrap();
-        let path = dir.path().to_str().unwrap();
-        let flags = OFlag::O_RDWR | OFlag::O_CREAT;
-        let mode = Mode::S_IRUSR | Mode::S_IWUSR;
-        fcntl::open(path, flags, mode)
-            .map_err(|e| parse_nix_error(e, "open_active_file"))
-            .unwrap()
-    }
-
     #[test]
-    fn test_check_version() {
+    fn test_log_file_validation() {
         // magic header corruption
         let mut buf: Vec<u8> = Vec::with_capacity(1024);
         buf.write(b"RAFT-LOG-FILE-HEADER-********************************")
             .unwrap();
         buf.encode_u64(Version::current().as_u64()).unwrap();
-        let fd = create_tmp_file();
-        pwrite(fd, &buf, 0).unwrap();
-        assert!(check_version(fd).is_err());
+        let fd = LogFd::create("test_log_file_validation").unwrap();
+        fd.write(0, &buf).unwrap();
+        assert!(fd.read_header().is_err());
 
         // unrecognized version
         buf.clear();
         buf.write(FILE_MAGIC_HEADER).unwrap();
         buf.encode_u64(u64::MAX).unwrap();
-        let fd = create_tmp_file();
-        pwrite(fd, &buf, 0).unwrap();
-        assert!(check_version(fd).is_err());
+        fd.write(0, &buf).unwrap();
+        assert!(fd.read_header().is_err());
 
-        // correct
-        let fd = create_tmp_file();
-        write_file_header(fd).unwrap();
-        assert!(check_version(fd).is_ok());
+        fs::remove_file("test_log_file_validation").unwrap();
     }
 }

@@ -1,7 +1,7 @@
-use protobuf::Message;
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use crate::config::RecoveryMode;
-use crate::log_batch::{EntryExt, LogBatch};
+use crate::log_batch::{LogBatch, MessageExt};
 use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -97,19 +97,19 @@ pub trait PipeLog: Sized + Clone + Send {
         len: u64,
     ) -> Result<Vec<u8>>;
 
-    fn read_file_for_recovery<E: Message, W: EntryExt<E>>(
+    fn read_file_into_log_batch<M: MessageExt>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<E, W>>,
+        batches: &mut Vec<LogBatch<M>>,
     ) -> Result<()>;
 
     /// Write a batch into the append queue.
-    fn append<E: Message, W: EntryExt<E>>(
+    fn append<M: MessageExt>(
         &self,
         queue: LogQueue,
-        batch: &mut LogBatch<E, W>,
+        batch: &mut LogBatch<M>,
         sync: bool,
     ) -> Result<(FileId, usize)>;
 

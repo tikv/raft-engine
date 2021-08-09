@@ -12,12 +12,14 @@ path = "examples/append_compact_purge.rs"
 byteorder = "1.2"
 crc32fast = "1.2"
 crossbeam = "0.8"
+fail = "0.4"
 fxhash = "0.2"
 hex = "0.4"
 lazy_static = "1.3"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 lz4-sys = "1.9.2"
 nix = "0.18.0"
+parking_lot = "0.11"
 prometheus = { version = "0.12", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "=2.8.0"
@@ -27,14 +29,22 @@ thiserror = "1.0"
 [dev-dependencies]
 ctor = "0.1"
 env_logger = "0.7"
+kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 rand = "0.7"
 rand_distr = "0.3"
 tempfile = "3.1"
 toml = "0.5"
 
+[features]
+failpoints = [
+  "fail/failpoints",
+]
+
 [patch.crates-io]
+raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
+protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
 
 [workspace]
 members = [ "stress" ]
