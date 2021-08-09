@@ -13,15 +13,17 @@ use const_format::formatcp;
 use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
-use raft_engine::{Command, Config, EntryExt, LogBatch, RaftLogEngine, ReadableSize};
+use raft_engine::{Command, Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};
 use rand::{thread_rng, Rng};
 
-type Engine = RaftLogEngine<Entry, EntryExtTyped>;
-type WriteBatch = LogBatch<Entry, EntryExtTyped>;
+type Engine = RaftLogEngine<MessageExtTyped>;
+type WriteBatch = LogBatch<MessageExtTyped>;
 
 #[derive(Clone)]
-struct EntryExtTyped;
-impl EntryExt<Entry> for EntryExtTyped {
+struct MessageExtTyped;
+impl MessageExt for MessageExtTyped {
+    type Entry = Entry;
+
     fn index(entry: &Entry) -> u64 {
         entry.index
     }
@@ -119,7 +121,7 @@ impl ThreadSummary {
             .record(end.duration_since(start).as_micros() as u64)
             .unwrap();
         if self.first.is_none() {
-            self.first = Some(start.clone());
+            self.first = Some(start);
         } else {
             self.last = Some(start);
         }
@@ -320,13 +322,16 @@ fn spawn_purge(
         .unwrap()
 }
 
-fn prepare_entries(entries: &Vec<Entry>, mut start_index: u64) -> Vec<Entry> {
-    let mut entries = entries.clone();
-    for e in &mut entries {
-        e.set_index(start_index);
-        start_index += 1;
-    }
+fn prepare_entries(entries: &[Entry], mut start_index: u64) -> Vec<Entry> {
     entries
+        .iter()
+        .cloned()
+        .map(|mut e| {
+            e.set_index(start_index);
+            start_index += 1;
+            e
+        })
+        .collect()
 }
 
 fn wait_til(now: &mut Instant, t: Instant) {
@@ -365,14 +370,14 @@ fn main() {
             Arg::with_name("time")
                 .long("time")
                 .value_name("time[s]")
-                .default_value(&formatcp!("{}", DEFAULT_TIME.as_secs()))
+                .default_value(formatcp!("{}", DEFAULT_TIME.as_secs()))
                 .help("Set the stress test time")
                 .takes_value(true),
         )
         .arg(
             Arg::with_name("regions")
                 .long("regions")
-                .default_value(&formatcp!("{}", DEFAULT_REGIONS))
+                .default_value(formatcp!("{}", DEFAULT_REGIONS))
                 .help("Set the region count")
                 .takes_value(true),
         )
@@ -380,7 +385,7 @@ fn main() {
             Arg::with_name("purge_interval")
                 .long("purge-interval")
                 .value_name("interval[ms]")
-                .default_value(&formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_millis()))
+                .default_value(formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_millis()))
                 .help("Set the interval to purge obsolete log files")
                 .takes_value(true),
         )
@@ -389,7 +394,7 @@ fn main() {
                 .conflicts_with("compact_count")
                 .long("compact-ttl")
                 .value_name("ttl[ms]")
-                .default_value(&formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
+                .default_value(formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
                 .help("Compact log entries older than TTL")
                 .takes_value(true),
         )
@@ -398,7 +403,7 @@ fn main() {
                 .conflicts_with("compact_ttl")
                 .long("compact-count")
                 .value_name("n")
-                .default_value(&formatcp!("{}", DEFAULT_COMPACT_COUNT))
+                .default_value(formatcp!("{}", DEFAULT_COMPACT_COUNT))
                 .help("Compact log entries exceeding this threshold")
                 .takes_value(true),
         )
@@ -423,7 +428,7 @@ fn main() {
         .arg(
             Arg::with_name("write_threads")
                 .long("write-threads")
-                .default_value(&formatcp!("{}", DEFAULT_WRITE_THREADS))
+                .default_value(formatcp!("{}", DEFAULT_WRITE_THREADS))
                 .help("Set the thread count for writing logs")
                 .takes_value(true),
         )
@@ -431,7 +436,7 @@ fn main() {
             Arg::with_name("write_ops_per_thread")
                 .long("write-ops-per-thread")
                 .value_name("ops")
-                .default_value(&formatcp!("{}", DEFAULT_WRITE_OPS_PER_THREAD))
+                .default_value(formatcp!("{}", DEFAULT_WRITE_OPS_PER_THREAD))
                 .help("Set the per-thread OPS for writing logs")
                 .takes_value(true),
         )
@@ -439,7 +444,7 @@ fn main() {
             Arg::with_name("read_threads")
                 .long("read-threads")
                 .value_name("threads")
-                .default_value(&formatcp!("{}", DEFAULT_READ_THREADS))
+                .default_value(formatcp!("{}", DEFAULT_READ_THREADS))
                 .help("Set the thread count for reading logs")
                 .takes_value(true),
         )
@@ -447,7 +452,7 @@ fn main() {
             Arg::with_name("read_ops_per_thread")
                 .long("read-ops-per-thread")
                 .value_name("ops")
-                .default_value(&formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD))
+                .default_value(formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD))
                 .help("Set the per-thread OPS for read entry requests")
                 .takes_value(true),
         )
@@ -455,7 +460,7 @@ fn main() {
             Arg::with_name("entry_size")
                 .long("entry-size")
                 .value_name("size")
-                .default_value(&formatcp!("{}", DEFAULT_ENTRY_SIZE))
+                .default_value(formatcp!("{}", DEFAULT_ENTRY_SIZE))
                 .help("Set the average size of log entry")
                 .takes_value(true),
         )
@@ -463,7 +468,7 @@ fn main() {
             Arg::with_name("write_entry_count")
                 .long("write-entry-count")
                 .value_name("count")
-                .default_value(&formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT))
+                .default_value(formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT))
                 .help("Set the average number of written entries of a region in a log batch")
                 .takes_value(true),
         )
@@ -471,7 +476,7 @@ fn main() {
             Arg::with_name("write_region_count")
                 .long("write-region-count")
                 .value_name("count")
-                .default_value(&formatcp!("{}", DEFAULT_WRITE_REGION_COUNT))
+                .default_value(formatcp!("{}", DEFAULT_WRITE_REGION_COUNT))
                 .help("Set the average number of written regions in a log batch")
                 .takes_value(true),
         )
@@ -479,7 +484,7 @@ fn main() {
             Arg::with_name("write_sync")
                 .long("write-sync")
                 .value_name("sync")
-                .default_value(&formatcp!("{}", DEFAULT_WRITE_SYNC))
+                .default_value(formatcp!("{}", DEFAULT_WRITE_SYNC))
                 .help("Whether to sync write raft logs")
                 .takes_value(true),
         )
@@ -569,7 +574,7 @@ fn main() {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
     }
     args.validate().unwrap();
-    let engine = Arc::new(Engine::new(config));
+    let engine = Arc::new(Engine::open(config).unwrap());
     let mut write_threads = Vec::new();
     let mut read_threads = Vec::new();
     let mut misc_threads = Vec::new();
