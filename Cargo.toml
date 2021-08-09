@@ -1,13 +1,12 @@
 [package]
 name = "raft-engine"
 version = "0.1.0"
-authors = ["zhangjinpeng1987 <zhangjinpeng@pingcap.com>"]
+authors = ["The TiKV Authors"]
 edition = "2018"
 
-[features]
-failpoints = [
-  "fail/failpoints",
-]
+[[example]]
+name = "append-compact-purge"
+path = "examples/append_compact_purge.rs"
 
 [dependencies]
 byteorder = "1.2"
@@ -37,11 +36,15 @@ rand_distr = "0.3"
 tempfile = "3.1"
 toml = "0.5"
 
+[features]
+failpoints = [
+  "fail/failpoints",
+]
+
 [patch.crates-io]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
 
-[[example]]
-name = "append-compact-purge"
-path = "examples/append_compact_purge.rs"
+[workspace]
+members = [ "stress" ]
