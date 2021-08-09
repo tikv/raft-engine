@@ -1,20 +1,13 @@
-// Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-pub use std::collections::hash_map::Entry as HashMapEntry;
 use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
-use std::io::Error as IoError;
 use std::ops::{Div, Mul};
-use std::os::unix::prelude::RawFd;
 use std::str::FromStr;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
-use crate::{Error, Result as RaftEngineResult};
-
-use nix::errno::Errno;
-use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{lseek, Whence};
+use crc32fast::Hasher;
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -189,6 +182,17 @@ impl<'de> Deserialize<'de> for ReadableSize {
     }
 }
 
+pub trait InstantExt {
+    fn saturating_elapsed(&self) -> Duration;
+}
+
+impl InstantExt for Instant {
+    #[inline]
+    fn saturating_elapsed(&self) -> Duration {
+        Instant::now().saturating_duration_since(*self)
+    }
+}
+
 /// Take slices in the range.
 ///
 /// ### Panics
@@ -205,61 +209,74 @@ pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T]
     }
 }
 
-pub trait HandyRwLock<T> {
-    fn wl(&self) -> RwLockWriteGuard<'_, T>;
-    fn rl(&self) -> RwLockReadGuard<'_, T>;
+#[inline]
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data);
+    hasher.finalize()
 }
 
-impl<T> HandyRwLock<T> for RwLock<T> {
-    fn wl(&self) -> RwLockWriteGuard<'_, T> {
-        self.write().unwrap()
-    }
-    fn rl(&self) -> RwLockReadGuard<'_, T> {
-        self.read().unwrap()
-    }
-}
+pub mod lz4 {
+    use std::{i32, ptr};
 
-pub fn parse_nix_error(e: nix::Error, custom: &'static str) -> Error {
-    match e {
-        nix::Error::Sys(no) => {
-            let kind = IoError::from(no).kind();
-            Error::Io(IoError::new(kind, custom))
+    pub fn encode_block(src: &[u8], head_reserve: usize, tail_alloc: usize) -> Vec<u8> {
+        unsafe {
+            let bound = lz4_sys::LZ4_compressBound(src.len() as i32);
+            assert!(bound > 0 && src.len() <= i32::MAX as usize);
+
+            // Layout: { header | decoded_len | content | checksum }.
+            let capacity = head_reserve + 4 + bound as usize + tail_alloc;
+            let mut output: Vec<u8> = Vec::with_capacity(capacity);
+
+            let le_len = src.len().to_le_bytes();
+            ptr::copy_nonoverlapping(le_len.as_ptr(), output.as_mut_ptr().add(head_reserve), 4);
+
+            let size = lz4_sys::LZ4_compress_default(
+                src.as_ptr() as _,
+                output.as_mut_ptr().add(head_reserve + 4) as _,
+                src.len() as i32,
+                bound,
+            );
+            assert!(size > 0);
+            output.set_len(head_reserve + 4 + size as usize);
+            output
         }
-        e => box_err!("{}: {:?}", custom, e),
     }
-}
 
-pub fn file_size(fd: RawFd) -> RaftEngineResult<usize> {
-    lseek(fd, 0, Whence::SeekEnd)
-        .map(|n| n as usize)
-        .map_err(|e| parse_nix_error(e, "lseek"))
-}
-
-pub fn pread_exact(fd: RawFd, mut offset: u64, len: usize) -> RaftEngineResult<Vec<u8>> {
-    let mut result = vec![0; len as usize];
-    let mut readed = 0;
-    while readed < len {
-        let bytes = match pread(fd, &mut result[readed..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pread")),
-        };
-        readed += bytes;
-        offset += bytes as u64;
+    pub fn decode_block(src: &[u8]) -> Vec<u8> {
+        assert!(src.len() > 4, "data is too short: {} <= 4", src.len());
+        unsafe {
+            let len = u32::from_le(ptr::read_unaligned(src.as_ptr() as *const u32));
+            let mut dst = Vec::with_capacity(len as usize);
+            let l = lz4_sys::LZ4_decompress_safe(
+                src.as_ptr().add(4) as _,
+                dst.as_mut_ptr() as _,
+                src.len() as i32 - 4,
+                dst.capacity() as i32,
+            );
+            if l == len as i32 {
+                dst.set_len(l as usize);
+                return dst;
+            }
+            if l < 0 {
+                panic!("decompress failed: {}", l);
+            } else {
+                panic!("length of decompress result not match {} != {}", len, l);
+            }
+        }
     }
-    Ok(result)
-}
 
-pub fn pwrite_exact(fd: RawFd, mut offset: u64, content: &[u8]) -> RaftEngineResult<()> {
-    let mut written = 0;
-    while written < content.len() {
-        let bytes = match pwrite(fd, &content[written..], offset as _) {
-            Ok(bytes) => bytes,
-            Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
-            Err(e) => return Err(parse_nix_error(e, "pwrite")),
-        };
-        written += bytes;
-        offset += bytes as u64;
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn test_basic() {
+            let data: Vec<&'static [u8]> = vec![b"", b"123", b"12345678910"];
+            for d in data {
+                let compressed = super::encode_block(d, 0, 0);
+                assert!(compressed.len() > 4);
+                let res = super::decode_block(&compressed);
+                assert_eq!(res, d);
+            }
+        }
     }
-    Ok(())
 }

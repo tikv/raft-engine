@@ -1,16 +1,13 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::os::unix::prelude::RawFd;
+use crate::file_pipe_log::LogFd;
+use crate::{Error, LogBatch, MessageExt, Result};
 
 use log::trace;
-use protobuf::Message;
-
-use crate::util::{file_size, pread_exact};
-use crate::{EntryExt, Error, LogBatch, Result};
 
 #[derive(Debug)]
-pub struct LogBatchFileReader {
-    fd: RawFd,
+pub struct LogBatchFileReader<'a> {
+    fd: &'a LogFd,
     fsize: usize,
     buffer: Vec<u8>,
     offset: u64, // buffer offset
@@ -20,11 +17,11 @@ pub struct LogBatchFileReader {
     read_block_size: usize,
 }
 
-impl LogBatchFileReader {
-    pub fn new(fd: RawFd, offset: u64, read_block_size: usize) -> Result<Self> {
+impl<'a> LogBatchFileReader<'a> {
+    pub fn new(fd: &'a LogFd, offset: u64, read_block_size: usize) -> Result<Self> {
         Ok(Self {
             fd,
-            fsize: file_size(fd)?,
+            fsize: fd.file_size()?,
             offset,
             cursor: offset,
             buffer: vec![],
@@ -33,7 +30,7 @@ impl LogBatchFileReader {
         })
     }
 
-    pub fn next<E: Message, W: EntryExt<E>>(&mut self) -> Result<Option<LogBatch<E, W>>> {
+    pub fn next<M: MessageExt>(&mut self) -> Result<Option<LogBatch<M>>> {
         if self.cursor > self.fsize as u64 {
             return Err(Error::Corruption(format!(
                 "unexpected eof at {}",
@@ -45,13 +42,12 @@ impl LogBatchFileReader {
         }
 
         // invariance: make sure buffer can cover the range before reads.
-        let mut needed_buffer_size = LogBatch::<E, W>::header_size();
+        let mut needed_buffer_size = LogBatch::<M>::header_size();
         if self.buffer_remain_size() < needed_buffer_size {
             self.extend_buffer(needed_buffer_size)?;
         }
-        needed_buffer_size = LogBatch::<E, W>::recovery_size(
-            &mut self.buffer_slice_from_cursor(needed_buffer_size),
-        )?;
+        needed_buffer_size =
+            LogBatch::<M>::recovery_size(&mut self.buffer_slice_from_cursor(needed_buffer_size))?;
         trace!("LogBatch::recovery_size = {}", needed_buffer_size);
         if self.buffer_remain_size() < needed_buffer_size {
             self.extend_buffer(needed_buffer_size)?;
@@ -61,7 +57,7 @@ impl LogBatchFileReader {
             self.cursor,
             needed_buffer_size
         );
-        match LogBatch::<E, W>::from_bytes(
+        match LogBatch::<M>::from_bytes(
             &mut self.buffer_slice_from_cursor(needed_buffer_size),
             self.cursor,
         )? {
@@ -116,10 +112,10 @@ impl LogBatchFileReader {
 
         if offset == self.offset + self.len as u64 {
             trace!("::extend buffer {}:{}", offset, len);
-            self.buffer.extend(pread_exact(self.fd, offset, len)?);
+            self.buffer.extend(self.fd.read(offset as i64, len)?);
         } else {
             trace!("::replace buffer {}:{}", offset, len);
-            self.buffer = pread_exact(self.fd, offset, len)?;
+            self.buffer = self.fd.read(offset as i64, len)?;
             self.offset = offset;
         }
         self.len = self.buffer.len();
