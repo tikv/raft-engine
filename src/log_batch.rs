@@ -124,6 +124,12 @@ impl<M: MessageExt> Entries<M> {
                 self.entries_index[i].len = content.len() as u64;
                 *entries_size += self.entries_index[i].len as usize;
             }
+            if i != 0 {
+                assert_eq!(
+                    self.entries_index[i].index - 1,
+                    self.entries_index[i - 1].index
+                )
+            }
             buf.encode_var_u64(*entries_size as u64)?;
             entries_buf.extend_from_slice(&content);
         }
