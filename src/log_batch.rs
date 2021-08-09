@@ -656,9 +656,9 @@ mod tests {
         let mut v = vec![Entry::new(); len];
         let mut index = first_index;
         for e in v.iter_mut() {
-            e.index = index;
+            e.set_index(index);
             if let Some(ref data) = data {
-                e.data = data.clone();
+                e.set_data(data.clone().into())
             }
             index += 1;
         }
