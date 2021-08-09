@@ -222,7 +222,7 @@ fn spawn_write(
                     let first = engine.first_index(rid).unwrap_or(0);
                     let last = engine.last_index(rid).unwrap_or(0);
                     let entries = prepare_entries(&entry_batch, last + 1);
-                    log_batch.add_entries(0, entries);
+                    log_batch.add_entries(rid, entries);
                     if args.compact_count > 0 && last - first + 1 > args.compact_count {
                         log_batch.add_command(
                             rid,
@@ -463,7 +463,7 @@ fn main() {
                 .long("write-entry-count")
                 .value_name("count")
                 .default_value(&formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT))
-                .help("Set the average number of entries in a log batch")
+                .help("Set the average number of written entries of a region in a log batch")
                 .takes_value(true),
         )
         .arg(
@@ -471,7 +471,7 @@ fn main() {
                 .long("write-region-count")
                 .value_name("count")
                 .default_value(&formatcp!("{}", DEFAULT_WRITE_REGION_COUNT))
-                .help("Set the average number of regions in a log batch")
+                .help("Set the average number of written regions in a log batch")
                 .takes_value(true),
         )
         .arg(
