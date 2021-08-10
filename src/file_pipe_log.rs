@@ -637,13 +637,14 @@ impl PipeLog for FilePipeLog {
         batch: &mut LogBatch<M>,
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
-        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
+        if let Some(content) = batch.encode_to_bytes(self.compression_threshold)? {
             let start = Instant::now();
             let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
             }
 
+            // set fields based on the log file
             batch.set_position(queue, file_id, offset);
 
             match queue {

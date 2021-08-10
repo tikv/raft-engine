@@ -15,9 +15,7 @@ use crate::pipe_log::{FileId, LogQueue};
 use crate::util::{crc32, lz4};
 use crate::{Error, Result};
 
-pub const BATCH_MIN_SIZE: usize = HEADER_LEN + SECTION_OFFSET_LEN + CHECKSUM_LEN * 2;
-pub const HEADER_LEN: usize = 8;
-pub const SECTION_OFFSET_LEN: usize = 8;
+pub const HEADER_LEN: usize = 16;
 pub const CHECKSUM_LEN: usize = 4;
 
 const TYPE_ENTRIES: u8 = 0x01;
@@ -88,14 +86,14 @@ impl<M: MessageExt> Entries<M> {
             index = codec::decode_var_u64(buf)?;
         }
         while count > 0 {
-            let len = codec::decode_var_u64(buf)? - *entries_size as u64;
+            let entry_len = (codec::decode_var_u64(buf)? as usize) - *entries_size;
             let entry_index = EntryIndex {
                 index,
-                offset: *entries_size as u64,
-                len,
+                entry_offset: *entries_size as u64,
+                entry_len,
                 ..Default::default()
             };
-            *entries_size += len as usize;
+            *entries_size += entry_len;
             entries_index.push(entry_index);
             index += 1;
             count -= 1;
@@ -103,26 +101,15 @@ impl<M: MessageExt> Entries<M> {
         Ok(Entries::new(vec![], Some(entries_index)))
     }
 
-    pub fn encode_to(
-        &mut self,
-        buf: &mut Vec<u8>,
-        entries_buf: &mut Vec<u8>,
-        entries_size: &mut usize,
-    ) -> Result<()> {
-        // buf layout = { entries count | first_index | [ entry_tail_offset ] }
-        // entries_buf layout = { [ content ] }
-        let count = self.entries.len() as u64;
-        buf.encode_var_u64(count)?;
-        if count > 0 {
-            buf.encode_var_u64(M::index(&self.entries[0]))?;
-        }
+    pub fn encode_entries_to(&mut self, buf: &mut Vec<u8>, entries_size: &mut usize) -> Result<()> {
+        // only encode entries and set entries_index in memory, entries_index will be encoded later.
         for (i, e) in self.entries.iter().enumerate() {
             let content = e.write_to_bytes()?;
             if !self.entries_index[i].file_id.valid() {
                 self.entries_index[i].index = M::index(e);
-                self.entries_index[i].offset = *entries_size as u64;
-                self.entries_index[i].len = content.len() as u64;
-                *entries_size += self.entries_index[i].len as usize;
+                self.entries_index[i].entry_offset = *entries_size as u64;
+                self.entries_index[i].entry_len = content.len();
+                *entries_size += self.entries_index[i].entry_len;
             }
             if i != 0 {
                 assert_eq!(
@@ -130,42 +117,28 @@ impl<M: MessageExt> Entries<M> {
                     self.entries_index[i - 1].index
                 )
             }
-            buf.encode_var_u64(*entries_size as u64)?;
-            entries_buf.extend_from_slice(&content);
+            buf.extend_from_slice(&content);
         }
         Ok(())
     }
 
-    pub fn set_position(&mut self, queue: LogQueue, file_id: FileId, base_offset: u64) {
-        for idx in self.entries_index.iter_mut() {
-            debug_assert!(!idx.file_id.valid() && idx.base_offset == 0);
-            idx.queue = queue;
-            idx.file_id = file_id;
-            idx.base_offset = base_offset;
+    pub fn encode_entries_index_to(&self, buf: &mut Vec<u8>) -> Result<()> {
+        // layout = { count | first_index | [ tail_offset ] }
+        let count = self.entries_index.len() as u64;
+        buf.encode_var_u64(count)?;
+        if count > 0 {
+            buf.encode_var_u64(self.entries_index[0].index)?;
         }
+        for ei in self.entries_index.iter() {
+            buf.encode_var_u64(ei.entry_offset + ei.entry_len as u64)?;
+        }
+        Ok(())
     }
 
     pub fn set_queue_and_file_id(&mut self, queue: LogQueue, file_id: FileId) {
         for idx in self.entries_index.iter_mut() {
             idx.queue = queue;
             idx.file_id = file_id;
-        }
-    }
-
-    fn update_compression_info(
-        &mut self,
-        compression_type: CompressionType,
-        base_offset: Option<u64>,
-        section_offset: u64,
-        section_len: u64,
-    ) {
-        for idx in self.entries_index.iter_mut() {
-            idx.compression_type = compression_type;
-            idx.section_offset = section_offset;
-            idx.section_len = section_len;
-            if let Some(batch_offset) = base_offset {
-                idx.base_offset = batch_offset;
-            }
         }
     }
 
@@ -177,7 +150,7 @@ impl<M: MessageExt> Entries<M> {
             }
         } else {
             for ei in self.entries_index.iter() {
-                size += (8/*index*/+8/*tail_offset*/) + ei.len as usize;
+                size += (8/*index*/+8/*tail_offset*/) + ei.entry_len;
             }
         }
         size
@@ -342,18 +315,21 @@ impl<M: MessageExt> LogItem<M> {
         }
     }
 
-    pub fn encode_to(
-        &mut self,
-        buf: &mut Vec<u8>,
-        entries_buf: &mut Vec<u8>,
-        entries_size: &mut usize,
-    ) -> Result<()> {
+    pub fn encode_entries_to(&mut self, buf: &mut Vec<u8>, entries_size: &mut usize) -> Result<()> {
+        if let LogItemContent::Entries(entries) = &mut self.content {
+            entries.encode_entries_to(buf, entries_size)?;
+        }
+        Ok(())
+    }
+
+    /// Must be called after `encode_entries_to`.
+    pub fn encode_to(&self, buf: &mut Vec<u8>) -> Result<()> {
         // layout = { 8 byte id | 1 byte type | item layout }
         buf.encode_var_u64(self.raft_group_id)?;
-        match &mut self.content {
+        match &self.content {
             LogItemContent::Entries(entries) => {
                 buf.push(TYPE_ENTRIES);
-                entries.encode_to(buf, entries_buf, entries_size)?;
+                entries.encode_entries_index_to(buf)?;
             }
             LogItemContent::Command(command) => {
                 buf.push(TYPE_COMMAND);
@@ -446,7 +422,11 @@ where
     pub fn set_position(&mut self, queue: LogQueue, file_id: FileId, offset: u64) {
         for item in self.items.iter_mut() {
             if let LogItemContent::Entries(entries) = &mut item.content {
-                entries.set_position(queue, file_id, offset);
+                for ei in entries.entries_index.iter_mut() {
+                    ei.queue = queue;
+                    ei.file_id = file_id;
+                    ei.entries_offset += offset;
+                }
             }
         }
     }
@@ -492,111 +472,105 @@ where
         self.items.is_empty()
     }
 
-    pub fn from_bytes(
+    pub fn parse_header(buf: &mut SliceReader<'_>) -> Result<(usize, u64, CompressionType)> {
+        assert_eq!(buf.len(), HEADER_LEN);
+        let mut len = codec::decode_u64(buf)? as usize;
+        let offset = codec::decode_u64(buf)?;
+        let compression_type = CompressionType::from_byte(len as u8);
+        len >>= 8;
+        Ok((len, offset, compression_type))
+    }
+
+    pub fn from_footer(
         buf: &mut SliceReader<'_>,
-        // The offset of the batch from its log file.
-        base_offset: u64,
-    ) -> Result<Option<(LogBatch<M>, usize)>> {
-        if buf.is_empty() {
-            return Ok(None);
-        }
-        if buf.len() < BATCH_MIN_SIZE {
-            return Err(Error::TooShort);
-        }
-
-        let header = codec::decode_u64(buf)? as usize;
-        let compression_type = CompressionType::from_byte(header as u8);
-        let batch_len = header >> 8;
-        let section_offset = codec::decode_u64(buf)?;
-        let section_len = batch_len as u64 - section_offset;
-        test_checksum(&buf[..section_offset as usize])?;
-
-        let mut items_count = codec::decode_var_u64(buf)? as usize;
-        assert!(items_count > 0 && !buf.is_empty());
-        let mut log_batch = LogBatch::with_capacity(items_count);
-        while items_count > 0 {
+        entries_offset: u64,
+        entries_len: usize,
+        compression_type: CompressionType,
+    ) -> Result<LogBatch<M>> {
+        test_checksum(buf)?;
+        let mut count = codec::decode_var_u64(buf)?;
+        assert!(count > 0 && !buf.is_empty());
+        let mut log_batch = LogBatch::with_capacity(count as usize);
+        while count > 0 {
             let item = LogItem::from_bytes(buf, &mut 0)?;
             log_batch.items_approximate_size += item.compute_approximate_size();
             log_batch.items.push(item);
-            items_count -= 1;
+            count -= 1;
         }
 
         for item in log_batch.items.iter_mut() {
             if let LogItemContent::Entries(entries) = &mut item.content {
-                entries.update_compression_info(
-                    compression_type,
-                    Some(base_offset),
-                    section_offset,
-                    section_len,
-                );
+                for ei in entries.entries_index.iter_mut() {
+                    ei.compression_type = compression_type;
+                    ei.entries_offset = entries_offset;
+                    ei.entries_len = entries_len;
+                }
             }
         }
         buf.consume(CHECKSUM_LEN);
 
-        Ok(Some((log_batch, section_len as usize)))
+        Ok(log_batch)
     }
 
     // TODO: avoid to write a large batch into one compressed chunk.
-    pub fn encode_to_bytes(&mut self, compression_threshold: usize) -> Option<Vec<u8>> {
+    pub fn encode_to_bytes(&mut self, compression_threshold: usize) -> Result<Option<Vec<u8>>> {
         if self.items.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        // layout = { 8 bytes batch_len | 8 bytes section offset | item count | multiple items (without entries) | crc32 | section (entries) | crc32 }
-        //          ^base_offset in file                         ^offset = 0
-        //                                                       |<------------------------------------ batch_len ---------------------------------->|
-        //                                                                                                              ^offset = section_offset
-        //                                                                                                              |<------- section_len ------>|
-        // log file layout: { magic | version | LogBatch | LogBatch | LogBatch | ... | LogBatch }
-        //                                    ^base_offset
-        let mut buf = Vec::with_capacity(1024);
-        let mut entries_buf = Vec::with_capacity(4096);
+        // layout:
+        // <---     header     ---><---        entries        ---><---                    footer                    --->
+        // { u64 len | u64 offset | (compressed) entries | crc32 | item count | entry indexes / commands / kvs | crc32 }
+        // ^ offset = 0                                         ^ offset = <offset>
 
-        buf.encode_u64(0).unwrap();
-        buf.encode_u64(0).unwrap();
-        buf.encode_var_u64(self.items.len() as u64).unwrap();
+        let mut buf = Vec::with_capacity(4096);
 
+        // reserve for header
+        buf.encode_u64(0)?;
+        buf.encode_u64(0)?;
+
+        // encode entries first, set entries_index
         for item in self.items.iter_mut() {
-            item.encode_to(&mut buf, &mut entries_buf, &mut 0).unwrap();
+            item.encode_entries_to(&mut buf, &mut 0)?;
         }
-        let buf_checksum = crc32(&buf[16..]);
-        buf.encode_u32_le(buf_checksum).unwrap();
-
         let compression_type =
-            if compression_threshold > 0 && entries_buf.len() > compression_threshold {
-                entries_buf = lz4::encode_block(&entries_buf, 0, 4);
+            if compression_threshold > 0 && (buf.len() - HEADER_LEN) > compression_threshold {
+                buf = lz4::encode_block(&buf[HEADER_LEN..], HEADER_LEN, 4);
                 CompressionType::Lz4
             } else {
                 CompressionType::None
             };
-        let entries_buf_checksum = crc32(&entries_buf);
-        entries_buf.encode_u32_le(entries_buf_checksum).unwrap();
+        let checksum = crc32(&buf[HEADER_LEN..]);
+        buf.encode_u32_le(checksum)?;
 
-        let section_offset = buf.len() as u64 - 16;
-        let section_len = entries_buf.len() as u64;
-        (&mut buf[8..])
-            .write_u64::<BigEndian>(section_offset)
-            .unwrap();
+        let offset = buf.len() as u64;
 
-        // merge two buffers
-        buf.append(&mut entries_buf);
-        let batch_len = buf.len() as u64 - 16;
-        let mut header = batch_len << 8;
-        header |= u64::from(compression_type.to_byte());
-        buf.as_mut_slice().write_u64::<BigEndian>(header).unwrap();
+        // encode footer (entries_index / commands / kvs)
+        let count = self.items.len() as u64;
+        buf.encode_var_u64(count)?;
+        for item in self.items.iter() {
+            item.encode_to(&mut buf)?;
+        }
+        let checksum = crc32(&buf[offset as usize..]);
+        buf.encode_u32_le(checksum)?;
 
+        // write header
+        let len = ((buf.len() as u64) << 8) | u64::from(compression_type.to_byte());
+
+        (&mut buf[..HEADER_LEN]).write_u64::<BigEndian>(len)?;
+        (&mut buf[8..HEADER_LEN]).write_u64::<BigEndian>(offset)?;
+
+        // update entries_index
         for item in self.items.iter_mut() {
             if let LogItemContent::Entries(entries) = &mut item.content {
-                entries.update_compression_info(
-                    compression_type,
-                    None,
-                    section_offset,
-                    section_len,
-                );
+                for ei in entries.entries_index.iter_mut() {
+                    ei.compression_type = compression_type;
+                    ei.entries_offset = HEADER_LEN as u64; // need to add batch offset of the file after written.
+                    ei.entries_len = offset as usize - HEADER_LEN;
+                }
             }
         }
-
-        Some(buf)
+        Ok(Some(buf))
     }
 
     // Don't account for compression and varint encoding.
@@ -609,15 +583,9 @@ where
         }
     }
 
-    /// min buffer size to decide `min_buffer_size_for_recovery`
-    pub fn header_size() -> usize {
-        // 8 /*len*/ + 8 /*section offset*/
-        16
-    }
-
     /// min buffer size for recover memtable ()
     pub fn recovery_size(buf: &mut SliceReader<'_>) -> Result<usize> {
-        debug_assert!(buf.len() >= Self::header_size());
+        debug_assert!(buf.len() >= HEADER_LEN);
         let mut reader = buf.as_ref();
         reader.consume(8);
         let section_offset = codec::decode_u64(&mut reader)? as usize;
@@ -678,8 +646,8 @@ mod tests {
         for entry_index in entries_index {
             entries.push(
                 parse_from_bytes(
-                    &data[entry_index.offset as usize
-                        ..(entry_index.offset + entry_index.len) as usize],
+                    &data[entry_index.entry_offset as usize
+                        ..entry_index.entry_offset as usize + entry_index.entry_len],
                 )
                 .unwrap(),
             );
@@ -694,20 +662,17 @@ mod tests {
             vec![], // Empty entries.
         ] {
             let mut entries = Entries::<Entry>::new(pb_entries, None);
-
-            let (mut encoded_entries_index, mut encoded_entries, mut entries_size1) =
-                (vec![], vec![], 0);
+            let mut encoded_entries = vec![];
+            let mut encoded_entries_index = vec![];
             entries
-                .encode_to(
-                    &mut encoded_entries_index,
-                    &mut encoded_entries,
-                    &mut entries_size1,
-                )
+                .encode_entries_to(&mut encoded_entries, &mut 0)
+                .unwrap();
+            entries
+                .encode_entries_index_to(&mut encoded_entries_index)
                 .unwrap();
 
-            let (mut s, mut entries_size2) = (encoded_entries_index.as_slice(), 0);
-            let mut decoded_entries =
-                Entries::<Entry>::from_bytes(&mut s, &mut entries_size2).unwrap();
+            let mut s = encoded_entries_index.as_slice();
+            let mut decoded_entries = Entries::<Entry>::from_bytes(&mut s, &mut 0).unwrap();
             assert_eq!(s.len(), 0);
             decoded_entries.entries =
                 decode_entries_from_bytes(&encoded_entries, &decoded_entries.entries_index, false);
@@ -753,17 +718,13 @@ mod tests {
         ];
 
         for mut item in items.into_iter() {
-            let (mut encoded_entries_index, mut encoded_entries, mut entries_size1) =
-                (vec![], vec![], 0);
-            item.encode_to(
-                &mut encoded_entries_index,
-                &mut encoded_entries,
-                &mut entries_size1,
-            )
-            .unwrap();
+            let (mut encoded_item, mut encoded_entries) = (vec![], vec![]);
+            item.encode_entries_to(&mut encoded_entries, &mut 0)
+                .unwrap();
+            item.encode_to(&mut encoded_item).unwrap();
 
-            let (mut s, mut entries_size2) = (encoded_entries_index.as_slice(), 0);
-            let mut decoded_item = LogItem::from_bytes(&mut s, &mut entries_size2).unwrap();
+            let mut s = encoded_item.as_slice();
+            let mut decoded_item = LogItem::from_bytes(&mut s, &mut 0).unwrap();
             if let LogItemContent::Entries(entries) = decoded_item.content {
                 decoded_item.content = LogItemContent::Entries(Entries::new(
                     decode_entries_from_bytes(&encoded_entries, &entries.entries_index, false),
@@ -786,10 +747,25 @@ mod tests {
             .unwrap();
         batch.delete_message(region_id, b"key2".to_vec());
 
-        let encoded = batch.encode_to_bytes(0).unwrap();
+        let encoded = batch.encode_to_bytes(0).unwrap().unwrap();
+
         let mut s = encoded.as_slice();
-        let (mut decoded_batch, skip) = LogBatch::from_bytes(&mut s, 0).unwrap().unwrap();
-        assert_eq!(s.len(), skip);
+
+        // decide batch without entries
+        let (len, offset, compression_type) =
+            LogBatch::<Entry>::parse_header(&mut &s[..HEADER_LEN]).unwrap();
+        assert_eq!(s.len(), len);
+        s.consume(offset as usize);
+        let mut decoded_batch = LogBatch::from_footer(
+            &mut s,
+            HEADER_LEN as u64,
+            offset as usize - HEADER_LEN,
+            compression_type,
+        )
+        .unwrap();
+        assert_eq!(s.len(), 0);
+
+        let s = &encoded[HEADER_LEN..offset as usize];
         for item in decoded_batch.items.as_mut_slice() {
             if let LogItemContent::Entries(entries) = &item.content {
                 item.content = LogItemContent::Entries(Entries::new(
@@ -798,6 +774,7 @@ mod tests {
                 ));
             }
         }
+
         assert_eq!(batch, decoded_batch);
     }
 }

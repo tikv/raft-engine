@@ -470,21 +470,22 @@ where
 {
     let queue = entry_index.queue;
     let file_id = entry_index.file_id;
-    let section_offset = entry_index.base_offset + 16 + entry_index.section_offset;
-    let section_len = entry_index.section_len;
-    let offset = entry_index.offset as usize;
-    let len = entry_index.len as usize;
+    let entries_offset = entry_index.entries_offset;
+    let entries_len = entry_index.entries_len;
+    let entry_offset = entry_index.entry_offset;
+    let entry_len = entry_index.entry_len;
 
-    let buf = pipe_log.read_bytes(queue, file_id, section_offset, section_len)?;
-    log_batch::test_checksum(&buf[..])?;
+    let buf = pipe_log.read_bytes(queue, file_id, entries_offset, entries_len as u64)?;
+    log_batch::test_checksum(&buf)?;
 
     let entry_content = match entry_index.compression_type {
-        CompressionType::None => buf[offset..offset + len].to_owned(),
+        CompressionType::None => {
+            buf[entry_offset as usize..entry_offset as usize + entry_len].to_owned()
+        }
         CompressionType::Lz4 => {
             let reader = &buf[..];
-            let decompressed =
-                log_batch::decompress(&reader[..section_len as usize - CHECKSUM_LEN]);
-            decompressed[offset..offset + len].to_vec()
+            let decompressed = log_batch::decompress(&reader[..entries_len - CHECKSUM_LEN]);
+            decompressed[entry_offset as usize..entry_offset as usize + entry_len].to_vec()
         }
     };
 
@@ -603,9 +604,11 @@ mod tests {
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             for i in 10..20 {
                 entry.set_index(i + 1);
+                debug!("assert {}:{}", i, i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
 
                 entry.set_index(i);
+                debug!("assert {}:{}", i, i);
                 assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
             }
         }

@@ -20,13 +20,10 @@ pub struct EntryIndex {
     pub queue: LogQueue,
     pub file_id: FileId,
     pub compression_type: CompressionType,
-    pub base_offset: u64,
-    pub section_offset: u64, // section offset of batch
-    pub section_len: u64,
-
-    // Entry content position in uncompressed section.
-    pub offset: u64,
-    pub len: u64,
+    pub entries_offset: u64, // related to log file
+    pub entries_len: usize,
+    pub entry_offset: u64,
+    pub entry_len: usize,
 }
 
 impl Default for EntryIndex {
@@ -36,11 +33,10 @@ impl Default for EntryIndex {
             queue: LogQueue::Append,
             file_id: Default::default(),
             compression_type: CompressionType::None,
-            base_offset: 0,
-            section_offset: 0,
-            section_len: 0,
-            offset: 0,
-            len: 0,
+            entries_offset: 0,
+            entries_len: 0,
+            entry_offset: 0,
+            entry_len: 0,
         }
     }
 }
@@ -206,11 +202,10 @@ impl MemTable {
 
             self.entries_index[i + distance].file_id = ei.file_id;
             self.entries_index[i + distance].compression_type = ei.compression_type;
-            self.entries_index[i + distance].base_offset = ei.base_offset;
-            self.entries_index[i + distance].section_offset = ei.section_offset;
-            self.entries_index[i + distance].section_len = ei.section_len;
-            self.entries_index[i + distance].offset = ei.offset;
-            self.entries_index[i + distance].len = ei.len;
+            self.entries_index[i + distance].entries_offset = ei.entries_offset;
+            self.entries_index[i + distance].entries_len = ei.entries_len;
+            self.entries_index[i + distance].entry_offset = ei.entry_offset;
+            self.entries_index[i + distance].entry_len = ei.entry_len;
             debug_assert_eq!(&self.entries_index[i + distance], ei);
         }
 
@@ -365,9 +360,9 @@ impl MemTable {
         if let Some(max_size) = max_size {
             let mut total_size = 0;
             for idx in first.iter().chain(second) {
-                total_size += idx.len;
+                total_size += idx.entry_len;
                 // No matter max_size's value, fetch one entry at least.
-                if total_size as usize > max_size && total_size > idx.len {
+                if total_size as usize > max_size && total_size > idx.entry_len {
                     break;
                 }
                 vec_idx.push(idx.clone());
@@ -516,7 +511,9 @@ mod tests {
         }
 
         fn entries_size(&self) -> usize {
-            self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
+            self.entries_index
+                .iter()
+                .fold(0, |acc, e| acc + e.entry_len) as usize
         }
 
         fn check_entries_index(&self) {
@@ -952,8 +949,8 @@ mod tests {
             ent_idx.index = idx;
             ent_idx.queue = queue;
             ent_idx.file_id = file_id;
-            ent_idx.offset = idx; // fake offset
-            ent_idx.len = 1; // fake size
+            ent_idx.entry_offset = idx; // fake offset
+            ent_idx.entry_len = 1; // fake size
 
             ents_idx.push(ent_idx);
         }
