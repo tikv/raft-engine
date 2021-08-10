@@ -42,9 +42,6 @@ const DEFAULT_FILES_COUNT: usize = 32;
 #[cfg(target_os = "linux")]
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
-// TODO(MrCroxx): [PLEASE REVIEW] benchmark needed, 4k or 512?
-const RECOVERY_FILE_READ_SIZE: usize = 512;
-
 #[derive(Clone, Copy)]
 pub enum Version {
     V1 = 1,
@@ -415,6 +412,7 @@ pub struct FilePipeLog {
     rotate_size: usize,
     bytes_per_sync: usize,
     compression_threshold: usize,
+    recovery_read_block_size: usize,
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
@@ -435,6 +433,7 @@ impl FilePipeLog {
             appender,
             rewriter,
             listeners,
+            recovery_read_block_size: cfg.recovery_read_block_size.0 as usize,
         }
     }
 
@@ -610,7 +609,7 @@ impl PipeLog for FilePipeLog {
         let mut reader = LogBatchFileReader::new(
             &fd,
             (FILE_MAGIC_HEADER.len() + Version::len()) as u64,
-            RECOVERY_FILE_READ_SIZE,
+            self.recovery_read_block_size,
         )?;
         loop {
             match reader.next::<M>() {
