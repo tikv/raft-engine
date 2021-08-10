@@ -5,6 +5,7 @@ authors = ["The TiKV Authors"]
 edition = "2018"
 
 [dependencies]
+byte-unit = "4.0.12"
 clap = "2.32"
 const_format = "0.2.13"
 hdrhistogram = "6.0"
