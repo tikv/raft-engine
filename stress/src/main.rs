@@ -2,12 +2,14 @@
 
 extern crate hdrhistogram;
 
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
+use byte_unit::Byte;
 use clap::{App, Arg};
 use const_format::formatcp;
 use hdrhistogram::Histogram;
@@ -44,6 +46,7 @@ const DEFAULT_ENTRY_SIZE: usize = 1024;
 const DEFAULT_WRITE_ENTRY_COUNT: u64 = 10;
 const DEFAULT_WRITE_REGION_COUNT: u64 = 5;
 const DEFAULT_WRITE_SYNC: bool = true;
+const DEFAULT_RECOVER_ONLY: bool = false;
 
 #[derive(Debug, Clone)]
 struct TestArgs {
@@ -61,6 +64,7 @@ struct TestArgs {
     write_entry_count: u64,
     write_region_count: u64,
     write_sync: bool,
+    recover_only: bool,
 }
 
 impl Default for TestArgs {
@@ -80,6 +84,7 @@ impl Default for TestArgs {
             write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
             write_region_count: DEFAULT_WRITE_REGION_COUNT,
             write_sync: DEFAULT_WRITE_SYNC,
+            recover_only: DEFAULT_RECOVER_ONLY,
         }
     }
 }
@@ -513,6 +518,14 @@ fn main() {
                 .help("Compress log batch bigger than this threshold")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("recover_only")
+                .long("recover-only")
+                .value_name("bool")
+                .default_value(formatcp!("{}", DEFAULT_RECOVER_ONLY))
+                .help("Only recover RaftEngine for recovery duration benchmarking.")
+                .takes_value(true),
+        )
         .get_matches();
     if let Some(s) = matches.value_of("time") {
         args.time = Duration::from_secs(s.parse::<u64>().unwrap());
@@ -573,8 +586,28 @@ fn main() {
     if let Some(s) = matches.value_of("batch_compression_threshold") {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
     }
+    if let Some(s) = matches.value_of("recover_only") {
+        args.recover_only = s.parse::<bool>().unwrap();
+    }
     args.validate().unwrap();
+
+    let mut size: u128 = 0;
+    for entry in std::fs::read_dir(PathBuf::from(&config.dir)).unwrap() {
+        let entry = entry.unwrap();
+        size += std::fs::metadata(entry.path()).unwrap().len() as u128;
+    }
+    let start = Instant::now();
     let engine = Arc::new(Engine::open(config).unwrap());
+    println!(
+        "Recovering {} raft logs takes {:?}.",
+        Byte::from_bytes(size)
+            .get_appropriate_unit(true)
+            .to_string(),
+        start.elapsed()
+    );
+    if args.recover_only {
+        return;
+    }
     let mut write_threads = Vec::new();
     let mut read_threads = Vec::new();
     let mut misc_threads = Vec::new();
