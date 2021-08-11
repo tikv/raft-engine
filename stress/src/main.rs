@@ -47,6 +47,7 @@ const DEFAULT_ENTRY_SIZE: usize = 1024;
 const DEFAULT_WRITE_ENTRY_COUNT: u64 = 10;
 const DEFAULT_WRITE_REGION_COUNT: u64 = 5;
 const DEFAULT_WRITE_SYNC: bool = true;
+const DEFAULT_REUSE_DATA: bool = false;
 
 #[derive(Debug, Clone)]
 struct TestArgs {
@@ -514,6 +515,14 @@ fn main() {
                 .help("Whether to sync write raft logs")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("reuse_data")
+                .long("reuse-data")
+                .value_name("reuse")
+                .default_value(formatcp!("{}", DEFAULT_REUSE_DATA))
+                .help("Whether to reuse existing data in specified path")
+                .takes_value(true),
+        )
         // Raft Engine configurations
         .arg(
             Arg::with_name("target_file_size")
@@ -540,6 +549,20 @@ fn main() {
                 .takes_value(true),
         )
         .get_matches();
+    // Raft Engine configurations
+    if let Some(s) = matches.value_of("path") {
+        config.dir = s.to_string();
+    }
+    if let Some(s) = matches.value_of("target_file_size") {
+        config.target_file_size = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("purge_threshold") {
+        config.purge_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("batch_compression_threshold") {
+        config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    // Test configurations
     if let Some(s) = matches.value_of("time") {
         args.time = Duration::from_secs(s.parse::<u64>().unwrap());
     }
@@ -586,18 +609,11 @@ fn main() {
     if let Some(s) = matches.value_of("write_sync") {
         args.write_sync = s.parse::<bool>().unwrap();
     }
-    // Raft Engine configurations
-    if let Some(s) = matches.value_of("path") {
-        config.dir = s.to_string();
-    }
-    if let Some(s) = matches.value_of("target_file_size") {
-        config.target_file_size = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("purge_threshold") {
-        config.purge_threshold = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("batch_compression_threshold") {
-        config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
+    if let Some(s) = matches.value_of("reuse_data") {
+        if !s.parse::<bool>().unwrap() {
+            // clean up existing log files
+            std::fs::remove_dir_all(&config.dir).unwrap();
+        }
     }
     args.validate().unwrap();
 
