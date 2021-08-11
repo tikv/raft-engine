@@ -216,7 +216,7 @@ fn spawn_write(
             };
             for _ in 0..args.write_entry_count {
                 entry_batch.push(Entry {
-                    data: vec![0u8; args.entry_size].into(),
+                    data: vec![thread_rng().gen::<u8>(); args.entry_size].into(),
                     ..Default::default()
                 });
             }
@@ -313,12 +313,10 @@ fn spawn_purge(
                         for region in regions.into_iter() {
                             let first = engine.first_index(region).unwrap_or(0);
                             let last = engine.last_index(region).unwrap_or(0);
-                            engine.compact_to(
-                                region,
-                                last - ((last - first + 1) as f32 * args.force_compact_factor)
-                                    as u64
-                                    + 1,
-                            );
+                            let compact_to = last
+                                - ((last - first + 1) as f32 * args.force_compact_factor) as u64
+                                + 1;
+                            engine.compact_to(region, compact_to);
                         }
                     }
                     Err(e) => println!("purge error {:?} in thread {}", e, index),
@@ -411,8 +409,8 @@ fn main() {
         .arg(
             Arg::with_name("purge_interval")
                 .long("purge-interval")
-                .value_name("interval[ms]")
-                .default_value(formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_millis()))
+                .value_name("interval[s]")
+                .default_value(formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()))
                 .help("Set the interval to purge obsolete log files")
                 .takes_value(true),
         )
@@ -420,8 +418,8 @@ fn main() {
             Arg::with_name("compact_ttl")
                 .conflicts_with("compact_count")
                 .long("compact-ttl")
-                .value_name("ttl[ms]")
-                .default_value(formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
+                .value_name("ttl[s]")
+                .default_value(formatcp!("{}", DEFAULT_COMPACT_TTL.as_secs()))
                 .help("Compact log entries older than TTL")
                 .takes_value(true),
         )
@@ -570,10 +568,10 @@ fn main() {
         args.regions = s.parse::<u64>().unwrap();
     }
     if let Some(s) = matches.value_of("purge_interval") {
-        args.purge_interval = Duration::from_millis(s.parse::<u64>().unwrap());
+        args.purge_interval = Duration::from_secs(s.parse::<u64>().unwrap());
     }
     if let Some(s) = matches.value_of("compact_ttl") {
-        args.compact_ttl = Duration::from_millis(s.parse::<u64>().unwrap());
+        args.compact_ttl = Duration::from_secs(s.parse::<u64>().unwrap());
         if args.compact_ttl.as_millis() > 0 {
             println!("Not supported");
             std::process::exit(1);
