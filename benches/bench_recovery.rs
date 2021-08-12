@@ -49,13 +49,13 @@ impl Default for Config {
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
-        self.total_size,
-        self.region_count,
-        self.batch_size,
-        self.item_size,
-        self.entry_size,
-        self.batch_compression_threshold
-    )
+            self.total_size,
+            self.region_count,
+            self.batch_size,
+            self.item_size,
+            self.entry_size,
+            self.batch_compression_threshold
+        )
     }
 }
 
