@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use fail::fail_point;
 use log::{debug, info, warn};
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
@@ -73,6 +74,17 @@ impl LogFd {
     fn open<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
         let flags = OFlag::O_RDWR;
         let mode = Mode::S_IRWXU;
+        fail_point!("fadvise-dontneed", |_| {
+            let fd = fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open"))?;
+            let fd = LogFd(fd);
+            fd.read_header()?;
+            #[cfg(target_os = "linux")]
+            unsafe {
+                extern crate libc;
+                libc::posix_fadvise64(fd.0, 0, fd.file_size()? as i64, libc::POSIX_FADV_DONTNEED);
+            }
+            Ok(fd)
+        });
         let fd = fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open"))?;
         let fd = LogFd(fd);
         fd.read_header()?;
@@ -263,7 +275,6 @@ impl LogManager {
             let mut path = PathBuf::from(&self.dir);
             path.push(logs.last().unwrap());
             let fd = Arc::new(LogFd::open(&path)?);
-
             self.active_log_size = fd.file_size()?;
             self.active_log_capacity = self.active_log_size;
             self.last_sync_size = self.active_log_size;
