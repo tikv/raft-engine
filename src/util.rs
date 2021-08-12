@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::{HashMap as StdHashMap, VecDeque};
-use std::fmt::{self, Display, Write};
+use std::fmt::{self, Write};
 use std::hash::BuildHasherDefault;
 use std::ops::{Div, Mul};
 use std::str::FromStr;
@@ -134,24 +134,6 @@ impl FromStr for ReadableSize {
         match size.parse::<f64>() {
             Ok(n) => Ok(ReadableSize((n * unit as f64) as u64)),
             Err(_) => Err(format!("invalid size string: {:?}", s)),
-        }
-    }
-}
-
-impl Display for ReadableSize {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 >= PB {
-            write!(f, "{:.1}PiB", self.0 as f64 / PB as f64)
-        } else if self.0 >= TB {
-            write!(f, "{:.1}TiB", self.0 as f64 / TB as f64)
-        } else if self.0 >= GB {
-            write!(f, "{:.1}GiB", self.0 as f64 / GB as f64)
-        } else if self.0 >= MB {
-            write!(f, "{:.1}<MiB", self.0 as f64 / MB as f64)
-        } else if self.0 >= KB {
-            write!(f, "{:.1}KiB", self.0 as f64 / KB as f64)
-        } else {
-            write!(f, "{}B", self.0)
         }
     }
 }
