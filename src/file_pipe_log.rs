@@ -78,6 +78,7 @@ impl LogFd {
             let fd = fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open"))?;
             let fd = LogFd(fd);
             fd.read_header()?;
+            #[cfg(target_os = "linux")]
             unsafe {
                 extern crate libc;
                 libc::posix_fadvise64(fd.0, 0, fd.file_size()? as i64, libc::POSIX_FADV_DONTNEED);

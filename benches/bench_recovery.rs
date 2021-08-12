@@ -1,4 +1,5 @@
-use byte_unit::Byte;
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use raft::eraftpb::Entry;
 use raft_engine::ReadableSize;
@@ -48,12 +49,12 @@ impl Default for Config {
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
-        size_to_readable_string(self.total_size.0 as u128),
+        self.total_size,
         self.region_count,
-        size_to_readable_string(self.batch_size.0 as u128),
-        size_to_readable_string(self.item_size.0 as u128),
-        size_to_readable_string(self.entry_size.0 as u128),
-        size_to_readable_string(self.batch_compression_threshold.0 as u128)
+        self.batch_size,
+        self.item_size,
+        self.entry_size,
+        self.batch_compression_threshold
     )
     }
 }
@@ -70,7 +71,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     let engine = Engine::open(ecfg.clone()).unwrap();
 
     let mut indexes: HashMap<u64, u64> = (1..cfg.region_count + 1).map(|rid| (rid, 0)).collect();
-    while dir_size(&path) < cfg.total_size.0 as u128 {
+    while dir_size(&path).0 < cfg.total_size.0 {
         let mut batch = LogBatch::default();
         while batch.approximate_size() < cfg.batch_size.0 as usize {
             let region_id = rng.gen_range(1, cfg.region_count + 1);
@@ -96,23 +97,18 @@ fn generate(cfg: &Config) -> Result<TempDir> {
         }
         engine.write(&mut batch, false).unwrap();
     }
+    engine.sync().unwrap();
     drop(engine);
     Ok(dir)
 }
 
-fn dir_size(path: &str) -> u128 {
-    let mut size: u128 = 0;
-    for entry in std::fs::read_dir(PathBuf::from(path)).unwrap() {
-        let entry = entry.unwrap();
-        size += std::fs::metadata(entry.path()).unwrap().len() as u128;
-    }
-    size
-}
-
-fn size_to_readable_string(size: u128) -> String {
-    Byte::from_bytes(size)
-        .get_appropriate_unit(true)
-        .to_string()
+fn dir_size(path: &str) -> ReadableSize {
+    ReadableSize(
+        std::fs::read_dir(PathBuf::from(path))
+            .unwrap()
+            .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len() as u64)
+            .fold(0, |size, x| size + x),
+    )
 }
 
 // Benchmarks
@@ -160,12 +156,7 @@ fn bench_recovery(c: &mut Criterion) {
         c.bench_with_input(
             BenchmarkId::new(
                 "Engine::open",
-                format!(
-                    "size:{} config-{}: {}",
-                    size_to_readable_string(dir_size(&path)),
-                    i,
-                    name
-                ),
+                format!("size:{} config-{}: {}", dir_size(&path), i, name),
             ),
             &ecfg,
             |b, cfg| {
