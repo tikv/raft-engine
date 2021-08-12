@@ -28,7 +28,6 @@ serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 
 [dev-dependencies]
-byte-unit = "4.0.12"
 criterion = "0.3.5"
 ctor = "0.1"
 env_logger = "0.7"
@@ -55,4 +54,4 @@ members = [ "stress" ]
 [[bench]]
 name = "bench_recovery"
 harness = false
-required-features = ["fail/failpoints"]
+required-features = ["failpoints"]
