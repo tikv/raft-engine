@@ -82,7 +82,8 @@ fn generate(cfg: &Config) -> Result<TempDir> {
                     data: (&mut rng)
                         .sample_iter(rand::distributions::Standard)
                         .take(cfg.entry_size.0 as usize)
-                        .collect::<Vec<u8>>(),
+                        .collect::<Vec<u8>>()
+                        .into(),
                     ..Default::default()
                 });
                 item_size += cfg.entry_size.0;
