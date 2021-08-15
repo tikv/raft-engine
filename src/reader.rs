@@ -43,12 +43,9 @@ impl<'a> LogBatchFileReader<'a> {
         // invariance: make sure buffer can cover the range before reads.
 
         // read & parse header
-        let mut needed_buffer_size = HEADER_LEN;
-        if self.buffer_remain_size() < needed_buffer_size {
-            self.extend_buffer(needed_buffer_size, 0)?;
-        }
+        self.peek(HEADER_LEN, 0)?;
         let (len, offset, compression_type) =
-            LogBatch::<M>::parse_header(&mut self.buffer_slice_from_cursor(needed_buffer_size))?;
+            LogBatch::<M>::parse_header(&mut self.slice(HEADER_LEN))?;
         let entries_offset = self.cursor + HEADER_LEN as u64;
         let entries_len = offset as usize - HEADER_LEN;
 
@@ -56,50 +53,49 @@ impl<'a> LogBatchFileReader<'a> {
         self.cursor += offset;
 
         // read footer & recover
-        needed_buffer_size = len - offset as usize;
-        trace!("LogBatch::recovery_size = {}", needed_buffer_size);
-        if self.buffer_remain_size() < needed_buffer_size {
-            self.extend_buffer(needed_buffer_size, HEADER_LEN)?;
-        }
+        let footer_size = len - offset as usize;
+        trace!("LogBatch::recovery_size = {}", footer_size);
+        self.peek(footer_size, HEADER_LEN)?;
         trace!(
             "recover LogBatch offset:{} len:{}",
             self.cursor,
-            needed_buffer_size
+            footer_size
         );
         let batch = LogBatch::<M>::from_footer(
-            &mut self.buffer_slice_from_cursor(needed_buffer_size),
+            &mut self.slice(footer_size),
             entries_offset,
             entries_len,
             compression_type,
         )?;
-        self.cursor += needed_buffer_size as u64;
+        self.cursor += footer_size as u64;
         Ok(Some(batch))
     }
 
-    pub fn buffer_remain_size(&self) -> usize {
-        if self.cursor as usize > self.offset as usize + self.buffer.len() {
-            0
-        } else {
-            self.offset as usize + self.buffer.len() - self.cursor as usize
+    fn peek(&mut self, size: usize, hint: usize) -> Result<()> {
+        let remain = (self.offset as usize + self.buffer.len())
+            .checked_sub(self.cursor as usize)
+            .unwrap_or_else(|| 0);
+        if remain >= size {
+            return Ok(());
         }
-    }
 
-    fn buffer_slice_from_cursor(&self, len: usize) -> &[u8] {
-        trace!(
-            "::slice buffer offset:{} cursor:{}",
-            self.offset,
-            self.cursor
+        let roffset = std::cmp::max(self.offset + self.buffer.len() as u64, self.cursor);
+        let rsize = std::cmp::min(
+            std::cmp::max(size + hint, self.read_block_size),
+            self.fsize - roffset as usize,
         );
-        assert!(self.offset <= self.cursor);
-        assert!(self.offset as usize + self.buffer.len() >= self.cursor as usize + len);
-        let start = (self.cursor - self.offset) as usize;
-        let end = start + len;
-        &self.buffer[start..end]
-    }
 
-    fn extend_buffer(&mut self, needed_buffer_size: usize, tail_hint: usize) -> Result<()> {
-        self.fread(self.cursor, needed_buffer_size + tail_hint)?;
-        if (self.offset as usize + self.buffer.len() - self.cursor as usize) < needed_buffer_size {
+        if roffset == self.offset + self.buffer.len() as u64 {
+            trace!("::extend buffer {}:{}", roffset, rsize);
+            self.buffer.extend(self.fd.read(roffset as i64, rsize)?);
+        } else {
+            trace!("::replace buffer {}:{}", roffset, rsize);
+            self.buffer.clear();
+            self.fd.read_to(&mut self.buffer, roffset as i64, rsize)?;
+            self.offset = roffset;
+        }
+
+        if (self.offset as usize + self.buffer.len() - self.cursor as usize) < size {
             return Err(Error::Corruption(format!(
                 "unexpected eof at {}",
                 self.offset + self.buffer.len() as u64
@@ -108,23 +104,11 @@ impl<'a> LogBatchFileReader<'a> {
         Ok(())
     }
 
-    fn fread(&mut self, offset: u64, len: usize) -> Result<()> {
-        trace!("called fread at {}:{}", offset, len);
-        let offset = std::cmp::max(self.offset + self.buffer.len() as u64, offset);
-        let mut len = std::cmp::max(len, self.read_block_size);
-        if offset as usize + len > self.fsize {
-            len -= offset as usize + len - self.fsize;
-        }
-
-        if offset == self.offset + self.buffer.len() as u64 {
-            trace!("::extend buffer {}:{}", offset, len);
-            self.buffer.extend(self.fd.read(offset as i64, len)?);
-        } else {
-            trace!("::replace buffer {}:{}", offset, len);
-            self.buffer = self.fd.read(offset as i64, len)?;
-            self.offset = offset;
-        }
-        trace!("new buffer {}:{}", self.offset, self.buffer.len());
-        Ok(())
+    fn slice(&self, len: usize) -> &[u8] {
+        assert!(self.offset <= self.cursor);
+        assert!(self.offset as usize + self.buffer.len() >= self.cursor as usize + len);
+        let start = (self.cursor - self.offset) as usize;
+        let end = start + len;
+        &self.buffer[start..end]
     }
 }

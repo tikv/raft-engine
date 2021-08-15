@@ -115,6 +115,23 @@ impl LogFd {
         Ok(result)
     }
 
+    pub fn read_to(&self, buffer: &mut Vec<u8>, mut offset: i64, len: usize) -> Result<()> {
+        if buffer.len() != len {
+            buffer.resize(len, 0);
+        }
+        let mut readed = 0;
+        while readed < len {
+            let bytes = match pread(self.0, &mut buffer[readed..], offset) {
+                Ok(bytes) => bytes,
+                Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+                Err(e) => return Err(parse_nix_error(e, "pread")),
+            };
+            readed += bytes;
+            offset += bytes as i64;
+        }
+        Ok(())
+    }
+
     pub fn write(&self, mut offset: i64, content: &[u8]) -> Result<()> {
         let mut written = 0;
         while written < content.len() {
