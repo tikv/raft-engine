@@ -604,11 +604,9 @@ mod tests {
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             for i in 10..20 {
                 entry.set_index(i + 1);
-                debug!("assert {}:{}", i, i + 1);
                 assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
 
                 entry.set_index(i);
-                debug!("assert {}:{}", i, i);
                 assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
             }
         }

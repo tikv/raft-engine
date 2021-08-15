@@ -12,7 +12,6 @@ pub struct LogBatchFileReader<'a> {
     fsize: usize,
     buffer: Vec<u8>,
     offset: u64, // buffer offset
-    len: usize,  // buffer len
     cursor: u64, // monotonic read cursor
 
     read_block_size: usize,
@@ -26,7 +25,6 @@ impl<'a> LogBatchFileReader<'a> {
             offset,
             cursor: offset,
             buffer: vec![],
-            len: 0,
             read_block_size,
         })
     }
@@ -79,10 +77,10 @@ impl<'a> LogBatchFileReader<'a> {
     }
 
     pub fn buffer_remain_size(&self) -> usize {
-        if self.cursor as usize > self.offset as usize + self.len {
+        if self.cursor as usize > self.offset as usize + self.buffer.len() {
             0
         } else {
-            self.offset as usize + self.len - self.cursor as usize
+            self.offset as usize + self.buffer.len() - self.cursor as usize
         }
     }
 
@@ -93,7 +91,7 @@ impl<'a> LogBatchFileReader<'a> {
             self.cursor
         );
         assert!(self.offset <= self.cursor);
-        assert!(self.offset as usize + self.len >= self.cursor as usize + len);
+        assert!(self.offset as usize + self.buffer.len() >= self.cursor as usize + len);
         let start = (self.cursor - self.offset) as usize;
         let end = start + len;
         &self.buffer[start..end]
@@ -101,10 +99,10 @@ impl<'a> LogBatchFileReader<'a> {
 
     fn extend_buffer(&mut self, needed_buffer_size: usize, tail_hint: usize) -> Result<()> {
         self.fread(self.cursor, needed_buffer_size + tail_hint)?;
-        if (self.offset as usize + self.len - self.cursor as usize) < needed_buffer_size {
+        if (self.offset as usize + self.buffer.len() - self.cursor as usize) < needed_buffer_size {
             return Err(Error::Corruption(format!(
                 "unexpected eof at {}",
-                self.offset + self.len as u64
+                self.offset + self.buffer.len() as u64
             )));
         }
         Ok(())
@@ -112,13 +110,13 @@ impl<'a> LogBatchFileReader<'a> {
 
     fn fread(&mut self, offset: u64, len: usize) -> Result<()> {
         trace!("called fread at {}:{}", offset, len);
-        let offset = std::cmp::max(self.offset + self.len as u64, offset);
+        let offset = std::cmp::max(self.offset + self.buffer.len() as u64, offset);
         let mut len = std::cmp::max(len, self.read_block_size);
         if offset as usize + len > self.fsize {
             len -= offset as usize + len - self.fsize;
         }
 
-        if offset == self.offset + self.len as u64 {
+        if offset == self.offset + self.buffer.len() as u64 {
             trace!("::extend buffer {}:{}", offset, len);
             self.buffer.extend(self.fd.read(offset as i64, len)?);
         } else {
@@ -126,8 +124,7 @@ impl<'a> LogBatchFileReader<'a> {
             self.buffer = self.fd.read(offset as i64, len)?;
             self.offset = offset;
         }
-        self.len = self.buffer.len();
-        trace!("new buffer {}:{}", self.offset, self.len);
+        trace!("new buffer {}:{}", self.offset, self.buffer.len());
         Ok(())
     }
 }

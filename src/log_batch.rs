@@ -521,7 +521,7 @@ where
         // layout:
         // <---     header     ---><---        entries        ---><---                    footer                    --->
         // { u64 len | u64 offset | (compressed) entries | crc32 | item count | entry indexes / commands / kvs | crc32 }
-        // ^ offset = 0                                         ^ offset = <offset>
+        //                                                      ^ offset = <offset>
 
         let mut buf = Vec::with_capacity(4096);
 
@@ -581,15 +581,6 @@ where
             8 /*len*/ + 8 /*section offset*/ + 8/*items count*/
             +self.items_approximate_size + CHECKSUM_LEN * 2 /*checksum*/
         }
-    }
-
-    /// min buffer size for recover memtable ()
-    pub fn recovery_size(buf: &mut SliceReader<'_>) -> Result<usize> {
-        debug_assert!(buf.len() >= HEADER_LEN);
-        let mut reader = buf.as_ref();
-        reader.consume(8);
-        let section_offset = codec::decode_u64(&mut reader)? as usize;
-        Ok(section_offset + 16)
     }
 }
 
