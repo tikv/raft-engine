@@ -467,6 +467,7 @@ impl MemTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::generate_entry_indexes;
 
     impl MemTable {
         pub fn max_file_id(&self, queue: LogQueue) -> Option<FileId> {
@@ -934,26 +935,5 @@ mod tests {
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
-    }
-
-    fn generate_entry_indexes(
-        begin_idx: u64,
-        end_idx: u64,
-        queue: LogQueue,
-        file_id: FileId,
-    ) -> Vec<EntryIndex> {
-        assert!(end_idx >= begin_idx);
-        let mut ents_idx = vec![];
-        for idx in begin_idx..end_idx {
-            let mut ent_idx = EntryIndex::default();
-            ent_idx.index = idx;
-            ent_idx.queue = queue;
-            ent_idx.file_id = file_id;
-            ent_idx.entry_offset = idx; // fake offset
-            ent_idx.entry_len = 1; // fake size
-
-            ents_idx.push(ent_idx);
-        }
-        ents_idx
     }
 }

@@ -608,21 +608,9 @@ pub fn decompress(buf: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    use crate::test_util::generate_entries;
     use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
-
-    fn entries(first_index: u64, len: usize, data: Option<Vec<u8>>) -> Vec<Entry> {
-        let mut v = vec![Entry::new(); len];
-        let mut index = first_index;
-        for e in v.iter_mut() {
-            e.set_index(index);
-            if let Some(ref data) = data {
-                e.set_data(data.clone().into())
-            }
-            index += 1;
-        }
-        v
-    }
 
     fn decode_entries_from_bytes<E: Message>(
         buf: &[u8],
@@ -649,7 +637,7 @@ mod tests {
     #[test]
     fn test_entries_enc_dec() {
         for pb_entries in vec![
-            entries(1, 10, None),
+            generate_entries(1, 10, None),
             vec![], // Empty entries.
         ] {
             let mut entries = Entries::<Entry>::new(pb_entries, None);
@@ -698,7 +686,7 @@ mod tests {
     fn test_log_item_enc_dec() {
         let region_id = 8;
         let items = vec![
-            LogItem::<Entry>::from_entries(region_id, entries(1, 10, None)),
+            LogItem::<Entry>::from_entries(region_id, generate_entries(1, 10, None)),
             LogItem::from_command(region_id, Command::Clean),
             LogItem::from_kv(
                 region_id,
@@ -731,7 +719,10 @@ mod tests {
     fn test_log_batch_enc_dec() {
         let region_id = 8;
         let mut batch = LogBatch::<Entry>::default();
-        batch.add_entries(region_id, entries(1, 10, Some(vec![b'x'; 1024].into())));
+        batch.add_entries(
+            region_id,
+            generate_entries(1, 10, Some(vec![b'x'; 1024].into())),
+        );
         batch.add_command(region_id, Command::Clean);
         batch
             .put(region_id, b"key".to_vec(), b"value".to_vec())
