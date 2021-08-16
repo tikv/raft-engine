@@ -15,7 +15,8 @@ use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
 use crate::log_batch::{
-    self, Command, CompressionType, LogBatch, LogItemContent, MessageExt, OpType, CHECKSUM_LEN,
+    self, Command, CompressionType, LogBatch, LogItemBatch, LogItemContent, MessageExt, OpType,
+    CHECKSUM_LEN,
 };
 use crate::memtable::{EntryIndex, MemTable};
 use crate::metrics::*;
@@ -250,9 +251,9 @@ where
         let mut batches = Vec::new();
         let mut file_id = first_file;
         while file_id <= active_file {
-            pipe_log.read_file_into_log_batch(queue, file_id, recovery_mode, &mut batches)?;
-            for mut batch in batches.drain(..) {
-                Self::apply_to_memtable(memtables, &mut batch, queue, file_id);
+            pipe_log.read_file_into_log_item_batch(queue, file_id, recovery_mode, &mut batches)?;
+            for mut item_batch in batches.drain(..) {
+                Self::apply_to_memtable(memtables, &mut item_batch, queue, file_id);
             }
             file_id = file_id.forward(1);
         }
@@ -266,17 +267,17 @@ where
 
     fn apply_to_memtable(
         memtables: &MemTableAccessor,
-        log_batch: &mut LogBatch<M>,
+        log_item_batch: &mut LogItemBatch<M>,
         queue: LogQueue,
         file_id: FileId,
     ) {
-        for item in log_batch.drain() {
+        for item in log_item_batch.drain() {
             let raft = item.raft_group_id;
             let memtable = memtables.get_or_insert(raft);
             fail_point!("apply_memtable_region_3", raft == 3, |_| {});
             match item.content {
-                LogItemContent::Entries(entries_to_add) => {
-                    let entries_index = entries_to_add.entries_index;
+                LogItemContent::EntriesIndex(entries_to_add) => {
+                    let entries_index = entries_to_add.0;
                     debug!(
                         "{} append to {:?}.{:?}, Entries[{:?}, {:?}:{:?})",
                         raft,
@@ -347,7 +348,12 @@ where
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
             if file_id.valid() {
-                Self::apply_to_memtable(&self.memtables, log_batch, LogQueue::Append, file_id);
+                Self::apply_to_memtable(
+                    &self.memtables,
+                    log_batch.items_batch(),
+                    LogQueue::Append,
+                    file_id,
+                );
                 for listener in &self.listeners {
                     listener.post_apply_memtables(LogQueue::Append, file_id);
                 }

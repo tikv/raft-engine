@@ -1,13 +1,13 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::file_pipe_log::LogFd;
-use crate::log_batch::HEADER_LEN;
+use crate::log_batch::{LogItemBatch, HEADER_LEN};
 use crate::{Error, LogBatch, MessageExt, Result};
 
 use log::trace;
 
 #[derive(Debug)]
-pub struct LogBatchFileReader<'a> {
+pub struct LogItemBatchFileReader<'a> {
     fd: &'a LogFd,
     fsize: usize,
     buffer: Vec<u8>,
@@ -17,7 +17,7 @@ pub struct LogBatchFileReader<'a> {
     read_block_size: usize,
 }
 
-impl<'a> LogBatchFileReader<'a> {
+impl<'a> LogItemBatchFileReader<'a> {
     pub fn new(fd: &'a LogFd, offset: u64, read_block_size: usize) -> Result<Self> {
         Ok(Self {
             fd,
@@ -29,7 +29,7 @@ impl<'a> LogBatchFileReader<'a> {
         })
     }
 
-    pub fn next<M: MessageExt>(&mut self) -> Result<Option<LogBatch<M>>> {
+    pub fn next<M: MessageExt>(&mut self) -> Result<Option<LogItemBatch<M>>> {
         if self.cursor > self.fsize as u64 {
             return Err(Error::Corruption(format!(
                 "unexpected eof at {}",
@@ -61,14 +61,14 @@ impl<'a> LogBatchFileReader<'a> {
             self.cursor,
             footer_size
         );
-        let batch = LogBatch::<M>::from_footer(
+        let item_batch = LogItemBatch::<M>::from_bytes(
             &mut self.slice(footer_size),
             entries_offset,
             entries_len,
             compression_type,
         )?;
         self.cursor += footer_size as u64;
-        Ok(Some(batch))
+        Ok(Some(item_batch))
     }
 
     fn peek(&mut self, size: usize, hint: usize) -> Result<()> {

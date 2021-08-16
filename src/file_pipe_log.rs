@@ -20,10 +20,10 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::log_batch::{LogBatch, MessageExt};
+use crate::log_batch::{LogBatch, LogItemBatch, MessageExt};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::reader::LogBatchFileReader;
+use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
 
@@ -614,25 +614,25 @@ impl PipeLog for FilePipeLog {
         fd.read(offset as i64, len as usize)
     }
 
-    fn read_file_into_log_batch<M: MessageExt>(
+    fn read_file_into_log_item_batch<M: MessageExt>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<M>>,
+        item_batches: &mut Vec<LogItemBatch<M>>,
     ) -> Result<()> {
         debug!("recover from log file {:?}:{:?}", queue, file_id);
         let fd = self.get_queue(queue).get_fd(file_id)?;
-        let mut reader = LogBatchFileReader::new(
+        let mut reader = LogItemBatchFileReader::new(
             &fd,
             (FILE_MAGIC_HEADER.len() + Version::len()) as u64,
             self.recovery_read_block_size,
         )?;
         loop {
             match reader.next::<M>() {
-                Ok(Some(mut batch)) => {
-                    batch.set_queue_and_file_id(queue, file_id);
-                    batches.push(batch);
+                Ok(Some(mut item_batch)) => {
+                    item_batch.set_queue_and_file_id(queue, file_id);
+                    item_batches.push(item_batch);
                 }
                 Ok(None) => return Ok(()),
                 Err(e) => {
