@@ -43,9 +43,8 @@ impl<'a> LogItemBatchFileReader<'a> {
         // invariance: make sure buffer can cover the range before reads.
 
         // read & parse header
-        self.peek(HEADER_LEN, 0)?;
         let (len, offset, compression_type) =
-            LogBatch::<M>::parse_header(&mut self.slice(HEADER_LEN))?;
+            LogBatch::<M>::parse_header(&mut self.peek(HEADER_LEN, 0)?)?;
         let entries_offset = self.cursor + HEADER_LEN as u64;
         let entries_len = offset as usize - HEADER_LEN;
 
@@ -62,7 +61,7 @@ impl<'a> LogItemBatchFileReader<'a> {
             footer_size
         );
         let item_batch = LogItemBatch::<M>::from_bytes(
-            &mut self.slice(footer_size),
+            &mut self.peek(footer_size, HEADER_LEN)?,
             entries_offset,
             entries_len,
             compression_type,
@@ -71,12 +70,11 @@ impl<'a> LogItemBatchFileReader<'a> {
         Ok(Some(item_batch))
     }
 
-    fn peek(&mut self, size: usize, hint: usize) -> Result<()> {
-        let remain = (self.offset as usize + self.buffer.len())
-            .checked_sub(self.cursor as usize)
-            .unwrap_or_else(|| 0);
+    fn peek(&mut self, size: usize, hint: usize) -> Result<&[u8]> {
+        let remain =
+            (self.offset as usize + self.buffer.len()).saturating_sub(self.cursor as usize);
         if remain >= size {
-            return Ok(());
+            return Ok(self.slice(size));
         }
 
         let roffset = std::cmp::max(self.offset + self.buffer.len() as u64, self.cursor);
@@ -101,7 +99,7 @@ impl<'a> LogItemBatchFileReader<'a> {
                 self.offset + self.buffer.len() as u64
             )));
         }
-        Ok(())
+        Ok(self.slice(size))
     }
 
     fn slice(&self, len: usize) -> &[u8] {

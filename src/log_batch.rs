@@ -683,7 +683,7 @@ where
             0
         } else {
             8 /*len*/ + 8 /*offset*/ + 8 /*items count*/
-            + self.content_approximate_size + CHECKSUM_LEN *2
+            + self.content_approximate_size + CHECKSUM_LEN * 2
         }
     }
 }
