@@ -28,13 +28,15 @@ pub fn generate_entry_indexes(
 ) -> Vec<EntryIndex> {
     assert!(end_idx >= begin_idx);
     let mut ents_idx = vec![];
+    let mut offset = 0;
     for idx in begin_idx..end_idx {
         let mut ent_idx = EntryIndex::default();
         ent_idx.index = idx;
         ent_idx.queue = queue;
         ent_idx.file_id = file_id;
-        ent_idx.entry_offset = idx; // fake offset
+        ent_idx.entry_offset = offset; // fake offset
         ent_idx.entry_len = 1; // fake size
+        offset += ent_idx.entry_len as u64;
 
         ents_idx.push(ent_idx);
     }
