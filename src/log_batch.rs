@@ -322,7 +322,7 @@ impl LogItem {
 
 #[derive(Debug, PartialEq)]
 pub struct LogItemBatch<M: MessageExt> {
-    items: Vec<LogItem>,
+    pub items: Vec<LogItem>,
     _phantom: PhantomData<M>,
 }
 
@@ -344,22 +344,6 @@ where
             items: Vec::with_capacity(cap),
             _phantom: PhantomData,
         }
-    }
-
-    pub fn merge(&mut self, rhs: &mut Self) {
-        self.items.append(&mut rhs.items);
-    }
-
-    pub fn iter_mut(&mut self) -> core::slice::IterMut<LogItem> {
-        self.items.iter_mut()
-    }
-
-    pub fn drain(&mut self) -> std::vec::Drain<'_, LogItem> {
-        self.items.drain(..)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
     }
 
     pub fn set_entries_indexes(&mut self, entry_indexes: &mut Vec<EntryIndex>) {
@@ -502,7 +486,7 @@ where
     }
 
     pub fn merge(&mut self, rhs: &mut Self) {
-        self.item_batch.merge(&mut rhs.item_batch);
+        self.item_batch.items.append(&mut rhs.item_batch.items);
         self.content_approximate_size += rhs.content_approximate_size;
         self.entries.append(&mut rhs.entries);
     }
@@ -545,7 +529,7 @@ where
     }
 
     pub fn is_empty(&self) -> bool {
-        self.item_batch.is_empty()
+        self.item_batch.items.is_empty()
     }
 
     pub fn items_batch(&mut self) -> &mut LogItemBatch<M> {
@@ -613,7 +597,7 @@ where
         (&mut buf[8..HEADER_LEN]).write_u64::<BigEndian>(offset)?;
 
         // update entries_index
-        for item in self.item_batch.iter_mut() {
+        for item in self.item_batch.items.iter_mut() {
             if let LogItemContent::EntriesIndex(entries_index) = &mut item.content {
                 for ei in entries_index.0.iter_mut() {
                     ei.compression_type = compression_type;
@@ -628,7 +612,7 @@ where
     // Don't account for compression and varint encoding.
     // Not meaningful after recovery.
     pub fn approximate_size(&self) -> usize {
-        if self.item_batch.is_empty() {
+        if self.item_batch.items.is_empty() {
             0
         } else {
             8 /*len*/ + 8 /*offset*/ + 8 /*items count*/
@@ -818,7 +802,7 @@ mod tests {
 
         // decode and assert entries
         let s = &encoded[HEADER_LEN..offset as usize];
-        for item in decoded_item_batch.iter_mut() {
+        for item in decoded_item_batch.items.iter_mut() {
             if let LogItemContent::EntriesIndex(entries_index) = &item.content {
                 let origin_entries = generate_entries(1, 10, Some(vec![b'x'; 1024].into()));
                 let decoded_entries = decode_entries_from_bytes(s, &entries_index.0, false);

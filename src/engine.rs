@@ -271,7 +271,7 @@ where
         queue: LogQueue,
         file_id: FileId,
     ) {
-        for item in log_item_batch.drain() {
+        for item in log_item_batch.items.drain(..) {
             let raft = item.raft_group_id;
             let memtable = memtables.get_or_insert(raft);
             fail_point!("apply_memtable_region_3", raft == 3, |_| {});
