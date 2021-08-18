@@ -53,13 +53,6 @@ impl<'a> LogItemBatchFileReader<'a> {
 
         // read footer & recover
         let footer_size = len - offset as usize;
-        trace!("LogBatch::recovery_size = {}", footer_size);
-        self.peek(footer_size, HEADER_LEN)?;
-        trace!(
-            "recover LogBatch offset:{} len:{}",
-            self.cursor,
-            footer_size
-        );
         let item_batch = LogItemBatch::<M>::from_bytes(
             &mut self.peek(footer_size, HEADER_LEN)?,
             entries_offset,
@@ -74,7 +67,8 @@ impl<'a> LogItemBatchFileReader<'a> {
         let remain =
             (self.offset as usize + self.buffer.len()).saturating_sub(self.cursor as usize);
         if remain >= size {
-            return Ok(self.slice(size));
+            return Ok(&self.buffer[(self.cursor - self.offset) as usize
+                ..(self.cursor - self.offset) as usize + size]);
         }
 
         let mut roffset = std::cmp::max(self.offset + self.buffer.len() as u64, self.cursor);
@@ -101,14 +95,7 @@ impl<'a> LogItemBatchFileReader<'a> {
                 self.offset + self.buffer.len() as u64
             )));
         }
-        Ok(self.slice(size))
-    }
-
-    fn slice(&self, len: usize) -> &[u8] {
-        assert!(self.offset <= self.cursor);
-        assert!(self.offset as usize + self.buffer.len() >= self.cursor as usize + len);
-        let start = (self.cursor - self.offset) as usize;
-        let end = start + len;
-        &self.buffer[start..end]
+        Ok(&self.buffer
+            [(self.cursor - self.offset) as usize..(self.cursor - self.offset) as usize + size])
     }
 }
