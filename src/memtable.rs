@@ -163,7 +163,6 @@ impl MemTable {
         let first = cmp::max(entries_index[0].index as usize, front);
         let last = cmp::min(entries_index[ents_len - 1].index as usize, back);
 
-        // TODO(MrCroxx): [PLEASE REVIEW] was this a bug? `this` => `if last < front {`
         if last < first {
             // All entries are compacted, update the counter.
             self.global_stats.add_compacted_rewrite(entries_index.len());
