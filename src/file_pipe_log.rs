@@ -115,11 +115,16 @@ impl LogFd {
         Ok(result)
     }
 
-    pub fn read_to(&self, buffer: &mut Vec<u8>, mut offset: i64, len: usize) -> Result<()> {
+    /// Read bytes to the given buffer. The given buffer will be resized to `len`.
+    /// If the buffer is not empty, the existing range will be skipped.
+    /// Returns the number of bytes actually read.
+    pub fn read_to(&self, buffer: &mut Vec<u8>, mut offset: i64, len: usize) -> Result<usize> {
+        let mut readed = buffer.len();
+        offset += readed as i64;
+        let mut read_bytes = 0;
         if buffer.len() != len {
             buffer.resize(len, 0);
         }
-        let mut readed = 0;
         while readed < len {
             let bytes = match pread(self.0, &mut buffer[readed..], offset) {
                 Ok(bytes) => bytes,
@@ -128,8 +133,9 @@ impl LogFd {
             };
             readed += bytes;
             offset += bytes as i64;
+            read_bytes += bytes;
         }
-        Ok(())
+        Ok(read_bytes)
     }
 
     pub fn write(&self, mut offset: i64, content: &[u8]) -> Result<()> {

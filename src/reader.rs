@@ -77,15 +77,17 @@ impl<'a> LogItemBatchFileReader<'a> {
             return Ok(self.slice(size));
         }
 
-        let roffset = std::cmp::max(self.offset + self.buffer.len() as u64, self.cursor);
-        let rsize = std::cmp::min(
+        let mut roffset = std::cmp::max(self.offset + self.buffer.len() as u64, self.cursor);
+        let mut rsize = std::cmp::min(
             std::cmp::max(size + hint, self.read_block_size),
             self.fsize - roffset as usize,
         );
 
         if roffset == self.offset + self.buffer.len() as u64 {
             trace!("::extend buffer {}:{}", roffset, rsize);
-            self.buffer.extend(self.fd.read(roffset as i64, rsize)?);
+            roffset = self.offset;
+            rsize += self.buffer.len();
+            self.fd.read_to(&mut self.buffer, roffset as i64, rsize)?;
         } else {
             trace!("::replace buffer {}:{}", roffset, rsize);
             self.buffer.clear();
