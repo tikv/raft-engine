@@ -6,6 +6,7 @@ use raft_engine::ReadableSize;
 use raft_engine::{Config as EngineConfig, LogBatch, MessageExt, RaftLogEngine, Result};
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -25,7 +26,8 @@ impl MessageExt for MessageExtTyped {
 }
 
 struct Config {
-    total_size: ReadableSize,
+    total_size: Option<ReadableSize>,
+    total_bench_count: Option<u64>,
     region_count: u64,
     batch_size: ReadableSize,
     item_size: ReadableSize,
@@ -36,7 +38,8 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            total_size: ReadableSize::gb(1),
+            total_size: Some(ReadableSize::gb(1)),
+            total_bench_count: None,
             region_count: 100,
             batch_size: ReadableSize::mb(1),
             item_size: ReadableSize::kb(1),
@@ -48,8 +51,9 @@ impl Default for Config {
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
+        write!(f, "[total-size: {:?}][total-batch-count: {:?}][region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
             self.total_size,
+            self.total_bench_count,
             self.region_count,
             self.batch_size,
             self.item_size,
@@ -60,6 +64,14 @@ impl fmt::Display for Config {
 }
 
 fn generate(cfg: &Config) -> Result<TempDir> {
+    if (cfg.total_size.is_none() && cfg.total_bench_count.is_none())
+        || (cfg.total_size.is_some() && cfg.total_bench_count.is_some())
+    {
+        let e: Box<dyn Error + Sync + Send> =
+            "Either `total_size` or `total_bench_count` must be set.".into();
+        return Err(e.into());
+    }
+
     let dir = tempfile::Builder::new().prefix("bench").tempdir().unwrap();
     let path = dir.path().to_str().unwrap().to_owned();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -71,7 +83,14 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     let engine = Engine::open(ecfg.clone()).unwrap();
 
     let mut indexes: HashMap<u64, u64> = (1..cfg.region_count + 1).map(|rid| (rid, 0)).collect();
-    while dir_size(&path).0 < cfg.total_size.0 {
+    let mut batch_count = 0;
+    loop {
+        if cfg.total_size.is_some() && dir_size(&path).0 >= cfg.total_size.unwrap().0 {
+            break;
+        } else if cfg.total_bench_count.is_some() && batch_count >= cfg.total_bench_count.unwrap() {
+            break;
+        }
+
         let mut batch = LogBatch::default();
         while batch.approximate_size() < cfg.batch_size.0 as usize {
             let region_id = rng.gen_range(1, cfg.region_count + 1);
@@ -97,6 +116,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
             batch.add_entries(region_id, entries);
         }
         engine.write(&mut batch, false).unwrap();
+        batch_count += 1;
     }
     engine.sync().unwrap();
     drop(engine);
@@ -124,6 +144,14 @@ fn bench_recovery(c: &mut Criterion) {
             },
         ),
         (
+            "batch-count-limits".to_owned(),
+            Config {
+                total_size: None,
+                total_bench_count: Some(1000),
+                ..Default::default()
+            },
+        ),
+        (
             "compressed".to_owned(),
             Config {
                 batch_compression_threshold: ReadableSize::kb(8),
@@ -137,6 +165,14 @@ fn bench_recovery(c: &mut Criterion) {
                 batch_size: ReadableSize::kb(1),
                 item_size: ReadableSize(256),
                 entry_size: ReadableSize(32),
+                ..Default::default()
+            },
+        ),
+        (
+            "bench-10GB".to_owned(),
+            Config {
+                region_count: 1000,
+                total_size: Some(ReadableSize::gb(10)),
                 ..Default::default()
             },
         ),
