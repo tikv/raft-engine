@@ -364,10 +364,10 @@ impl WrittenBytesHook {
         Self(AtomicUsize::new(0))
     }
 
-    pub fn print(&self) {
+    pub fn print(&self, time: u64) {
         println!(
-            "written bytes = {}",
-            ReadableSize(self.0.load(Ordering::Relaxed) as u64)
+            "Write Bandwidth = {}/s",
+            ReadableSize(self.0.load(Ordering::Relaxed) as u64 / time)
         );
     }
 }
@@ -651,5 +651,5 @@ fn main() {
         })
         .print("read");
     misc_threads.into_iter().for_each(|t| t.join().unwrap());
-    wb.print();
+    wb.print(args.time.as_secs());
 }

@@ -14,7 +14,7 @@ pub trait EventListener: Sync + Send {
 
     /// Test whether a log file can be purged or not.
     fn first_file_not_ready_for_purge(&self, _queue: LogQueue) -> FileId {
-        FileId::from(u64::MAX)
+        Default::default()
     }
 
     /// Called *after* a log file get purged.
