@@ -3,7 +3,7 @@
 extern crate hdrhistogram;
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
@@ -13,7 +13,10 @@ use const_format::formatcp;
 use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
-use raft_engine::{Command, Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};
+use raft_engine::{
+    Command, Config, EventListener, FileId, LogBatch, LogQueue, MessageExt, RaftLogEngine,
+    ReadableSize,
+};
 use rand::{thread_rng, Rng};
 
 type Engine = RaftLogEngine<MessageExtTyped>;
@@ -354,6 +357,27 @@ fn wait_til(now: &mut Instant, t: Instant) {
     }
 }
 
+struct WrittenBytesHook(AtomicUsize);
+
+impl WrittenBytesHook {
+    pub fn new() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+
+    pub fn print(&self, time: u64) {
+        println!(
+            "Write Bandwidth = {}/s",
+            ReadableSize(self.0.load(Ordering::Relaxed) as u64 / time)
+        );
+    }
+}
+
+impl EventListener for WrittenBytesHook {
+    fn on_append_log_file(&self, _queue: LogQueue, _file_id: FileId, bytes: usize) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
 fn main() {
     let mut args = TestArgs::default();
     let mut config = Config::default();
@@ -574,7 +598,10 @@ fn main() {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
     }
     args.validate().unwrap();
-    let engine = Arc::new(Engine::open(config).unwrap());
+
+    let wb = Arc::new(WrittenBytesHook::new());
+
+    let engine = Arc::new(Engine::open_with_listeners(config, vec![wb.clone()]).unwrap());
     let mut write_threads = Vec::new();
     let mut read_threads = Vec::new();
     let mut misc_threads = Vec::new();
@@ -624,4 +651,5 @@ fn main() {
         })
         .print("read");
     misc_threads.into_iter().for_each(|t| t.join().unwrap());
+    wb.print(args.time.as_secs());
 }
