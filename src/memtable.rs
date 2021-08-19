@@ -16,16 +16,14 @@ const SHRINK_CACHE_LIMIT: usize = 512;
 pub struct EntryIndex {
     pub index: u64,
 
-    // Log batch physical position in file.
+    // Compressed section physical position in file.
     pub queue: LogQueue,
     pub file_id: FileId,
-    pub base_offset: u64,
     pub compression_type: CompressionType,
-    pub batch_len: u64,
-
-    // Entry position in log batch.
-    pub offset: u64,
-    pub len: u64,
+    pub entries_offset: u64, // related to log file
+    pub entries_len: usize,
+    pub entry_offset: u64,
+    pub entry_len: usize,
 }
 
 impl Default for EntryIndex {
@@ -34,11 +32,11 @@ impl Default for EntryIndex {
             index: 0,
             queue: LogQueue::Append,
             file_id: Default::default(),
-            base_offset: 0,
             compression_type: CompressionType::None,
-            batch_len: 0,
-            offset: 0,
-            len: 0,
+            entries_offset: 0,
+            entries_len: 0,
+            entry_offset: 0,
+            entry_len: 0,
         }
     }
 }
@@ -165,7 +163,7 @@ impl MemTable {
         let first = cmp::max(entries_index[0].index as usize, front);
         let last = cmp::min(entries_index[ents_len - 1].index as usize, back);
 
-        if last < front {
+        if last < first {
             // All entries are compacted, update the counter.
             self.global_stats.add_compacted_rewrite(entries_index.len());
             return;
@@ -202,11 +200,12 @@ impl MemTable {
             }
 
             self.entries_index[i + distance].file_id = ei.file_id;
-            self.entries_index[i + distance].base_offset = ei.base_offset;
             self.entries_index[i + distance].compression_type = ei.compression_type;
-            self.entries_index[i + distance].batch_len = ei.batch_len;
-            self.entries_index[i + distance].offset = ei.offset;
-            self.entries_index[i + distance].len = ei.len;
+            self.entries_index[i + distance].entries_offset = ei.entries_offset;
+            self.entries_index[i + distance].entries_len = ei.entries_len;
+            self.entries_index[i + distance].entry_offset = ei.entry_offset;
+            self.entries_index[i + distance].entry_len = ei.entry_len;
+            debug_assert_eq!(&self.entries_index[i + distance], ei);
         }
 
         self.rewrite_count = distance + ents_len;
@@ -360,9 +359,9 @@ impl MemTable {
         if let Some(max_size) = max_size {
             let mut total_size = 0;
             for idx in first.iter().chain(second) {
-                total_size += idx.len;
+                total_size += idx.entry_len;
                 // No matter max_size's value, fetch one entry at least.
-                if total_size as usize > max_size && total_size > idx.len {
+                if total_size as usize > max_size && total_size > idx.entry_len {
                     break;
                 }
                 vec_idx.push(idx.clone());
@@ -467,6 +466,7 @@ impl MemTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::generate_entry_indexes;
 
     impl MemTable {
         pub fn max_file_id(&self, queue: LogQueue) -> Option<FileId> {
@@ -511,7 +511,9 @@ mod tests {
         }
 
         fn entries_size(&self) -> usize {
-            self.entries_index.iter().fold(0, |acc, e| acc + e.len) as usize
+            self.entries_index
+                .iter()
+                .fold(0, |acc, e| acc + e.entry_len) as usize
         }
 
         fn check_entries_index(&self) {
@@ -932,26 +934,5 @@ mod tests {
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
-    }
-
-    fn generate_entry_indexes(
-        begin_idx: u64,
-        end_idx: u64,
-        queue: LogQueue,
-        file_id: FileId,
-    ) -> Vec<EntryIndex> {
-        assert!(end_idx >= begin_idx);
-        let mut ents_idx = vec![];
-        for idx in begin_idx..end_idx {
-            let mut ent_idx = EntryIndex::default();
-            ent_idx.index = idx;
-            ent_idx.queue = queue;
-            ent_idx.file_id = file_id;
-            ent_idx.offset = idx; // fake offset
-            ent_idx.len = 1; // fake size
-
-            ents_idx.push(ent_idx);
-        }
-        ents_idx
     }
 }

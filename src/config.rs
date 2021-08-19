@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{util::ReadableSize, Result};
 
+const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecoveryMode {
@@ -27,6 +29,9 @@ pub struct Config {
     ///
     /// Set to `0` will disable compression.
     pub batch_compression_threshold: ReadableSize,
+
+    /// Read block size for recovery. Default value: "4KB". Min value: "512B".
+    pub recovery_read_block_size: ReadableSize,
 }
 
 impl Default for Config {
@@ -38,6 +43,7 @@ impl Default for Config {
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             batch_compression_threshold: ReadableSize::kb(8),
+            recovery_read_block_size: ReadableSize::kb(4),
         }
     }
 }
@@ -50,6 +56,12 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge_threshold < target_file_size"));
+        }
+        if self.recovery_read_block_size.0 < MIN_RECOVERY_READ_BLOCK_SIZE as u64 {
+            return Err(box_err!(
+                "recovery_read_block_size < {}",
+                MIN_RECOVERY_READ_BLOCK_SIZE
+            ));
         }
         Ok(())
     }
