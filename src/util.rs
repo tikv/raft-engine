@@ -147,7 +147,7 @@ impl Display for ReadableSize {
         } else if self.0 >= GB {
             write!(f, "{:.1}GiB", self.0 as f64 / GB as f64)
         } else if self.0 >= MB {
-            write!(f, "{:.1}<MiB", self.0 as f64 / MB as f64)
+            write!(f, "{:.1}MiB", self.0 as f64 / MB as f64)
         } else if self.0 >= KB {
             write!(f, "{:.1}KiB", self.0 as f64 / KB as f64)
         } else {

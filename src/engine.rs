@@ -159,7 +159,7 @@ where
         Self::open_with_listeners(cfg, vec![])
     }
 
-    fn open_with_listeners(
+    pub fn open_with_listeners(
         cfg: Config,
         mut listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<M, FilePipeLog>> {
@@ -912,7 +912,7 @@ mod tests {
                 self.0[&queue].files.fetch_add(1, Ordering::Release);
             }
 
-            fn on_append_log_file(&self, queue: LogQueue, _: FileId) {
+            fn on_append_log_file(&self, queue: LogQueue, _: FileId, _: usize) {
                 self.0[&queue].appends.fetch_add(1, Ordering::Release);
             }
 
