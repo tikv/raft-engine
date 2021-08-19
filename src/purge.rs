@@ -355,7 +355,7 @@ impl EventListener for PurgeHook {
         }
     }
 
-    fn on_append_log_file(&self, queue: LogQueue, file_id: FileId) {
+    fn on_append_log_file(&self, queue: LogQueue, file_id: FileId, _bytes: usize) {
         if queue == LogQueue::Append {
             let active_log_files = self.active_log_files.read();
             assert!(!active_log_files.is_empty());

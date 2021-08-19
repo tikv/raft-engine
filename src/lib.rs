@@ -48,7 +48,9 @@ use crate::file_pipe_log::FilePipeLog;
 
 pub use self::config::{Config, RecoveryMode};
 pub use self::errors::{Error, Result};
+pub use self::event_listener::EventListener;
 pub use self::log_batch::{Command, LogBatch, MessageExt};
+pub use self::pipe_log::{FileId, LogQueue};
 pub use self::util::ReadableSize;
 pub type RaftLogEngine<X> = self::engine::Engine<X, FilePipeLog>;
 

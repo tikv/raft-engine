@@ -531,10 +531,11 @@ impl FilePipeLog {
     ) -> Result<(FileId, u64, Arc<LogFd>)> {
         // Must hold lock until file is written to avoid corrupted holes.
         let mut log_manager = self.mut_queue(queue);
-        let (file_id, offset, fd) = log_manager.on_append(content.len(), sync)?;
+        let size = content.len();
+        let (file_id, offset, fd) = log_manager.on_append(size, sync)?;
         fd.write(offset as i64, content)?;
         for listener in &self.listeners {
-            listener.on_append_log_file(queue, file_id);
+            listener.on_append_log_file(queue, file_id, size);
         }
 
         Ok((file_id, offset, fd))
