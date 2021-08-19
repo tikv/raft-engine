@@ -271,12 +271,12 @@ where
         let (file_id, bytes) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
         if file_id.valid() {
             let queue = LogQueue::Rewrite;
-            for item in log_batch.drain() {
+            for item in log_batch.items_batch().items.drain(..) {
                 let raft = item.raft_group_id;
                 let memtable = self.memtables.get_or_insert(raft);
                 match item.content {
-                    LogItemContent::Entries(entries_to_add) => {
-                        let entries_index = entries_to_add.entries_index;
+                    LogItemContent::EntriesIndex(entries_to_add) => {
+                        let entries_index = entries_to_add.0;
                         debug!(
                             "{} append to {:?}.{}, Entries[{:?}:{:?})",
                             raft,

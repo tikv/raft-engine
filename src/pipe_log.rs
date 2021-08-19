@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use crate::config::RecoveryMode;
-use crate::log_batch::{LogBatch, MessageExt};
+use crate::log_batch::{LogBatch, LogItemBatch, MessageExt};
 use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -97,12 +97,12 @@ pub trait PipeLog: Sized + Clone + Send {
         len: u64,
     ) -> Result<Vec<u8>>;
 
-    fn read_file_into_log_batch<M: MessageExt>(
+    fn read_file_into_log_item_batch<M: MessageExt>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<M>>,
+        batches: &mut Vec<LogItemBatch<M>>,
     ) -> Result<()>;
 
     /// Write a batch into the append queue.

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{BufRead, Error as IoError, ErrorKind as IoErrorKind};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,9 +21,10 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::log_batch::{LogBatch, MessageExt};
+use crate::log_batch::{LogBatch, LogItemBatch, MessageExt};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
+use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
 
@@ -68,10 +69,11 @@ impl Version {
     }
 }
 
-struct LogFd(RawFd);
+#[derive(Debug)]
+pub struct LogFd(RawFd);
 
 impl LogFd {
-    fn open<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
+    pub fn open<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
         let flags = OFlag::O_RDWR;
         let mode = Mode::S_IRWXU;
         fail_point!("fadvise-dontneed", |_| {
@@ -91,7 +93,7 @@ impl LogFd {
         Ok(fd)
     }
 
-    fn create<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
+    pub fn create<P: ?Sized + NixPath>(path: &P) -> Result<Self> {
         let flags = OFlag::O_RDWR | OFlag::O_CREAT;
         let mode = Mode::S_IRWXU;
         let fd = fcntl::open(path, flags, mode).map_err(|e| parse_nix_error(e, "open"))?;
@@ -100,17 +102,17 @@ impl LogFd {
         Ok(fd)
     }
 
-    fn close(&self) -> Result<()> {
+    pub fn close(&self) -> Result<()> {
         close(self.0).map_err(|e| parse_nix_error(e, "close"))
     }
-    fn sync(&self) -> Result<()> {
+    pub fn sync(&self) -> Result<()> {
         let start = Instant::now();
         let res = fsync(self.0).map_err(|e| parse_nix_error(e, "fsync"));
         LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
         res
     }
 
-    fn read(&self, mut offset: i64, len: usize) -> Result<Vec<u8>> {
+    pub fn read(&self, mut offset: i64, len: usize) -> Result<Vec<u8>> {
         let mut result = vec![0; len as usize];
         let mut readed = 0;
         while readed < len {
@@ -125,7 +127,30 @@ impl LogFd {
         Ok(result)
     }
 
-    fn write(&self, mut offset: i64, content: &[u8]) -> Result<()> {
+    /// Read bytes to the given buffer. The given buffer will be resized to `len`.
+    /// If the buffer is not empty, the existing range will be skipped.
+    /// Returns the number of bytes actually read.
+    pub fn read_to(&self, buffer: &mut Vec<u8>, mut offset: i64, len: usize) -> Result<usize> {
+        let mut readed = buffer.len();
+        offset += readed as i64;
+        let mut read_bytes = 0;
+        if buffer.len() != len {
+            buffer.resize(len, 0);
+        }
+        while readed < len {
+            let bytes = match pread(self.0, &mut buffer[readed..], offset) {
+                Ok(bytes) => bytes,
+                Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
+                Err(e) => return Err(parse_nix_error(e, "pread")),
+            };
+            readed += bytes;
+            offset += bytes as i64;
+            read_bytes += bytes;
+        }
+        Ok(read_bytes)
+    }
+
+    pub fn write(&self, mut offset: i64, content: &[u8]) -> Result<()> {
         let mut written = 0;
         while written < content.len() {
             let bytes = match pwrite(self.0, &content[written..], offset) {
@@ -139,7 +164,7 @@ impl LogFd {
         Ok(())
     }
 
-    fn file_size(&self) -> Result<usize> {
+    pub fn file_size(&self) -> Result<usize> {
         lseek(self.0, 0, Whence::SeekEnd)
             .map(|n| n as usize)
             .map_err(|e| parse_nix_error(e, "lseek"))
@@ -421,6 +446,7 @@ pub struct FilePipeLog {
     rotate_size: usize,
     bytes_per_sync: usize,
     compression_threshold: usize,
+    recovery_read_block_size: usize,
 
     appender: Arc<RwLock<LogManager>>,
     rewriter: Arc<RwLock<LogManager>>,
@@ -441,6 +467,7 @@ impl FilePipeLog {
             appender,
             rewriter,
             listeners,
+            recovery_read_block_size: cfg.recovery_read_block_size.0 as usize,
         }
     }
 
@@ -555,6 +582,7 @@ impl FilePipeLog {
         }
     }
 
+    #[cfg(test)]
     fn truncate_active_log(&self, queue: LogQueue, offset: Option<usize>) -> Result<()> {
         self.mut_queue(queue).truncate_active_log(offset)
     }
@@ -604,51 +632,37 @@ impl PipeLog for FilePipeLog {
         fd.read(offset as i64, len as usize)
     }
 
-    fn read_file_into_log_batch<M: MessageExt>(
+    fn read_file_into_log_item_batch<M: MessageExt>(
         &self,
         queue: LogQueue,
         file_id: FileId,
         mode: RecoveryMode,
-        batches: &mut Vec<LogBatch<M>>,
+        item_batches: &mut Vec<LogItemBatch<M>>,
     ) -> Result<()> {
-        let mut path = PathBuf::from(&self.dir);
-        path.push(build_file_name(queue, file_id));
-        // TODO: use `LogFd` for reading file bytes instead of `std::fs`
-        let content = fs::read(&path)?;
-        let mut buf = content.as_slice();
-        let start_ptr = buf.as_ptr();
-        buf.consume(FILE_MAGIC_HEADER.len() + Version::len());
-        let mut offset = (FILE_MAGIC_HEADER.len() + Version::len()) as u64;
+        debug!("recover from log file {:?}:{:?}", queue, file_id);
+        let fd = self.get_queue(queue).get_fd(file_id)?;
+        let mut reader = LogItemBatchFileReader::new(
+            &fd,
+            (FILE_MAGIC_HEADER.len() + Version::len()) as u64,
+            self.recovery_read_block_size,
+        )?;
         loop {
-            debug!("recovering log batch at {:?}.{}", file_id, offset);
-            let mut log_batch = match LogBatch::from_bytes(&mut buf, file_id, offset) {
-                Ok(Some(log_batch)) => log_batch,
-                Ok(None) => {
-                    info!("Recovered raft log {:?}.{:?}.", queue, file_id);
-                    return Ok(());
+            match reader.next::<M>() {
+                Ok(Some(mut item_batch)) => {
+                    item_batch.set_queue_and_file_id(queue, file_id);
+                    item_batches.push(item_batch);
                 }
+                Ok(None) => return Ok(()),
                 Err(e) => {
-                    warn!(
-                        "Raft log content is corrupted at {:?}.{:?}:{}, error: {}",
-                        queue, file_id, offset, e
-                    );
-                    if file_id == self.active_file_id(queue)
-                        && mode == RecoveryMode::TolerateCorruptedTailRecords
-                    {
-                        self.truncate_active_log(queue, Some(offset as usize))?;
-                        return Ok(());
-                    } else {
-                        return Err(Error::Corruption(
-                            "Raft log content is corrupted".to_owned(),
-                        ));
+                    return match mode {
+                        RecoveryMode::TolerateCorruptedTailRecords => Ok(()),
+                        RecoveryMode::AbsoluteConsistency => Err(Error::Corruption(format!(
+                            "Raft log content is corrupted: {}",
+                            e
+                        ))),
                     }
                 }
-            };
-            if queue == LogQueue::Rewrite {
-                log_batch.set_queue(LogQueue::Rewrite);
             }
-            batches.push(log_batch);
-            offset = (buf.as_ptr() as usize - start_ptr as usize) as u64;
         }
     }
 
@@ -658,13 +672,14 @@ impl PipeLog for FilePipeLog {
         batch: &mut LogBatch<M>,
         mut sync: bool,
     ) -> Result<(FileId, usize)> {
-        if let Some(content) = batch.encode_to_bytes(self.compression_threshold) {
+        if let Some(content) = batch.encode_to_bytes(self.compression_threshold)? {
             let start = Instant::now();
             let (file_id, offset, fd) = self.append_bytes(queue, &content, &mut sync)?;
             if sync {
                 fd.sync()?;
             }
 
+            // set fields based on the log file
             batch.set_position(queue, file_id, offset);
 
             match queue {

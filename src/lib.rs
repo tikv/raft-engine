@@ -42,6 +42,9 @@ mod memtable;
 mod metrics;
 mod pipe_log;
 mod purge;
+mod reader;
+#[cfg(test)]
+mod test_util;
 mod util;
 
 use crate::file_pipe_log::FilePipeLog;
