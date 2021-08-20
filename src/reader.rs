@@ -97,19 +97,19 @@ impl LogItemBatchFileReader {
             self.buffer.resize(read, 0);
             Ok(&self.buffer[..size])
         } else {
-            let to_read = (offset + size + prefetch).saturating_sub(end);
-            if to_read > 0 {
+            let should_read = (offset + size + prefetch).saturating_sub(end);
+            if should_read > 0 {
                 let read_offset = self.buffer_offset + self.buffer.len();
-                let buffer_offset = self.buffer.len();
-                self.buffer.resize(buffer_offset + to_read, 0);
-                let read = f.read(&mut self.buffer[buffer_offset..])?;
-                if read + prefetch < to_read {
+                let prev_len = self.buffer.len();
+                self.buffer.resize(prev_len + std::cmp::max(should_read, self.read_block_size), 0);
+                let read = f.read(&mut self.buffer[prev_len..])?;
+                if read + prefetch < should_read {
                     return Err(Error::Corruption(format!(
                         "unexpected eof at {}",
                         read_offset + read,
                     )));
                 }
-                self.buffer.resize(buffer_offset + read, 0);
+                self.buffer.truncate(prev_len + read);
             }
             Ok(&self.buffer[offset - self.buffer_offset..offset - self.buffer_offset + size])
         }
