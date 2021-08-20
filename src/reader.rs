@@ -1,101 +1,120 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::file_pipe_log::LogFd;
-use crate::log_batch::{LogItemBatch, HEADER_LEN};
-use crate::{Error, LogBatch, MessageExt, Result};
+use crate::file_system::Readable;
+use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
+use crate::log_file::{LogFileHeader, LOG_FILE_MAX_HEADER_LEN};
+use crate::{Error, Result};
 
-use log::trace;
+pub struct LogItemBatchFileReader {
+    file: Option<Box<dyn Readable>>,
+    size: usize,
 
-#[derive(Debug)]
-pub struct LogItemBatchFileReader<'a> {
-    fd: &'a LogFd,
-    fsize: usize,
     buffer: Vec<u8>,
-    offset: u64, // buffer offset
-    cursor: u64, // monotonic read cursor
+    buffer_offset: usize,
+    valid_offset: usize,
 
     read_block_size: usize,
 }
 
-impl<'a> LogItemBatchFileReader<'a> {
-    pub fn new(fd: &'a LogFd, offset: u64, read_block_size: usize) -> Result<Self> {
-        Ok(Self {
-            fd,
-            fsize: fd.file_size()?,
-            offset,
-            cursor: offset,
-            buffer: vec![],
+impl LogItemBatchFileReader {
+    pub fn new(read_block_size: usize) -> Self {
+        Self {
+            file: None,
+            size: 0,
+
+            buffer: Vec::new(),
+            buffer_offset: 0,
+            valid_offset: 0,
+
             read_block_size,
-        })
+        }
     }
 
-    pub fn next<M: MessageExt>(&mut self) -> Result<Option<LogItemBatch<M>>> {
-        if self.cursor > self.fsize as u64 {
-            return Err(Error::Corruption(format!(
-                "unexpected eof at {}",
-                &self.cursor
-            )));
-        }
-        if self.cursor == self.fsize as u64 {
-            return Ok(None);
-        }
-
-        // invariance: make sure buffer can cover the range before reads.
-
-        // read & parse header
-        let (len, offset, compression_type) =
-            LogBatch::<M>::parse_header(&mut self.peek(HEADER_LEN, 0)?)?;
-        let entries_offset = self.cursor + HEADER_LEN as u64;
-        let entries_len = offset as usize - HEADER_LEN;
-
-        // skip entries
-        self.cursor += offset;
-
-        // read footer & recover
-        let footer_size = len - offset as usize;
-        let item_batch = LogItemBatch::<M>::from_bytes(
-            &mut self.peek(footer_size, HEADER_LEN)?,
-            entries_offset,
-            entries_len,
-            compression_type,
-        )?;
-        self.cursor += footer_size as u64;
-        Ok(Some(item_batch))
+    pub fn open(&mut self, file: Box<dyn Readable>, size: usize) -> Result<()> {
+        self.file = Some(file);
+        self.size = size;
+        self.buffer.clear();
+        self.buffer_offset = 0;
+        self.valid_offset = 0;
+        let peek_size = std::cmp::min(LOG_FILE_MAX_HEADER_LEN, size);
+        let mut header = self.peek(0, peek_size, LOG_BATCH_HEADER_LEN)?;
+        LogFileHeader::decode(&mut header)?;
+        self.valid_offset = peek_size - header.len();
+        Ok(())
     }
 
-    fn peek(&mut self, size: usize, hint: usize) -> Result<&[u8]> {
-        let remain =
-            (self.offset as usize + self.buffer.len()).saturating_sub(self.cursor as usize);
-        if remain >= size {
-            return Ok(&self.buffer[(self.cursor - self.offset) as usize
-                ..(self.cursor - self.offset) as usize + size]);
+    pub fn valid_offset(&self) -> usize {
+        self.valid_offset
+    }
+
+    pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
+        if self.valid_offset < LOG_BATCH_HEADER_LEN {
+            return Err(Error::Corruption(
+                "attempt to read file with broken header".to_owned(),
+            ));
         }
+        if self.valid_offset < self.size {
+            let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
+                self.valid_offset,
+                LOG_BATCH_HEADER_LEN,
+                0,
+            )?)?;
+            let entries_offset = self.valid_offset + LOG_BATCH_HEADER_LEN;
+            let entries_len = footer_offset - LOG_BATCH_HEADER_LEN;
 
-        let mut roffset = std::cmp::max(self.offset + self.buffer.len() as u64, self.cursor);
-        let mut rsize = std::cmp::min(
-            std::cmp::max(size + hint, self.read_block_size),
-            self.fsize - roffset as usize,
-        );
+            let item_batch = LogItemBatch::decode(
+                &mut self.peek(
+                    self.valid_offset + footer_offset,
+                    len - footer_offset,
+                    LOG_BATCH_HEADER_LEN,
+                )?,
+                entries_offset,
+                entries_len,
+                compression_type,
+            )?;
+            self.valid_offset += len;
+            return Ok(Some(item_batch));
+        }
+        Ok(None)
+    }
 
-        if roffset == self.offset + self.buffer.len() as u64 {
-            trace!("::extend buffer {}:{}", roffset, rsize);
-            roffset = self.offset;
-            rsize += self.buffer.len();
-            self.fd.read_to(&mut self.buffer, roffset as i64, rsize)?;
+    fn peek(&mut self, offset: usize, size: usize, prefetch: usize) -> Result<&[u8]> {
+        debug_assert!(offset >= self.buffer_offset);
+        let f = self.file.as_mut().unwrap();
+        let end = self.buffer_offset + self.buffer.len();
+        if offset > end {
+            self.buffer_offset = offset;
+            self.buffer
+                .resize(std::cmp::max(size + prefetch, self.read_block_size), 0);
+            f.seek(std::io::SeekFrom::Start(self.buffer_offset as u64))?;
+            let read = f.read(&mut self.buffer)?;
+            if read < size {
+                return Err(Error::Corruption(format!(
+                    "unexpected eof at {}",
+                    self.buffer_offset + read
+                )));
+            }
+            self.buffer.resize(read, 0);
+            Ok(&self.buffer[..size])
         } else {
-            trace!("::replace buffer {}:{}", roffset, rsize);
-            self.buffer.clear();
-            self.fd.read_to(&mut self.buffer, roffset as i64, rsize)?;
-            self.offset = roffset;
+            let should_read = (offset + size + prefetch).saturating_sub(end);
+            if should_read > 0 {
+                let read_offset = self.buffer_offset + self.buffer.len();
+                let prev_len = self.buffer.len();
+                self.buffer.resize(
+                    prev_len + std::cmp::max(should_read, self.read_block_size),
+                    0,
+                );
+                let read = f.read(&mut self.buffer[prev_len..])?;
+                if read + prefetch < should_read {
+                    return Err(Error::Corruption(format!(
+                        "unexpected eof at {}",
+                        read_offset + read,
+                    )));
+                }
+                self.buffer.truncate(prev_len + read);
+            }
+            Ok(&self.buffer[offset - self.buffer_offset..offset - self.buffer_offset + size])
         }
-
-        if (self.offset as usize + self.buffer.len() - self.cursor as usize) < size {
-            return Err(Error::Corruption(format!(
-                "unexpected eof at {}",
-                self.offset + self.buffer.len() as u64
-            )));
-        }
-        Ok(&self.buffer
-            [(self.cursor - self.offset) as usize..(self.cursor - self.offset) as usize + size])
     }
 }

@@ -10,7 +10,7 @@ use crate::codec::Error as CodecError;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
-    Other(#[from] Box<dyn error::Error + Send + Sync>),
+    Other(#[from] Box<dyn error::Error>),
     #[error("{0}")]
     Io(#[from] IoError),
     #[error("Codec {0}")]

@@ -20,6 +20,8 @@ libc = "0.2.99"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 lz4-sys = "1.9.2"
 nix = "0.18.0"
+num-derive = "0.3"
+num-traits = "0.2"
 parking_lot = "0.11"
 prometheus = { version = "0.12", features = ["nightly"] }
 prometheus-static-metric = "0.5"
