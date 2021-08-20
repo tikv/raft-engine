@@ -44,6 +44,7 @@ const DEFAULT_ENTRY_SIZE: usize = 1024;
 const DEFAULT_WRITE_ENTRY_COUNT: u64 = 10;
 const DEFAULT_WRITE_REGION_COUNT: u64 = 5;
 const DEFAULT_WRITE_SYNC: bool = true;
+const DEFAULT_REUSE_DATA: bool = false;
 
 #[derive(Debug, Clone)]
 struct TestArgs {
@@ -212,7 +213,7 @@ fn spawn_write(
             };
             for _ in 0..args.write_entry_count {
                 entry_batch.push(Entry {
-                    data: vec![0u8; args.entry_size].into(),
+                    data: vec![thread_rng().gen::<u8>(); args.entry_size].into(),
                     ..Default::default()
                 });
             }
@@ -307,12 +308,10 @@ fn spawn_purge(
                         for region in regions.into_iter() {
                             let first = engine.first_index(region).unwrap_or(0);
                             let last = engine.last_index(region).unwrap_or(0);
-                            engine.compact_to(
-                                region,
-                                last - ((last - first + 1) as f32 * args.force_compact_factor)
-                                    as u64
-                                    + 1,
-                            );
+                            let compact_to = last
+                                - ((last - first + 1) as f32 * args.force_compact_factor) as u64
+                                + 1;
+                            engine.compact_to(region, compact_to);
                         }
                     }
                     Err(e) => println!("purge error {:?} in thread {}", e, index),
@@ -384,8 +383,8 @@ fn main() {
         .arg(
             Arg::with_name("purge_interval")
                 .long("purge-interval")
-                .value_name("interval[ms]")
-                .default_value(formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_millis()))
+                .value_name("interval[s]")
+                .default_value(formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()))
                 .help("Set the interval to purge obsolete log files")
                 .takes_value(true),
         )
@@ -393,8 +392,8 @@ fn main() {
             Arg::with_name("compact_ttl")
                 .conflicts_with("compact_count")
                 .long("compact-ttl")
-                .value_name("ttl[ms]")
-                .default_value(formatcp!("{}", DEFAULT_COMPACT_TTL.as_millis()))
+                .value_name("ttl[s]")
+                .default_value(formatcp!("{}", DEFAULT_COMPACT_TTL.as_secs()))
                 .help("Compact log entries older than TTL")
                 .takes_value(true),
         )
@@ -488,6 +487,14 @@ fn main() {
                 .help("Whether to sync write raft logs")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("reuse_data")
+                .long("reuse-data")
+                .value_name("reuse")
+                .default_value(formatcp!("{}", DEFAULT_REUSE_DATA))
+                .help("Whether to reuse existing data in specified path")
+                .takes_value(true),
+        )
         // Raft Engine configurations
         .arg(
             Arg::with_name("target_file_size")
@@ -514,6 +521,20 @@ fn main() {
                 .takes_value(true),
         )
         .get_matches();
+    // Raft Engine configurations
+    if let Some(s) = matches.value_of("path") {
+        config.dir = s.to_string();
+    }
+    if let Some(s) = matches.value_of("target_file_size") {
+        config.target_file_size = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("purge_threshold") {
+        config.purge_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("batch_compression_threshold") {
+        config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    // Test configurations
     if let Some(s) = matches.value_of("time") {
         args.time = Duration::from_secs(s.parse::<u64>().unwrap());
     }
@@ -521,10 +542,10 @@ fn main() {
         args.regions = s.parse::<u64>().unwrap();
     }
     if let Some(s) = matches.value_of("purge_interval") {
-        args.purge_interval = Duration::from_millis(s.parse::<u64>().unwrap());
+        args.purge_interval = Duration::from_secs(s.parse::<u64>().unwrap());
     }
     if let Some(s) = matches.value_of("compact_ttl") {
-        args.compact_ttl = Duration::from_millis(s.parse::<u64>().unwrap());
+        args.compact_ttl = Duration::from_secs(s.parse::<u64>().unwrap());
         if args.compact_ttl.as_millis() > 0 {
             println!("Not supported");
             std::process::exit(1);
@@ -560,18 +581,11 @@ fn main() {
     if let Some(s) = matches.value_of("write_sync") {
         args.write_sync = s.parse::<bool>().unwrap();
     }
-    // Raft Engine configurations
-    if let Some(s) = matches.value_of("path") {
-        config.dir = s.to_string();
-    }
-    if let Some(s) = matches.value_of("target_file_size") {
-        config.target_file_size = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("purge_threshold") {
-        config.purge_threshold = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("batch_compression_threshold") {
-        config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
+    if let Some(s) = matches.value_of("reuse_data") {
+        if !s.parse::<bool>().unwrap() {
+            // clean up existing log files
+            let _ = std::fs::remove_dir_all(&config.dir);
+        }
     }
     args.validate().unwrap();
     let engine = Arc::new(Engine::open(config).unwrap());

@@ -758,7 +758,7 @@ mod tests {
         let new_active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
         let new_active_len = engine
             .pipe_log
-            .file_size(LogQueue::Rewrite, active_num)
+            .file_size(LogQueue::Rewrite, new_active_num)
             .unwrap();
         assert!(
             new_active_num > active_num
