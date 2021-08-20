@@ -101,7 +101,10 @@ impl LogItemBatchFileReader {
             if should_read > 0 {
                 let read_offset = self.buffer_offset + self.buffer.len();
                 let prev_len = self.buffer.len();
-                self.buffer.resize(prev_len + std::cmp::max(should_read, self.read_block_size), 0);
+                self.buffer.resize(
+                    prev_len + std::cmp::max(should_read, self.read_block_size),
+                    0,
+                );
                 let read = f.read(&mut self.buffer[prev_len..])?;
                 if read + prefetch < should_read {
                     return Err(Error::Corruption(format!(

@@ -101,7 +101,7 @@ impl ActiveFile {
     }
 
     fn truncate(&mut self) -> Result<()> {
-        self.fd.truncate(self.size as i64)?;
+        self.fd.truncate(self.size)?;
         self.fd.sync()?;
         self.capacity = self.size;
         Ok(())
@@ -117,11 +117,10 @@ impl ActiveFile {
     }
 
     fn write(&mut self, buf: &[u8], sync: bool) -> Result<()> {
-        #[cfg(target_os = "linux")]
         if self.size + buf.len() > self.capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let alloc = std::cmp::max(self.size + buf.len() - self.capacity, FILE_ALLOCATE_SIZE);
-            self.fd.allocate(self.capacity as i64, alloc as i64)?;
+            self.fd.allocate(self.capacity, alloc)?;
             self.capacity += alloc;
         }
         self.writer.write_all(buf)?;

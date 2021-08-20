@@ -122,10 +122,10 @@ impl LogFd {
         res
     }
 
-    pub fn read(&self, mut offset: i64, buf: &mut [u8]) -> IoResult<usize> {
+    pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
         let mut readed = 0;
         while readed < buf.len() {
-            let bytes = match pread(self.0, &mut buf[readed..], offset) {
+            let bytes = match pread(self.0, &mut buf[readed..], offset as i64) {
                 Ok(bytes) => bytes,
                 Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
                 Err(e) => return Err(from_nix_error(e, "pread")),
@@ -135,15 +135,15 @@ impl LogFd {
                 break;
             }
             readed += bytes;
-            offset += bytes as i64;
+            offset += bytes;
         }
         Ok(readed)
     }
 
-    pub fn write(&self, mut offset: i64, content: &[u8]) -> IoResult<usize> {
+    pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
         let mut written = 0;
         while written < content.len() {
-            let bytes = match pwrite(self.0, &content[written..], offset) {
+            let bytes = match pwrite(self.0, &content[written..], offset as i64) {
                 Ok(bytes) => bytes,
                 Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
                 Err(e) => return Err(from_nix_error(e, "pwrite")),
@@ -152,7 +152,7 @@ impl LogFd {
                 break;
             }
             written += bytes;
-            offset += bytes as i64;
+            offset += bytes;
         }
         Ok(written)
     }
@@ -163,18 +163,25 @@ impl LogFd {
             .map_err(|e| from_nix_error(e, "lseek"))
     }
 
-    pub fn truncate(&self, offset: i64) -> IoResult<()> {
-        ftruncate(self.0, offset).map_err(|e| from_nix_error(e, "ftruncate"))
+    pub fn truncate(&self, offset: usize) -> IoResult<()> {
+        ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
     }
 
-    pub fn allocate(&self, offset: i64, size: i64) -> IoResult<()> {
-        fcntl::fallocate(
-            self.0,
-            fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
-            offset,
-            size,
-        )
-        .map_err(|e| from_nix_error(e, "fallocate"))
+    pub fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
+        #[cfg(target_os = "linux")]
+        {
+            fcntl::fallocate(
+                self.0,
+                fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
+                offset as i64,
+                size as i64,
+            )
+            .map_err(|e| from_nix_error(e, "fallocate"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
     }
 }
 
@@ -202,7 +209,7 @@ impl LogFile {
 
 impl Write for LogFile {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        let len = self.inner.write(self.offset as i64, buf)?;
+        let len = self.inner.write(self.offset, buf)?;
         self.offset += len;
         Ok(len)
     }
@@ -214,7 +221,7 @@ impl Write for LogFile {
 
 impl Read for LogFile {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let len = self.inner.read(self.offset as i64, buf)?;
+        let len = self.inner.read(self.offset, buf)?;
         self.offset += len;
         Ok(len)
     }
