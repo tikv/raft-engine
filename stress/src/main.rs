@@ -20,7 +20,7 @@ use raft_engine::{
 use rand::{thread_rng, Rng};
 
 type Engine = RaftLogEngine<MessageExtTyped>;
-type WriteBatch = LogBatch<MessageExtTyped>;
+type WriteBatch = LogBatch;
 
 #[derive(Clone)]
 struct MessageExtTyped;
@@ -229,7 +229,9 @@ fn spawn_write(
                     let first = engine.first_index(rid).unwrap_or(0);
                     let last = engine.last_index(rid).unwrap_or(0);
                     let entries = prepare_entries(&entry_batch, last + 1);
-                    log_batch.add_entries(rid, entries);
+                    log_batch
+                        .add_entries::<MessageExtTyped>(rid, entries)
+                        .unwrap();
                     if args.compact_count > 0 && last - first + 1 > args.compact_count {
                         log_batch.add_command(
                             rid,
@@ -615,7 +617,7 @@ fn main() {
 
     let wb = Arc::new(WrittenBytesHook::new());
 
-    let engine = Arc::new(Engine::open_with_listeners(config, vec![wb.clone()]).unwrap());
+    let engine = Arc::new(Engine::open_with_listeners(config, None, vec![wb.clone()]).unwrap());
     let mut write_threads = Vec::new();
     let mut read_threads = Vec::new();
     let mut misc_threads = Vec::new();

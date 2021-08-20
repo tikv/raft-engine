@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 macro_rules! box_err {
     ($e:expr) => ({
         use std::error::Error;
-        let e: Box<dyn Error + Sync + Send> = format!("[{}:{}]: {}", file!(), line!(),  $e).into();
+        let e: Box<dyn Error> = format!("[{}:{}]: {}", file!(), line!(),  $e).into();
         e.into()
     });
     ($f:tt, $($arg:expr),+) => ({
@@ -37,7 +37,9 @@ mod engine;
 mod errors;
 mod event_listener;
 mod file_pipe_log;
+mod file_system;
 mod log_batch;
+mod log_file;
 mod memtable;
 mod metrics;
 mod pipe_log;

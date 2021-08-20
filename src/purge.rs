@@ -218,7 +218,7 @@ where
         expect_rewrites_per_memtable: usize,
         rewrite: Option<FileId>,
     ) -> Result<()> {
-        let mut log_batch = LogBatch::<M>::default();
+        let mut log_batch = LogBatch::default();
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
@@ -241,9 +241,9 @@ where
                 total_size += entry.compute_size();
                 entries.push(entry);
             }
-            log_batch.add_entries(region_id, entries);
+            log_batch.add_entries::<M>(region_id, entries)?;
             for (k, v) in kvs {
-                log_batch.put(region_id, k, v)?;
+                log_batch.put(region_id, k, v);
             }
 
             let target_file_size = self.cfg.target_file_size.0 as usize;
@@ -257,7 +257,7 @@ where
 
     fn rewrite_impl(
         &self,
-        log_batch: &mut LogBatch<M>,
+        log_batch: &mut LogBatch,
         rewrite_watermark: Option<FileId>,
         sync: bool,
     ) -> Result<()> {
@@ -271,7 +271,7 @@ where
         let (file_id, bytes) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
         if file_id.valid() {
             let queue = LogQueue::Rewrite;
-            for item in log_batch.items_batch().items.drain(..) {
+            for item in log_batch.drain() {
                 let raft = item.raft_group_id;
                 let memtable = self.memtables.get_or_insert(raft);
                 match item.content {
