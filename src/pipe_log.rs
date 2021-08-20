@@ -1,7 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::config::RecoveryMode;
-use crate::log_batch::{LogBatch, LogItemBatch, MessageExt};
+use crate::log_batch::LogBatch;
 use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -30,10 +29,12 @@ impl FileId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
     /// Default constructor must return an invalid instance.
     pub fn valid(&self) -> bool {
         self.0 > 0
     }
+
     /// Returns an invalid ID when applied on an invalid file ID.
     pub fn forward(&self, step: usize) -> Self {
         if self.0 == 0 {
@@ -42,6 +43,7 @@ impl FileId {
             FileId(self.0 + step as u64)
         }
     }
+
     /// Returns an invalid ID when out of bound or applied on an invalid file ID.
     pub fn backward(&self, step: usize) -> Self {
         if self.0 <= step as u64 {
@@ -50,6 +52,7 @@ impl FileId {
             FileId(self.0 - step as u64)
         }
     }
+
     /// Returns step distance from another older ID.
     pub fn step_after(&self, rhs: &Self) -> Option<usize> {
         if self.0 == 0 || rhs.0 == 0 || self.0 < rhs.0 {
@@ -68,6 +71,7 @@ impl FileId {
             std::cmp::min(lhs.0, rhs.0).into()
         }
     }
+
     pub fn max(lhs: FileId, rhs: FileId) -> FileId {
         if !lhs.valid() {
             rhs
@@ -97,21 +101,8 @@ pub trait PipeLog: Sized + Clone + Send {
         len: u64,
     ) -> Result<Vec<u8>>;
 
-    fn read_file_into_log_item_batch<M: MessageExt>(
-        &self,
-        queue: LogQueue,
-        file_id: FileId,
-        mode: RecoveryMode,
-        batches: &mut Vec<LogItemBatch<M>>,
-    ) -> Result<()>;
-
     /// Write a batch into the append queue.
-    fn append<M: MessageExt>(
-        &self,
-        queue: LogQueue,
-        batch: &mut LogBatch<M>,
-        sync: bool,
-    ) -> Result<(FileId, usize)>;
+    fn append(&self, queue: LogQueue, batch: &mut LogBatch, sync: bool) -> Result<(FileId, usize)>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
