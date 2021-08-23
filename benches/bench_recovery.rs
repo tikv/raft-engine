@@ -68,12 +68,12 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     ecfg.dir = path.clone();
     ecfg.batch_compression_threshold = cfg.batch_compression_threshold;
 
-    let engine = Engine::open(ecfg.clone()).unwrap();
+    let engine = Engine::open(ecfg.clone(), None).unwrap();
 
     let mut indexes: HashMap<u64, u64> = (1..cfg.region_count + 1).map(|rid| (rid, 0)).collect();
     while dir_size(&path).0 < cfg.total_size.0 {
         let mut batch = LogBatch::default();
-        while batch.approximate_size() < cfg.batch_size.0 as usize {
+        while batch.size() < cfg.batch_size.0 as usize {
             let region_id = rng.gen_range(1, cfg.region_count + 1);
             let mut item_size = 0;
             let mut entries = vec![];
@@ -94,7 +94,9 @@ fn generate(cfg: &Config) -> Result<TempDir> {
                 index + 1
             });
             *indexes.get_mut(&region_id).unwrap() = index;
-            batch.add_entries(region_id, entries);
+            batch
+                .add_entries::<MessageExtTyped>(region_id, entries)
+                .unwrap();
         }
         engine.write(&mut batch, false).unwrap();
     }
@@ -162,7 +164,7 @@ fn bench_recovery(c: &mut Criterion) {
             &ecfg,
             |b, cfg| {
                 b.iter(|| {
-                    Engine::open(cfg.to_owned()).unwrap();
+                    Engine::open(cfg.to_owned(), None).unwrap();
                 })
             },
         );
