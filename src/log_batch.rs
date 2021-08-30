@@ -10,6 +10,7 @@ use protobuf::parse_from_bytes;
 use protobuf::Message;
 
 use crate::codec::{self, Error as CodecError, NumberEncoder};
+use crate::engine::ParallelRecoverContext;
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileId, LogQueue};
 use crate::util::{crc32, lz4};
@@ -331,6 +332,32 @@ impl LogItemBatch {
             items: Vec::with_capacity(cap),
             item_size: 0,
         }
+    }
+
+    pub fn pick_parallel_recover_context(&self) -> ParallelRecoverContext {
+        let mut context = ParallelRecoverContext::default();
+        for item in self.items.iter() {
+            match &item.content {
+                LogItemContent::Command(Command::Clean) => {
+                    // Removed raft_group_id will never be used again.
+                    context.removed_memtables.insert(item.raft_group_id);
+                }
+                LogItemContent::Command(Command::Compact { index }) => {
+                    context
+                        .compacted_memtables
+                        .insert(item.raft_group_id, *index);
+                }
+                LogItemContent::Kv(KeyValue { op_type, key, .. }) => {
+                    if *op_type == OpType::Del {
+                        context
+                            .removed_keys
+                            .insert((item.raft_group_id, key.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        context
     }
 
     pub fn drain(&mut self) -> LogItemDrain {

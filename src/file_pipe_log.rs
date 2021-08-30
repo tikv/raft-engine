@@ -10,14 +10,14 @@ use std::time::Instant;
 use log::{info, warn};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::config::{Config, RecoveryMode};
+use crate::config::Config;
+use crate::engine::RecoverContext;
 use crate::event_listener::EventListener;
 use crate::file_system::{FileSystem, Readable, Writable};
-use crate::log_batch::{LogBatch, LogItemBatch};
+use crate::log_batch::LogBatch;
 use crate::log_file::{LogFd, LogFile, LogFileHeader, LOG_FILE_MIN_HEADER_LEN};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
 
@@ -147,66 +147,43 @@ struct LogManager {
     pub first_file_id: FileId,
     pub active_file_id: FileId,
 
-    all_files: VecDeque<Arc<LogFd>>,
+    pub all_files: VecDeque<Arc<LogFd>>,
     active_file: ActiveFile,
 }
 
 impl LogManager {
-    fn open<F>(
+    fn open(
         cfg: &Config,
         file_system: Option<Arc<dyn FileSystem>>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut min_file_id: FileId,
         mut max_file_id: FileId,
-        replay: &F,
-    ) -> Result<Self>
-    where
-        F: Fn(LogQueue, FileId, LogItemBatch),
-    {
-        let mut reader = LogItemBatchFileReader::new(cfg.recovery_read_block_size.0 as usize);
+    ) -> Result<(Self, Vec<RecoverContext>)> {
         let mut all_files = VecDeque::with_capacity(DEFAULT_FILES_COUNT);
+        let mut recover_contexts = Vec::with_capacity(DEFAULT_FILES_COUNT);
         if max_file_id.valid() {
             assert!(min_file_id <= max_file_id);
             let mut file_id = min_file_id;
             while file_id <= max_file_id {
                 let path = build_file_path(&cfg.dir, queue, file_id);
                 let fd = Arc::new(LogFd::open(&path)?);
+                let file_size = fd.file_size()?;
                 all_files.push_back(fd.clone());
                 for listener in &listeners {
                     listener.post_new_log_file(queue, file_id);
                 }
-                // Recover log items.
-                let file_size = fd.file_size()?;
-                let tolerate_failure = file_id == max_file_id
-                    && cfg.recovery_mode == RecoveryMode::TolerateCorruptedTailRecords;
                 let raw_file_reader = Box::new(LogFile::new(fd));
                 let file_reader = if let Some(ref fs) = file_system {
                     fs.open_file_reader(&path, raw_file_reader as Box<dyn Readable>)?
                 } else {
                     raw_file_reader
                 };
-                if let Err(e) = reader.open(file_reader, file_size) {
-                    if !tolerate_failure {
-                        return Err(Error::Corruption(format!("Unable to open log file: {}", e)));
-                    }
-                } else {
-                    loop {
-                        match reader.next() {
-                            Ok(Some(mut item_batch)) => {
-                                item_batch.set_position(queue, file_id, None);
-                                replay(queue, file_id, item_batch);
-                            }
-                            Err(e) if tolerate_failure => {
-                                return Err(Error::Corruption(format!(
-                                    "Raft log content is corrupted: {}",
-                                    e
-                                )))
-                            }
-                            _ => break,
-                        }
-                    }
-                }
+                recover_contexts.push(RecoverContext {
+                    file_id,
+                    file_size: file_size,
+                    file_reader: Some(file_reader),
+                });
                 file_id = file_id.forward(1);
             }
         } else {
@@ -222,7 +199,8 @@ impl LogManager {
                 listener.post_new_log_file(queue, min_file_id);
             }
         }
-        let active_file_size = reader.valid_offset();
+        // TODO(MrCroxx): use valid offset?
+        let active_file_size = all_files.back().unwrap().file_size()?;
         let active_fd = all_files.back().unwrap().clone();
         let raw_writer = Box::new(LogFile::new(active_fd.clone()));
         let active_file = ActiveFile::open(
@@ -253,7 +231,7 @@ impl LogManager {
             active_file,
         };
         manager.update_metrics();
-        Ok(manager)
+        Ok((manager, recover_contexts))
     }
 
     fn new_log_file(&mut self) -> Result<()> {
@@ -364,14 +342,15 @@ pub struct FilePipeLog {
 }
 
 impl FilePipeLog {
-    pub fn open<F>(
+    // pub fn open<F>(
+    pub fn open(
         cfg: &Config,
         file_system: Option<Arc<dyn FileSystem>>,
         listeners: Vec<Arc<dyn EventListener>>,
-        replay: F,
-    ) -> Result<FilePipeLog>
-    where
-        F: Fn(LogQueue, FileId, LogItemBatch),
+        // replay: F,
+    ) -> Result<(FilePipeLog, Vec<RecoverContext>, Vec<RecoverContext>)>
+// where
+        // F: Fn(LogQueue, FileId, LogItemBatch),
     {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
@@ -400,34 +379,57 @@ impl FilePipeLog {
             }
         });
 
-        let appender = Arc::new(RwLock::new(LogManager::open(
+        let (appender, append_recover_contexts) = LogManager::open(
             cfg,
             file_system.clone(),
             listeners.clone(),
             LogQueue::Append,
             min_append_id,
             max_append_id,
-            &replay,
-        )?));
-        let rewriter = Arc::new(RwLock::new(LogManager::open(
+            // &replay,
+        )?;
+        let appender = Arc::new(RwLock::new(appender));
+        let (rewriter, rewrite_recover_contexts) = LogManager::open(
             cfg,
             file_system.clone(),
             listeners.clone(),
             LogQueue::Rewrite,
             min_rewrite_id,
             max_rewrite_id,
-            &replay,
-        )?));
+            // &replay,
+        )?;
+        let rewriter = Arc::new(RwLock::new(rewriter));
 
-        Ok(FilePipeLog {
-            dir: cfg.dir.clone(),
-            rotate_size: cfg.target_file_size.0 as usize,
-            compression_threshold: cfg.batch_compression_threshold.0 as usize,
-            appender,
-            rewriter,
-            file_system,
-            listeners,
-        })
+        Ok((
+            FilePipeLog {
+                dir: cfg.dir.clone(),
+                rotate_size: cfg.target_file_size.0 as usize,
+                compression_threshold: cfg.batch_compression_threshold.0 as usize,
+                appender,
+                rewriter,
+                file_system,
+                listeners,
+            },
+            append_recover_contexts,
+            rewrite_recover_contexts,
+        ))
+    }
+
+    pub fn get_files_with_ids(&self, queue: LogQueue) -> Vec<(FileId, Arc<LogFd>)> {
+        let lm = match queue {
+            LogQueue::Append => self.appender.read(),
+            LogQueue::Rewrite => self.rewriter.read(),
+        };
+        let fid = lm.first_file_id.clone();
+        lm.all_files
+            .clone()
+            .drain(..)
+            .map(|f| {
+                let item = (fid.clone(), f);
+                fid.forward(1);
+                item
+            })
+            .collect()
     }
 
     fn append_bytes(
@@ -589,7 +591,8 @@ mod tests {
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        FilePipeLog::open(&cfg, None, vec![], |_, _, _| {}).unwrap()
+        // FilePipeLog::open(&cfg, None, vec![], |_, _, _| {}).unwrap()
+        FilePipeLog::open(&cfg, None, vec![]).unwrap().0
     }
 
     #[test]
