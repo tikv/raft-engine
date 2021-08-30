@@ -300,6 +300,19 @@ impl MemTable {
         }
     }
 
+    /// Mrege from `rhs`, which is in the range right-continuous to this.
+    /// Only called during parllel recovery.
+    pub fn merge(&mut self, rhs: &mut Self) {
+        assert_eq!(self.region_id, rhs.region_id);
+        if let (Some(last), Some(next)) = (self.entries_index.back(), rhs.entries_index.front()) {
+            assert_eq!(last.index + 1, next.index);
+        }
+        self.entries_index.append(&mut rhs.entries_index);
+        self.rewrite_count += rhs.rewrite_count;
+        self.kvs.extend(rhs.kvs.drain());
+        self.global_stats.merge(&rhs.global_stats);
+    }
+
     /// Merge from `rhs`, which has a lower priority.
     pub fn merge_lower_prio(&mut self, rhs: &mut Self) {
         debug_assert_eq!(rhs.rewrite_count, rhs.entries_index.len());
@@ -460,6 +473,16 @@ impl MemTable {
 
     pub fn last_index(&self) -> Option<u64> {
         self.entries_index.back().map(|e| e.index)
+    }
+}
+
+#[cfg(test)]
+impl PartialEq for MemTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.region_id == other.region_id
+            && self.entries_index == other.entries_index
+            && self.rewrite_count == other.rewrite_count
+            && self.kvs == other.kvs
     }
 }
 

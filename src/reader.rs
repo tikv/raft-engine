@@ -43,10 +43,6 @@ impl LogItemBatchFileReader {
         Ok(())
     }
 
-    pub fn valid_offset(&self) -> usize {
-        self.valid_offset
-    }
-
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
         if self.valid_offset < LOG_BATCH_HEADER_LEN {
             return Err(Error::Corruption(

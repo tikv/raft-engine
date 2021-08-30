@@ -26,6 +26,7 @@ parking_lot = "0.11"
 prometheus = { version = "0.12", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "=2.8.0"
+rayon = "1.5.1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 

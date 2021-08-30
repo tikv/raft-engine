@@ -15,17 +15,17 @@ pub trait FileSystem: Send + Sync {
         &self,
         path: &Path,
         reader: Box<dyn Readable>,
-    ) -> Result<Box<dyn Readable>, Box<dyn std::error::Error>>;
+    ) -> Result<Box<dyn Readable>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn open_file_writer(
         &self,
         path: &Path,
         writer: Box<dyn Writable>,
-    ) -> Result<Box<dyn Writable>, Box<dyn std::error::Error>>;
+    ) -> Result<Box<dyn Writable>, Box<dyn std::error::Error + Send + Sync>>;
 
     fn create_file_writer(
         &self,
         path: &Path,
         writer: Box<dyn Writable>,
-    ) -> Result<Box<dyn Writable>, Box<dyn std::error::Error>>;
+    ) -> Result<Box<dyn Writable>, Box<dyn std::error::Error + Send + Sync>>;
 }
