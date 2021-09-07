@@ -14,12 +14,12 @@ use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::{
-    Command, Config, EventListener, FileId, LogBatch, LogQueue, MessageExt, RaftLogEngine,
+    Command, Config, Engine as RawEngine, EventListener, FileId, LogBatch, LogQueue, MessageExt,
     ReadableSize,
 };
 use rand::{thread_rng, Rng};
 
-type Engine = RaftLogEngine<MessageExtTyped>;
+type Engine = RawEngine<MessageExtTyped>;
 type WriteBatch = LogBatch;
 
 #[derive(Clone)]
@@ -617,7 +617,7 @@ fn main() {
 
     let wb = Arc::new(WrittenBytesHook::new());
 
-    let engine = Arc::new(Engine::open_with_listeners(config, None, vec![wb.clone()]).unwrap());
+    let engine = Arc::new(Engine::open_with_listeners(config, vec![wb.clone()]).unwrap());
     let mut write_threads = Vec::new();
     let mut read_threads = Vec::new();
     let mut misc_threads = Vec::new();
