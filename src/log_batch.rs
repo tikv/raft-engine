@@ -10,9 +10,9 @@ use protobuf::parse_from_bytes;
 use protobuf::Message;
 
 use crate::codec::{self, Error as CodecError, NumberEncoder};
-use crate::engine::ParallelRecoverContext;
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileId, LogQueue};
+use crate::recover::ParallelRecoverContext;
 use crate::util::{crc32, lz4};
 use crate::{Error, Result};
 

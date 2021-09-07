@@ -2,29 +2,27 @@
 
 use std::borrow::BorrowMut;
 use std::collections::{HashSet, VecDeque};
-use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{mem, u64};
+use std::u64;
 
 use fail::fail_point;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
 use protobuf::{parse_from_bytes, Message};
-use rayon::prelude::*;
 
 use crate::config::Config;
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
-use crate::file_system::{FileSystem, Readable};
+use crate::file_system::FileSystem;
 use crate::log_batch::{Command, LogBatch, LogItemContent, LogItemDrain, MessageExt, OpType};
 use crate::memtable::{EntryIndex, MemTable};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::reader::LogItemBatchFileReader;
+use crate::recover::{ParallelRecoverContext, RecoverManager};
 use crate::util::{HashMap, InstantExt};
-use crate::{metrics::*, RecoveryMode};
 use crate::{GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
@@ -132,6 +130,7 @@ impl MemTableAccessor {
         ids
     }
 
+    /// Remove contents that are deleted by coming operations.
     pub fn mask(&mut self, parallel_recover_context: &ParallelRecoverContext, queue: LogQueue) {
         for raft_group_id in parallel_recover_context.removed_memtables.iter() {
             self.remove(*raft_group_id, queue, FileId::default());
@@ -157,6 +156,16 @@ impl MemTableAccessor {
             }
         }
     }
+
+    pub fn drain(&mut self) -> Vec<(u64, Arc<RwLock<MemTable>>)> {
+        let mut memtables_with_ids = vec![];
+        for slot in self.slots.drain(..) {
+            for (raft_group_id, memtable) in slot.write().drain() {
+                memtables_with_ids.push((raft_group_id, memtable));
+            }
+        }
+        memtables_with_ids
+    }
 }
 
 #[cfg(test)]
@@ -179,40 +188,6 @@ impl PartialEq for MemTableAccessor {
             }
         }
         *self.removed_memtables.lock() == *other.removed_memtables.lock()
-    }
-}
-
-pub struct RecoverContext {
-    pub file_id: FileId,
-    pub file_size: usize,
-    pub file_reader: Option<Box<dyn Readable>>,
-}
-
-impl Debug for RecoverContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecoverContext")
-            .field("file_id", &self.file_id)
-            .field("file_size", &self.file_size)
-            .finish()
-    }
-}
-
-#[derive(Default)]
-pub struct ParallelRecoverContext {
-    pub removed_memtables: HashSet<u64>,
-    pub compacted_memtables: HashMap<u64, u64>,
-    pub removed_keys: HashSet<(u64, Vec<u8>)>,
-}
-
-/// ParallelRecoverContext only masks previous items, not current or future items.
-// TODO(MrCroxx): unit tests. A: del(a) B: put(a,1) => A&B: del(a) rignt?
-impl ParallelRecoverContext {
-    pub fn merge(&mut self, right: &mut Self) {
-        self.removed_memtables
-            .extend(right.removed_memtables.drain());
-        self.compacted_memtables
-            .extend(right.compacted_memtables.drain());
-        self.removed_keys.extend(right.removed_keys.drain());
     }
 }
 
@@ -253,76 +228,29 @@ where
 
         let global_stats = Arc::new(GlobalStats::default());
 
-        let (pipe_log, append_readables_with_ids, rewrite_readables_with_ids) = FilePipeLog::open(
+        let mut recover_manager = RecoverManager::new(
+            cfg.recovery_mode,
+            cfg.recovery_threads,
+            cfg.recovery_read_block_size.0 as usize,
+            global_stats.clone(),
+            |memtables, queue, file_id, mut item_batch| {
+                Self::apply_to_memtable(memtables, item_batch.drain(), queue, file_id)
+            },
+        );
+
+        let pipe_log = FilePipeLog::open(
             &cfg,
             match file_system {
                 Some(fs) => Some(fs.clone()),
                 None => None,
             },
             listeners.clone(),
+            &mut recover_manager,
         )?;
 
-        let recover_append_threads = if append_readables_with_ids.is_empty() {
-            0
-        } else {
-            std::cmp::max(
-                cfg.recovery_threads - 1,
-                std::cmp::min(
-                    1,
-                    append_readables_with_ids.len()
-                        / (append_readables_with_ids.len() + rewrite_readables_with_ids.len()),
-                ),
-            )
-        };
-        let recover_rewrite_threads = if rewrite_readables_with_ids.is_empty() {
-            0
-        } else {
-            cfg.recovery_threads - recover_append_threads
-        };
-
         let start = Instant::now();
-
-        let mut memtable_accessors: VecDeque<Result<MemTableAccessor>> = [
-            (
-                LogQueue::Append,
-                recover_append_threads,
-                Some(append_readables_with_ids),
-            ),
-            (
-                LogQueue::Rewrite,
-                recover_rewrite_threads,
-                Some(rewrite_readables_with_ids),
-            ),
-        ]
-        .par_iter_mut()
-        .map(|(queue, concurrency, recover_contexts)| {
-            Self::parallel_recover(
-                *concurrency,
-                cfg.recovery_read_block_size.0 as usize,
-                cfg.recovery_mode,
-                *queue,
-                recover_contexts.take().unwrap(),
-                global_stats.clone(),
-            )
-        })
-        .collect();
-        assert_eq!(memtable_accessors.len(), 2);
-        let memtables = memtable_accessors.pop_front().unwrap()?;
-        let rewrite_memtables = memtable_accessors.pop_front().unwrap()?;
+        let memtables = recover_manager.recover()?;
         info!("Recovering raft logs takes {:?}", start.elapsed());
-
-        let ids = memtables.cleaned_region_ids();
-        for slot in rewrite_memtables.slots.into_iter() {
-            for (id, raft_rewrite) in mem::take(&mut *slot.write()) {
-                if let Some(raft_append) = memtables.get(id) {
-                    raft_append
-                        .write()
-                        .merge_lower_prio(&mut *raft_rewrite.write());
-                } else if !ids.contains(&id) {
-                    memtables.insert(id, raft_rewrite);
-                }
-            }
-        }
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
@@ -342,122 +270,6 @@ where
             listeners,
             _phantom: PhantomData,
         })
-    }
-
-    fn parallel_recover(
-        concurrency: usize,
-        read_block_size: usize,
-        recovery_mode: RecoveryMode,
-        queue: LogQueue,
-        mut recover_contexts: Vec<RecoverContext>,
-        global_stats: Arc<GlobalStats>,
-    ) -> Result<MemTableAccessor> {
-        debug!(
-            "Recover queue: {:?}, total:{}, concurrency: {}.",
-            queue,
-            recover_contexts.len(),
-            concurrency
-        );
-        if concurrency == 0 {
-            debug!("Recover queue:{:?} finish.", queue);
-            return Ok(Self::new_memtables_and_parallel_recover_context(global_stats).0);
-        }
-        let files_per_thread = std::cmp::max(1, recover_contexts.len() / concurrency);
-        let chunks = recover_contexts.par_chunks_mut(files_per_thread);
-        let chunk_chount = chunks.len();
-        let (memtables, _) = chunks
-            .enumerate()
-            .map(|(index, chunk)| {
-                debug!("recover {} files in one thread: {:?}", chunk.len(), chunk);
-                Self::recover(
-                    read_block_size,
-                    queue,
-                    chunk,
-                    global_stats.clone(),
-                    recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
-                        && index == chunk_chount - 1,
-                )
-            })
-            .try_reduce(
-                || Self::new_memtables_and_parallel_recover_context(global_stats.clone()),
-                |left, right| {
-                    debug!("Reduce.");
-                    Ok(Self::merge(queue, left.0, right.0, left.1, right.1))
-                },
-            )?;
-        debug!("Recover queue:{:?} finish.", queue);
-        Ok(memtables)
-    }
-
-    fn recover(
-        read_block_size: usize,
-        queue: LogQueue,
-        recover_contexts: &mut [RecoverContext],
-        global_stats: Arc<GlobalStats>,
-        tolerate_tail_failure: bool,
-    ) -> Result<(MemTableAccessor, ParallelRecoverContext)> {
-        debug!("Recover files: {:?}.", recover_contexts);
-        let mut reader = LogItemBatchFileReader::new(read_block_size);
-        let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, global_stats.clone())
-        }));
-        let mut parallel_recover_context = ParallelRecoverContext::default();
-        let file_count = recover_contexts.len();
-        for (i, recover_context) in recover_contexts.iter_mut().enumerate() {
-            reader
-                .open(
-                    recover_context.file_reader.take().unwrap(),
-                    recover_context.file_size,
-                )
-                .unwrap();
-            loop {
-                match reader.next() {
-                    Ok(Some(mut item_batch)) => {
-                        item_batch.set_position(queue, recover_context.file_id, None);
-                        let mut context = item_batch.pick_parallel_recover_context();
-                        parallel_recover_context.merge(&mut context);
-                        Self::apply_to_memtable(
-                            &memtables,
-                            item_batch.drain(),
-                            queue,
-                            recover_context.file_id,
-                        );
-                    }
-                    Ok(None) => break,
-                    Err(e) if tolerate_tail_failure && i == file_count - 1 => {
-                        // TODO(MrCroxx): Or return an error?
-                        warn!("Raft log content is corrupted: {}", e);
-                        break;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        debug!("Recover files: {:?} finish.", recover_contexts);
-        Ok((memtables, parallel_recover_context))
-    }
-
-    fn new_memtables_and_parallel_recover_context(
-        global_stats: Arc<GlobalStats>,
-    ) -> (MemTableAccessor, ParallelRecoverContext) {
-        let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, global_stats.clone())
-        }));
-        let parallel_recover_context = ParallelRecoverContext::default();
-        (memtables, parallel_recover_context)
-    }
-
-    fn merge(
-        queue: LogQueue,
-        mut ml: MemTableAccessor,
-        mut mr: MemTableAccessor,
-        mut ctxl: ParallelRecoverContext,
-        mut ctxr: ParallelRecoverContext,
-    ) -> (MemTableAccessor, ParallelRecoverContext) {
-        ml.mask(&ctxr, queue);
-        ml.merge(&mut mr);
-        ctxl.merge(&mut ctxr);
-        (ml, ctxl)
     }
 }
 
