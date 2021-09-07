@@ -35,7 +35,7 @@ where
 {
     cfg: Arc<Config>,
     memtables: MemTableAccessor,
-    pipe_log: P,
+    pipe_log: Arc<P>,
     global_stats: Arc<GlobalStats>,
     listeners: Vec<Arc<dyn EventListener>>,
 
@@ -53,7 +53,7 @@ where
     pub fn new(
         cfg: Arc<Config>,
         memtables: MemTableAccessor,
-        pipe_log: P,
+        pipe_log: Arc<P>,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
     ) -> PurgeManager<M, P> {
@@ -237,7 +237,7 @@ where
             };
 
             for i in entry_indexes {
-                let entry = read_entry_from_file::<M, _>(&self.pipe_log, &i)?;
+                let entry = read_entry_from_file::<M, _>(self.pipe_log.as_ref(), &i)?;
                 total_size += entry.compute_size();
                 entries.push(entry);
             }

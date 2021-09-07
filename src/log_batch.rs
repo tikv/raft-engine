@@ -431,7 +431,7 @@ impl LogItemBatch {
 enum BufState {
     Uninitialized,
     EntriesFilled,
-    Sealed(usize),
+    Sealed(usize), // Contains offset of item batch
     Incomplete,
 }
 
@@ -499,7 +499,10 @@ impl LogBatch {
             self.buf.encode_u64(0)?;
             self.buf.encode_u64(0)?;
         } else if self.buf_state != BufState::EntriesFilled {
-            // return error
+            return Err(Error::Corruption(format!(
+                "Unexpected log batch buffer state: {:?}",
+                self.buf_state
+            )));
         } else {
             self.buf_state = BufState::Incomplete;
         }

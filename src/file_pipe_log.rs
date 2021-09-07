@@ -2,32 +2,32 @@
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write};
+use std::io::BufRead;
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use log::{info, warn};
+use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::{FromPrimitive, ToPrimitive};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
-use crate::file_system::{FileSystem, Readable, Writable};
+use crate::file_builder::FileBuilder;
 use crate::log_batch::{LogBatch, LogItemBatch};
-use crate::log_file::{LogFd, LogFile, LogFileHeader, LOG_FILE_MIN_HEADER_LEN};
+use crate::log_file::{LogFd, LogFile};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
 
-const LOG_SUFFIX: &str = ".raftlog";
 const LOG_NUM_LEN: usize = 16;
-const LOG_NAME_LEN: usize = LOG_NUM_LEN + LOG_SUFFIX.len();
-
-const REWRITE_SUFFIX: &str = ".rewrite";
-const REWRITE_NUM_LEN: usize = 8;
-const REWRITE_NAME_LEN: usize = REWRITE_NUM_LEN + REWRITE_SUFFIX.len();
+const LOG_APPEND_SUFFIX: &str = ".raftlog";
+const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 
 const INIT_FILE_ID: u64 = 1;
 
@@ -36,14 +36,32 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 fn build_file_name(queue: LogQueue, file_id: FileId) -> String {
     match queue {
-        LogQueue::Append => format!("{:0width$}{}", file_id, LOG_SUFFIX, width = LOG_NUM_LEN),
+        LogQueue::Append => format!(
+            "{:0width$}{}",
+            file_id,
+            LOG_APPEND_SUFFIX,
+            width = LOG_NUM_LEN
+        ),
         LogQueue::Rewrite => format!(
             "{:0width$}{}",
             file_id,
-            REWRITE_SUFFIX,
-            width = REWRITE_NUM_LEN
+            LOG_REWRITE_SUFFIX,
+            width = LOG_NUM_LEN
         ),
     }
+}
+
+fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
+    if file_name.len() > LOG_NUM_LEN {
+        if let Ok(num) = file_name[..LOG_NUM_LEN].parse::<u64>() {
+            if file_name.ends_with(LOG_APPEND_SUFFIX) {
+                return Ok((LogQueue::Append, num.into()));
+            } else if file_name.ends_with(LOG_REWRITE_SUFFIX) {
+                return Ok((LogQueue::Rewrite, num.into()));
+            }
+        }
+    }
+    Err(Error::ParseFileName(file_name.to_owned()))
 }
 
 fn build_file_path<P: AsRef<Path>>(dir: P, queue: LogQueue, file_id: FileId) -> PathBuf {
@@ -52,109 +70,147 @@ fn build_file_path<P: AsRef<Path>>(dir: P, queue: LogQueue, file_id: FileId) -> 
     path
 }
 
-fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
-    if file_name.ends_with(LOG_SUFFIX) && file_name.len() == LOG_NAME_LEN {
-        if let Ok(num) = file_name[..LOG_NUM_LEN].parse::<u64>() {
-            return Ok((LogQueue::Append, num.into()));
-        }
-    } else if file_name.ends_with(REWRITE_SUFFIX) && file_name.len() == REWRITE_NAME_LEN {
-        if let Ok(num) = file_name[..REWRITE_NUM_LEN].parse::<u64>() {
-            return Ok((LogQueue::Rewrite, num.into()));
-        }
-    }
-    Err(Error::ParseFileName(file_name.to_owned()))
+const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
+pub const LOG_FILE_HEADER_LEN: usize = LOG_FILE_MAGIC_HEADER.len() + Version::len();
+
+#[derive(Clone, Copy, FromPrimitive, ToPrimitive)]
+enum Version {
+    V1 = 1,
 }
 
-struct ActiveFile {
+impl Version {
+    const fn current() -> Self {
+        Self::V1
+    }
+
+    const fn len() -> usize {
+        8
+    }
+}
+
+pub struct LogFileHeader {}
+
+impl LogFileHeader {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn decode(buf: &mut &[u8]) -> Result<Self> {
+        if buf.len() < LOG_FILE_HEADER_LEN {
+            return Err(Error::Corruption("log file header too short".to_owned()));
+        }
+        if !buf.starts_with(LOG_FILE_MAGIC_HEADER) {
+            return Err(Error::Corruption(
+                "log file magic header mismatch".to_owned(),
+            ));
+        }
+        buf.consume(LOG_FILE_MAGIC_HEADER.len());
+        let v = codec::decode_u64(buf)?;
+        if Version::from_u64(v).is_none() {
+            return Err(Error::Corruption(format!(
+                "unrecognized log file version: {}",
+                v
+            )));
+        }
+        Ok(Self {})
+    }
+
+    pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
+        buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
+        buf.encode_u64(Version::current().to_u64().unwrap())?;
+        Ok(())
+    }
+}
+
+struct ActiveFile<W: Seek + Write> {
     fd: Arc<LogFd>,
-    writer: Box<dyn Writable>,
-    size: usize,
+    writer: W,
+    written: usize,
     capacity: usize,
     last_sync: usize,
 }
 
-impl ActiveFile {
-    fn open(fd: Arc<LogFd>, writer: Box<dyn Writable>, size: usize) -> Result<Self> {
-        let file_size = fd.file_size()?;
+impl<W: Seek + Write> ActiveFile<W> {
+    fn open(fd: Arc<LogFd>, writer: W, written: usize) -> Result<Self> {
+        let capacity = fd.file_size()?;
         let mut f = Self {
             fd,
             writer,
-            size,
-            capacity: file_size,
-            last_sync: size,
+            written,
+            capacity,
+            last_sync: written,
         };
-        if size < LOG_FILE_MIN_HEADER_LEN {
+        if written < LOG_FILE_HEADER_LEN {
             f.write_header()?;
         } else {
-            f.writer.seek(std::io::SeekFrom::Start(size as u64))?;
+            f.writer.seek(std::io::SeekFrom::Start(written as u64))?;
         }
         Ok(f)
     }
 
-    fn reset(&mut self, fd: Arc<LogFd>, writer: Box<dyn Writable>) -> Result<()> {
-        self.size = 0;
-        self.last_sync = 0;
+    fn rotate(&mut self, fd: Arc<LogFd>, writer: W) -> Result<()> {
+        self.writer = writer;
+        self.written = 0;
         self.capacity = fd.file_size()?;
         self.fd = fd;
-        self.writer = writer;
+        self.last_sync = 0;
         self.write_header()
     }
 
     fn truncate(&mut self) -> Result<()> {
-        self.fd.truncate(self.size)?;
+        self.fd.truncate(self.written)?;
         self.fd.sync()?;
-        self.capacity = self.size;
+        self.capacity = self.written;
         Ok(())
     }
 
     fn write_header(&mut self) -> Result<()> {
         self.writer.seek(std::io::SeekFrom::Start(0))?;
-        self.size = 0;
-        let mut buf = Vec::with_capacity(LOG_FILE_MIN_HEADER_LEN);
+        self.written = 0;
+        let mut buf = Vec::with_capacity(LOG_FILE_HEADER_LEN);
         LogFileHeader::new().encode(&mut buf)?;
-        self.write(&buf, true)?;
-        Ok(())
+        self.write(&buf, true)
     }
 
     fn write(&mut self, buf: &[u8], sync: bool) -> Result<()> {
-        if self.size + buf.len() > self.capacity {
+        if self.written + buf.len() > self.capacity {
             // Use fallocate to pre-allocate disk space for active file.
-            let alloc = std::cmp::max(self.size + buf.len() - self.capacity, FILE_ALLOCATE_SIZE);
+            let alloc = std::cmp::max(self.written + buf.len() - self.capacity, FILE_ALLOCATE_SIZE);
             self.fd.allocate(self.capacity, alloc)?;
             self.capacity += alloc;
         }
         self.writer.write_all(buf)?;
-        self.size += buf.len();
+        self.written += buf.len();
         if sync {
-            self.last_sync = self.size;
+            self.last_sync = self.written;
         }
         Ok(())
     }
 
     fn since_last_sync(&self) -> usize {
-        self.size - self.last_sync
+        self.written - self.last_sync
     }
 }
 
-struct LogManager {
+struct LogManager<B: FileBuilder> {
     queue: LogQueue,
     dir: String,
     rotate_size: usize,
     bytes_per_sync: usize,
-    file_system: Option<Arc<dyn FileSystem>>,
+    file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
 
     pub first_file_id: FileId,
     pub active_file_id: FileId,
 
     all_files: VecDeque<Arc<LogFd>>,
-    active_file: ActiveFile,
+    active_file: ActiveFile<B::Writer<LogFile>>,
 }
 
-impl LogManager {
+impl<B: FileBuilder> LogManager<B> {
     fn open<F>(
         cfg: &Config,
-        file_system: Option<Arc<dyn FileSystem>>,
+        file_builder: Arc<B>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut min_file_id: FileId,
@@ -164,7 +220,9 @@ impl LogManager {
     where
         F: Fn(LogQueue, FileId, LogItemBatch),
     {
-        let mut reader = LogItemBatchFileReader::new(cfg.recovery_read_block_size.0 as usize);
+        let mut reader = LogItemBatchFileReader::<B::Reader<LogFile>>::new(
+            cfg.recovery_read_block_size.0 as usize,
+        );
         let mut all_files = VecDeque::with_capacity(DEFAULT_FILES_COUNT);
         if max_file_id.valid() {
             assert!(min_file_id <= max_file_id);
@@ -180,12 +238,7 @@ impl LogManager {
                 let file_size = fd.file_size()?;
                 let tolerate_failure = file_id == max_file_id
                     && cfg.recovery_mode == RecoveryMode::TolerateCorruptedTailRecords;
-                let raw_file_reader = Box::new(LogFile::new(fd));
-                let file_reader = if let Some(ref fs) = file_system {
-                    fs.open_file_reader(&path, raw_file_reader as Box<dyn Readable>)?
-                } else {
-                    raw_file_reader
-                };
+                let file_reader = file_builder.build_reader(&path, LogFile::new(fd))?;
                 if let Err(e) = reader.open(file_reader, file_size) {
                     if !tolerate_failure {
                         return Err(Error::Corruption(format!("Unable to open log file: {}", e)));
@@ -224,17 +277,13 @@ impl LogManager {
         }
         let active_file_size = reader.valid_offset();
         let active_fd = all_files.back().unwrap().clone();
-        let raw_writer = Box::new(LogFile::new(active_fd.clone()));
         let active_file = ActiveFile::open(
-            active_fd,
-            if let Some(ref fs) = file_system {
-                fs.open_file_writer(
-                    &build_file_path(&cfg.dir, queue, max_file_id),
-                    raw_writer as Box<dyn Writable>,
-                )?
-            } else {
-                raw_writer
-            },
+            active_fd.clone(),
+            file_builder.build_writer(
+                &build_file_path(&cfg.dir, queue, max_file_id),
+                LogFile::new(active_fd),
+                false, /*create*/
+            )?,
             active_file_size,
         )?;
 
@@ -243,7 +292,7 @@ impl LogManager {
             dir: cfg.dir.clone(),
             rotate_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
-            file_system,
+            file_builder,
             listeners,
 
             first_file_id: min_file_id,
@@ -258,7 +307,7 @@ impl LogManager {
 
     fn new_log_file(&mut self) -> Result<()> {
         if self.active_file_id.valid() {
-            self.truncate_active_log()?;
+            // self.truncate_active_log()?;
         }
         self.active_file_id = if self.active_file_id.valid() {
             self.active_file_id.forward(1)
@@ -269,16 +318,10 @@ impl LogManager {
         let path = build_file_path(&self.dir, self.queue, self.active_file_id);
         let fd = Arc::new(LogFd::create(&path)?);
         self.all_files.push_back(fd.clone());
-
-        let raw_writer = Box::new(LogFile::new(fd.clone()));
-        self.active_file.reset(
-            fd,
-            if let Some(ref fs) = self.file_system {
-                fs.open_file_writer(&path, raw_writer as Box<dyn Writable>)
-                    .unwrap()
-            } else {
-                raw_writer
-            },
+        self.active_file.rotate(
+            fd.clone(),
+            self.file_builder
+                .build_writer(&path, LogFile::new(fd), true /*create*/)?,
         )?;
         self.sync_dir()?;
 
@@ -327,13 +370,13 @@ impl LogManager {
     }
 
     fn append(&mut self, content: &[u8], sync: &mut bool) -> Result<(FileId, u64, Arc<LogFd>)> {
-        if self.active_file.size >= self.rotate_size {
+        if self.active_file.written >= self.rotate_size {
             self.new_log_file()?;
         }
         if self.active_file.since_last_sync() >= self.bytes_per_sync {
             *sync = true;
         }
-        let offset = self.active_file.size as u64;
+        let offset = self.active_file.written as u64;
         self.active_file.write(content, *sync)?;
         Ok((self.active_file_id, offset, self.active_file.fd.clone()))
     }
@@ -347,29 +390,29 @@ impl LogManager {
 
     fn size(&self) -> usize {
         self.active_file_id.step_after(&self.first_file_id).unwrap() * self.rotate_size
-            + self.active_file.size
+            + self.active_file.written
     }
 }
 
 #[derive(Clone)]
-pub struct FilePipeLog {
+pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
     rotate_size: usize,
     compression_threshold: usize,
 
-    appender: Arc<RwLock<LogManager>>,
-    rewriter: Arc<RwLock<LogManager>>,
-    file_system: Option<Arc<dyn FileSystem>>,
+    appender: Arc<RwLock<LogManager<B>>>,
+    rewriter: Arc<RwLock<LogManager<B>>>,
+    file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
 }
 
-impl FilePipeLog {
+impl<B: FileBuilder> FilePipeLog<B> {
     pub fn open<F>(
         cfg: &Config,
-        file_system: Option<Arc<dyn FileSystem>>,
+        file_builder: Arc<B>,
         listeners: Vec<Arc<dyn EventListener>>,
         replay: F,
-    ) -> Result<FilePipeLog>
+    ) -> Result<FilePipeLog<B>>
     where
         F: Fn(LogQueue, FileId, LogItemBatch),
     {
@@ -402,7 +445,7 @@ impl FilePipeLog {
 
         let appender = Arc::new(RwLock::new(LogManager::open(
             cfg,
-            file_system.clone(),
+            file_builder.clone(),
             listeners.clone(),
             LogQueue::Append,
             min_append_id,
@@ -411,7 +454,7 @@ impl FilePipeLog {
         )?));
         let rewriter = Arc::new(RwLock::new(LogManager::open(
             cfg,
-            file_system.clone(),
+            file_builder.clone(),
             listeners.clone(),
             LogQueue::Rewrite,
             min_rewrite_id,
@@ -425,7 +468,7 @@ impl FilePipeLog {
             compression_threshold: cfg.batch_compression_threshold.0 as usize,
             appender,
             rewriter,
-            file_system,
+            file_builder,
             listeners,
         })
     }
@@ -441,20 +484,22 @@ impl FilePipeLog {
             listener.on_append_log_file(queue, file_id, content.len());
         }
         if *sync {
+            let start = Instant::now();
             fd.sync()?;
+            LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
         }
 
         Ok((file_id, offset))
     }
 
-    fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager> {
+    fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager<B>> {
         match queue {
             LogQueue::Append => self.appender.read(),
             LogQueue::Rewrite => self.rewriter.read(),
         }
     }
 
-    fn mut_queue(&self, queue: LogQueue) -> RwLockWriteGuard<LogManager> {
+    fn mut_queue(&self, queue: LogQueue) -> RwLockWriteGuard<LogManager<B>> {
         match queue {
             LogQueue::Append => self.appender.write(),
             LogQueue::Rewrite => self.rewriter.write(),
@@ -462,7 +507,7 @@ impl FilePipeLog {
     }
 }
 
-impl PipeLog for FilePipeLog {
+impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
     fn close(&self) -> Result<()> {
         self.mut_queue(LogQueue::Rewrite).truncate_active_log()?;
         self.mut_queue(LogQueue::Append).truncate_active_log()
@@ -486,12 +531,10 @@ impl PipeLog for FilePipeLog {
         len: u64,
     ) -> Result<Vec<u8>> {
         let fd = self.get_queue(queue).get_fd(file_id)?;
-        let raw_reader = Box::new(LogFile::new(fd));
-        let mut reader = if let Some(ref fs) = self.file_system {
-            fs.open_file_reader(&build_file_path(&self.dir, queue, file_id), raw_reader)?
-        } else {
-            raw_reader
-        };
+        let mut reader = self.file_builder.build_reader(
+            &build_file_path(&self.dir, queue, file_id),
+            LogFile::new(fd),
+        )?;
         reader.seek(std::io::SeekFrom::Start(offset))?;
         let mut buf = vec![0; len as usize];
         let size = reader.read(&mut buf)?;
@@ -564,8 +607,7 @@ impl PipeLog for FilePipeLog {
 
         let mut cur_file_id = file_id.backward(purge_count);
         for i in 0..purge_count {
-            let mut path = PathBuf::from(&self.dir);
-            path.push(build_file_name(queue, cur_file_id));
+            let path = build_file_path(&self.dir, queue, cur_file_id);
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} fail: {}", path, e);
                 return Ok(i);
@@ -581,15 +623,20 @@ mod tests {
     use tempfile::Builder;
 
     use super::*;
+    use crate::file_builder::DefaultFileBuilder;
     use crate::util::ReadableSize;
 
-    fn new_test_pipe_log(path: &str, bytes_per_sync: usize, rotate_size: usize) -> FilePipeLog {
+    fn new_test_pipe_log(
+        path: &str,
+        bytes_per_sync: usize,
+        rotate_size: usize,
+    ) -> FilePipeLog<DefaultFileBuilder> {
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        FilePipeLog::open(&cfg, None, vec![], |_, _, _| {}).unwrap()
+        FilePipeLog::open(&cfg, Arc::new(DefaultFileBuilder {}), vec![], |_, _, _| {}).unwrap()
     }
 
     #[test]
@@ -601,7 +648,7 @@ mod tests {
         );
         assert_eq!(build_file_name(LogQueue::Append, 123.into()), file_name);
 
-        let file_name: &str = "00000123.rewrite";
+        let file_name: &str = "0000000000000123.rewrite";
         assert_eq!(
             parse_file_name(file_name).unwrap(),
             (LogQueue::Rewrite, 123.into())
@@ -623,7 +670,7 @@ mod tests {
         assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_ID.into());
         assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_ID.into());
 
-        let header_size = LOG_FILE_MIN_HEADER_LEN as u64;
+        let header_size = LOG_FILE_HEADER_LEN as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
