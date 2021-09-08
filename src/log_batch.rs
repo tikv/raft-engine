@@ -656,6 +656,7 @@ mod tests {
 
     use crate::test_util::{generate_entries, generate_entry_indexes};
     use raft::eraftpb::Entry;
+    use rand::{thread_rng, Rng};
 
     fn decode_entries_from_bytes<M: MessageExt>(
         buf: &[u8],
@@ -795,5 +796,26 @@ mod tests {
                 assert_eq!(origin_entries, decoded_entries);
             }
         }
+    }
+
+    #[bench]
+    fn bench_log_batch_add_entry_and_encode(b: &mut test::Bencher) {
+        fn details(log_batch: &mut LogBatch, entries: &Vec<Entry>, regions: usize) {
+            for _ in 0..regions {
+                log_batch
+                    .add_entries::<Entry>(thread_rng().gen(), entries.clone())
+                    .unwrap();
+            }
+            log_batch.encoded_bytes(1).unwrap();
+            let _ = log_batch.drain();
+        }
+        let data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
+        let entries = generate_entries(1, 10, Some(data));
+        let mut log_batch = LogBatch::default();
+        // warm up
+        details(&mut log_batch, &entries, 100);
+        b.iter(move || {
+            details(&mut log_batch, &entries, 100);
+        });
     }
 }
