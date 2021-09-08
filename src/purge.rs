@@ -241,7 +241,7 @@ where
                 total_size += entry.compute_size();
                 entries.push(entry);
             }
-            log_batch.add_entries::<M>(region_id, entries)?;
+            log_batch.add_entries::<M>(region_id, &entries)?;
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }

@@ -230,7 +230,7 @@ fn spawn_write(
                     let last = engine.last_index(rid).unwrap_or(0);
                     let entries = prepare_entries(&entry_batch, last + 1);
                     log_batch
-                        .add_entries::<MessageExtTyped>(rid, entries)
+                        .add_entries::<MessageExtTyped>(rid, &entries)
                         .unwrap();
                     if args.compact_count > 0 && last - first + 1 > args.compact_count {
                         log_batch.add_command(

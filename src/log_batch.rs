@@ -503,17 +503,17 @@ impl LogBatch {
     pub fn add_entries<M: MessageExt>(
         &mut self,
         region_id: u64,
-        mut entries: Vec<M::Entry>,
+        entries: &[M::Entry],
     ) -> Result<()> {
         debug_assert!(self.buf_state == BufState::Open);
 
         let mut entry_indexes = Vec::with_capacity(entries.len());
         self.buf_state = BufState::Incomplete;
-        for e in entries.drain(..) {
+        for e in entries {
             let buf_offset = self.buf.len();
             e.write_to_vec(&mut self.buf)?;
             entry_indexes.push(EntryIndex {
-                index: M::index(&e),
+                index: M::index(e),
                 entry_offset: (buf_offset - LOG_BATCH_HEADER_LEN) as u64,
                 entry_len: self.buf.len() - buf_offset,
                 ..Default::default()
@@ -760,7 +760,7 @@ mod tests {
         batch
             .add_entries::<Entry>(
                 region_id,
-                generate_entries(1, 10, Some(vec![b'x'; 1024].into())),
+                &generate_entries(1, 10, Some(vec![b'x'; 1024].into())),
             )
             .unwrap();
         batch.add_command(region_id, Command::Clean);
@@ -769,7 +769,7 @@ mod tests {
         batch
             .add_entries::<Entry>(
                 region_id,
-                generate_entries(1, 10, Some(vec![b'x'; 1024].into())),
+                &generate_entries(1, 10, Some(vec![b'x'; 1024].into())),
             )
             .unwrap();
 
@@ -803,7 +803,7 @@ mod tests {
         fn details(log_batch: &mut LogBatch, entries: &Vec<Entry>, regions: usize) {
             for _ in 0..regions {
                 log_batch
-                    .add_entries::<Entry>(thread_rng().gen(), entries.clone())
+                    .add_entries::<Entry>(thread_rng().gen(), entries)
                     .unwrap();
             }
             log_batch.encoded_bytes(1).unwrap();
