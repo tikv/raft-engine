@@ -269,54 +269,53 @@ where
         }
 
         let (file_id, bytes) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
-        if file_id.valid() {
-            let queue = LogQueue::Rewrite;
-            for item in log_batch.drain() {
-                let raft = item.raft_group_id;
-                let memtable = self.memtables.get_or_insert(raft);
-                match item.content {
-                    LogItemContent::EntriesIndex(entries_to_add) => {
-                        let entries_index = entries_to_add.0;
+        debug_assert!(file_id.valid());
+        let queue = LogQueue::Rewrite;
+        for item in log_batch.drain() {
+            let raft = item.raft_group_id;
+            let memtable = self.memtables.get_or_insert(raft);
+            match item.content {
+                LogItemContent::EntriesIndex(entries_to_add) => {
+                    let entries_index = entries_to_add.0;
+                    debug!(
+                        "{} append to {:?}.{}, Entries[{:?}:{:?})",
+                        raft,
+                        queue,
+                        file_id,
+                        entries_index.first().map(|x| x.index),
+                        entries_index.last().map(|x| x.index + 1),
+                    );
+                    memtable.write().rewrite(entries_index, rewrite_watermark);
+                }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => {
+                        let key = kv.key;
                         debug!(
-                            "{} append to {:?}.{}, Entries[{:?}:{:?})",
+                            "{} append to {:?}.{}, Put({})",
                             raft,
                             queue,
                             file_id,
-                            entries_index.first().map(|x| x.index),
-                            entries_index.last().map(|x| x.index + 1),
+                            hex::encode(&key),
                         );
-                        memtable.write().rewrite(entries_index, rewrite_watermark);
-                    }
-                    LogItemContent::Kv(kv) => match kv.op_type {
-                        OpType::Put => {
-                            let key = kv.key;
-                            debug!(
-                                "{} append to {:?}.{}, Put({})",
-                                raft,
-                                queue,
-                                file_id,
-                                hex::encode(&key),
-                            );
-                            memtable
-                                .write()
-                                .rewrite_key(key, rewrite_watermark, file_id);
-                        }
-                        _ => unreachable!(),
-                    },
-                    LogItemContent::Command(Command::Clean) => {
-                        debug!("{} append to {:?}.{}, Clean", raft, queue, file_id);
+                        memtable
+                            .write()
+                            .rewrite_key(key, rewrite_watermark, file_id);
                     }
                     _ => unreachable!(),
+                },
+                LogItemContent::Command(Command::Clean) => {
+                    debug!("{} append to {:?}.{}, Clean", raft, queue, file_id);
                 }
+                _ => unreachable!(),
             }
-            for listener in &self.listeners {
-                listener.post_apply_memtables(LogQueue::Rewrite, file_id);
-            }
-            if rewrite_watermark.is_none() {
-                BACKGROUND_REWRITE_BYTES.rewrite.inc_by(bytes as u64);
-            } else {
-                BACKGROUND_REWRITE_BYTES.append.inc_by(bytes as u64);
-            }
+        }
+        for listener in &self.listeners {
+            listener.post_apply_memtables(LogQueue::Rewrite, file_id);
+        }
+        if rewrite_watermark.is_none() {
+            BACKGROUND_REWRITE_BYTES.rewrite.inc_by(bytes as u64);
+        } else {
+            BACKGROUND_REWRITE_BYTES.append.inc_by(bytes as u64);
         }
         Ok(())
     }

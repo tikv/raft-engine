@@ -312,16 +312,15 @@ where
             0
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
-            if file_id.valid() {
-                Self::apply_to_memtable(
-                    &self.memtables,
-                    log_batch.drain(),
-                    LogQueue::Append,
-                    file_id,
-                );
-                for listener in &self.listeners {
-                    listener.post_apply_memtables(LogQueue::Append, file_id);
-                }
+            debug_assert!(file_id.valid());
+            Self::apply_to_memtable(
+                &self.memtables,
+                log_batch.drain(),
+                LogQueue::Append,
+                file_id,
+            );
+            for listener in &self.listeners {
+                listener.post_apply_memtables(LogQueue::Append, file_id);
             }
             bytes
         };
