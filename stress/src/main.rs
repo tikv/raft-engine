@@ -610,7 +610,7 @@ fn main() {
     if let Some(s) = matches.value_of("reuse_data") {
         if !s.parse::<bool>().unwrap() {
             // clean up existing log files
-            std::fs::remove_dir_all(&config.dir).unwrap();
+            let _ = std::fs::remove_dir_all(&config.dir);
         }
     }
     args.validate().unwrap();
