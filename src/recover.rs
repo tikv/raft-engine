@@ -37,7 +37,6 @@ pub struct ParallelRecoverContext {
 }
 
 /// ParallelRecoverContext only masks previous items, not current or future items.
-// TODO(MrCroxx): unit tests. A: del(a) B: put(a,1) => A&B: del(a) rignt?
 impl ParallelRecoverContext {
     pub fn merge(&mut self, right: &mut Self) {
         self.removed_memtables
@@ -229,9 +228,11 @@ where
             })
             .try_reduce(
                 || Self::new_memtables_and_parallel_recover_context(global_stats.clone()),
-                |left, right| {
-                    debug!("Reduce.");
-                    Ok(Self::merge(queue, left.0, right.0, left.1, right.1))
+                |(mut ml, mut ctxl), (mut mr, mut ctxr)| {
+                    ml.mask(&ctxr, queue);
+                    ml.merge(&mut mr);
+                    ctxl.merge(&mut ctxr);
+                    Ok((ml, ctxl))
                 },
             )?;
         debug!("Recover queue:{:?} finish.", queue);
@@ -289,18 +290,5 @@ where
         }));
         let parallel_recover_context = ParallelRecoverContext::default();
         (memtables, parallel_recover_context)
-    }
-
-    fn merge(
-        queue: LogQueue,
-        mut ml: MemTableAccessor,
-        mut mr: MemTableAccessor,
-        mut ctxl: ParallelRecoverContext,
-        mut ctxr: ParallelRecoverContext,
-    ) -> (MemTableAccessor, ParallelRecoverContext) {
-        ml.mask(&ctxr, queue);
-        ml.merge(&mut mr);
-        ctxl.merge(&mut ctxr);
-        (ml, ctxl)
     }
 }

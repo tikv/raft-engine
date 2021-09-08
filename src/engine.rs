@@ -147,6 +147,7 @@ impl MemTableAccessor {
         }
     }
 
+    /// Merge memtables from the next right one during segmented recovery.
     pub fn merge(&mut self, rhs: &mut Self) {
         for slot in rhs.slots.iter_mut() {
             for (raft_group_id, memtable) in slot.write().drain() {
@@ -158,6 +159,7 @@ impl MemTableAccessor {
     }
 
     pub fn drain(&mut self) -> Vec<(u64, Arc<RwLock<MemTable>>)> {
+        self.removed_memtables.lock().clear();
         let mut memtables_with_ids = vec![];
         for slot in self.slots.drain(..) {
             for (raft_group_id, memtable) in slot.write().drain() {
