@@ -95,7 +95,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
             });
             *indexes.get_mut(&region_id).unwrap() = index;
             batch
-                .add_entries::<MessageExtTyped>(region_id, entries)
+                .add_entries::<MessageExtTyped>(region_id, &entries)
                 .unwrap();
         }
         engine.write(&mut batch, false).unwrap();

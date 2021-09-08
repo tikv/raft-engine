@@ -312,16 +312,15 @@ where
             0
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
-            if file_id.valid() {
-                Self::apply_to_memtable(
-                    &self.memtables,
-                    log_batch.drain(),
-                    LogQueue::Append,
-                    file_id,
-                );
-                for listener in &self.listeners {
-                    listener.post_apply_memtables(LogQueue::Append, file_id);
-                }
+            debug_assert!(file_id.valid());
+            Self::apply_to_memtable(
+                &self.memtables,
+                log_batch.drain(),
+                LogQueue::Append,
+                file_id,
+            );
+            for listener in &self.listeners {
+                listener.post_apply_memtables(LogQueue::Append, file_id);
             }
             bytes
         };
@@ -467,7 +466,7 @@ mod tests {
 
     type RaftLogEngine = Engine<Entry, FilePipeLog>;
     impl RaftLogEngine {
-        fn append(&self, raft_group_id: u64, entries: Vec<Entry>) -> Result<usize> {
+        fn append(&self, raft_group_id: u64, entries: &Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
             batch.add_entries::<Entry>(raft_group_id, entries)?;
             self.write(&mut batch, false)
@@ -477,7 +476,7 @@ mod tests {
     fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
         let mut log_batch = LogBatch::default();
         log_batch
-            .add_entries::<Entry>(raft, vec![entry.clone()])
+            .add_entries::<Entry>(raft, &vec![entry.clone()])
             .unwrap();
         log_batch
             .put_message(
@@ -540,9 +539,9 @@ mod tests {
             entry.set_data(vec![b'x'; entry_size].into());
             for i in 10..20 {
                 entry.set_index(i);
-                engine.append(i, vec![entry.clone()]).unwrap();
+                engine.append(i, &vec![entry.clone()]).unwrap();
                 entry.set_index(i + 1);
-                engine.append(i, vec![entry.clone()]).unwrap();
+                engine.append(i, &vec![entry.clone()]).unwrap();
             }
 
             for i in 10..20 {
