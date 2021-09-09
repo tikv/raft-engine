@@ -237,63 +237,72 @@ pub fn crc32(data: &[u8]) -> u32 {
 pub mod lz4 {
     use std::{i32, ptr};
 
-    pub fn encode_block(src: &[u8], head_reserve: usize, tail_alloc: usize) -> Vec<u8> {
-        unsafe {
-            let bound = lz4_sys::LZ4_compressBound(src.len() as i32);
-            assert!(bound > 0 && src.len() <= i32::MAX as usize);
+    /// Compress content in `buf[skip..]`, and append output to `buf`.
+    pub fn append_encode_block(buf: &mut Vec<u8>, skip: usize) {
+        let buf_len = buf.len();
+        let content_len = buf_len - skip;
+        if content_len > 0 {
+            assert!(content_len <= i32::MAX as usize);
+            unsafe {
+                let bound = lz4_sys::LZ4_compressBound(content_len as i32);
+                assert!(bound > 0);
 
-            // Layout: { header | decoded_len | content | checksum }.
-            let capacity = head_reserve + 4 + bound as usize + tail_alloc;
-            let mut output: Vec<u8> = Vec::with_capacity(capacity);
+                // Layout: { decoded_len | content }
+                buf.reserve(buf_len + 4 + bound as usize);
+                let buf_ptr = buf.as_mut_ptr();
 
-            let le_len = src.len().to_le_bytes();
-            ptr::copy_nonoverlapping(le_len.as_ptr(), output.as_mut_ptr().add(head_reserve), 4);
+                let le_len = content_len.to_le_bytes();
+                ptr::copy_nonoverlapping(le_len.as_ptr(), buf_ptr.add(buf_len), 4);
 
-            let size = lz4_sys::LZ4_compress_default(
-                src.as_ptr() as _,
-                output.as_mut_ptr().add(head_reserve + 4) as _,
-                src.len() as i32,
-                bound,
-            );
-            assert!(size > 0);
-            output.set_len(head_reserve + 4 + size as usize);
-            output
+                let compressed = lz4_sys::LZ4_compress_default(
+                    buf_ptr.add(skip) as _,
+                    buf_ptr.add(buf_len + 4) as _,
+                    content_len as i32,
+                    bound,
+                );
+                assert!(compressed > 0);
+                buf.set_len(buf_len + 4 + compressed as usize);
+            }
         }
     }
 
     pub fn decode_block(src: &[u8]) -> Vec<u8> {
-        assert!(src.len() > 4, "data is too short: {} <= 4", src.len());
-        unsafe {
-            let len = u32::from_le(ptr::read_unaligned(src.as_ptr() as *const u32));
-            let mut dst = Vec::with_capacity(len as usize);
-            let l = lz4_sys::LZ4_decompress_safe(
-                src.as_ptr().add(4) as _,
-                dst.as_mut_ptr() as _,
-                src.len() as i32 - 4,
-                dst.capacity() as i32,
-            );
-            if l == len as i32 {
-                dst.set_len(l as usize);
-                return dst;
+        if src.len() > 4 {
+            unsafe {
+                let len = u32::from_le(ptr::read_unaligned(src.as_ptr() as *const u32));
+                let mut dst = Vec::with_capacity(len as usize);
+                let l = lz4_sys::LZ4_decompress_safe(
+                    src.as_ptr().add(4) as _,
+                    dst.as_mut_ptr() as _,
+                    src.len() as i32 - 4,
+                    dst.capacity() as i32,
+                );
+                if l == len as i32 {
+                    dst.set_len(l as usize);
+                    return dst;
+                }
+                if l < 0 {
+                    panic!("decompress failed: {}", l);
+                } else {
+                    panic!("length of decompress result not match {} != {}", len, l);
+                }
             }
-            if l < 0 {
-                panic!("decompress failed: {}", l);
-            } else {
-                panic!("length of decompress result not match {} != {}", len, l);
-            }
+        } else {
+            assert!(src.is_empty());
         }
+        Vec::new()
     }
 
     #[cfg(test)]
     mod tests {
         #[test]
         fn test_basic() {
-            let data: Vec<&'static [u8]> = vec![b"", b"123", b"12345678910"];
-            for d in data {
-                let compressed = super::encode_block(d, 0, 0);
-                assert!(compressed.len() > 4);
-                let res = super::decode_block(&compressed);
-                assert_eq!(res, d);
+            let vecs: Vec<Vec<u8>> = vec![b"".to_vec(), b"123".to_vec(), b"12345678910".to_vec()];
+            for mut vec in vecs.into_iter() {
+                let uncompressed_len = vec.len();
+                super::append_encode_block(&mut vec, 0);
+                let res = super::decode_block(&vec[uncompressed_len..]);
+                assert_eq!(res, vec[..uncompressed_len].to_owned());
             }
         }
     }

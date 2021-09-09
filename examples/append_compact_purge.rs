@@ -57,7 +57,7 @@ fn main() {
             let mut e = entry.clone();
             e.index = state.last_index + 1;
             batch
-                .add_entries::<MessageExtTyped>(region, vec![e; 1])
+                .add_entries::<MessageExtTyped>(region, &[e])
                 .unwrap();
             batch
                 .put_message(region, b"last_index".to_vec(), &state)
