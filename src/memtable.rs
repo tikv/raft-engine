@@ -477,16 +477,6 @@ impl MemTable {
 }
 
 #[cfg(test)]
-impl PartialEq for MemTable {
-    fn eq(&self, other: &Self) -> bool {
-        self.region_id == other.region_id
-            && self.entries_index == other.entries_index
-            && self.rewrite_count == other.rewrite_count
-            && self.kvs == other.kvs
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::generate_entry_indexes;

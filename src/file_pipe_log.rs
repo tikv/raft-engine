@@ -432,7 +432,7 @@ impl FilePipeLog {
             cfg.recovery_read_block_size.0 as usize,
             append_recover_contexts,
             rewrite_recover_contexts,
-            global_stats.clone(),
+            global_stats,
         )?;
 
         appender
@@ -619,12 +619,12 @@ impl FilePipeLog {
             LogQueue::Append => self.appender.read(),
             LogQueue::Rewrite => self.rewriter.read(),
         };
-        let fid = lm.first_file_id.clone();
+        let fid = lm.first_file_id;
         lm.all_files
             .clone()
             .drain(..)
             .map(|f| {
-                let item = (fid.clone(), f);
+                let item = (fid, f);
                 fid.forward(1);
                 item
             })
