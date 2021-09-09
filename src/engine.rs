@@ -161,7 +161,7 @@ impl MemTableAccessor {
             for (raft_group_id, memtable) in slot.write().drain() {
                 self.get_or_insert(raft_group_id)
                     .write()
-                    .merge(memtable.write().borrow_mut());
+                    .merge_newer_neighbor(memtable.write().borrow_mut());
             }
         }
     }
@@ -333,10 +333,7 @@ where
         let (pipe_log, mut append, mut rewrite) =
             FilePipeLog::open::<ParallelRecoverContext<M, FilePipeLog>>(
                 &cfg,
-                match file_system {
-                    Some(fs) => Some(fs.clone()),
-                    None => None,
-                },
+                file_system.clone(),
                 listeners.clone(),
                 global_stats.clone(),
             )?;

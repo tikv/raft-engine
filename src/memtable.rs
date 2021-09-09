@@ -300,9 +300,9 @@ impl MemTable {
         }
     }
 
-    /// Mrege from `rhs`, which is in the range right-continuous to this.
+    /// Mrege from newer neighbor `rhs`.
     /// Only called during parllel recovery.
-    pub fn merge(&mut self, rhs: &mut Self) {
+    pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         assert_eq!(self.region_id, rhs.region_id);
         if let (Some(last), Some(next)) = (self.entries_index.back(), rhs.entries_index.front()) {
             assert_eq!(last.index + 1, next.index);
