@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -121,6 +122,12 @@ impl ActiveFile {
         self.fd.sync()?;
         self.capacity = self.size;
         Ok(())
+    }
+
+    fn truncate_at(&mut self, size: usize) -> Result<()> {
+        assert!(size >= LOG_FILE_MIN_HEADER_LEN);
+        self.size = size;
+        self.truncate()
     }
 
     fn write_header(&mut self) -> Result<()> {
@@ -414,7 +421,12 @@ impl FilePipeLog {
             &mut rewrite_recover_contexts,
         )?));
 
-        let (append, rewrite) = Self::recover(
+        let (
+            append_sequential_replay_machine,
+            append_last_valid_offset,
+            rewrite_sequential_replay_machine,
+            rewrite_last_valid_offset,
+        ) = Self::recover(
             cfg.recovery_mode,
             cfg.recovery_threads,
             cfg.recovery_read_block_size.0 as usize,
@@ -422,6 +434,15 @@ impl FilePipeLog {
             rewrite_recover_contexts,
             global_stats.clone(),
         )?;
+
+        appender
+            .write()
+            .active_file
+            .truncate_at(append_last_valid_offset)?;
+        rewriter
+            .write()
+            .active_file
+            .truncate_at(rewrite_last_valid_offset)?;
 
         Ok((
             FilePipeLog {
@@ -433,8 +454,8 @@ impl FilePipeLog {
                 file_system,
                 listeners,
             },
-            append,
-            rewrite,
+            append_sequential_replay_machine,
+            rewrite_sequential_replay_machine,
         ))
     }
 
@@ -445,7 +466,7 @@ impl FilePipeLog {
         append_recover_contexts: Vec<RecoverContext>,
         rewrite_recover_contexts: Vec<RecoverContext>,
         global_stats: Arc<GlobalStats>,
-    ) -> Result<(S, S)>
+    ) -> Result<(S, usize, S, usize)>
     where
         S: SequentialReplayMachine,
     {
@@ -474,7 +495,7 @@ impl FilePipeLog {
             .build()
             .unwrap();
 
-        let mut ms: VecDeque<Result<S>> = pool.install(|| {
+        let mut ms: VecDeque<Result<(S, usize)>> = pool.install(|| {
             [
                 (
                     LogQueue::Append,
@@ -501,9 +522,14 @@ impl FilePipeLog {
             .collect()
         });
 
-        let append = ms.pop_front().unwrap()?;
-        let rewrite = ms.pop_front().unwrap()?;
-        Ok((append, rewrite))
+        let (append, append_last_valid_offset) = ms.pop_front().unwrap()?;
+        let (rewrite, rewrite_last_valid_offset) = ms.pop_front().unwrap()?;
+        Ok((
+            append,
+            append_last_valid_offset,
+            rewrite,
+            rewrite_last_valid_offset,
+        ))
     }
 
     fn recover_queue<S>(
@@ -513,7 +539,7 @@ impl FilePipeLog {
         queue: LogQueue,
         mut recover_contexts: Vec<RecoverContext>,
         global_stats: Arc<GlobalStats>,
-    ) -> Result<S>
+    ) -> Result<(S, usize)>
     where
         S: SequentialReplayMachine,
     {
@@ -525,19 +551,21 @@ impl FilePipeLog {
         );
         if concurrency == 0 {
             debug!("Recover queue:{:?} finish (nothing to recover).", queue);
-            return Ok(S::new(global_stats));
+            return Ok((S::new(global_stats), LOG_FILE_MIN_HEADER_LEN));
         }
         let chunk_size = std::cmp::max(1, recover_contexts.len() / concurrency);
         let chunks = recover_contexts.par_chunks_mut(chunk_size);
         let chunk_chount = chunks.len();
-        let m = chunks
+        let last_valid_offset = Arc::new(AtomicUsize::new(LOG_FILE_MIN_HEADER_LEN));
+        let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
                 debug!("Recover files: {:?}.", chunk);
                 let mut reader = LogItemBatchFileReader::new(read_block_size);
-                let mut m = S::new(global_stats.clone());
+                let mut sequential_replay_machine = S::new(global_stats.clone());
                 let file_count = chunk.len();
                 for (i, recover_context) in chunk.iter_mut().enumerate() {
+                    let is_last = index == chunk_chount - 1 && i == file_count - 1;
                     reader.open(
                         recover_context.file_reader.take().unwrap(),
                         recover_context.file_size,
@@ -546,13 +574,16 @@ impl FilePipeLog {
                         match reader.next() {
                             Ok(Some(mut item_batch)) => {
                                 item_batch.set_position(queue, recover_context.file_id, None);
-                                m.replay(item_batch, queue, recover_context.file_id)?;
+                                sequential_replay_machine.replay(
+                                    item_batch,
+                                    queue,
+                                    recover_context.file_id,
+                                )?;
                             }
                             Ok(None) => break,
                             Err(e)
                                 if recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
-                                    && index == chunk_chount - 1
-                                    && i == file_count - 1 =>
+                                    && is_last =>
                             {
                                 warn!("The tail of raft log is corrupted but ignored: {}", e);
                                 break;
@@ -560,19 +591,26 @@ impl FilePipeLog {
                             Err(e) => return Err(e),
                         }
                     }
+                    if is_last {
+                        last_valid_offset
+                            .store(reader.valid_offset(), std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 debug!("Recover queue:{:?} finish.", queue);
-                Ok(m)
+                Ok(sequential_replay_machine)
             })
             .try_reduce(
                 || S::new(global_stats.clone()),
-                |mut ml, mr| {
-                    ml.merge(mr, queue)?;
-                    Ok(ml)
+                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
+                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
+                    Ok(sequential_replay_machine_left)
                 },
             )?;
         debug!("Recover files: {:?} finish.", recover_contexts);
-        Ok(m)
+        Ok((
+            sequential_replay_machine,
+            last_valid_offset.load(std::sync::atomic::Ordering::Relaxed),
+        ))
     }
 
     pub fn get_files_with_ids(&self, queue: LogQueue) -> Vec<(FileId, Arc<LogFd>)> {

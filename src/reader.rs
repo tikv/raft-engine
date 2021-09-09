@@ -113,4 +113,8 @@ impl LogItemBatchFileReader {
             Ok(&self.buffer[offset - self.buffer_offset..offset - self.buffer_offset + size])
         }
     }
+
+    pub fn valid_offset(&self) -> usize {
+        self.valid_offset
+    }
 }
