@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
+const MIN_RECOVERY_THREADS: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -32,7 +33,7 @@ pub struct Config {
 
     /// Read block size for recovery. Default value: "4KB". Min value: "512B".
     pub recovery_read_block_size: ReadableSize,
-    /// Parallel recovery concurrency. Default value: "8".
+    /// Parallel recovery concurrency. Default value: "8". Min value: "1".
     pub recovery_threads: usize,
 }
 
@@ -65,6 +66,9 @@ impl Config {
                 "recovery_read_block_size < {}",
                 MIN_RECOVERY_READ_BLOCK_SIZE
             ));
+        }
+        if self.recovery_threads < MIN_RECOVERY_THREADS {
+            return Err(box_err!("recovery_threads < {}", MIN_RECOVERY_THREADS));
         }
         Ok(())
     }

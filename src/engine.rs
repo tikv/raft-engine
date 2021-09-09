@@ -167,29 +167,6 @@ impl MemTableAccessor {
     }
 }
 
-#[cfg(test)]
-impl PartialEq for MemTableAccessor {
-    fn eq(&self, other: &Self) -> bool {
-        for i in 0..SLOTS_COUNT {
-            let slot = self.slots[i].read();
-            let slot_other = other.slots[i].read();
-            if slot.len() != slot_other.len() {
-                return false;
-            }
-            for (k, memtable) in slot.iter() {
-                if let Some(memtable_other) = slot_other.get(k) {
-                    if *memtable.read() != *memtable_other.read() {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-        }
-        *self.removed_memtables.lock() == *other.removed_memtables.lock()
-    }
-}
-
 struct ParallelRecoverContext<M, P>
 where
     M: MessageExt + Clone,
@@ -581,20 +558,6 @@ where
             v
         })
     }
-
-    #[cfg(test)]
-    pub fn take_memtables(&mut self) -> MemTableAccessor {
-        let mut memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, Arc::new(GlobalStats::default()))
-        }));
-        std::mem::swap(&mut self.memtables, &mut memtables);
-        memtables
-    }
-
-    #[cfg(test)]
-    pub fn compare_memtables(&self, memtables: &MemTableAccessor) -> bool {
-        self.memtables == *memtables
-    }
 }
 
 pub fn read_entry_from_file<M, P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<M::Entry>
@@ -847,10 +810,16 @@ mod tests {
         }
 
         // Recover with rewrite queue and append queue.
-        let memtables = engine.take_memtables();
+        let mut memtables = MemTableAccessor::new(Arc::new(move |raft_group_id| {
+            MemTable::new(raft_group_id, Arc::new(GlobalStats::default()))
+        }));
+        std::mem::swap(&mut engine.memtables, &mut memtables);
         drop(engine);
         let engine = RaftLogEngine::open(cfg.clone(), None).unwrap();
-        assert!(engine.compare_memtables(&memtables));
+        assert_eq!(
+            engine.memtables.cleaned_region_ids(),
+            memtables.cleaned_region_ids()
+        );
         for i in 1..=10 {
             for j in 1..=10 {
                 let e = engine.get_entry(j, i).unwrap().unwrap();

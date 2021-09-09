@@ -470,22 +470,23 @@ impl FilePipeLog {
     where
         S: SequentialReplayMachine,
     {
+        let concurrency = std::cmp::max(2, threads);
         let (append_recover_concurrency, rewrite_recover_concurrency) = match (
             append_recover_contexts.len(),
             rewrite_recover_contexts.len(),
         ) {
             (0, 0) => (0, 0),
-            (0, _) => (0, threads),
-            (_, 0) => (threads, 0),
+            (0, _) => (0, concurrency),
+            (_, 0) => (concurrency, 0),
             (append_recover_count, rewrite_recover_count) => {
                 let recover_append_concurrency = std::cmp::max(
-                    threads - 1,
+                    concurrency - 1,
                     std::cmp::min(
                         1,
                         append_recover_count / (append_recover_count + rewrite_recover_count),
                     ),
                 );
-                let recover_rewrite_concurrency = threads - recover_append_concurrency;
+                let recover_rewrite_concurrency = concurrency - recover_append_concurrency;
                 (recover_append_concurrency, recover_rewrite_concurrency)
             }
         };
