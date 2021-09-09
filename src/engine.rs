@@ -16,12 +16,13 @@ use crate::config::Config;
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::FilePipeLog;
 use crate::file_system::FileSystem;
-use crate::log_batch::{Command, LogBatch, LogItemContent, LogItemDrain, MessageExt, OpType};
+use crate::log_batch::{
+    Command, KeyValue, LogBatch, LogItemBatch, LogItemContent, LogItemDrain, MessageExt, OpType,
+};
 use crate::memtable::{EntryIndex, MemTable};
 use crate::metrics::*;
-use crate::pipe_log::{FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::recover::{ParallelRecoverContext, RecoverManager};
 use crate::util::{HashMap, InstantExt};
 use crate::{GlobalStats, Result};
 
@@ -131,7 +132,14 @@ impl MemTableAccessor {
     }
 
     /// Remove contents that are deleted by coming operations.
-    pub fn mask(&mut self, parallel_recover_context: &ParallelRecoverContext, queue: LogQueue) {
+    fn mask<M, P>(
+        &mut self,
+        parallel_recover_context: &ParallelRecoverContext<M, P>,
+        queue: LogQueue,
+    ) where
+        M: MessageExt + Clone,
+        P: PipeLog,
+    {
         for raft_group_id in parallel_recover_context.removed_memtables.iter() {
             self.remove(*raft_group_id, queue, FileId::default());
         }
@@ -157,17 +165,6 @@ impl MemTableAccessor {
             }
         }
     }
-
-    pub fn drain(&mut self) -> Vec<(u64, Arc<RwLock<MemTable>>)> {
-        self.removed_memtables.lock().clear();
-        let mut memtables_with_ids = vec![];
-        for slot in self.slots.drain(..) {
-            for (raft_group_id, memtable) in slot.write().drain() {
-                memtables_with_ids.push((raft_group_id, memtable));
-            }
-        }
-        memtables_with_ids
-    }
 }
 
 #[cfg(test)]
@@ -190,6 +187,108 @@ impl PartialEq for MemTableAccessor {
             }
         }
         *self.removed_memtables.lock() == *other.removed_memtables.lock()
+    }
+}
+
+struct ParallelRecoverContext<M, P>
+where
+    M: MessageExt + Clone,
+    P: PipeLog,
+{
+    removed_memtables: HashSet<u64>,
+    compacted_memtables: HashMap<u64, u64>,
+    removed_keys: HashSet<(u64, Vec<u8>)>,
+    memtables: Option<MemTableAccessor>,
+    _phantom1: PhantomData<M>,
+    _phantom2: PhantomData<P>,
+}
+
+impl<M, P> ParallelRecoverContext<M, P>
+where
+    M: MessageExt + Clone,
+    P: PipeLog,
+{
+    fn take_memtables(&mut self) -> MemTableAccessor {
+        self.memtables
+            .take()
+            .expect("memtable has already be taken")
+    }
+}
+
+impl<M, P> SequentialReplayMachine for ParallelRecoverContext<M, P>
+where
+    M: MessageExt + Clone,
+    P: PipeLog,
+{
+    fn new(global_stats: Arc<GlobalStats>) -> Self {
+        Self {
+            memtables: Some(MemTableAccessor::new(Arc::new(move |id: u64| {
+                MemTable::new(id, global_stats.clone())
+            }))),
+            removed_memtables: Default::default(),
+            compacted_memtables: Default::default(),
+            removed_keys: Default::default(),
+            _phantom1: PhantomData,
+            _phantom2: PhantomData,
+        }
+    }
+
+    fn replay(
+        &mut self,
+        mut item_batch: LogItemBatch,
+        queue: LogQueue,
+        file_id: FileId,
+    ) -> Result<()> {
+        let mut context = Self {
+            memtables: None,
+            removed_memtables: Default::default(),
+            compacted_memtables: Default::default(),
+            removed_keys: Default::default(),
+            _phantom1: PhantomData,
+            _phantom2: PhantomData,
+        };
+        for item in item_batch.iter() {
+            match &item.content {
+                LogItemContent::Command(Command::Clean) => {
+                    // Removed raft_group_id will never be used again.
+                    context.removed_memtables.insert(item.raft_group_id);
+                }
+                LogItemContent::Command(Command::Compact { index }) => {
+                    context
+                        .compacted_memtables
+                        .insert(item.raft_group_id, *index);
+                }
+                LogItemContent::Kv(KeyValue { op_type, key, .. }) => {
+                    if *op_type == OpType::Del {
+                        context
+                            .removed_keys
+                            .insert((item.raft_group_id, key.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.merge(context, queue)?;
+        Engine::<M, P>::apply_to_memtable(
+            self.memtables.as_ref().unwrap(),
+            item_batch.drain(),
+            queue,
+            file_id,
+        );
+        Ok(())
+    }
+
+    fn merge(&mut self, mut rhs: Self, queue: LogQueue) -> Result<()> {
+        assert!(self.memtables.is_some());
+        if let Some(mut memtables) = rhs.memtables.take() {
+            self.memtables.as_mut().unwrap().mask(&rhs, queue);
+            self.memtables.as_mut().unwrap().merge(&mut memtables);
+        }
+        self.removed_memtables.extend(rhs.removed_memtables.drain());
+        self.compacted_memtables
+            .extend(rhs.compacted_memtables.drain());
+        self.removed_keys.extend(rhs.removed_keys.drain());
+        Ok(())
     }
 }
 
@@ -230,29 +329,34 @@ where
 
         let global_stats = Arc::new(GlobalStats::default());
 
-        let mut recover_manager = RecoverManager::new(
-            cfg.recovery_mode,
-            cfg.recovery_threads,
-            cfg.recovery_read_block_size.0 as usize,
-            global_stats.clone(),
-            |memtables, queue, file_id, mut item_batch| {
-                Self::apply_to_memtable(memtables, item_batch.drain(), queue, file_id)
-            },
-        );
-
-        let pipe_log = FilePipeLog::open(
-            &cfg,
-            match file_system {
-                Some(fs) => Some(fs.clone()),
-                None => None,
-            },
-            listeners.clone(),
-            &mut recover_manager,
-        )?;
-
         let start = Instant::now();
-        let memtables = recover_manager.recover()?;
+        let (pipe_log, mut append, mut rewrite) =
+            FilePipeLog::open::<ParallelRecoverContext<M, FilePipeLog>>(
+                &cfg,
+                match file_system {
+                    Some(fs) => Some(fs.clone()),
+                    None => None,
+                },
+                listeners.clone(),
+                global_stats.clone(),
+            )?;
         info!("Recovering raft logs takes {:?}", start.elapsed());
+
+        let memtables = append.take_memtables();
+        let memtables_rewrite = rewrite.take_memtables();
+
+        let ids = memtables.cleaned_region_ids();
+        for slot in memtables_rewrite.slots.into_iter() {
+            for (id, raft_rewrite) in std::mem::take(&mut *slot.write()) {
+                if let Some(raft_append) = memtables.get(id) {
+                    raft_append
+                        .write()
+                        .merge_lower_prio(&mut *raft_rewrite.write());
+                } else if !ids.contains(&id) {
+                    memtables.insert(id, raft_rewrite);
+                }
+            }
+        }
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(

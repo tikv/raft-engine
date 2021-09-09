@@ -45,7 +45,6 @@ mod metrics;
 mod pipe_log;
 mod purge;
 mod reader;
-mod recover;
 #[cfg(test)]
 mod test_util;
 mod util;

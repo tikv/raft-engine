@@ -7,19 +7,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use rayon::prelude::*;
 
 use crate::config::Config;
-use crate::engine::MemTableAccessor;
 use crate::event_listener::EventListener;
 use crate::file_system::{FileSystem, Readable, Writable};
-use crate::log_batch::{LogBatch, LogItemBatch};
+use crate::log_batch::LogBatch;
 use crate::log_file::{LogFd, LogFile, LogFileHeader, LOG_FILE_MIN_HEADER_LEN};
-use crate::metrics::*;
-use crate::pipe_log::{FileId, LogQueue, PipeLog};
-use crate::recover::RecoverManager;
+use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
+use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
+use crate::{metrics::*, GlobalStats, RecoveryMode};
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -64,6 +64,21 @@ fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
         }
     }
     Err(Error::ParseFileName(file_name.to_owned()))
+}
+
+struct RecoverContext {
+    file_id: FileId,
+    file_size: usize,
+    file_reader: Option<Box<dyn Readable>>,
+}
+
+impl std::fmt::Debug for RecoverContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoverContext")
+            .field("file_id", &self.file_id)
+            .field("file_size", &self.file_size)
+            .finish()
+    }
 }
 
 struct ActiveFile {
@@ -153,18 +168,15 @@ struct LogManager {
 }
 
 impl LogManager {
-    fn open<F>(
+    fn open(
         cfg: &Config,
         file_system: Option<Arc<dyn FileSystem>>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut min_file_id: FileId,
         mut max_file_id: FileId,
-        recover_manager: &mut RecoverManager<F>,
-    ) -> Result<Self>
-    where
-        F: Fn(&MemTableAccessor, LogQueue, FileId, LogItemBatch) + Sync,
-    {
+        recover_contexts: &mut Vec<RecoverContext>,
+    ) -> Result<Self> {
         let mut all_files = VecDeque::with_capacity(DEFAULT_FILES_COUNT);
         if max_file_id.valid() {
             assert!(min_file_id <= max_file_id);
@@ -183,7 +195,11 @@ impl LogManager {
                 } else {
                     raw_file_reader
                 };
-                recover_manager.append(queue, file_id, file_size, file_reader);
+                recover_contexts.push(RecoverContext {
+                    file_id,
+                    file_size,
+                    file_reader: Some(file_reader),
+                });
                 file_id = file_id.forward(1);
             }
         } else {
@@ -341,14 +357,14 @@ pub struct FilePipeLog {
 }
 
 impl FilePipeLog {
-    pub fn open<F>(
+    pub fn open<S>(
         cfg: &Config,
         file_system: Option<Arc<dyn FileSystem>>,
         listeners: Vec<Arc<dyn EventListener>>,
-        recover_manager: &mut RecoverManager<F>,
-    ) -> Result<FilePipeLog>
+        global_stats: Arc<GlobalStats>,
+    ) -> Result<(FilePipeLog, S, S)>
     where
-        F: Fn(&MemTableAccessor, LogQueue, FileId, LogItemBatch) + Sync,
+        S: SequentialReplayMachine,
     {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
@@ -377,6 +393,8 @@ impl FilePipeLog {
             }
         });
 
+        let (mut append_recover_contexts, mut rewrite_recover_contexts) = (vec![], vec![]);
+
         let appender = Arc::new(RwLock::new(LogManager::open(
             cfg,
             file_system.clone(),
@@ -384,7 +402,7 @@ impl FilePipeLog {
             LogQueue::Append,
             min_append_id,
             max_append_id,
-            recover_manager,
+            &mut append_recover_contexts,
         )?));
         let rewriter = Arc::new(RwLock::new(LogManager::open(
             cfg,
@@ -393,18 +411,168 @@ impl FilePipeLog {
             LogQueue::Rewrite,
             min_rewrite_id,
             max_rewrite_id,
-            recover_manager,
+            &mut rewrite_recover_contexts,
         )?));
 
-        Ok(FilePipeLog {
-            dir: cfg.dir.clone(),
-            rotate_size: cfg.target_file_size.0 as usize,
-            compression_threshold: cfg.batch_compression_threshold.0 as usize,
-            appender,
-            rewriter,
-            file_system,
-            listeners,
-        })
+        let (append, rewrite) = Self::recover(
+            cfg.recovery_mode,
+            cfg.recovery_threads,
+            cfg.recovery_read_block_size.0 as usize,
+            append_recover_contexts,
+            rewrite_recover_contexts,
+            global_stats.clone(),
+        )?;
+
+        Ok((
+            FilePipeLog {
+                dir: cfg.dir.clone(),
+                rotate_size: cfg.target_file_size.0 as usize,
+                compression_threshold: cfg.batch_compression_threshold.0 as usize,
+                appender,
+                rewriter,
+                file_system,
+                listeners,
+            },
+            append,
+            rewrite,
+        ))
+    }
+
+    fn recover<S>(
+        recovery_mode: RecoveryMode,
+        threads: usize,
+        read_block_size: usize,
+        append_recover_contexts: Vec<RecoverContext>,
+        rewrite_recover_contexts: Vec<RecoverContext>,
+        global_stats: Arc<GlobalStats>,
+    ) -> Result<(S, S)>
+    where
+        S: SequentialReplayMachine,
+    {
+        let (append_recover_concurrency, rewrite_recover_concurrency) = match (
+            append_recover_contexts.len(),
+            rewrite_recover_contexts.len(),
+        ) {
+            (0, 0) => (0, 0),
+            (0, _) => (0, threads),
+            (_, 0) => (threads, 0),
+            (append_recover_count, rewrite_recover_count) => {
+                let recover_append_concurrency = std::cmp::max(
+                    threads - 1,
+                    std::cmp::min(
+                        1,
+                        append_recover_count / (append_recover_count + rewrite_recover_count),
+                    ),
+                );
+                let recover_rewrite_concurrency = threads - recover_append_concurrency;
+                (recover_append_concurrency, recover_rewrite_concurrency)
+            }
+        };
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+
+        let mut ms: VecDeque<Result<S>> = pool.install(|| {
+            [
+                (
+                    LogQueue::Append,
+                    append_recover_concurrency,
+                    append_recover_contexts,
+                ),
+                (
+                    LogQueue::Rewrite,
+                    rewrite_recover_concurrency,
+                    rewrite_recover_contexts,
+                ),
+            ]
+            .par_iter_mut()
+            .map(|(queue, concurrency, recover_contexts)| {
+                Self::recover_queue(
+                    recovery_mode,
+                    *concurrency,
+                    read_block_size,
+                    *queue,
+                    std::mem::take(recover_contexts),
+                    global_stats.clone(),
+                )
+            })
+            .collect()
+        });
+
+        let append = ms.pop_front().unwrap()?;
+        let rewrite = ms.pop_front().unwrap()?;
+        Ok((append, rewrite))
+    }
+
+    fn recover_queue<S>(
+        recovery_mode: RecoveryMode,
+        concurrency: usize,
+        read_block_size: usize,
+        queue: LogQueue,
+        mut recover_contexts: Vec<RecoverContext>,
+        global_stats: Arc<GlobalStats>,
+    ) -> Result<S>
+    where
+        S: SequentialReplayMachine,
+    {
+        debug!(
+            "Recover queue: {:?}, total:{}, concurrency: {}.",
+            queue,
+            recover_contexts.len(),
+            concurrency
+        );
+        if concurrency == 0 {
+            debug!("Recover queue:{:?} finish (nothing to recover).", queue);
+            return Ok(S::new(global_stats));
+        }
+        let chunk_size = std::cmp::max(1, recover_contexts.len() / concurrency);
+        let chunks = recover_contexts.par_chunks_mut(chunk_size);
+        let chunk_chount = chunks.len();
+        let m = chunks
+            .enumerate()
+            .map(|(index, chunk)| {
+                debug!("Recover files: {:?}.", chunk);
+                let mut reader = LogItemBatchFileReader::new(read_block_size);
+                let mut m = S::new(global_stats.clone());
+                let file_count = chunk.len();
+                for (i, recover_context) in chunk.iter_mut().enumerate() {
+                    reader.open(
+                        recover_context.file_reader.take().unwrap(),
+                        recover_context.file_size,
+                    )?;
+                    loop {
+                        match reader.next() {
+                            Ok(Some(mut item_batch)) => {
+                                item_batch.set_position(queue, recover_context.file_id, None);
+                                m.replay(item_batch, queue, recover_context.file_id)?;
+                            }
+                            Ok(None) => break,
+                            Err(e)
+                                if recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
+                                    && index == chunk_chount - 1
+                                    && i == file_count - 1 =>
+                            {
+                                warn!("The tail of raft log is corrupted but ignored: {}", e);
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                debug!("Recover queue:{:?} finish.", queue);
+                Ok(m)
+            })
+            .try_reduce(
+                || S::new(global_stats.clone()),
+                |mut ml, mr| {
+                    ml.merge(mr, queue)?;
+                    Ok(ml)
+                },
+            )?;
+        debug!("Recover files: {:?} finish.", recover_contexts);
+        Ok(m)
     }
 
     pub fn get_files_with_ids(&self, queue: LogQueue) -> Vec<(FileId, Arc<LogFd>)> {
@@ -575,7 +743,22 @@ mod tests {
     use tempfile::Builder;
 
     use super::*;
-    use crate::{util::ReadableSize, GlobalStats};
+    use crate::{log_batch::LogItemBatch, util::ReadableSize, GlobalStats};
+
+    struct BlackholeSequentialReplayMachine {}
+    impl SequentialReplayMachine for BlackholeSequentialReplayMachine {
+        fn new(_: Arc<GlobalStats>) -> Self {
+            Self {}
+        }
+
+        fn replay(&mut self, _: LogItemBatch, _: LogQueue, _: FileId) -> Result<()> {
+            Ok(())
+        }
+
+        fn merge(&mut self, _: Self, _: LogQueue) -> Result<()> {
+            Ok(())
+        }
+    }
 
     fn new_test_pipe_log(path: &str, bytes_per_sync: usize, rotate_size: usize) -> FilePipeLog {
         let mut cfg = Config::default();
@@ -583,19 +766,14 @@ mod tests {
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        FilePipeLog::open(
+        FilePipeLog::open::<BlackholeSequentialReplayMachine>(
             &cfg,
             None,
             vec![],
-            &mut RecoverManager::new(
-                crate::RecoveryMode::AbsoluteConsistency,
-                0,
-                0,
-                Arc::new(GlobalStats::default()),
-                |_, _, _, _| {},
-            ),
+            Arc::new(GlobalStats::default()),
         )
         .unwrap()
+        .0
     }
 
     #[test]
