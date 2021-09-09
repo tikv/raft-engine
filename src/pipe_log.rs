@@ -83,7 +83,7 @@ impl FileId {
     }
 }
 
-pub trait PipeLog: Sized + Clone + Send {
+pub trait PipeLog: Sized {
     /// Close the pipe log.
     fn close(&self) -> Result<()>;
 

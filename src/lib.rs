@@ -13,6 +13,7 @@
 
 #![feature(shrink_to)]
 #![feature(cell_update)]
+#![feature(generic_associated_types)]
 #![feature(test)]
 
 #[macro_use]
@@ -38,8 +39,8 @@ mod config;
 mod engine;
 mod errors;
 mod event_listener;
+mod file_builder;
 mod file_pipe_log;
-mod file_system;
 mod log_batch;
 mod log_file;
 mod memtable;
@@ -51,15 +52,14 @@ mod reader;
 mod test_util;
 mod util;
 
-use crate::file_pipe_log::FilePipeLog;
-
-pub use self::config::{Config, RecoveryMode};
-pub use self::errors::{Error, Result};
-pub use self::event_listener::EventListener;
-pub use self::log_batch::{Command, LogBatch, MessageExt};
-pub use self::pipe_log::{FileId, LogQueue};
-pub use self::util::ReadableSize;
-pub type RaftLogEngine<X> = self::engine::Engine<X, FilePipeLog>;
+pub use config::{Config, RecoveryMode};
+pub use errors::{Error, Result};
+pub use event_listener::EventListener;
+pub use file_builder::FileBuilder;
+pub use log_batch::{Command, LogBatch, MessageExt};
+pub use pipe_log::{FileId, LogQueue};
+pub use util::ReadableSize;
+pub type Engine<M, FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine<M, FileBuilder>;
 
 #[derive(Default)]
 pub struct GlobalStats {
