@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,15 +11,15 @@ use log::{debug, info, warn};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rayon::prelude::*;
 
-use crate::config::Config;
+use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_system::{FileSystem, Readable, Writable};
 use crate::log_batch::LogBatch;
 use crate::log_file::{LogFd, LogFile, LogFileHeader, LOG_FILE_MIN_HEADER_LEN};
+use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
-use crate::{metrics::*, GlobalStats, RecoveryMode};
 use crate::{Error, Result};
 
 const LOG_SUFFIX: &str = ".raftlog";
@@ -67,19 +66,10 @@ fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
     Err(Error::ParseFileName(file_name.to_owned()))
 }
 
-struct RecoverContext {
+struct FileToRecover {
     file_id: FileId,
-    file_size: usize,
-    file_reader: Option<Box<dyn Readable>>,
-}
-
-impl std::fmt::Debug for RecoverContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecoverContext")
-            .field("file_id", &self.file_id)
-            .field("file_size", &self.file_size)
-            .finish()
-    }
+    fd: Arc<LogFd>,
+    reader: Option<Box<dyn Readable>>,
 }
 
 struct ActiveFile {
@@ -91,19 +81,19 @@ struct ActiveFile {
 }
 
 impl ActiveFile {
-    fn open(fd: Arc<LogFd>, writer: Box<dyn Writable>, size: usize) -> Result<Self> {
+    fn open(fd: Arc<LogFd>, writer: Box<dyn Writable>) -> Result<Self> {
         let file_size = fd.file_size()?;
         let mut f = Self {
             fd,
             writer,
-            size,
+            size: file_size,
             capacity: file_size,
-            last_sync: size,
+            last_sync: file_size,
         };
-        if size < LOG_FILE_MIN_HEADER_LEN {
+        if file_size < LOG_FILE_MIN_HEADER_LEN {
             f.write_header()?;
         } else {
-            f.writer.seek(std::io::SeekFrom::Start(size as u64))?;
+            f.writer.seek(std::io::SeekFrom::Start(file_size as u64))?;
         }
         Ok(f)
     }
@@ -111,7 +101,7 @@ impl ActiveFile {
     fn reset(&mut self, fd: Arc<LogFd>, writer: Box<dyn Writable>) -> Result<()> {
         self.size = 0;
         self.last_sync = 0;
-        self.capacity = fd.file_size()?;
+        self.capacity = 0;
         self.fd = fd;
         self.writer = writer;
         self.write_header()
@@ -122,12 +112,6 @@ impl ActiveFile {
         self.fd.sync()?;
         self.capacity = self.size;
         Ok(())
-    }
-
-    fn truncate_at(&mut self, size: usize) -> Result<()> {
-        assert!(size >= LOG_FILE_MIN_HEADER_LEN);
-        self.size = size;
-        self.truncate()
     }
 
     fn write_header(&mut self) -> Result<()> {
@@ -180,62 +164,47 @@ impl LogManager {
         file_system: Option<Arc<dyn FileSystem>>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
-        mut min_file_id: FileId,
-        mut max_file_id: FileId,
-        recover_contexts: &mut Vec<RecoverContext>,
+        files: Vec<FileToRecover>,
     ) -> Result<Self> {
-        let mut all_files = VecDeque::with_capacity(DEFAULT_FILES_COUNT);
-        if max_file_id.valid() {
-            assert!(min_file_id <= max_file_id);
-            let mut file_id = min_file_id;
-            while file_id <= max_file_id {
-                let path = build_file_path(&cfg.dir, queue, file_id);
-                let fd = Arc::new(LogFd::open(&path)?);
-                let file_size = fd.file_size()?;
-                all_files.push_back(fd.clone());
-                for listener in &listeners {
-                    listener.post_new_log_file(queue, file_id);
-                }
-                let raw_file_reader = Box::new(LogFile::new(fd));
-                let file_reader = if let Some(ref fs) = file_system {
-                    fs.open_file_reader(&path, raw_file_reader as Box<dyn Readable>)?
-                } else {
-                    raw_file_reader
-                };
-                recover_contexts.push(RecoverContext {
-                    file_id,
-                    file_size,
-                    file_reader: Some(file_reader),
-                });
-                file_id = file_id.forward(1);
+        let mut first_file_id = FileId::default();
+        let mut active_file_id = FileId::default();
+        let mut all_files =
+            VecDeque::with_capacity(std::cmp::max(DEFAULT_FILES_COUNT, files.len()));
+        for f in files.into_iter() {
+            if !first_file_id.valid() {
+                first_file_id = f.file_id;
             }
-        } else {
-            min_file_id = INIT_FILE_ID.into();
-            max_file_id = INIT_FILE_ID.into();
+            all_files.push_back(f.fd);
+            active_file_id = f.file_id;
+            for listener in &listeners {
+                listener.post_new_log_file(queue, f.file_id);
+            }
+        }
+        if !first_file_id.valid() {
+            first_file_id = INIT_FILE_ID.into();
+            active_file_id = first_file_id;
             let fd = Arc::new(LogFd::create(&build_file_path(
                 &cfg.dir,
                 queue,
-                min_file_id,
+                first_file_id,
             ))?);
             all_files.push_back(fd);
             for listener in &listeners {
-                listener.post_new_log_file(queue, min_file_id);
+                listener.post_new_log_file(queue, first_file_id);
             }
         }
-        let active_file_size = all_files.back().unwrap().file_size()?;
         let active_fd = all_files.back().unwrap().clone();
         let raw_writer = Box::new(LogFile::new(active_fd.clone()));
         let active_file = ActiveFile::open(
             active_fd,
             if let Some(ref fs) = file_system {
                 fs.open_file_writer(
-                    &build_file_path(&cfg.dir, queue, max_file_id),
+                    &build_file_path(&cfg.dir, queue, active_file_id),
                     raw_writer as Box<dyn Writable>,
                 )?
             } else {
                 raw_writer
             },
-            active_file_size,
         )?;
 
         let manager = Self {
@@ -246,8 +215,8 @@ impl LogManager {
             file_system,
             listeners,
 
-            first_file_id: min_file_id,
-            active_file_id: max_file_id,
+            first_file_id,
+            active_file_id,
 
             all_files,
             active_file,
@@ -364,15 +333,11 @@ pub struct FilePipeLog {
 }
 
 impl FilePipeLog {
-    pub fn open<S>(
+    pub fn open<S: SequentialReplayMachine>(
         cfg: &Config,
         file_system: Option<Arc<dyn FileSystem>>,
         listeners: Vec<Arc<dyn EventListener>>,
-        global_stats: Arc<GlobalStats>,
-    ) -> Result<(FilePipeLog, S, S)>
-    where
-        S: SequentialReplayMachine,
-    {
+    ) -> Result<(FilePipeLog, S, S)> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -400,49 +365,64 @@ impl FilePipeLog {
             }
         });
 
-        let (mut append_recover_contexts, mut rewrite_recover_contexts) = (vec![], vec![]);
+        let mut append_files = Vec::new();
+        let mut rewrite_files = Vec::new();
+        for (queue, min_id, max_id, files) in [
+            (
+                LogQueue::Append,
+                min_append_id,
+                max_append_id,
+                &mut append_files,
+            ),
+            (
+                LogQueue::Rewrite,
+                min_rewrite_id,
+                max_rewrite_id,
+                &mut rewrite_files,
+            ),
+        ] {
+            if min_id.valid() {
+                for i in min_id.as_u64()..=max_id.as_u64() {
+                    let file_id = i.into();
+                    let path = build_file_path(&cfg.dir, queue, file_id);
+                    let fd = Arc::new(LogFd::open(&path)?);
+                    let raw_reader = Box::new(LogFile::new(fd.clone()));
+                    let file_reader = if let Some(ref fs) = file_system {
+                        fs.open_file_reader(&build_file_path(&cfg.dir, queue, file_id), raw_reader)?
+                    } else {
+                        raw_reader
+                    };
+                    files.push(FileToRecover {
+                        file_id,
+                        fd,
+                        reader: Some(file_reader),
+                    })
+                }
+            }
+        }
+
+        let (append_sequential_replay_machine, rewrite_sequential_replay_machine) = Self::recover(
+            cfg.recovery_mode,
+            cfg.recovery_threads,
+            cfg.recovery_read_block_size.0 as usize,
+            &mut append_files,
+            &mut rewrite_files,
+        )?;
 
         let appender = Arc::new(RwLock::new(LogManager::open(
             cfg,
             file_system.clone(),
             listeners.clone(),
             LogQueue::Append,
-            min_append_id,
-            max_append_id,
-            &mut append_recover_contexts,
+            append_files,
         )?));
         let rewriter = Arc::new(RwLock::new(LogManager::open(
             cfg,
             file_system.clone(),
             listeners.clone(),
             LogQueue::Rewrite,
-            min_rewrite_id,
-            max_rewrite_id,
-            &mut rewrite_recover_contexts,
+            rewrite_files,
         )?));
-
-        let (
-            append_sequential_replay_machine,
-            append_last_valid_offset,
-            rewrite_sequential_replay_machine,
-            rewrite_last_valid_offset,
-        ) = Self::recover(
-            cfg.recovery_mode,
-            cfg.recovery_threads,
-            cfg.recovery_read_block_size.0 as usize,
-            append_recover_contexts,
-            rewrite_recover_contexts,
-            global_stats,
-        )?;
-
-        appender
-            .write()
-            .active_file
-            .truncate_at(append_last_valid_offset)?;
-        rewriter
-            .write()
-            .active_file
-            .truncate_at(rewrite_last_valid_offset)?;
 
         Ok((
             FilePipeLog {
@@ -459,127 +439,87 @@ impl FilePipeLog {
         ))
     }
 
-    fn recover<S>(
+    fn recover<S: SequentialReplayMachine>(
         recovery_mode: RecoveryMode,
         threads: usize,
         read_block_size: usize,
-        append_recover_contexts: Vec<RecoverContext>,
-        rewrite_recover_contexts: Vec<RecoverContext>,
-        global_stats: Arc<GlobalStats>,
-    ) -> Result<(S, usize, S, usize)>
-    where
-        S: SequentialReplayMachine,
-    {
-        let concurrency = std::cmp::max(2, threads);
-        let (append_recover_concurrency, rewrite_recover_concurrency) = match (
-            append_recover_contexts.len(),
-            rewrite_recover_contexts.len(),
-        ) {
-            (0, 0) => (0, 0),
-            (0, _) => (0, concurrency),
-            (_, 0) => (concurrency, 0),
-            (append_recover_count, rewrite_recover_count) => {
-                let recover_append_concurrency = std::cmp::max(
-                    concurrency - 1,
-                    std::cmp::min(
-                        1,
-                        append_recover_count / (append_recover_count + rewrite_recover_count),
-                    ),
-                );
-                let recover_rewrite_concurrency = concurrency - recover_append_concurrency;
-                (recover_append_concurrency, recover_rewrite_concurrency)
-            }
-        };
+        append_files: &mut [FileToRecover],
+        rewrite_files: &mut [FileToRecover],
+    ) -> Result<(S, S)> {
+        let (append_concurrency, rewrite_concurrency) =
+            match (append_files.len(), rewrite_files.len()) {
+                (0, 0) => (0, 0),
+                (0, _) => (0, threads),
+                (_, 0) => (threads, 0),
+                (a, b) => {
+                    let a_threads = std::cmp::max(1, threads * a / (a + b));
+                    let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
+                    (a_threads, b_threads)
+                }
+            };
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
-
-        let mut ms: VecDeque<Result<(S, usize)>> = pool.install(|| {
-            [
-                (
-                    LogQueue::Append,
-                    append_recover_concurrency,
-                    append_recover_contexts,
-                ),
-                (
-                    LogQueue::Rewrite,
-                    rewrite_recover_concurrency,
-                    rewrite_recover_contexts,
-                ),
-            ]
-            .par_iter_mut()
-            .map(|(queue, concurrency, recover_contexts)| {
+        let (append, rewrite) = pool.join(
+            || {
                 Self::recover_queue(
+                    LogQueue::Append,
                     recovery_mode,
-                    *concurrency,
+                    append_concurrency,
                     read_block_size,
-                    *queue,
-                    std::mem::take(recover_contexts),
-                    global_stats.clone(),
+                    append_files,
                 )
-            })
-            .collect()
-        });
+            },
+            || {
+                Self::recover_queue(
+                    LogQueue::Rewrite,
+                    recovery_mode,
+                    rewrite_concurrency,
+                    read_block_size,
+                    rewrite_files,
+                )
+            },
+        );
 
-        let (append, append_last_valid_offset) = ms.pop_front().unwrap()?;
-        let (rewrite, rewrite_last_valid_offset) = ms.pop_front().unwrap()?;
-        Ok((
-            append,
-            append_last_valid_offset,
-            rewrite,
-            rewrite_last_valid_offset,
-        ))
+        Ok((append?, rewrite?))
     }
 
-    fn recover_queue<S>(
+    fn recover_queue<S: SequentialReplayMachine>(
+        queue: LogQueue,
         recovery_mode: RecoveryMode,
         concurrency: usize,
         read_block_size: usize,
-        queue: LogQueue,
-        mut recover_contexts: Vec<RecoverContext>,
-        global_stats: Arc<GlobalStats>,
-    ) -> Result<(S, usize)>
-    where
-        S: SequentialReplayMachine,
-    {
+        files: &mut [FileToRecover],
+    ) -> Result<S> {
         debug!(
             "Recover queue: {:?}, total:{}, concurrency: {}.",
             queue,
-            recover_contexts.len(),
+            files.len(),
             concurrency
         );
         if concurrency == 0 {
-            debug!("Recover queue:{:?} finish (nothing to recover).", queue);
-            return Ok((S::new(global_stats), LOG_FILE_MIN_HEADER_LEN));
+            return Ok(S::default());
         }
-        let chunk_size = std::cmp::max(1, recover_contexts.len() / concurrency);
-        let chunks = recover_contexts.par_chunks_mut(chunk_size);
-        let chunk_chount = chunks.len();
-        let last_valid_offset = Arc::new(AtomicUsize::new(LOG_FILE_MIN_HEADER_LEN));
+        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
+        let chunks = files.par_chunks_mut(max_chunk_size);
+        let chunk_count = chunks.len();
+        debug_assert!(chunk_count <= concurrency);
         let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
-                debug!("Recover files: {:?}.", chunk);
                 let mut reader = LogItemBatchFileReader::new(read_block_size);
-                let mut sequential_replay_machine = S::new(global_stats.clone());
+                let mut sequential_replay_machine = S::default();
                 let file_count = chunk.len();
-                for (i, recover_context) in chunk.iter_mut().enumerate() {
-                    let is_last = index == chunk_chount - 1 && i == file_count - 1;
-                    reader.open(
-                        recover_context.file_reader.take().unwrap(),
-                        recover_context.file_size,
-                    )?;
+                for (i, f) in chunk.iter_mut().enumerate() {
+                    let is_last = index == chunk_count - 1 && i == file_count - 1;
+                    reader.open(f.reader.take().unwrap(), f.fd.file_size()?)?;
                     loop {
                         match reader.next() {
                             Ok(Some(mut item_batch)) => {
-                                item_batch.set_position(queue, recover_context.file_id, None);
-                                sequential_replay_machine.replay(
-                                    item_batch,
-                                    queue,
-                                    recover_context.file_id,
-                                )?;
+                                item_batch.set_position(queue, f.file_id, None);
+                                sequential_replay_machine.replay(item_batch, queue, f.file_id)?;
                             }
                             Ok(None) => break,
                             Err(e)
@@ -587,48 +527,25 @@ impl FilePipeLog {
                                     && is_last =>
                             {
                                 warn!("The tail of raft log is corrupted but ignored: {}", e);
+                                f.fd.truncate(reader.valid_offset())?;
                                 break;
                             }
                             Err(e) => return Err(e),
                         }
-                    }
-                    if is_last {
-                        last_valid_offset
-                            .store(reader.valid_offset(), std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 debug!("Recover queue:{:?} finish.", queue);
                 Ok(sequential_replay_machine)
             })
             .try_reduce(
-                || S::new(global_stats.clone()),
+                S::default,
                 |mut sequential_replay_machine_left, sequential_replay_machine_right| {
                     sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
                     Ok(sequential_replay_machine_left)
                 },
             )?;
-        debug!("Recover files: {:?} finish.", recover_contexts);
-        Ok((
-            sequential_replay_machine,
-            last_valid_offset.load(std::sync::atomic::Ordering::Relaxed),
-        ))
-    }
-
-    pub fn get_files_with_ids(&self, queue: LogQueue) -> Vec<(FileId, Arc<LogFd>)> {
-        let lm = match queue {
-            LogQueue::Append => self.appender.read(),
-            LogQueue::Rewrite => self.rewriter.read(),
-        };
-        let fid = lm.first_file_id;
-        lm.all_files
-            .clone()
-            .drain(..)
-            .map(|f| {
-                let item = (fid, f);
-                fid.forward(1);
-                item
-            })
-            .collect()
+        // debug!("Recover files: {:?} finish.", files);
+        Ok(sequential_replay_machine)
     }
 
     fn append_bytes(
@@ -782,14 +699,11 @@ mod tests {
     use tempfile::Builder;
 
     use super::*;
-    use crate::{log_batch::LogItemBatch, util::ReadableSize, GlobalStats};
+    use crate::{log_batch::LogItemBatch, util::ReadableSize};
 
+    #[derive(Default)]
     struct BlackholeSequentialReplayMachine {}
     impl SequentialReplayMachine for BlackholeSequentialReplayMachine {
-        fn new(_: Arc<GlobalStats>) -> Self {
-            Self {}
-        }
-
         fn replay(&mut self, _: LogItemBatch, _: LogQueue, _: FileId) -> Result<()> {
             Ok(())
         }
@@ -805,14 +719,9 @@ mod tests {
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        FilePipeLog::open::<BlackholeSequentialReplayMachine>(
-            &cfg,
-            None,
-            vec![],
-            Arc::new(GlobalStats::default()),
-        )
-        .unwrap()
-        .0
+        FilePipeLog::open::<BlackholeSequentialReplayMachine>(&cfg, None, vec![])
+            .unwrap()
+            .0
     }
 
     #[test]

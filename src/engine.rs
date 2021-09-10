@@ -231,26 +231,32 @@ struct ParallelRecoverContext {
     compacted_memtables: HashMap<u64, u64>,
     removed_keys: HashSet<(u64, Vec<u8>)>,
     memtables: MemTableAccessor,
+    stats: Arc<GlobalStats>,
 }
 
 impl ParallelRecoverContext {
-    fn finish(self) -> MemTableAccessor {
-        self.memtables
+    fn finish(self) -> (MemTableAccessor, Arc<GlobalStats>) {
+        (self.memtables, self.stats)
     }
 }
 
-impl SequentialReplayMachine for ParallelRecoverContext {
-    fn new(global_stats: Arc<GlobalStats>) -> Self {
+impl Default for ParallelRecoverContext {
+    fn default() -> Self {
+        let stats = Arc::new(GlobalStats::default());
+        let stats_clone = stats.clone();
         Self {
             memtables: MemTableAccessor::new(Arc::new(move |id: u64| {
-                MemTable::new(id, global_stats.clone())
+                MemTable::new(id, stats_clone.clone())
             })),
             removed_memtables: Default::default(),
             compacted_memtables: Default::default(),
             removed_keys: Default::default(),
+            stats,
         }
     }
+}
 
+impl SequentialReplayMachine for ParallelRecoverContext {
     fn replay(
         &mut self,
         mut item_batch: LogItemBatch,
@@ -324,19 +330,17 @@ where
     ) -> Result<Engine<M, FilePipeLog>> {
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
-        let global_stats = Arc::new(GlobalStats::default());
-
         let start = Instant::now();
         let (pipe_log, append, rewrite) = FilePipeLog::open::<ParallelRecoverContext>(
             &cfg,
             file_system.clone(),
             listeners.clone(),
-            global_stats.clone(),
         )?;
         info!("Recovering raft logs takes {:?}", start.elapsed());
 
-        let memtables = append.finish();
-        let memtables_rewrite = rewrite.finish();
+        let (memtables, global_stats) = append.finish();
+        let (memtables_rewrite, rewrite_stats) = rewrite.finish();
+        global_stats.merge(&rewrite_stats);
 
         let ids = memtables.cleaned_region_ids();
         for slot in memtables_rewrite.slots.into_iter() {
