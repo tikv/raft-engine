@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Result, Seek, Write};
 use std::path::Path;
 
 /// A `FileBuilder` generates file readers or writers that are composed upon
@@ -11,16 +11,11 @@ pub trait FileBuilder: Send + Sync {
     type Reader<R: Seek + Read + Send>: Seek + Read + Send;
     type Writer<W: Seek + Write + Send>: Seek + Write + Send;
 
-    fn build_reader<R>(&self, path: &Path, reader: R) -> Result<Self::Reader<R>, std::io::Error>
+    fn build_reader<R>(&self, path: &Path, reader: R) -> Result<Self::Reader<R>>
     where
         R: Seek + Read + Send;
 
-    fn build_writer<W>(
-        &self,
-        path: &Path,
-        writer: W,
-        create: bool,
-    ) -> Result<Self::Writer<W>, std::io::Error>
+    fn build_writer<W>(&self, path: &Path, writer: W, create: bool) -> Result<Self::Writer<W>>
     where
         W: Seek + Write + Send;
 }
@@ -33,19 +28,14 @@ impl FileBuilder for DefaultFileBuilder {
     type Reader<R: Seek + Read + Send> = R;
     type Writer<W: Seek + Write + Send> = W;
 
-    fn build_reader<R>(&self, _path: &Path, reader: R) -> Result<Self::Reader<R>, std::io::Error>
+    fn build_reader<R>(&self, _path: &Path, reader: R) -> Result<Self::Reader<R>>
     where
         R: Seek + Read + Send,
     {
         Ok(reader)
     }
 
-    fn build_writer<W>(
-        &self,
-        _path: &Path,
-        writer: W,
-        _create: bool,
-    ) -> Result<Self::Writer<W>, std::io::Error>
+    fn build_writer<W>(&self, _path: &Path, writer: W, _create: bool) -> Result<Self::Writer<W>>
     where
         W: Seek + Write + Send,
     {
