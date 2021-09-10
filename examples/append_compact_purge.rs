@@ -2,7 +2,7 @@
 
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
-use raft_engine::{Config, LogBatch, MessageExt, RaftLogEngine, ReadableSize};
+use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize};
 use rand::thread_rng;
 use rand_distr::{Distribution, Normal};
 
@@ -26,7 +26,7 @@ fn main() {
     config.dir = "append-compact-purge-data".to_owned();
     config.purge_threshold = ReadableSize::gb(2);
     config.batch_compression_threshold = ReadableSize::kb(0);
-    let engine = RaftLogEngine::<MessageExtTyped>::open(config, None).expect("Open raft engine");
+    let engine = Engine::<MessageExtTyped>::open(config).expect("Open raft engine");
 
     let compact_offset = 32; // In src/purge.rs, it's the limit for rewrite.
 
@@ -56,9 +56,7 @@ fn main() {
 
             let mut e = entry.clone();
             e.index = state.last_index + 1;
-            batch
-                .add_entries::<MessageExtTyped>(region, vec![e; 1])
-                .unwrap();
+            batch.add_entries::<MessageExtTyped>(region, &[e]).unwrap();
             batch
                 .put_message(region, b"last_index".to_vec(), &state)
                 .unwrap();

@@ -1,79 +1,22 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{BufRead, Read, Result as IoResult, Seek, SeekFrom, Write};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::sync::Arc;
-use std::time::Instant;
 
 use fail::fail_point;
-use log::warn;
+use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
 use nix::NixPath;
-use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::{FromPrimitive, ToPrimitive};
 
-use crate::codec::{self, NumberEncoder};
-use crate::metrics::*;
-use crate::util::InstantExt;
-use crate::{Error, Result};
-
-const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-pub const LOG_FILE_MIN_HEADER_LEN: usize = LOG_FILE_MAGIC_HEADER.len() + Version::len();
-pub const LOG_FILE_MAX_HEADER_LEN: usize = LOG_FILE_MIN_HEADER_LEN;
-
-#[derive(Clone, Copy, FromPrimitive, ToPrimitive)]
-enum Version {
-    V1 = 1,
-}
-
-impl Version {
-    const fn current() -> Self {
-        Self::V1
-    }
-
-    const fn len() -> usize {
-        8
-    }
-}
-
-pub struct LogFileHeader {}
-
-impl LogFileHeader {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn decode(buf: &mut &[u8]) -> Result<Self> {
-        if buf.len() < LOG_FILE_MIN_HEADER_LEN {
-            return Err(Error::Corruption("log file header too short".to_owned()));
-        }
-        if !buf.starts_with(LOG_FILE_MAGIC_HEADER) {
-            return Err(Error::Corruption(
-                "log file magic header mismatch".to_owned(),
-            ));
-        }
-        buf.consume(LOG_FILE_MAGIC_HEADER.len());
-        let v = codec::decode_u64(buf)?;
-        if Version::from_u64(v).is_none() {
-            return Err(Error::Corruption(format!(
-                "unrecognized log file version: {}",
-                v
-            )));
-        }
-        Ok(Self {})
-    }
-
-    pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
-        buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
-        buf.encode_u64(Version::current().to_u64().unwrap())?;
-        Ok(())
-    }
-}
-
+/// A `LogFd` is a RAII file that provides basic I/O functionality.
+///
+/// This implementation is a thin wrapper around `RawFd`, and primarily targets
+/// UNIX-based systems.
 pub struct LogFd(RawFd);
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
@@ -116,10 +59,7 @@ impl LogFd {
     }
 
     pub fn sync(&self) -> IoResult<()> {
-        let start = Instant::now();
-        let res = fsync(self.0).map_err(|e| from_nix_error(e, "fsync"));
-        LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        res
+        fsync(self.0).map_err(|e| from_nix_error(e, "fsync"))
     }
 
     pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
@@ -188,11 +128,12 @@ impl LogFd {
 impl Drop for LogFd {
     fn drop(&mut self) {
         if let Err(e) = self.close() {
-            warn!("close: {}", e);
+            error!("error while closing file: {}", e);
         }
     }
 }
 
+/// A `LogFile` is a `LogFd` wrapper that implements `Seek`, `Write` and `Read`.
 pub struct LogFile {
     inner: Arc<LogFd>,
     offset: usize,

@@ -1,12 +1,13 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::file_system::Readable;
+use std::io::{Read, Seek};
+
+use crate::file_pipe_log::{LogFileHeader, LOG_FILE_HEADER_LEN};
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::log_file::{LogFileHeader, LOG_FILE_MAX_HEADER_LEN};
 use crate::{Error, Result};
 
-pub struct LogItemBatchFileReader {
-    file: Option<Box<dyn Readable>>,
+pub struct LogItemBatchFileReader<R: Read + Seek> {
+    file: Option<R>,
     size: usize,
 
     buffer: Vec<u8>,
@@ -16,7 +17,7 @@ pub struct LogItemBatchFileReader {
     read_block_size: usize,
 }
 
-impl LogItemBatchFileReader {
+impl<R: Read + Seek> LogItemBatchFileReader<R> {
     pub fn new(read_block_size: usize) -> Self {
         Self {
             file: None,
@@ -30,16 +31,15 @@ impl LogItemBatchFileReader {
         }
     }
 
-    pub fn open(&mut self, file: Box<dyn Readable>, size: usize) -> Result<()> {
+    pub fn open(&mut self, file: R, size: usize) -> Result<()> {
         self.file = Some(file);
         self.size = size;
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
-        let peek_size = std::cmp::min(LOG_FILE_MAX_HEADER_LEN, size);
-        let mut header = self.peek(0, peek_size, LOG_BATCH_HEADER_LEN)?;
+        let mut header = self.peek(0, LOG_FILE_HEADER_LEN, LOG_BATCH_HEADER_LEN)?;
         LogFileHeader::decode(&mut header)?;
-        self.valid_offset = peek_size - header.len();
+        self.valid_offset = LOG_FILE_HEADER_LEN;
         Ok(())
     }
 
@@ -90,7 +90,7 @@ impl LogItemBatchFileReader {
                     self.buffer_offset + read
                 )));
             }
-            self.buffer.resize(read, 0);
+            self.buffer.truncate(read);
             Ok(&self.buffer[..size])
         } else {
             let should_read = (offset + size + prefetch).saturating_sub(end);
