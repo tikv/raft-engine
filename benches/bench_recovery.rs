@@ -142,6 +142,14 @@ fn bench_recovery(c: &mut Criterion) {
                 ..Default::default()
             },
         ),
+        (
+            "10GB".to_owned(),
+            Config {
+                total_size: ReadableSize::gb(10),
+                region_count: 1000,
+                ..Default::default()
+            },
+        ),
     ];
 
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
