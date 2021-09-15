@@ -540,7 +540,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_util::generate_entry_indexes, util::ReadableSize};
+    use crate::test_util::generate_entry_indexes;
+    use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
@@ -1090,41 +1091,44 @@ mod tests {
         //      [1, 5) is compacted, [5, 20) remains
         //
 
-        let mut batches = vec![
-            LogItemBatch::with_capacity(0),
-            LogItemBatch::with_capacity(0),
-            LogItemBatch::with_capacity(0),
-        ];
-        batches[0]
-            .put_message(
-                10,
-                b"key1".to_vec(),
-                &Entry {
-                    index: 100,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        batches[1].delete_message(10, b"key1".to_vec());
-        batches[2]
-            .put_message(
-                10,
-                b"key1".to_vec(),
-                &Entry {
-                    index: 101,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        batches[0].put(11, b"key".to_vec(), b"ANYTHING".to_vec());
-        batches[1].add_command(11, Command::Clean);
-        batches[0].add_entry_indexes(12, generate_entry_indexes(1, 11, queue, file_id));
-        batches[1].add_command(12, Command::Compact { index: 5 });
-        batches[2].add_entry_indexes(12, generate_entry_indexes(11, 21, queue, file_id));
+        let batches = || {
+            let mut bs = vec![
+                LogItemBatch::with_capacity(0),
+                LogItemBatch::with_capacity(0),
+                LogItemBatch::with_capacity(0),
+            ];
+            bs[0]
+                .put_message(
+                    10,
+                    b"key1".to_vec(),
+                    &Entry {
+                        index: 100,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            bs[1].delete_message(10, b"key1".to_vec());
+            bs[2]
+                .put_message(
+                    10,
+                    b"key1".to_vec(),
+                    &Entry {
+                        index: 101,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            bs[0].put(11, b"key".to_vec(), b"ANYTHING".to_vec());
+            bs[1].add_command(11, Command::Clean);
+            bs[0].add_entry_indexes(12, generate_entry_indexes(1, 11, queue, file_id));
+            bs[1].add_command(12, Command::Compact { index: 5 });
+            bs[2].add_entry_indexes(12, generate_entry_indexes(11, 21, queue, file_id));
+            bs
+        };
 
         // reverse merge
         let mut ctxs = VecDeque::default();
-        for batch in batches {
+        for batch in batches() {
             let mut ctx = ParallelRecoverContext::default();
             ctx.replay(batch, queue, file_id).unwrap();
             ctxs.push_back(ctx);
@@ -1134,14 +1138,30 @@ mod tests {
             x.merge(y, queue).unwrap();
             ctxs.push_back(x);
         }
-        let (memtables, _) = ctxs.pop_front().unwrap().finish();
+        let (merged_memtables, merged_global_stats) = ctxs.pop_front().unwrap().finish();
+        // sequential apply
+        let global_stats = Arc::new(GlobalStats::default());
+        let global_stats_clone = global_stats.clone();
+        let memtables = MemTableAccessor::new(Arc::new(move |id| {
+            MemTable::new(id, global_stats_clone.clone())
+        }));
+        for mut batch in batches() {
+            memtables.apply(batch.drain(), queue, file_id);
+        }
 
         // asserts
         assert_eq!(
             {
                 let mut entry = Entry::default();
                 entry
-                    .merge_from_bytes(&memtables.get(10).unwrap().read().get(b"key1").unwrap())
+                    .merge_from_bytes(
+                        &merged_memtables
+                            .get(10)
+                            .unwrap()
+                            .read()
+                            .get(b"key1")
+                            .unwrap(),
+                    )
                     .unwrap();
                 entry
             },
@@ -1150,15 +1170,23 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert!(memtables.get(11).is_none());
-        assert!(memtables.removed_memtables.lock().contains(&11));
+        assert!(merged_memtables.get(11).is_none());
+        assert!(merged_memtables.removed_memtables.lock().contains(&11));
         for i in 1..21 {
-            let opt = memtables.get(12).unwrap().read().get_entry(i);
+            let opt = merged_memtables.get(12).unwrap().read().get_entry(i);
             if i < 5 {
                 assert!(opt.is_none());
             } else {
                 assert!(opt.is_some());
             }
         }
+        assert_eq!(
+            global_stats.rewrite_operations(),
+            merged_global_stats.rewrite_operations()
+        );
+        assert_eq!(
+            global_stats.compacted_rewrite_operations(),
+            merged_global_stats.compacted_rewrite_operations()
+        );
     }
 }
