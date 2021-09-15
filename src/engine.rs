@@ -540,7 +540,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::ReadableSize;
+    use crate::{test_util::generate_entry_indexes, util::ReadableSize};
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
@@ -1065,5 +1065,100 @@ mod tests {
         // Drop and then recover.
         drop(engine);
         RaftLogEngine::open(cfg).unwrap();
+    }
+
+    #[test]
+    fn test_parallel_recover_merge() {
+        let queue = LogQueue::Append;
+        let file_id = FileId::from(10);
+
+        // ops:
+        //
+        // case 1:
+        //      region 10: put (key1, v1) => del (key1) => put (key1, v2)
+        // expect 1:
+        //      get (key1) == v2
+        //
+        // case 2:
+        //      region 11: put (k, _) => cleanup
+        // expect 2:
+        //      memtable 11 is none
+        //
+        // case 3:
+        //      region 12: entries [1, 10) => compact 5 => entries [11, 20)
+        // expect 3:
+        //      [1, 5) is compacted, [5, 20) remains
+        //
+
+        let mut batches = vec![
+            LogItemBatch::with_capacity(0),
+            LogItemBatch::with_capacity(0),
+            LogItemBatch::with_capacity(0),
+        ];
+        batches[0]
+            .put_message(
+                10,
+                b"key1".to_vec(),
+                &Entry {
+                    index: 100,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        batches[1].delete_message(10, b"key1".to_vec());
+        batches[2]
+            .put_message(
+                10,
+                b"key1".to_vec(),
+                &Entry {
+                    index: 101,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        batches[0].put(11, b"key".to_vec(), b"ANYTHING".to_vec());
+        batches[1].add_command(11, Command::Clean);
+        batches[0].add_entry_indexes(12, generate_entry_indexes(1, 11, queue, file_id));
+        batches[1].add_command(12, Command::Compact { index: 5 });
+        batches[2].add_entry_indexes(12, generate_entry_indexes(11, 21, queue, file_id));
+
+        // reverse merge
+        let mut ctxs = VecDeque::default();
+        for batch in batches {
+            let mut ctx = ParallelRecoverContext::default();
+            ctx.replay(batch, queue, file_id).unwrap();
+            ctxs.push_back(ctx);
+        }
+        while ctxs.len() > 1 {
+            let (y, mut x) = (ctxs.pop_back().unwrap(), ctxs.pop_back().unwrap());
+            x.merge(y, queue).unwrap();
+            ctxs.push_back(x);
+        }
+        let (memtables, _) = ctxs.pop_front().unwrap().finish();
+
+        // asserts
+        assert_eq!(
+            {
+                let mut entry = Entry::default();
+                entry
+                    .merge_from_bytes(&memtables.get(10).unwrap().read().get(b"key1").unwrap())
+                    .unwrap();
+                entry
+            },
+            Entry {
+                index: 101,
+                ..Default::default()
+            }
+        );
+        assert!(memtables.get(11).is_none());
+        assert!(memtables.removed_memtables.lock().contains(&11));
+        for i in 1..21 {
+            let opt = memtables.get(12).unwrap().read().get_entry(i);
+            if i < 5 {
+                assert!(opt.is_none());
+            } else {
+                assert!(opt.is_some());
+            }
+        }
     }
 }

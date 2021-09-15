@@ -535,12 +535,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
         read_block_size: usize,
         files: &mut [FileToRecover<B::Reader<LogFile>>],
     ) -> Result<S> {
-        debug!(
-            "Recover queue: {:?}, total:{}, concurrency: {}.",
-            queue,
-            files.len(),
-            concurrency
-        );
         if concurrency == 0 {
             return Ok(S::default());
         }
@@ -586,7 +580,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
                     Ok(sequential_replay_machine_left)
                 },
             )?;
-        // debug!("Recover files: {:?} finish.", files);
         Ok(sequential_replay_machine)
     }
 
