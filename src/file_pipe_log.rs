@@ -8,19 +8,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use rayon::prelude::*;
 
 use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
-use crate::log_batch::{LogBatch, LogItemBatch};
+use crate::log_batch::LogBatch;
 use crate::log_file::{LogFd, LogFile};
 use crate::metrics::*;
-use crate::pipe_log::{FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
@@ -122,6 +123,12 @@ impl LogFileHeader {
     }
 }
 
+struct FileToRecover<R: Seek + Read> {
+    file_id: FileId,
+    fd: Arc<LogFd>,
+    reader: Option<R>,
+}
+
 struct ActiveFile<W: Seek + Write> {
     fd: Arc<LogFd>,
     writer: W,
@@ -131,19 +138,19 @@ struct ActiveFile<W: Seek + Write> {
 }
 
 impl<W: Seek + Write> ActiveFile<W> {
-    fn open(fd: Arc<LogFd>, writer: W, written: usize) -> Result<Self> {
-        let capacity = fd.file_size()?;
+    fn open(fd: Arc<LogFd>, writer: W) -> Result<Self> {
+        let file_size = fd.file_size()?;
         let mut f = Self {
             fd,
             writer,
-            written,
-            capacity,
-            last_sync: written,
+            written: file_size,
+            capacity: file_size,
+            last_sync: file_size,
         };
-        if written < LOG_FILE_HEADER_LEN {
+        if file_size < LOG_FILE_HEADER_LEN {
             f.write_header()?;
         } else {
-            f.writer.seek(std::io::SeekFrom::Start(written as u64))?;
+            f.writer.seek(std::io::SeekFrom::Start(file_size as u64))?;
         }
         Ok(f)
     }
@@ -151,7 +158,7 @@ impl<W: Seek + Write> ActiveFile<W> {
     fn rotate(&mut self, fd: Arc<LogFd>, writer: W) -> Result<()> {
         self.writer = writer;
         self.written = 0;
-        self.capacity = fd.file_size()?;
+        self.capacity = 0;
         self.fd = fd;
         self.last_sync = 0;
         self.write_header()
@@ -208,83 +215,50 @@ struct LogManager<B: FileBuilder> {
 }
 
 impl<B: FileBuilder> LogManager<B> {
-    fn open<F>(
+    fn open(
         cfg: &Config,
         file_builder: Arc<B>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
-        mut min_file_id: FileId,
-        mut max_file_id: FileId,
-        replay: &F,
-    ) -> Result<Self>
-    where
-        F: Fn(LogQueue, FileId, LogItemBatch),
-    {
-        let mut reader = LogItemBatchFileReader::<B::Reader<LogFile>>::new(
-            cfg.recovery_read_block_size.0 as usize,
-        );
-        let mut all_files = VecDeque::with_capacity(DEFAULT_FILES_COUNT);
-        if max_file_id.valid() {
-            assert!(min_file_id <= max_file_id);
-            let mut file_id = min_file_id;
-            while file_id <= max_file_id {
-                let path = build_file_path(&cfg.dir, queue, file_id);
-                let fd = Arc::new(LogFd::open(&path)?);
-                all_files.push_back(fd.clone());
-                for listener in &listeners {
-                    listener.post_new_log_file(queue, file_id);
-                }
-                // Recover log items.
-                let file_size = fd.file_size()?;
-                let tolerate_failure = file_id == max_file_id
-                    && cfg.recovery_mode == RecoveryMode::TolerateCorruptedTailRecords;
-                let file_reader = file_builder.build_reader(&path, LogFile::new(fd))?;
-                if let Err(e) = reader.open(file_reader, file_size) {
-                    if !tolerate_failure {
-                        return Err(Error::Corruption(format!("Unable to open log file: {}", e)));
-                    }
-                } else {
-                    loop {
-                        match reader.next() {
-                            Ok(Some(mut item_batch)) => {
-                                item_batch.set_position(queue, file_id, None);
-                                replay(queue, file_id, item_batch);
-                            }
-                            Err(e) if tolerate_failure => {
-                                return Err(Error::Corruption(format!(
-                                    "Raft log content is corrupted: {}",
-                                    e
-                                )))
-                            }
-                            _ => break,
-                        }
-                    }
-                }
-                file_id = file_id.forward(1);
+        files: Vec<FileToRecover<B::Reader<LogFile>>>,
+    ) -> Result<Self> {
+        let mut first_file_id = FileId::default();
+        let mut active_file_id = FileId::default();
+        let mut all_files =
+            VecDeque::with_capacity(std::cmp::max(DEFAULT_FILES_COUNT, files.len()));
+        let mut create_file = false;
+        for f in files.into_iter() {
+            if !first_file_id.valid() {
+                first_file_id = f.file_id;
             }
-        } else {
-            min_file_id = INIT_FILE_ID.into();
-            max_file_id = INIT_FILE_ID.into();
+            all_files.push_back(f.fd);
+            active_file_id = f.file_id;
+            for listener in &listeners {
+                listener.post_new_log_file(queue, f.file_id);
+            }
+        }
+        if !first_file_id.valid() {
+            first_file_id = INIT_FILE_ID.into();
+            active_file_id = first_file_id;
+            create_file = true;
             let fd = Arc::new(LogFd::create(&build_file_path(
                 &cfg.dir,
                 queue,
-                min_file_id,
+                first_file_id,
             ))?);
             all_files.push_back(fd);
             for listener in &listeners {
-                listener.post_new_log_file(queue, min_file_id);
+                listener.post_new_log_file(queue, first_file_id);
             }
         }
-        let active_file_size = reader.valid_offset();
         let active_fd = all_files.back().unwrap().clone();
         let active_file = ActiveFile::open(
             active_fd.clone(),
             file_builder.build_writer(
-                &build_file_path(&cfg.dir, queue, max_file_id),
+                &build_file_path(&cfg.dir, queue, active_file_id),
                 LogFile::new(active_fd),
-                false, /*create*/
+                create_file,
             )?,
-            active_file_size,
         )?;
 
         let manager = Self {
@@ -295,8 +269,8 @@ impl<B: FileBuilder> LogManager<B> {
             file_builder,
             listeners,
 
-            first_file_id: min_file_id,
-            active_file_id: max_file_id,
+            first_file_id,
+            active_file_id,
 
             all_files,
             active_file,
@@ -407,15 +381,11 @@ pub struct FilePipeLog<B: FileBuilder> {
 }
 
 impl<B: FileBuilder> FilePipeLog<B> {
-    pub fn open<F>(
+    pub fn open<S: SequentialReplayMachine>(
         cfg: &Config,
         file_builder: Arc<B>,
         listeners: Vec<Arc<dyn EventListener>>,
-        replay: F,
-    ) -> Result<FilePipeLog<B>>
-    where
-        F: Fn(LogQueue, FileId, LogItemBatch),
-    {
+    ) -> Result<(FilePipeLog<B>, S, S)> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -443,34 +413,174 @@ impl<B: FileBuilder> FilePipeLog<B> {
             }
         });
 
+        let mut append_files = Vec::new();
+        let mut rewrite_files = Vec::new();
+        for (queue, min_id, max_id, files) in [
+            (
+                LogQueue::Append,
+                min_append_id,
+                max_append_id,
+                &mut append_files,
+            ),
+            (
+                LogQueue::Rewrite,
+                min_rewrite_id,
+                max_rewrite_id,
+                &mut rewrite_files,
+            ),
+        ] {
+            if min_id.valid() {
+                for i in min_id.as_u64()..=max_id.as_u64() {
+                    let file_id = i.into();
+                    let path = build_file_path(&cfg.dir, queue, file_id);
+                    let fd = Arc::new(LogFd::open(&path)?);
+                    files.push(FileToRecover {
+                        file_id,
+                        fd: fd.clone(),
+                        reader: Some(file_builder.build_reader(&path, LogFile::new(fd))?),
+                    })
+                }
+            }
+        }
+
+        let (append_sequential_replay_machine, rewrite_sequential_replay_machine) = Self::recover(
+            cfg.recovery_mode,
+            cfg.recovery_threads,
+            cfg.recovery_read_block_size.0 as usize,
+            &mut append_files,
+            &mut rewrite_files,
+        )?;
+
         let appender = Arc::new(RwLock::new(LogManager::open(
             cfg,
             file_builder.clone(),
             listeners.clone(),
             LogQueue::Append,
-            min_append_id,
-            max_append_id,
-            &replay,
+            append_files,
         )?));
         let rewriter = Arc::new(RwLock::new(LogManager::open(
             cfg,
             file_builder.clone(),
             listeners.clone(),
             LogQueue::Rewrite,
-            min_rewrite_id,
-            max_rewrite_id,
-            &replay,
+            rewrite_files,
         )?));
 
-        Ok(FilePipeLog {
-            dir: cfg.dir.clone(),
-            rotate_size: cfg.target_file_size.0 as usize,
-            compression_threshold: cfg.batch_compression_threshold.0 as usize,
-            appender,
-            rewriter,
-            file_builder,
-            listeners,
-        })
+        Ok((
+            FilePipeLog {
+                dir: cfg.dir.clone(),
+                rotate_size: cfg.target_file_size.0 as usize,
+                compression_threshold: cfg.batch_compression_threshold.0 as usize,
+                appender,
+                rewriter,
+                file_builder,
+                listeners,
+            },
+            append_sequential_replay_machine,
+            rewrite_sequential_replay_machine,
+        ))
+    }
+
+    fn recover<S: SequentialReplayMachine>(
+        recovery_mode: RecoveryMode,
+        threads: usize,
+        read_block_size: usize,
+        append_files: &mut [FileToRecover<B::Reader<LogFile>>],
+        rewrite_files: &mut [FileToRecover<B::Reader<LogFile>>],
+    ) -> Result<(S, S)> {
+        let (append_concurrency, rewrite_concurrency) =
+            match (append_files.len(), rewrite_files.len()) {
+                (0, 0) => (0, 0),
+                (0, _) => (0, threads),
+                (_, 0) => (threads, 0),
+                (a, b) => {
+                    let a_threads = std::cmp::max(1, threads * a / (a + b));
+                    let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
+                    (a_threads, b_threads)
+                }
+            };
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let (append, rewrite) = pool.join(
+            || {
+                Self::recover_queue(
+                    LogQueue::Append,
+                    recovery_mode,
+                    append_concurrency,
+                    read_block_size,
+                    append_files,
+                )
+            },
+            || {
+                Self::recover_queue(
+                    LogQueue::Rewrite,
+                    recovery_mode,
+                    rewrite_concurrency,
+                    read_block_size,
+                    rewrite_files,
+                )
+            },
+        );
+
+        Ok((append?, rewrite?))
+    }
+
+    fn recover_queue<S: SequentialReplayMachine>(
+        queue: LogQueue,
+        recovery_mode: RecoveryMode,
+        concurrency: usize,
+        read_block_size: usize,
+        files: &mut [FileToRecover<B::Reader<LogFile>>],
+    ) -> Result<S> {
+        if concurrency == 0 {
+            return Ok(S::default());
+        }
+        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
+        let chunks = files.par_chunks_mut(max_chunk_size);
+        let chunk_count = chunks.len();
+        debug_assert!(chunk_count <= concurrency);
+        let sequential_replay_machine = chunks
+            .enumerate()
+            .map(|(index, chunk)| {
+                let mut reader = LogItemBatchFileReader::new(read_block_size);
+                let mut sequential_replay_machine = S::default();
+                let file_count = chunk.len();
+                for (i, f) in chunk.iter_mut().enumerate() {
+                    let is_last = index == chunk_count - 1 && i == file_count - 1;
+                    reader.open(f.reader.take().unwrap(), f.fd.file_size()?)?;
+                    loop {
+                        match reader.next() {
+                            Ok(Some(mut item_batch)) => {
+                                item_batch.set_position(queue, f.file_id, None);
+                                sequential_replay_machine.replay(item_batch, queue, f.file_id)?;
+                            }
+                            Ok(None) => break,
+                            Err(e)
+                                if recovery_mode == RecoveryMode::TolerateCorruptedTailRecords
+                                    && is_last =>
+                            {
+                                warn!("The tail of raft log is corrupted but ignored: {}", e);
+                                f.fd.truncate(reader.valid_offset())?;
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                debug!("Recover queue:{:?} finish.", queue);
+                Ok(sequential_replay_machine)
+            })
+            .try_reduce(
+                S::default,
+                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
+                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
+                    Ok(sequential_replay_machine_left)
+                },
+            )?;
+        Ok(sequential_replay_machine)
     }
 
     fn append_bytes(
@@ -624,7 +734,20 @@ mod tests {
 
     use super::*;
     use crate::file_builder::DefaultFileBuilder;
+    use crate::log_batch::LogItemBatch;
     use crate::util::ReadableSize;
+
+    #[derive(Default)]
+    struct BlackholeSequentialReplayMachine {}
+    impl SequentialReplayMachine for BlackholeSequentialReplayMachine {
+        fn replay(&mut self, _: LogItemBatch, _: LogQueue, _: FileId) -> Result<()> {
+            Ok(())
+        }
+
+        fn merge(&mut self, _: Self, _: LogQueue) -> Result<()> {
+            Ok(())
+        }
+    }
 
     fn new_test_pipe_log(
         path: &str,
@@ -636,7 +759,13 @@ mod tests {
         cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
         cfg.target_file_size = ReadableSize(rotate_size as u64);
 
-        FilePipeLog::open(&cfg, Arc::new(DefaultFileBuilder {}), vec![], |_, _, _| {}).unwrap()
+        FilePipeLog::open::<BlackholeSequentialReplayMachine>(
+            &cfg,
+            Arc::new(DefaultFileBuilder {}),
+            vec![],
+        )
+        .unwrap()
+        .0
     }
 
     #[test]

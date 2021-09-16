@@ -43,10 +43,6 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
         Ok(())
     }
 
-    pub fn valid_offset(&self) -> usize {
-        self.valid_offset
-    }
-
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
         if self.valid_offset < LOG_BATCH_HEADER_LEN {
             return Err(Error::Corruption(
@@ -116,5 +112,9 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
             }
             Ok(&self.buffer[offset - self.buffer_offset..offset - self.buffer_offset + size])
         }
+    }
+
+    pub fn valid_offset(&self) -> usize {
+        self.valid_offset
     }
 }

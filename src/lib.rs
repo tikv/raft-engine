@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 macro_rules! box_err {
     ($e:expr) => ({
         use std::error::Error;
-        let e: Box<dyn Error> = format!("[{}:{}]: {}", file!(), line!(),  $e).into();
+        let e: Box<dyn Error + Send + Sync> = format!("[{}:{}]: {}", file!(), line!(),  $e).into();
         e.into()
     });
     ($f:tt, $($arg:expr),+) => ({
@@ -82,6 +82,11 @@ impl GlobalStats {
     }
     pub fn compacted_rewrite_operations(&self) -> usize {
         self.compacted_rewrite_operations.load(Ordering::Acquire)
+    }
+
+    pub fn merge(&self, rhs: &Self) {
+        self.add_rewrite(rhs.rewrite_operations());
+        self.add_compacted_rewrite(rhs.compacted_rewrite_operations())
     }
 }
 

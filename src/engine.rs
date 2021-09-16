@@ -1,10 +1,11 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::borrow::BorrowMut;
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{mem, u64};
+use std::u64;
 
 use fail::fail_point;
 use log::{debug, error, info};
@@ -15,10 +16,12 @@ use crate::config::Config;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::FilePipeLog;
-use crate::log_batch::{Command, LogBatch, LogItemContent, LogItemDrain, MessageExt, OpType};
+use crate::log_batch::{
+    Command, KeyValue, LogBatch, LogItemBatch, LogItemContent, LogItemDrain, MessageExt, OpType,
+};
 use crate::memtable::{EntryIndex, MemTable};
 use crate::metrics::*;
-use crate::pipe_log::{FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HashMap, InstantExt};
 use crate::{GlobalStats, Result};
@@ -127,134 +130,39 @@ impl MemTableAccessor {
         }
         ids
     }
-}
 
-pub struct Engine<M, B = DefaultFileBuilder, P = FilePipeLog<B>>
-where
-    M: MessageExt + Clone,
-    B: FileBuilder,
-    P: PipeLog,
-{
-    memtables: MemTableAccessor,
-    pipe_log: Arc<P>,
-    purge_manager: PurgeManager<M, P>,
-
-    listeners: Vec<Arc<dyn EventListener>>,
-
-    _phantom: PhantomData<B>,
-}
-
-impl<M> Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>
-where
-    M: MessageExt + Clone,
-{
-    pub fn open(
-        cfg: Config,
-    ) -> Result<Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
-        Self::open_with_listeners(cfg, vec![])
-    }
-
-    pub fn open_with_listeners(
-        cfg: Config,
-        listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
-        Self::open_with(cfg, Arc::new(DefaultFileBuilder {}), listeners)
-    }
-}
-
-impl<M, B> Engine<M, B, FilePipeLog<B>>
-where
-    M: MessageExt + Clone,
-    B: FileBuilder,
-{
-    pub fn open_with_file_builder(
-        cfg: Config,
-        file_builder: Arc<B>,
-    ) -> Result<Engine<M, B, FilePipeLog<B>>> {
-        Self::open_with(cfg, file_builder, vec![])
-    }
-
-    pub fn open_with(
-        cfg: Config,
-        file_builder: Arc<B>,
-        mut listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<Engine<M, B, FilePipeLog<B>>> {
-        listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
-
-        let global_stats = Arc::new(GlobalStats::default());
-
-        let global_stats_clone = global_stats.clone();
-        let rewrite_memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, global_stats_clone.clone())
-        }));
-        let global_stats_clone = global_stats.clone();
-        let memtables = MemTableAccessor::new(Arc::new(move |id: u64| {
-            MemTable::new(id, global_stats_clone.clone())
-        }));
-
-        let start = Instant::now();
-        let pipe_log = Arc::new(FilePipeLog::open(
-            &cfg,
-            file_builder,
-            listeners.clone(),
-            |queue, file_id, mut item_batch| match queue {
-                LogQueue::Rewrite => {
-                    Self::apply_to_memtable(&rewrite_memtables, item_batch.drain(), queue, file_id)
-                }
-                LogQueue::Append => {
-                    Self::apply_to_memtable(&memtables, item_batch.drain(), queue, file_id)
-                }
-            },
-        )?);
-        info!("Recovering raft logs takes {:?}", start.elapsed());
-
-        let ids = memtables.cleaned_region_ids();
-        for slot in rewrite_memtables.slots.into_iter() {
-            for (id, raft_rewrite) in mem::take(&mut *slot.write()) {
-                if let Some(raft_append) = memtables.get(id) {
-                    raft_append
-                        .write()
-                        .merge_lower_prio(&mut *raft_rewrite.write());
-                } else if !ids.contains(&id) {
-                    memtables.insert(id, raft_rewrite);
-                }
+    /// Remove contents that are deleted by coming operations.
+    fn mask(&mut self, parallel_recover_context: &ParallelRecoverContext, queue: LogQueue) {
+        for raft_group_id in &parallel_recover_context.removed_memtables {
+            self.remove(*raft_group_id, queue, FileId::default());
+        }
+        for (raft_group_id, key) in &parallel_recover_context.removed_keys {
+            if let Some(memtable) = self.get(*raft_group_id) {
+                memtable.write().delete(key);
             }
         }
-
-        let cfg = Arc::new(cfg);
-        let purge_manager = PurgeManager::new(
-            cfg,
-            memtables.clone(),
-            pipe_log.clone(),
-            global_stats,
-            listeners.clone(),
-        );
-
-        Ok(Self {
-            memtables,
-            pipe_log,
-            purge_manager,
-            listeners,
-            _phantom: PhantomData,
-        })
+        for (raft_group_id, index) in &parallel_recover_context.compacted_memtables {
+            if let Some(memtable) = self.get(*raft_group_id) {
+                memtable.write().compact_to(*index);
+            }
+        }
     }
-}
 
-impl<M, B, P> Engine<M, B, P>
-where
-    M: MessageExt + Clone,
-    B: FileBuilder,
-    P: PipeLog,
-{
-    fn apply_to_memtable(
-        memtables: &MemTableAccessor,
-        log_items: LogItemDrain,
-        queue: LogQueue,
-        file_id: FileId,
-    ) {
+    /// Merge memtables from the next right one during segmented recovery.
+    pub fn merge(&mut self, rhs: &mut Self) {
+        for slot in rhs.slots.iter_mut() {
+            for (raft_group_id, memtable) in slot.write().drain() {
+                self.get_or_insert(raft_group_id)
+                    .write()
+                    .merge_newer_neighbor(memtable.write().borrow_mut());
+            }
+        }
+    }
+
+    fn apply(&self, log_items: LogItemDrain, queue: LogQueue, file_id: FileId) {
         for item in log_items {
             let raft = item.raft_group_id;
-            let memtable = memtables.get_or_insert(raft);
+            let memtable = self.get_or_insert(raft);
             fail_point!("apply_memtable_region_3", raft == 3, |_| {});
             match item.content {
                 LogItemContent::EntriesIndex(entries_to_add) => {
@@ -276,7 +184,7 @@ where
                 }
                 LogItemContent::Command(Command::Clean) => {
                     debug!("{} append to {:?}.{}, Clean", raft, queue, file_id);
-                    memtables.remove(raft, queue, file_id);
+                    self.remove(raft, queue, file_id);
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
                     debug!(
@@ -316,7 +224,177 @@ where
             }
         }
     }
+}
 
+struct ParallelRecoverContext {
+    removed_memtables: HashSet<u64>,
+    compacted_memtables: HashMap<u64, u64>,
+    removed_keys: HashSet<(u64, Vec<u8>)>,
+    memtables: MemTableAccessor,
+    stats: Arc<GlobalStats>,
+}
+
+impl ParallelRecoverContext {
+    fn finish(self) -> (MemTableAccessor, Arc<GlobalStats>) {
+        (self.memtables, self.stats)
+    }
+}
+
+impl Default for ParallelRecoverContext {
+    fn default() -> Self {
+        let stats = Arc::new(GlobalStats::default());
+        let stats_clone = stats.clone();
+        Self {
+            memtables: MemTableAccessor::new(Arc::new(move |id: u64| {
+                MemTable::new(id, stats_clone.clone())
+            })),
+            removed_memtables: Default::default(),
+            compacted_memtables: Default::default(),
+            removed_keys: Default::default(),
+            stats,
+        }
+    }
+}
+
+impl SequentialReplayMachine for ParallelRecoverContext {
+    fn replay(
+        &mut self,
+        mut item_batch: LogItemBatch,
+        queue: LogQueue,
+        file_id: FileId,
+    ) -> Result<()> {
+        for item in item_batch.iter() {
+            match &item.content {
+                LogItemContent::Command(Command::Clean) => {
+                    // Removed raft_group_id will never be used again.
+                    self.removed_memtables.insert(item.raft_group_id);
+                }
+                LogItemContent::Command(Command::Compact { index }) => {
+                    self.compacted_memtables.insert(item.raft_group_id, *index);
+                }
+                LogItemContent::Kv(KeyValue { op_type, key, .. }) => {
+                    if *op_type == OpType::Del {
+                        self.removed_keys.insert((item.raft_group_id, key.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.memtables.apply(item_batch.drain(), queue, file_id);
+        Ok(())
+    }
+
+    fn merge(&mut self, mut rhs: Self, queue: LogQueue) -> Result<()> {
+        self.memtables.mask(&rhs, queue);
+        self.memtables.merge(&mut rhs.memtables);
+        self.removed_memtables.extend(rhs.removed_memtables.drain());
+        self.compacted_memtables
+            .extend(rhs.compacted_memtables.drain());
+        self.removed_keys.extend(rhs.removed_keys.drain());
+        Ok(())
+    }
+}
+
+pub struct Engine<M, B = DefaultFileBuilder, P = FilePipeLog<B>>
+where
+    M: MessageExt,
+    B: FileBuilder,
+    P: PipeLog,
+{
+    memtables: MemTableAccessor,
+    pipe_log: Arc<P>,
+    purge_manager: PurgeManager<M, P>,
+
+    listeners: Vec<Arc<dyn EventListener>>,
+
+    _phantom: PhantomData<B>,
+}
+
+impl<M> Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>
+where
+    M: MessageExt,
+{
+    pub fn open(
+        cfg: Config,
+    ) -> Result<Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
+        Self::open_with_listeners(cfg, vec![])
+    }
+
+    pub fn open_with_listeners(
+        cfg: Config,
+        listeners: Vec<Arc<dyn EventListener>>,
+    ) -> Result<Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
+        Self::open_with(cfg, Arc::new(DefaultFileBuilder {}), listeners)
+    }
+}
+
+impl<M, B> Engine<M, B, FilePipeLog<B>>
+where
+    M: MessageExt,
+    B: FileBuilder,
+{
+    pub fn open_with_file_builder(
+        cfg: Config,
+        file_builder: Arc<B>,
+    ) -> Result<Engine<M, B, FilePipeLog<B>>> {
+        Self::open_with(cfg, file_builder, vec![])
+    }
+
+    pub fn open_with(
+        cfg: Config,
+        file_builder: Arc<B>,
+        mut listeners: Vec<Arc<dyn EventListener>>,
+    ) -> Result<Engine<M, B, FilePipeLog<B>>> {
+        listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
+
+        let start = Instant::now();
+        let (pipe_log, append, rewrite) =
+            FilePipeLog::open::<ParallelRecoverContext>(&cfg, file_builder, listeners.clone())?;
+        let pipe_log = Arc::new(pipe_log);
+        info!("Recovering raft logs takes {:?}", start.elapsed());
+
+        let (memtables, global_stats) = append.finish();
+        let (memtables_rewrite, rewrite_stats) = rewrite.finish();
+        global_stats.merge(&rewrite_stats);
+
+        let ids = memtables.cleaned_region_ids();
+        for slot in memtables_rewrite.slots.into_iter() {
+            for (id, raft_rewrite) in std::mem::take(&mut *slot.write()) {
+                if let Some(raft_append) = memtables.get(id) {
+                    raft_append
+                        .write()
+                        .merge_lower_prio(&mut *raft_rewrite.write());
+                } else if !ids.contains(&id) {
+                    memtables.insert(id, raft_rewrite);
+                }
+            }
+        }
+
+        let cfg = Arc::new(cfg);
+        let purge_manager = PurgeManager::new(
+            cfg,
+            memtables.clone(),
+            pipe_log.clone(),
+            global_stats,
+            listeners.clone(),
+        );
+
+        Ok(Self {
+            memtables,
+            pipe_log,
+            purge_manager,
+            listeners,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<M, B, P> Engine<M, B, P>
+where
+    M: MessageExt,
+    B: FileBuilder,
+    P: PipeLog,
+{
     /// Write the content of LogBatch into the engine and return written bytes.
     /// If set sync true, the data will be persisted on disk by `fsync`.
     pub fn write(&self, log_batch: &mut LogBatch, sync: bool) -> Result<usize> {
@@ -329,12 +407,8 @@ where
         } else {
             let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
             debug_assert!(file_id.valid());
-            Self::apply_to_memtable(
-                &self.memtables,
-                log_batch.drain(),
-                LogQueue::Append,
-                file_id,
-            );
+            self.memtables
+                .apply(log_batch.drain(), LogQueue::Append, file_id);
             for listener in &self.listeners {
                 listener.post_apply_memtables(LogQueue::Append, file_id);
             }
@@ -449,7 +523,7 @@ where
 
 pub fn read_entry_from_file<M, P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<M::Entry>
 where
-    M: MessageExt + Clone,
+    M: MessageExt,
     P: PipeLog,
 {
     let buf = pipe_log.read_bytes(
@@ -466,6 +540,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::generate_entry_indexes;
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
@@ -687,8 +762,10 @@ mod tests {
         }
 
         // Recover with rewrite queue and append queue.
+        let cleaned_region_ids = engine.memtables.cleaned_region_ids();
         drop(engine);
         let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
         for i in 1..=10 {
             for j in 1..=10 {
                 let e = engine.get_entry(j, i).unwrap().unwrap();
@@ -989,5 +1066,127 @@ mod tests {
         // Drop and then recover.
         drop(engine);
         RaftLogEngine::open(cfg).unwrap();
+    }
+
+    #[test]
+    fn test_parallel_recover_merge() {
+        let queue = LogQueue::Append;
+        let file_id = FileId::from(10);
+
+        // ops:
+        //
+        // case 1:
+        //      region 10: put (key1, v1) => del (key1) => put (key1, v2)
+        // expect 1:
+        //      get (key1) == v2
+        //
+        // case 2:
+        //      region 11: put (k, _) => cleanup
+        // expect 2:
+        //      memtable 11 is none
+        //
+        // case 3:
+        //      region 12: entries [1, 10) => compact 5 => entries [11, 20)
+        // expect 3:
+        //      [1, 5) is compacted, [5, 20) remains
+        //
+
+        let batches = || {
+            let mut bs = vec![
+                LogItemBatch::with_capacity(0),
+                LogItemBatch::with_capacity(0),
+                LogItemBatch::with_capacity(0),
+            ];
+            bs[0]
+                .put_message(
+                    10,
+                    b"key1".to_vec(),
+                    &Entry {
+                        index: 100,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            bs[1].delete_message(10, b"key1".to_vec());
+            bs[2]
+                .put_message(
+                    10,
+                    b"key1".to_vec(),
+                    &Entry {
+                        index: 101,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            bs[0].put(11, b"key".to_vec(), b"ANYTHING".to_vec());
+            bs[1].add_command(11, Command::Clean);
+            bs[0].add_entry_indexes(12, generate_entry_indexes(1, 11, queue, file_id));
+            bs[1].add_command(12, Command::Compact { index: 5 });
+            bs[2].add_entry_indexes(12, generate_entry_indexes(11, 21, queue, file_id));
+            bs
+        };
+
+        // reverse merge
+        let mut ctxs = VecDeque::default();
+        for batch in batches() {
+            let mut ctx = ParallelRecoverContext::default();
+            ctx.replay(batch, queue, file_id).unwrap();
+            ctxs.push_back(ctx);
+        }
+        while ctxs.len() > 1 {
+            let (y, mut x) = (ctxs.pop_back().unwrap(), ctxs.pop_back().unwrap());
+            x.merge(y, queue).unwrap();
+            ctxs.push_back(x);
+        }
+        let (merged_memtables, merged_global_stats) = ctxs.pop_front().unwrap().finish();
+        // sequential apply
+        let global_stats = Arc::new(GlobalStats::default());
+        let global_stats_clone = global_stats.clone();
+        let memtables = MemTableAccessor::new(Arc::new(move |id| {
+            MemTable::new(id, global_stats_clone.clone())
+        }));
+        for mut batch in batches() {
+            memtables.apply(batch.drain(), queue, file_id);
+        }
+
+        // asserts
+        assert_eq!(
+            {
+                let mut entry = Entry::default();
+                entry
+                    .merge_from_bytes(
+                        &merged_memtables
+                            .get(10)
+                            .unwrap()
+                            .read()
+                            .get(b"key1")
+                            .unwrap(),
+                    )
+                    .unwrap();
+                entry
+            },
+            Entry {
+                index: 101,
+                ..Default::default()
+            }
+        );
+        assert!(merged_memtables.get(11).is_none());
+        assert!(merged_memtables.removed_memtables.lock().contains(&11));
+        for i in 1..21 {
+            let opt = merged_memtables.get(12).unwrap().read().get_entry(i);
+            if i < 5 {
+                assert!(opt.is_none());
+            } else {
+                assert!(opt.is_some());
+            }
+        }
+        assert_eq!(
+            global_stats.rewrite_operations(),
+            merged_global_stats.rewrite_operations()
+        );
+        assert_eq!(
+            global_stats.compacted_rewrite_operations(),
+            merged_global_stats.compacted_rewrite_operations()
+        );
     }
 }

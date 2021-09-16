@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::log_batch::LogBatch;
+use crate::log_batch::{LogBatch, LogItemBatch};
 use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -120,4 +120,9 @@ pub trait PipeLog: Sized {
 
     /// Purge the append queue to the given file id.
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize>;
+}
+
+pub trait SequentialReplayMachine: Send + Default {
+    fn replay(&mut self, item_batch: LogItemBatch, queue: LogQueue, file_id: FileId) -> Result<()>;
+    fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 }

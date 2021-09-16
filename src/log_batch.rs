@@ -328,6 +328,10 @@ impl LogItemBatch {
         }
     }
 
+    pub fn iter(&self) -> std::slice::Iter<LogItem> {
+        self.items.iter()
+    }
+
     pub fn drain(&mut self) -> LogItemDrain {
         self.item_size = 0;
         self.items.drain(..)

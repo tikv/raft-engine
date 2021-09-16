@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Result, Seek, Write};
 use std::path::Path;
 
 /// A `FileBuilder` generates file readers or writers that are composed upon
@@ -8,25 +8,16 @@ use std::path::Path;
 pub trait FileBuilder: Send + Sync {
     /// Types of outcome file reader/writer. They must not alter the length of
     /// bytes stream, nor buffer bytes between operations.
-    type Reader<R: Seek + Read>: Seek + Read;
-    type Writer<W: Seek + Write>: Seek + Write;
+    type Reader<R: Seek + Read + Send>: Seek + Read + Send;
+    type Writer<W: Seek + Write + Send>: Seek + Write + Send;
 
-    fn build_reader<R>(
-        &self,
-        path: &Path,
-        reader: R,
-    ) -> Result<Self::Reader<R>, Box<dyn std::error::Error>>
+    fn build_reader<R>(&self, path: &Path, reader: R) -> Result<Self::Reader<R>>
     where
-        R: Seek + Read;
+        R: Seek + Read + Send;
 
-    fn build_writer<W>(
-        &self,
-        path: &Path,
-        writer: W,
-        create: bool,
-    ) -> Result<Self::Writer<W>, Box<dyn std::error::Error>>
+    fn build_writer<W>(&self, path: &Path, writer: W, create: bool) -> Result<Self::Writer<W>>
     where
-        W: Seek + Write;
+        W: Seek + Write + Send;
 }
 
 /// `DefaultFileBuilder` is a `FileBuilder` that builds out the original
@@ -34,28 +25,19 @@ pub trait FileBuilder: Send + Sync {
 pub struct DefaultFileBuilder {}
 
 impl FileBuilder for DefaultFileBuilder {
-    type Reader<R: Seek + Read> = R;
-    type Writer<W: Seek + Write> = W;
+    type Reader<R: Seek + Read + Send> = R;
+    type Writer<W: Seek + Write + Send> = W;
 
-    fn build_reader<R>(
-        &self,
-        _path: &Path,
-        reader: R,
-    ) -> Result<Self::Reader<R>, Box<dyn std::error::Error>>
+    fn build_reader<R>(&self, _path: &Path, reader: R) -> Result<Self::Reader<R>>
     where
-        R: Seek + Read,
+        R: Seek + Read + Send,
     {
         Ok(reader)
     }
 
-    fn build_writer<W>(
-        &self,
-        _path: &Path,
-        writer: W,
-        _create: bool,
-    ) -> Result<Self::Writer<W>, Box<dyn std::error::Error>>
+    fn build_writer<W>(&self, _path: &Path, writer: W, _create: bool) -> Result<Self::Writer<W>>
     where
-        W: Seek + Write,
+        W: Seek + Write + Send,
     {
         Ok(writer)
     }

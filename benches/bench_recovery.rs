@@ -3,7 +3,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use raft::eraftpb::Entry;
 use raft_engine::ReadableSize;
-use raft_engine::{Config as EngineConfig, LogBatch, MessageExt, RaftLogEngine, Result};
+use raft_engine::{Config as EngineConfig, Engine as RaftLogEngine, LogBatch, MessageExt, Result};
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::fmt;
@@ -68,7 +68,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     ecfg.dir = path.clone();
     ecfg.batch_compression_threshold = cfg.batch_compression_threshold;
 
-    let engine = Engine::open(ecfg.clone(), None).unwrap();
+    let engine = Engine::open(ecfg.clone()).unwrap();
 
     let mut indexes: HashMap<u64, u64> = (1..cfg.region_count + 1).map(|rid| (rid, 0)).collect();
     while dir_size(&path).0 < cfg.total_size.0 {
@@ -142,6 +142,14 @@ fn bench_recovery(c: &mut Criterion) {
                 ..Default::default()
             },
         ),
+        (
+            "10GB".to_owned(),
+            Config {
+                total_size: ReadableSize::gb(10),
+                region_count: 1000,
+                ..Default::default()
+            },
+        ),
     ];
 
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
@@ -164,7 +172,7 @@ fn bench_recovery(c: &mut Criterion) {
             &ecfg,
             |b, cfg| {
                 b.iter(|| {
-                    Engine::open(cfg.to_owned(), None).unwrap();
+                    Engine::open(cfg.to_owned()).unwrap();
                 })
             },
         );

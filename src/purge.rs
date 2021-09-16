@@ -30,7 +30,7 @@ const MAX_REWRITE_BATCH_BYTES: usize = 1024 * 1024;
 #[derive(Clone)]
 pub struct PurgeManager<M, P>
 where
-    M: MessageExt + Clone,
+    M: MessageExt,
     P: PipeLog,
 {
     cfg: Arc<Config>,
@@ -47,7 +47,7 @@ where
 
 impl<M, P> PurgeManager<M, P>
 where
-    M: MessageExt + Clone,
+    M: MessageExt,
     P: PipeLog,
 {
     pub fn new(
