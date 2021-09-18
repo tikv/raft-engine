@@ -10,7 +10,7 @@ use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{close, fsync, ftruncate, lseek, Whence};
+use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
 /// A `LogFd` is a RAII file that provides basic I/O functionality.
@@ -59,7 +59,14 @@ impl LogFd {
     }
 
     pub fn sync(&self) -> IoResult<()> {
-        fsync(self.0).map_err(|e| from_nix_error(e, "fsync"))
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::fdatasync(self.0).map_err(|e| from_nix_error(e, "fdatasync"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            nix::unistd::fsync(self.0).map_err(|e| from_nix_error(e, "fsync"))
+        }
     }
 
     pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
@@ -112,7 +119,7 @@ impl LogFd {
         {
             fcntl::fallocate(
                 self.0,
-                fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE,
+                fcntl::FallocateFlags::empty(),
                 offset as i64,
                 size as i64,
             )

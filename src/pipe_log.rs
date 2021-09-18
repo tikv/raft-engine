@@ -84,9 +84,6 @@ impl FileId {
 }
 
 pub trait PipeLog: Sized {
-    /// Close the pipe log.
-    fn close(&self) -> Result<()>;
-
     fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64>;
 
     /// Total size of the given queue.
