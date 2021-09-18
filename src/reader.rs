@@ -55,6 +55,9 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
                 LOG_BATCH_HEADER_LEN,
                 0,
             )?)?;
+            if self.valid_offset + len > self.size {
+                return Err(Error::Corruption("log batch header broken".to_owned()));
+            }
             let entries_offset = self.valid_offset + LOG_BATCH_HEADER_LEN;
             let entries_len = footer_offset - LOG_BATCH_HEADER_LEN;
 

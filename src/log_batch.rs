@@ -42,8 +42,15 @@ pub enum CompressionType {
 }
 
 impl CompressionType {
-    pub fn from_u8(t: u8) -> CompressionType {
-        unsafe { mem::transmute(t) }
+    pub fn from_u8(t: u8) -> Result<Self> {
+        if t <= CompressionType::Lz4 as u8 {
+            Ok(unsafe { mem::transmute(t) })
+        } else {
+            Err(Error::Corruption(format!(
+                "Unrecognized compression type: {}",
+                t
+            )))
+        }
     }
 
     pub fn to_u8(self) -> u8 {
@@ -148,8 +155,12 @@ pub enum OpType {
 }
 
 impl OpType {
-    pub fn from_u8(t: u8) -> OpType {
-        unsafe { mem::transmute(t) }
+    pub fn from_u8(t: u8) -> Result<Self> {
+        if t <= OpType::Del as u8 {
+            Ok(unsafe { mem::transmute(t) })
+        } else {
+            Err(Error::Corruption(format!("Unrecognized op type: {}", t)))
+        }
     }
 
     pub fn to_u8(self) -> u8 {
@@ -176,7 +187,7 @@ impl KeyValue {
     }
 
     pub fn decode(buf: &mut SliceReader) -> Result<KeyValue> {
-        let op_type = OpType::from_u8(codec::read_u8(buf)?);
+        let op_type = OpType::from_u8(codec::read_u8(buf)?)?;
         let k_len = codec::decode_var_u64(buf)? as usize;
         let key = &buf[..k_len];
         buf.consume(k_len);
@@ -620,7 +631,16 @@ impl LogBatch {
 
         let len = codec::decode_u64(buf)? as usize;
         let offset = codec::decode_u64(buf)? as usize;
-        let compression_type = CompressionType::from_u8(len as u8);
+        let compression_type = CompressionType::from_u8(len as u8)?;
+        if offset > len {
+            return Err(Error::Corruption(
+                "Log item offset exceeds log batch length".to_owned(),
+            ));
+        } else if offset < LOG_BATCH_HEADER_LEN {
+            return Err(Error::Corruption(
+                "Log item offset is smaller than log batch header length".to_owned(),
+            ));
+        }
         Ok((offset, compression_type, len >> 8))
     }
 

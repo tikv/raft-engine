@@ -132,6 +132,7 @@ struct FileToRecover<R: Seek + Read> {
 struct ActiveFile<W: Seek + Write> {
     fd: Arc<LogFd>,
     writer: W,
+
     written: usize,
     capacity: usize,
     last_sync: usize,
@@ -165,9 +166,11 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn truncate(&mut self) -> Result<()> {
-        self.fd.truncate(self.written)?;
-        self.fd.sync()?;
-        self.capacity = self.written;
+        if self.written < self.capacity {
+            self.fd.truncate(self.written)?;
+            self.fd.sync()?;
+            self.capacity = self.written;
+        }
         Ok(())
     }
 
@@ -176,13 +179,19 @@ impl<W: Seek + Write> ActiveFile<W> {
         self.written = 0;
         let mut buf = Vec::with_capacity(LOG_FILE_HEADER_LEN);
         LogFileHeader::new().encode(&mut buf)?;
-        self.write(&buf, true)
+        self.write(&buf, true, 0)
     }
 
-    fn write(&mut self, buf: &[u8], sync: bool) -> Result<()> {
+    fn write(&mut self, buf: &[u8], sync: bool, target_file_size: usize) -> Result<()> {
         if self.written + buf.len() > self.capacity {
             // Use fallocate to pre-allocate disk space for active file.
-            let alloc = std::cmp::max(self.written + buf.len() - self.capacity, FILE_ALLOCATE_SIZE);
+            let alloc = std::cmp::max(
+                self.written + buf.len() - self.capacity,
+                std::cmp::min(
+                    FILE_ALLOCATE_SIZE,
+                    target_file_size.saturating_sub(self.capacity),
+                ),
+            );
             self.fd.allocate(self.capacity, alloc)?;
             self.capacity += alloc;
         }
@@ -281,7 +290,8 @@ impl<B: FileBuilder> LogManager<B> {
 
     fn new_log_file(&mut self) -> Result<()> {
         if self.active_file_id.valid() {
-            // self.truncate_active_log()?;
+            // Necessary to truncate extra zeros from fallocate().
+            self.truncate_active_log()?;
         }
         self.active_file_id = if self.active_file_id.valid() {
             self.active_file_id.forward(1)
@@ -351,7 +361,7 @@ impl<B: FileBuilder> LogManager<B> {
             *sync = true;
         }
         let offset = self.active_file.written as u64;
-        self.active_file.write(content, *sync)?;
+        self.active_file.write(content, *sync, self.rotate_size)?;
         Ok((self.active_file_id, offset, self.active_file.fd.clone()))
     }
 
@@ -618,11 +628,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
 }
 
 impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
-    fn close(&self) -> Result<()> {
-        self.mut_queue(LogQueue::Rewrite).truncate_active_log()?;
-        self.mut_queue(LogQueue::Append).truncate_active_log()
-    }
-
     fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64> {
         self.get_queue(queue)
             .get_fd(file_id)
