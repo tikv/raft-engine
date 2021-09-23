@@ -25,6 +25,8 @@ use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
+use std::fs::File;
+use fs2::FileExt;
 
 const LOG_NUM_LEN: usize = 16;
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
@@ -395,7 +397,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
         cfg: &Config,
         file_builder: Arc<B>,
         listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<(FilePipeLog<B>, S, S)> {
+    ) -> Result<(FilePipeLog<B>, S, S, File)> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -404,6 +406,20 @@ impl<B: FileBuilder> FilePipeLog<B> {
         if !path.is_dir() {
             return Err(box_err!("Not directory: {}", &cfg.dir));
         }
+
+        // Add a LOCK File to lock the directory.
+        let lock_path = path.join(Path::new("LOCK"));
+        let f = File::create(lock_path.as_path());
+        if f.is_err() {
+            return Err(box_err!("failed to create lock at {}: {}", lock_path.display(), f.err().unwrap()));
+        }
+
+        let file = f.unwrap();
+        if file.try_lock_exclusive().is_err() {
+            return Err(box_err!("lock {} failed, maybe another instance is using this directory.",
+                lock_path.display()));
+        }
+
 
         let (mut min_append_id, mut max_append_id) = (Default::default(), Default::default());
         let (mut min_rewrite_id, mut max_rewrite_id) = (Default::default(), Default::default());
@@ -488,6 +504,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
             },
             append_sequential_replay_machine,
             rewrite_sequential_replay_machine,
+            file,
         ))
     }
 
@@ -792,6 +809,32 @@ mod tests {
         let invalid_file_name: &str = "123.log";
         assert!(parse_file_name(invalid_file_name).is_err());
         assert!(parse_file_name(invalid_file_name).is_err());
+    }
+
+    #[test]
+    fn test_dir_lock() {
+        let dir = Builder::new().prefix("test_lock").tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut cfg = Config::default();
+        cfg.dir = path.to_owned();
+        cfg.bytes_per_sync = ReadableSize(1024u64);
+        cfg.target_file_size = ReadableSize(32 * 1024 as u64);
+
+        let r1 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
+            &cfg,
+            Arc::new(DefaultFileBuilder {}),
+            vec![],
+        );
+
+        assert_eq!(r1.is_ok(), true);
+        // Only one thread can hold file lock
+        let r2 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
+            &cfg,
+            Arc::new(DefaultFileBuilder {}),
+            vec![],
+        );
+        assert_eq!(r2.is_err(), true);
     }
 
     fn test_pipe_log_impl(queue: LogQueue) {

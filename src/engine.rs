@@ -25,6 +25,7 @@ use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HashMap, InstantExt};
 use crate::{GlobalStats, Result};
+use std::fs::File;
 
 const SLOTS_COUNT: usize = 128;
 
@@ -307,6 +308,8 @@ where
 
     listeners: Vec<Arc<dyn EventListener>>,
 
+    engine_file: File,
+
     _phantom: PhantomData<B>,
 }
 
@@ -348,7 +351,7 @@ where
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
-        let (pipe_log, append, rewrite) =
+        let (pipe_log, append, rewrite, file) =
             FilePipeLog::open::<ParallelRecoverContext>(&cfg, file_builder, listeners.clone())?;
         let pipe_log = Arc::new(pipe_log);
         info!("Recovering raft logs takes {:?}", start.elapsed());
@@ -384,6 +387,7 @@ where
             pipe_log,
             purge_manager,
             listeners,
+            engine_file: file,
             _phantom: PhantomData,
         })
     }
