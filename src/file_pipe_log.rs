@@ -773,6 +773,16 @@ mod tests {
         }
     }
 
+    pub fn expect_error<T, F>(err_matcher: F, x: Result<T>)
+        where
+            F: FnOnce(Error) + Send + 'static,
+    {
+        match x {
+            Err(e) => err_matcher(e),
+            _ => panic!("expect result to be an error"),
+        }
+    }
+
     fn new_test_pipe_log(
         path: &str,
         bytes_per_sync: usize,
@@ -832,8 +842,9 @@ mod tests {
             Arc::new(DefaultFileBuilder {}),
             vec![],
         );
-        assert_eq!(r2.is_err(), true);
-        assert_eq!(format!("{}", r2.err().unwrap()).contains("maybe another instance is using this directory"), true);
+        expect_error(|e| {
+            assert_eq!(format!("{}", e).contains("maybe another instance is using this directory"), true);
+        }, r2)
     }
 
     fn test_pipe_log_impl(queue: LogQueue) {
