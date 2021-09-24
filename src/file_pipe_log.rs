@@ -2,12 +2,14 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::fs::File;
 use std::io::BufRead;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use fs2::FileExt;
 use log::{debug, info, warn};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -25,8 +27,6 @@ use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::reader::LogItemBatchFileReader;
 use crate::util::InstantExt;
 use crate::{Error, Result};
-use std::fs::File;
-use fs2::FileExt;
 
 const LOG_NUM_LEN: usize = 16;
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
@@ -390,6 +390,8 @@ pub struct FilePipeLog<B: FileBuilder> {
     rewriter: Arc<RwLock<LogManager<B>>>,
     file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
+
+    db_file: Arc<File>,
 }
 
 impl<B: FileBuilder> FilePipeLog<B> {
@@ -397,7 +399,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
         cfg: &Config,
         file_builder: Arc<B>,
         listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<(FilePipeLog<B>, S, S, File)> {
+    ) -> Result<(FilePipeLog<B>, S, S)> {
         let path = Path::new(&cfg.dir);
         if !path.exists() {
             info!("Create raft log directory: {}", &cfg.dir);
@@ -501,10 +503,10 @@ impl<B: FileBuilder> FilePipeLog<B> {
                 rewriter,
                 file_builder,
                 listeners,
+                db_file: Arc::new(file)
             },
             append_sequential_replay_machine,
             rewrite_sequential_replay_machine,
-            file,
         ))
     }
 
@@ -818,16 +820,13 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.dir = path.to_owned();
-        cfg.bytes_per_sync = ReadableSize(1024u64);
-        cfg.target_file_size = ReadableSize(32 * 1024 as u64);
-
         let r1 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
             &cfg,
             Arc::new(DefaultFileBuilder {}),
             vec![],
         );
-
         assert_eq!(r1.is_ok(), true);
+
         // Only one thread can hold file lock
         let r2 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
             &cfg,
@@ -835,6 +834,7 @@ mod tests {
             vec![],
         );
         assert_eq!(r2.is_err(), true);
+        assert_eq!(format!("{}", r2.err().unwrap()).contains("maybe another instance is using this directory"), true);
     }
 
     fn test_pipe_log_impl(queue: LogQueue) {
