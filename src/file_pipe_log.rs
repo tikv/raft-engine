@@ -824,8 +824,7 @@ mod tests {
             &cfg,
             Arc::new(DefaultFileBuilder {}),
             vec![],
-        );
-        assert_eq!(r1.is_ok(), true);
+        ).unwrap();
 
         // Only one thread can hold file lock
         let r2 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
