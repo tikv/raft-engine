@@ -15,7 +15,6 @@
 #![feature(cell_update)]
 #![feature(generic_associated_types)]
 #![feature(test)]
-#![feature(assert_matches)]
 
 #[macro_use]
 extern crate lazy_static;
