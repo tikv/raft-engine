@@ -546,6 +546,14 @@ fn main() {
                 .help("Compress log batch bigger than this threshold")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("parallelize_fsync")
+                .long("parallelize-fsync")
+                .value_name("enable")
+                .default_value("false")
+                .help("Whether to call fsync in parallel")
+                .takes_value(true),
+        )
         .get_matches();
     // Raft Engine configurations
     if let Some(s) = matches.value_of("path") {
@@ -559,6 +567,9 @@ fn main() {
     }
     if let Some(s) = matches.value_of("batch_compression_threshold") {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("parallelize_fsync") {
+        config.parallelize_fsync = s.parse::<bool>().unwrap();
     }
     // Test configurations
     if let Some(s) = matches.value_of("time") {

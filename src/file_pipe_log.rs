@@ -194,8 +194,10 @@ impl<W: Seek + Write> ActiveFile<W> {
                     target_file_size.saturating_sub(self.capacity),
                 ),
             );
-            self.fd.allocate(self.capacity, alloc)?;
-            self.capacity += alloc;
+            if alloc > 0 {
+                self.fd.allocate(self.capacity, alloc)?;
+                self.capacity += alloc;
+            }
         }
         self.writer.write_all(buf)?;
         self.written += buf.len();
@@ -364,6 +366,9 @@ impl<B: FileBuilder> LogManager<B> {
         }
         let offset = self.active_file.written as u64;
         self.active_file.write(content, *sync, self.rotate_size)?;
+        for listener in &self.listeners {
+            listener.on_append_log_file(self.queue, self.active_file_id, content.len());
+        }
         Ok((self.active_file_id, offset, self.active_file.fd.clone()))
     }
 
@@ -380,18 +385,17 @@ impl<B: FileBuilder> LogManager<B> {
     }
 }
 
-#[derive(Clone)]
 pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
     rotate_size: usize,
     compression_threshold: usize,
+    parallelize_fsync: bool,
 
     appender: Arc<RwLock<LogManager<B>>>,
     rewriter: Arc<RwLock<LogManager<B>>>,
     file_builder: Arc<B>,
-    listeners: Vec<Arc<dyn EventListener>>,
 
-    db_file: Arc<File>,
+    _lock_file: File,
 }
 
 impl<B: FileBuilder> FilePipeLog<B> {
@@ -411,17 +415,14 @@ impl<B: FileBuilder> FilePipeLog<B> {
 
         // Add a LOCK File to lock the directory.
         let lock_path = path.join(Path::new("LOCK"));
-        let f = File::create(lock_path.as_path());
-        if f.is_err() {
-            return Err(box_err!("failed to create lock at {}: {}", lock_path.display(), f.err().unwrap()));
-        }
-
-        let file = f.unwrap();
-        if file.try_lock_exclusive().is_err() {
-            return Err(box_err!("lock {} failed, maybe another instance is using this directory.",
-                lock_path.display()));
-        }
-
+        let lock_file = File::create(lock_path.as_path())?;
+        lock_file.try_lock_exclusive().map_err(|e| {
+            Error::Other(box_err!(
+                "lock {} failed ({}), maybe another instance is using this directory.",
+                lock_path.display(),
+                e
+            ))
+        })?;
 
         let (mut min_append_id, mut max_append_id) = (Default::default(), Default::default());
         let (mut min_rewrite_id, mut max_rewrite_id) = (Default::default(), Default::default());
@@ -489,7 +490,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
         let rewriter = Arc::new(RwLock::new(LogManager::open(
             cfg,
             file_builder.clone(),
-            listeners.clone(),
+            listeners,
             LogQueue::Rewrite,
             rewrite_files,
         )?));
@@ -499,11 +500,11 @@ impl<B: FileBuilder> FilePipeLog<B> {
                 dir: cfg.dir.clone(),
                 rotate_size: cfg.target_file_size.0 as usize,
                 compression_threshold: cfg.batch_compression_threshold.0 as usize,
+                parallelize_fsync: cfg.parallelize_fsync,
                 appender,
                 rewriter,
                 file_builder,
-                listeners,
-                db_file: Arc::new(file)
+                _lock_file: lock_file,
             },
             append_sequential_replay_machine,
             rewrite_sequential_replay_machine,
@@ -618,16 +619,16 @@ impl<B: FileBuilder> FilePipeLog<B> {
         content: &[u8],
         sync: &mut bool,
     ) -> Result<(FileId, u64)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).append(content, sync)?;
-        for listener in &self.listeners {
-            listener.on_append_log_file(queue, file_id, content.len());
+        let mut queue = self.mut_queue(queue);
+        let (file_id, offset, fd) = queue.append(content, sync)?;
+        if self.parallelize_fsync {
+            std::mem::drop(queue);
         }
         if *sync {
             let start = Instant::now();
             fd.sync()?;
             LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
         }
-
         Ok((file_id, offset))
     }
 
@@ -773,16 +774,6 @@ mod tests {
         }
     }
 
-    pub fn expect_error<T, F>(err_matcher: F, x: Result<T>)
-        where
-            F: FnOnce(Error) + Send + 'static,
-    {
-        match x {
-            Err(e) => err_matcher(e),
-            _ => panic!("expect result to be an error"),
-        }
-    }
-
     fn new_test_pipe_log(
         path: &str,
         bytes_per_sync: usize,
@@ -827,14 +818,17 @@ mod tests {
     fn test_dir_lock() {
         let dir = Builder::new().prefix("test_lock").tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
+        let cfg = Config {
+            dir: path.to_owned(),
+            ..Default::default()
+        };
 
-        let mut cfg = Config::default();
-        cfg.dir = path.to_owned();
-        let r1 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
+        let _r1 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
             &cfg,
             Arc::new(DefaultFileBuilder {}),
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Only one thread can hold file lock
         let r2 = FilePipeLog::open::<BlackholeSequentialReplayMachine>(
@@ -842,9 +836,9 @@ mod tests {
             Arc::new(DefaultFileBuilder {}),
             vec![],
         );
-        expect_error(|e| {
-            assert_eq!(format!("{}", e).contains("maybe another instance is using this directory"), true);
-        }, r2)
+
+        assert!(format!("{}", r2.err().unwrap())
+            .contains("maybe another instance is using this directory"));
     }
 
     fn test_pipe_log_impl(queue: LogQueue) {
