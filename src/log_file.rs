@@ -32,7 +32,8 @@ fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
 impl LogFd {
     pub fn open<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
         let flags = OFlag::O_RDWR;
-        let mode = Mode::S_IRWXU;
+        // Permission 644
+        let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         fail_point!("log_fd_fadvise_dontneed", |_| {
             let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
             #[cfg(target_os = "linux")]
@@ -49,7 +50,8 @@ impl LogFd {
 
     pub fn create<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
         let flags = OFlag::O_RDWR | OFlag::O_CREAT;
-        let mode = Mode::S_IRWXU;
+        // Permission 644
+        let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         let fd = fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?;
         Ok(LogFd(fd))
     }
