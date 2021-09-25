@@ -22,6 +22,7 @@ pub struct Config {
     pub recovery_mode: RecoveryMode,
     pub bytes_per_sync: ReadableSize,
     pub target_file_size: ReadableSize,
+    pub parallelize_fsync: bool,
 
     /// Only purge if disk file size is greater than `purge_threshold`.
     pub purge_threshold: ReadableSize,
@@ -33,7 +34,7 @@ pub struct Config {
 
     /// Read block size for recovery. Default value: "4KB". Min value: "512B".
     pub recovery_read_block_size: ReadableSize,
-    /// Parallel recovery concurrency. Default value: "8". Min value: "1".
+    /// Parallel recovery concurrency. Default value: 4. Min value: 1.
     pub recovery_threads: usize,
 }
 
@@ -44,10 +45,11 @@ impl Default for Config {
             recovery_mode: RecoveryMode::TolerateCorruptedTailRecords,
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
+            parallelize_fsync: false,
             purge_threshold: ReadableSize::gb(10),
             batch_compression_threshold: ReadableSize::kb(8),
             recovery_read_block_size: ReadableSize::kb(4),
-            recovery_threads: 8,
+            recovery_threads: 4,
         }
     }
 }
