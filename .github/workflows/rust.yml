@@ -23,7 +23,7 @@ jobs:
           profile: minimal
           toolchain: nightly-2021-07-28
           override: true
-          components: clippy
+          components: rustfmt, clippy
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
