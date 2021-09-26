@@ -646,7 +646,10 @@ impl LogBatch {
 
     pub fn parse_entry<M: MessageExt>(buf: &[u8], idx: &EntryIndex) -> Result<M::Entry> {
         let len = idx.entries_len;
-        verify_checksum(&buf[0..len])?;
+        if len > 0 {
+            // protobuf message can be serialized to empty string.
+            verify_checksum(&buf[0..len])?;
+        }
         match idx.compression_type {
             CompressionType::None => Ok(parse_from_bytes(
                 &buf[idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],

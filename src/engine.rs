@@ -1189,4 +1189,55 @@ mod tests {
             merged_global_stats.compacted_rewrite_operations()
         );
     }
+
+    #[test]
+    fn test_empty_protobuf_message() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_empty_protobuf_message")
+            .tempdir()
+            .unwrap();
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
+
+        let mut log_batch = LogBatch::default();
+        let empty_entry = Entry::new();
+        assert_eq!(empty_entry.compute_size(), 0);
+        log_batch
+            .add_entries::<Entry>(0, &[empty_entry.clone()])
+            .unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        let empty_state = RaftLocalState::new();
+        assert_eq!(empty_state.compute_size(), 0);
+        log_batch
+            .put_message(1, b"last_index".to_vec(), &empty_state)
+            .unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        log_batch
+            .add_entries::<Entry>(2, &[empty_entry.clone()])
+            .unwrap();
+        log_batch
+            .put_message(2, b"last_index".to_vec(), &empty_state)
+            .unwrap();
+        engine.write(&mut log_batch, true).unwrap();
+        drop(engine);
+
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        assert_eq!(engine.get_entry(0, 0).unwrap().unwrap(), empty_entry);
+        assert_eq!(engine.get_entry(2, 0).unwrap().unwrap(), empty_entry);
+        assert_eq!(
+            engine
+                .get_message::<RaftLocalState>(1, b"last_index")
+                .unwrap()
+                .unwrap(),
+            empty_state
+        );
+        assert_eq!(
+            engine
+                .get_message::<RaftLocalState>(2, b"last_index")
+                .unwrap()
+                .unwrap(),
+            empty_state
+        );
+    }
 }
