@@ -59,7 +59,11 @@ pub use file_builder::FileBuilder;
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use pipe_log::{FileId, LogQueue};
 pub use util::ReadableSize;
-pub type Engine<M, FileBuilder = file_builder::DefaultFileBuilder, FilePipe = file_pipe_log::FilePipeLog<file_builder::DefaultFileBuilder>> = engine::Engine<M, FileBuilder, FilePipe>;
+pub type Engine<
+    M,
+    FileBuilder = file_builder::DefaultFileBuilder,
+    FilePipe = file_pipe_log::FilePipeLog<file_builder::DefaultFileBuilder>,
+> = engine::Engine<M, FileBuilder, FilePipe>;
 #[derive(Default)]
 pub struct GlobalStats {
     // How many operations in the rewrite queue.
