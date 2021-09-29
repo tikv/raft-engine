@@ -215,7 +215,7 @@ where
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut entries = Vec::new();
+            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.read();
