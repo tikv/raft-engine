@@ -556,7 +556,7 @@ mod tests {
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
-    type RaftLogEngine = Engine<Entry>;
+    type RaftLogEngine = Engine;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: &Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
@@ -639,9 +639,15 @@ mod tests {
             for i in 10..20 {
                 // Test get_entry from file.
                 entry.set_index(i);
-                assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i).unwrap(),
+                    Some(entry.clone())
+                );
                 entry.set_index(i + 1);
-                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i + 1).unwrap(),
+                    Some(entry.clone())
+                );
             }
 
             drop(engine);
@@ -650,10 +656,16 @@ mod tests {
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             for i in 10..20 {
                 entry.set_index(i + 1);
-                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i + 1).unwrap(),
+                    Some(entry.clone())
+                );
 
                 entry.set_index(i);
-                assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i).unwrap(),
+                    Some(entry.clone())
+                );
             }
         }
     }
@@ -708,7 +720,7 @@ mod tests {
         // No regions need to be force compacted because the threshold is not reached.
         assert!(will_force_compact.is_empty());
         // After purge, entries and raft state are still available.
-        assert!(engine.get_entry(1, 101).unwrap().is_some());
+        assert!(engine.get_entry::<Entry>(1, 101).unwrap().is_some());
 
         let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
@@ -766,7 +778,7 @@ mod tests {
         // All entries should be available.
         for i in 1..=10 {
             for j in 1..=10 {
-                let e = engine.get_entry(j, i).unwrap().unwrap();
+                let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
                 assert_eq!(e.get_data(), entry.get_data());
                 assert_eq!(last_index(&engine, j), 10);
             }
@@ -779,7 +791,7 @@ mod tests {
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
         for i in 1..=10 {
             for j in 1..=10 {
-                let e = engine.get_entry(j, i).unwrap().unwrap();
+                let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
                 assert_eq!(e.get_data(), entry.get_data());
                 assert_eq!(last_index(&engine, j), 10);
             }
@@ -869,7 +881,7 @@ mod tests {
             .is_none());
         // Entries of region 1 after the clean command should be still valid.
         for j in 2..=11 {
-            let entry_j = engine.get_entry(1, j).unwrap().unwrap();
+            let entry_j = engine.get_entry::<Entry>(1, j).unwrap().unwrap();
             assert_eq!(entry_j.get_data(), entry.get_data());
         }
 
@@ -1234,8 +1246,14 @@ mod tests {
         drop(engine);
 
         let engine = RaftLogEngine::open(cfg).unwrap();
-        assert_eq!(engine.get_entry(0, 0).unwrap().unwrap(), empty_entry);
-        assert_eq!(engine.get_entry(2, 0).unwrap().unwrap(), empty_entry);
+        assert_eq!(
+            engine.get_entry::<Entry>(0, 0).unwrap().unwrap(),
+            empty_entry
+        );
+        assert_eq!(
+            engine.get_entry::<Entry>(2, 0).unwrap().unwrap(),
+            empty_entry
+        );
         assert_eq!(
             engine
                 .get_message::<RaftLocalState>(1, b"last_index")
