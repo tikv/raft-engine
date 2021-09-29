@@ -2,18 +2,16 @@
 
 use std::cmp;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
-use protobuf::Message;
 
 use crate::config::Config;
-use crate::engine::{read_entry_from_file, MemTableAccessor};
+use crate::engine::{read_entry_bytes_from_file, MemTableAccessor};
 use crate::event_listener::EventListener;
-use crate::log_batch::{Command, LogBatch, LogItemContent, MessageExt, OpType};
+use crate::log_batch::{Command, LogBatch, LogItemContent, OpType};
 use crate::memtable::MemTable;
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
@@ -28,9 +26,8 @@ const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
-pub struct PurgeManager<M, P>
+pub struct PurgeManager<P>
 where
-    M: MessageExt,
     P: PipeLog,
 {
     cfg: Arc<Config>,
@@ -41,13 +38,10 @@ where
 
     // Only one thread can run `purge_expired_files` at a time.
     purge_mutex: Arc<Mutex<()>>,
-
-    _phantom: PhantomData<M>,
 }
 
-impl<M, P> PurgeManager<M, P>
+impl<P> PurgeManager<P>
 where
-    M: MessageExt,
     P: PipeLog,
 {
     pub fn new(
@@ -56,7 +50,7 @@ where
         pipe_log: Arc<P>,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
-    ) -> PurgeManager<M, P> {
+    ) -> PurgeManager<P> {
         PurgeManager {
             cfg,
             memtables,
@@ -64,7 +58,6 @@ where
             global_stats,
             listeners,
             purge_mutex: Arc::new(Mutex::new(())),
-            _phantom: PhantomData,
         }
     }
 
@@ -222,7 +215,7 @@ where
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
+            let mut entries = Vec::new();
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.read();
@@ -236,12 +229,12 @@ where
                 m.region_id()
             };
 
-            for i in entry_indexes {
-                let entry = read_entry_from_file::<M, _>(self.pipe_log.as_ref(), &i)?;
-                total_size += entry.compute_size();
+            for i in &entry_indexes {
+                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), i)?;
+                total_size += entry.len();
                 entries.push(entry);
             }
-            log_batch.add_entries::<M>(region_id, &entries)?;
+            log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }

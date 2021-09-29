@@ -14,12 +14,10 @@ use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::{
-    Command, Config, Engine as RawEngine, EventListener, FileId, LogBatch, LogQueue, MessageExt,
-    ReadableSize,
+    Command, Config, Engine, EventListener, FileId, LogBatch, LogQueue, MessageExt, ReadableSize,
 };
 use rand::{thread_rng, Rng};
 
-type Engine = RawEngine<MessageExtTyped>;
 type WriteBatch = LogBatch;
 
 #[derive(Clone)]
@@ -285,7 +283,7 @@ fn spawn_read(
                 }
                 // Read newest entry to avoid conflicting with compact
                 if let Some(last) = engine.last_index(rid) {
-                    if let Err(e) = engine.get_entry(rid, last) {
+                    if let Err(e) = engine.get_entry::<MessageExtTyped>(rid, last) {
                         println!("read error {:?} in thread {}", e, index);
                     }
                     let end = Instant::now();
