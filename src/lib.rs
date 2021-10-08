@@ -59,7 +59,7 @@ pub use file_builder::FileBuilder;
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use pipe_log::{FileId, LogQueue};
 pub use util::ReadableSize;
-pub type Engine<M, FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine<M, FileBuilder>;
+pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine<FileBuilder>;
 
 #[derive(Default)]
 pub struct GlobalStats {

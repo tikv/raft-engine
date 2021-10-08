@@ -295,48 +295,43 @@ impl SequentialReplayMachine for ParallelRecoverContext {
     }
 }
 
-pub struct Engine<M, B = DefaultFileBuilder, P = FilePipeLog<B>>
+pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
-    M: MessageExt,
     B: FileBuilder,
     P: PipeLog,
 {
     memtables: MemTableAccessor,
     pipe_log: Arc<P>,
-    purge_manager: PurgeManager<M, P>,
+    purge_manager: PurgeManager<P>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 
     _phantom: PhantomData<B>,
 }
 
-impl<M> Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>
-where
-    M: MessageExt,
-{
+impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
     pub fn open(
         cfg: Config,
-    ) -> Result<Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
+    ) -> Result<Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
         Self::open_with_listeners(cfg, vec![])
     }
 
     pub fn open_with_listeners(
         cfg: Config,
         listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<Engine<M, DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
+    ) -> Result<Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
         Self::open_with(cfg, Arc::new(DefaultFileBuilder {}), listeners)
     }
 }
 
-impl<M, B> Engine<M, B, FilePipeLog<B>>
+impl<B> Engine<B, FilePipeLog<B>>
 where
-    M: MessageExt,
     B: FileBuilder,
 {
     pub fn open_with_file_builder(
         cfg: Config,
         file_builder: Arc<B>,
-    ) -> Result<Engine<M, B, FilePipeLog<B>>> {
+    ) -> Result<Engine<B, FilePipeLog<B>>> {
         Self::open_with(cfg, file_builder, vec![])
     }
 
@@ -344,7 +339,7 @@ where
         cfg: Config,
         file_builder: Arc<B>,
         mut listeners: Vec<Arc<dyn EventListener>>,
-    ) -> Result<Engine<M, B, FilePipeLog<B>>> {
+    ) -> Result<Engine<B, FilePipeLog<B>>> {
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
@@ -389,9 +384,8 @@ where
     }
 }
 
-impl<M, B, P> Engine<M, B, P>
+impl<B, P> Engine<B, P>
 where
-    M: MessageExt,
     B: FileBuilder,
     P: PipeLog,
 {
@@ -439,7 +433,11 @@ where
         Ok(None)
     }
 
-    pub fn get_entry(&self, region_id: u64, log_idx: u64) -> Result<Option<M::Entry>> {
+    pub fn get_entry<M: MessageExt>(
+        &self,
+        region_id: u64,
+        log_idx: u64,
+    ) -> Result<Option<M::Entry>> {
         let start = Instant::now();
         let mut entry = None;
         if let Some(memtable) = self.memtables.get(region_id) {
@@ -458,7 +456,7 @@ where
     }
 
     /// Return count of fetched entries.
-    pub fn fetch_entries_to(
+    pub fn fetch_entries_to<M: MessageExt>(
         &self,
         region_id: u64,
         begin: u64,
@@ -537,6 +535,19 @@ where
     Ok(e)
 }
 
+pub fn read_entry_bytes_from_file<P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<Vec<u8>>
+where
+    P: PipeLog,
+{
+    let entries_buf = pipe_log.read_bytes(
+        ent_idx.queue,
+        ent_idx.file_id,
+        ent_idx.entries_offset,
+        ent_idx.entries_len as u64,
+    )?;
+    LogBatch::parse_entry_bytes(&entries_buf, ent_idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,7 +556,7 @@ mod tests {
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
-    type RaftLogEngine = Engine<Entry>;
+    type RaftLogEngine = Engine;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: &Vec<Entry>) -> Result<usize> {
             let mut batch = LogBatch::default();
@@ -628,9 +639,15 @@ mod tests {
             for i in 10..20 {
                 // Test get_entry from file.
                 entry.set_index(i);
-                assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i).unwrap(),
+                    Some(entry.clone())
+                );
                 entry.set_index(i + 1);
-                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i + 1).unwrap(),
+                    Some(entry.clone())
+                );
             }
 
             drop(engine);
@@ -639,10 +656,16 @@ mod tests {
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             for i in 10..20 {
                 entry.set_index(i + 1);
-                assert_eq!(engine.get_entry(i, i + 1).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i + 1).unwrap(),
+                    Some(entry.clone())
+                );
 
                 entry.set_index(i);
-                assert_eq!(engine.get_entry(i, i).unwrap(), Some(entry.clone()));
+                assert_eq!(
+                    engine.get_entry::<Entry>(i, i).unwrap(),
+                    Some(entry.clone())
+                );
             }
         }
     }
@@ -697,7 +720,7 @@ mod tests {
         // No regions need to be force compacted because the threshold is not reached.
         assert!(will_force_compact.is_empty());
         // After purge, entries and raft state are still available.
-        assert!(engine.get_entry(1, 101).unwrap().is_some());
+        assert!(engine.get_entry::<Entry>(1, 101).unwrap().is_some());
 
         let count = engine.compact_to(1, 102);
         assert_eq!(count, 1);
@@ -755,7 +778,7 @@ mod tests {
         // All entries should be available.
         for i in 1..=10 {
             for j in 1..=10 {
-                let e = engine.get_entry(j, i).unwrap().unwrap();
+                let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
                 assert_eq!(e.get_data(), entry.get_data());
                 assert_eq!(last_index(&engine, j), 10);
             }
@@ -768,7 +791,7 @@ mod tests {
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
         for i in 1..=10 {
             for j in 1..=10 {
-                let e = engine.get_entry(j, i).unwrap().unwrap();
+                let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
                 assert_eq!(e.get_data(), entry.get_data());
                 assert_eq!(last_index(&engine, j), 10);
             }
@@ -858,7 +881,7 @@ mod tests {
             .is_none());
         // Entries of region 1 after the clean command should be still valid.
         for j in 2..=11 {
-            let entry_j = engine.get_entry(1, j).unwrap().unwrap();
+            let entry_j = engine.get_entry::<Entry>(1, j).unwrap().unwrap();
             assert_eq!(entry_j.get_data(), entry.get_data());
         }
 
@@ -1223,8 +1246,14 @@ mod tests {
         drop(engine);
 
         let engine = RaftLogEngine::open(cfg).unwrap();
-        assert_eq!(engine.get_entry(0, 0).unwrap().unwrap(), empty_entry);
-        assert_eq!(engine.get_entry(2, 0).unwrap().unwrap(), empty_entry);
+        assert_eq!(
+            engine.get_entry::<Entry>(0, 0).unwrap().unwrap(),
+            empty_entry
+        );
+        assert_eq!(
+            engine.get_entry::<Entry>(2, 0).unwrap().unwrap(),
+            empty_entry
+        );
         assert_eq!(
             engine
                 .get_message::<RaftLocalState>(1, b"last_index")

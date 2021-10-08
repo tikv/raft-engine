@@ -539,6 +539,27 @@ impl LogBatch {
         Ok(())
     }
 
+    pub(crate) fn add_raw_entries(
+        &mut self,
+        region_id: u64,
+        mut entry_indexes: Vec<EntryIndex>,
+        entries: Vec<Vec<u8>>,
+    ) -> Result<()> {
+        debug_assert!(entry_indexes.len() == entries.len());
+        debug_assert!(self.buf_state == BufState::Open);
+
+        self.buf_state = BufState::Incomplete;
+        for (ei, e) in entry_indexes.iter_mut().zip(entries.iter()) {
+            let buf_offset = self.buf.len();
+            self.buf.extend(e);
+            ei.entry_offset = (buf_offset - LOG_BATCH_HEADER_LEN) as u64;
+            ei.entry_len = self.buf.len() - buf_offset;
+        }
+        self.buf_state = BufState::Open;
+        self.item_batch.add_entry_indexes(region_id, entry_indexes);
+        Ok(())
+    }
+
     pub fn add_command(&mut self, region_id: u64, cmd: Command) {
         self.item_batch.add_command(region_id, cmd);
     }
@@ -626,7 +647,7 @@ impl LogBatch {
         }
     }
 
-    pub fn decode_header(buf: &mut SliceReader) -> Result<(usize, CompressionType, usize)> {
+    pub(crate) fn decode_header(buf: &mut SliceReader) -> Result<(usize, CompressionType, usize)> {
         assert!(buf.len() >= LOG_BATCH_HEADER_LEN);
 
         let len = codec::decode_u64(buf)? as usize;
@@ -644,7 +665,7 @@ impl LogBatch {
         Ok((offset, compression_type, len >> 8))
     }
 
-    pub fn parse_entry<M: MessageExt>(buf: &[u8], idx: &EntryIndex) -> Result<M::Entry> {
+    pub(crate) fn parse_entry<M: MessageExt>(buf: &[u8], idx: &EntryIndex) -> Result<M::Entry> {
         let len = idx.entries_len;
         if len > 0 {
             // protobuf message can be serialized to empty string.
@@ -660,6 +681,24 @@ impl LogBatch {
                     &decompressed
                         [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
                 )?)
+            }
+        }
+    }
+
+    pub(crate) fn parse_entry_bytes(buf: &[u8], idx: &EntryIndex) -> Result<Vec<u8>> {
+        let len = idx.entries_len;
+        if len > 0 {
+            verify_checksum(&buf[0..len])?;
+        }
+        match idx.compression_type {
+            CompressionType::None => Ok(buf
+                [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
+                .to_owned()),
+            CompressionType::Lz4 => {
+                let decompressed = lz4::decode_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN]);
+                Ok(decompressed
+                    [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
+                    .to_owned())
             }
         }
     }
