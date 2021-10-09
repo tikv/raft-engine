@@ -23,7 +23,7 @@ nix = "0.18.0"
 num-derive = "0.3"
 num-traits = "0.2"
 parking_lot = "0.11"
-prometheus = { version = "0.12", features = ["nightly"] }
+prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "=2.8.0"
 rayon = "1.5.0"
