@@ -116,6 +116,7 @@ impl LogFd {
         ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
     }
 
+    #[allow(unused_variables)]
     pub fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
         #[cfg(target_os = "linux")]
         {
