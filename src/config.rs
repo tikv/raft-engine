@@ -12,6 +12,10 @@ const MIN_RECOVERY_THREADS: usize = 1;
 pub enum RecoveryMode {
     TolerateCorruptedTailRecords = 0,
     AbsoluteConsistency = 1,
+
+    /// Attention!!!, this will ignore all corrupted records, can only be used when
+    /// `TolerateCorruptedTailRecords` does not take effect
+    TolerateCorruptedAllRecords = 2,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -103,5 +107,16 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
+    }
+
+    #[test]
+    fn test_recovery_mode() {
+        let custom = r#"
+            dir = "custom_dir"
+            recovery-mode = "tolerate-corrupted-all-records"
+        "#;
+        let load: Config = toml::from_str(custom).unwrap();
+        assert_eq!(load.dir, "custom_dir");
+        assert_eq!(load.recovery_mode, RecoveryMode::TolerateCorruptedAllRecords);
     }
 }

@@ -596,6 +596,13 @@ impl<B: FileBuilder> FilePipeLog<B> {
                                 f.fd.truncate(reader.valid_offset())?;
                                 break;
                             }
+
+                            Err(e) if recovery_mode == RecoveryMode::TolerateCorruptedAllRecords =>
+                            {
+                                warn!("All corrupted raft logs will be truncated,  error of one file: {}",  e);
+                                f.fd.truncate(reader.valid_offset())?;
+                                break
+                            }
                             Err(e) => return Err(e),
                         }
                     }
