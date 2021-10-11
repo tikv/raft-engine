@@ -12,11 +12,10 @@ pub struct LogItemBatchFileReader<R: Read + Seek> {
 
     buffer: Vec<u8>,
 
-    // buffer_offset represent the postion where the begin of buffer data lies in the file
-    // for examle if the file conntent is 'abcedf' and buffer is 'ce', the buffer offset is 2
+    // File offset of the data contained in `buffer`.
     buffer_offset: usize,
 
-    // Offset of logbatch in log file, when read one logbatch, the value will updated
+    // File offset of the end of last decoded log batch
     valid_offset: usize,
 
     read_block_size: usize,
