@@ -307,7 +307,7 @@ where
     pipe_log: Arc<P>,
     purge_manager: PurgeManager<P>,
 
-    write_group: WriteBarrier<LogBatch, Result<(FileId, u64)>>,
+    write_barrier: WriteBarrier<LogBatch, Result<(FileId, u64)>>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 
@@ -384,7 +384,7 @@ where
             memtables,
             pipe_log,
             purge_manager,
-            write_group: Default::default(),
+            write_barrier: Default::default(),
             listeners,
             _phantom: PhantomData,
         })
@@ -405,7 +405,7 @@ where
         let (file_id, offset) = {
             if self.cfg.enable_write_group {
                 let mut writer = Writer::new(log_batch as &_, sync);
-                if let Some(mut group) = self.write_group.enter(&mut writer) {
+                if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                     for writer in group.iter_mut() {
                         sync |= writer.is_sync();
                         if !log_batch.is_empty() {
@@ -419,10 +419,10 @@ where
                         }
                     }
                     if sync {
-                        // fsync() is not retryable, a failed attempt could results in
-                        // unrecoverable loss of data since last successful fsync(). See
-                        // [PostgreSQL's fsync() surprise](https://lwn.net/Articles/752063/)
-                        // for more details.
+                        // fsync() is not retryable, a failed attempt could result in
+                        // unrecoverable loss of data written after last successful
+                        // fsync(). See [PostgreSQL's fsync() surprise]
+                        // (https://lwn.net/Articles/752063/) for more details.
                         if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
                             for writer in group.iter_mut() {
                                 writer.set_output(Err(Error::Fsync(e.to_string())));
