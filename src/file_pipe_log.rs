@@ -387,7 +387,6 @@ impl<B: FileBuilder> LogManager<B> {
 pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
     rotate_size: usize,
-    parallelize_fsync: bool,
 
     appender: Arc<RwLock<LogManager<B>>>,
     rewriter: Arc<RwLock<LogManager<B>>>,
@@ -497,7 +496,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
             FilePipeLog {
                 dir: cfg.dir.clone(),
                 rotate_size: cfg.target_file_size.0 as usize,
-                parallelize_fsync: cfg.parallelize_fsync,
                 appender,
                 rewriter,
                 file_builder,
@@ -616,11 +614,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
         content: &[u8],
         sync: &mut bool,
     ) -> Result<(FileId, u64)> {
-        let mut queue = self.mut_queue(queue);
-        let (file_id, offset, fd) = queue.append(content, sync)?;
-        if self.parallelize_fsync {
-            std::mem::drop(queue);
-        }
+        let (file_id, offset, fd) = self.mut_queue(queue).append(content, sync)?;
         if *sync {
             let start = Instant::now();
             fd.sync()?;

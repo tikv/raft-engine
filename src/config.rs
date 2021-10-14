@@ -22,7 +22,7 @@ pub struct Config {
     pub recovery_mode: RecoveryMode,
     pub bytes_per_sync: ReadableSize,
     pub target_file_size: ReadableSize,
-    pub parallelize_fsync: bool,
+    pub enable_write_group: bool,
 
     /// Only purge if disk file size is greater than `purge_threshold`.
     pub purge_threshold: ReadableSize,
@@ -45,7 +45,7 @@ impl Default for Config {
             recovery_mode: RecoveryMode::TolerateCorruptedTailRecords,
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
-            parallelize_fsync: false,
+            enable_write_group: true,
             purge_threshold: ReadableSize::gb(10),
             batch_compression_threshold: ReadableSize::kb(8),
             recovery_read_block_size: ReadableSize::kb(4),

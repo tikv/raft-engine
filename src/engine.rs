@@ -402,26 +402,31 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let (file_id, offset) = {
-            let mut writer = Writer::new(log_batch as &_, sync);
-            if let Some(mut group) = self.write_group.enter(&mut writer) {
-                for writer in group.iter_mut() {
-                    sync |= writer.is_sync();
-                    if !log_batch.is_empty() {
-                        writer.set_output(self.pipe_log.append(
-                            LogQueue::Append,
-                            writer.get_payload().encoded_bytes(),
-                            false, /*sync*/
-                        ));
-                    } else {
-                        writer.set_output(Ok((FileId::default(), 0)));
+            if self.cfg.enable_write_group {
+                let mut writer = Writer::new(log_batch as &_, sync);
+                if let Some(mut group) = self.write_group.enter(&mut writer) {
+                    for writer in group.iter_mut() {
+                        sync |= writer.is_sync();
+                        if !log_batch.is_empty() {
+                            writer.set_output(self.pipe_log.append(
+                                LogQueue::Append,
+                                writer.get_payload().encoded_bytes(),
+                                false, /*sync*/
+                            ));
+                        } else {
+                            writer.set_output(Ok((FileId::default(), 0)));
+                        }
+                    }
+                    if sync {
+                        self.pipe_log.sync(LogQueue::Append).unwrap();
+                        // TODO(tabokie): fail every writer if fsync fails.
                     }
                 }
-                if sync {
-                    self.pipe_log.sync(LogQueue::Append).unwrap();
-                    // TODO(tabokie): fail every writer if fsync fails.
-                }
+                writer.finish()?
+            } else {
+                self.pipe_log
+                    .append(LogQueue::Append, log_batch.encoded_bytes(), sync)?
             }
-            writer.finish()?
         };
 
         if len > 0 {
