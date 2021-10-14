@@ -254,15 +254,19 @@ where
         rewrite_watermark: Option<FileId>,
         sync: bool,
     ) -> Result<()> {
-        if log_batch.is_empty() {
+        let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
+        if len == 0 {
             if sync {
                 self.pipe_log.sync(LogQueue::Rewrite)?;
             }
             return Ok(());
         }
 
-        let (file_id, bytes) = self.pipe_log.append(LogQueue::Rewrite, log_batch, sync)?;
+        let (file_id, offset) =
+            self.pipe_log
+                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), sync)?;
         debug_assert!(file_id.valid());
+        log_batch.finish_write(LogQueue::Rewrite, file_id, offset);
         let queue = LogQueue::Rewrite;
         for item in log_batch.drain() {
             let raft = item.raft_group_id;
@@ -306,9 +310,9 @@ where
             listener.post_apply_memtables(LogQueue::Rewrite, file_id);
         }
         if rewrite_watermark.is_none() {
-            BACKGROUND_REWRITE_BYTES.rewrite.inc_by(bytes as u64);
+            BACKGROUND_REWRITE_BYTES.rewrite.inc_by(len as u64);
         } else {
-            BACKGROUND_REWRITE_BYTES.append.inc_by(bytes as u64);
+            BACKGROUND_REWRITE_BYTES.append.inc_by(len as u64);
         }
         Ok(())
     }

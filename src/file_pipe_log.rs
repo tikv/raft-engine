@@ -20,7 +20,6 @@ use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
-use crate::log_batch::LogBatch;
 use crate::log_file::{LogFd, LogFile};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
@@ -54,17 +53,17 @@ fn build_file_name(queue: LogQueue, file_id: FileId) -> String {
     }
 }
 
-fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
+fn parse_file_name(file_name: &str) -> Option<(LogQueue, FileId)> {
     if file_name.len() > LOG_NUM_LEN {
         if let Ok(num) = file_name[..LOG_NUM_LEN].parse::<u64>() {
             if file_name.ends_with(LOG_APPEND_SUFFIX) {
-                return Ok((LogQueue::Append, num.into()));
+                return Some((LogQueue::Append, num.into()));
             } else if file_name.ends_with(LOG_REWRITE_SUFFIX) {
-                return Ok((LogQueue::Rewrite, num.into()));
+                return Some((LogQueue::Rewrite, num.into()));
             }
         }
     }
-    Err(Error::ParseFileName(file_name.to_owned()))
+    None
 }
 
 fn build_file_path<P: AsRef<Path>>(dir: P, queue: LogQueue, file_id: FileId) -> PathBuf {
@@ -388,8 +387,6 @@ impl<B: FileBuilder> LogManager<B> {
 pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
     rotate_size: usize,
-    compression_threshold: usize,
-    parallelize_fsync: bool,
 
     appender: Arc<RwLock<LogManager<B>>>,
     rewriter: Arc<RwLock<LogManager<B>>>,
@@ -429,11 +426,11 @@ impl<B: FileBuilder> FilePipeLog<B> {
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
                 match parse_file_name(e.file_name().to_str().unwrap()) {
-                    Ok((LogQueue::Append, file_id)) => {
+                    Some((LogQueue::Append, file_id)) => {
                         min_append_id = FileId::min(min_append_id, file_id);
                         max_append_id = FileId::max(max_append_id, file_id);
                     }
-                    Ok((LogQueue::Rewrite, file_id)) => {
+                    Some((LogQueue::Rewrite, file_id)) => {
                         min_rewrite_id = FileId::min(min_rewrite_id, file_id);
                         max_rewrite_id = FileId::max(max_rewrite_id, file_id);
                     }
@@ -499,8 +496,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
             FilePipeLog {
                 dir: cfg.dir.clone(),
                 rotate_size: cfg.target_file_size.0 as usize,
-                compression_threshold: cfg.batch_compression_threshold.0 as usize,
-                parallelize_fsync: cfg.parallelize_fsync,
                 appender,
                 rewriter,
                 file_builder,
@@ -584,7 +579,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
                     loop {
                         match reader.next() {
                             Ok(Some(mut item_batch)) => {
-                                item_batch.set_position(queue, f.file_id, None);
+                                item_batch.set_file_location(queue, f.file_id);
                                 sequential_replay_machine.replay(item_batch, queue, f.file_id)?;
                             }
                             Ok(None) => break,
@@ -619,11 +614,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
         content: &[u8],
         sync: &mut bool,
     ) -> Result<(FileId, u64)> {
-        let mut queue = self.mut_queue(queue);
-        let (file_id, offset, fd) = queue.append(content, sync)?;
-        if self.parallelize_fsync {
-            std::mem::drop(queue);
-        }
+        let (file_id, offset, fd) = self.mut_queue(queue).append(content, sync)?;
         if *sync {
             let start = Instant::now();
             fd.sync()?;
@@ -677,18 +668,9 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(
-        &self,
-        queue: LogQueue,
-        batch: &mut LogBatch,
-        mut sync: bool,
-    ) -> Result<(FileId, usize)> {
-        let bytes = batch.encoded_bytes(self.compression_threshold)?;
+    fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<(FileId, u64)> {
         let start = Instant::now();
         let (file_id, offset) = self.append_bytes(queue, bytes, &mut sync)?;
-        let len = bytes.len();
-        // set fields based on the log file
-        batch.set_position(queue, file_id, Some(offset));
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
@@ -701,7 +683,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
                     .observe(start.saturating_elapsed().as_secs_f64());
             }
         }
-        Ok((file_id, len))
+        Ok((file_id, offset))
     }
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
@@ -810,8 +792,8 @@ mod tests {
         assert_eq!(build_file_name(LogQueue::Rewrite, 123.into()), file_name);
 
         let invalid_file_name: &str = "123.log";
-        assert!(parse_file_name(invalid_file_name).is_err());
-        assert!(parse_file_name(invalid_file_name).is_err());
+        assert!(parse_file_name(invalid_file_name).is_none());
+        assert!(parse_file_name(invalid_file_name).is_none());
     }
 
     #[test]

@@ -51,6 +51,7 @@ mod reader;
 #[cfg(test)]
 mod test_util;
 mod util;
+mod write_barrier;
 
 pub use config::{Config, RecoveryMode};
 pub use errors::{Error, Result};

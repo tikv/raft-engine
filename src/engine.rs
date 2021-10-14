@@ -24,11 +24,12 @@ use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HashMap, InstantExt};
+use crate::write_barrier::{WriteBarrier, Writer};
+use crate::Error;
 use crate::{GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
-// Modifying MemTables collection requires a write lock.
 type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 
 /// Collection of MemTables, indexed by Raft group ID.
@@ -300,9 +301,13 @@ where
     B: FileBuilder,
     P: PipeLog,
 {
+    cfg: Arc<Config>,
+
     memtables: MemTableAccessor,
     pipe_log: Arc<P>,
     purge_manager: PurgeManager<P>,
+
+    write_barrier: WriteBarrier<LogBatch, Result<(FileId, u64)>>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 
@@ -367,7 +372,7 @@ where
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
-            cfg,
+            cfg.clone(),
             memtables.clone(),
             pipe_log.clone(),
             global_stats,
@@ -375,9 +380,11 @@ where
         );
 
         Ok(Self {
+            cfg,
             memtables,
             pipe_log,
             purge_manager,
+            write_barrier: Default::default(),
             listeners,
             _phantom: PhantomData,
         })
@@ -390,27 +397,59 @@ where
     P: PipeLog,
 {
     /// Write the content of LogBatch into the engine and return written bytes.
-    /// If set sync true, the data will be persisted on disk by `fsync`.
-    pub fn write(&self, log_batch: &mut LogBatch, sync: bool) -> Result<usize> {
+    /// If `sync` is true, the write will be followed by a call to `fdatasync` on
+    /// the log file.
+    pub fn write(&self, log_batch: &mut LogBatch, mut sync: bool) -> Result<usize> {
         let start = Instant::now();
-        let bytes = if log_batch.is_empty() {
-            if sync {
-                self.pipe_log.sync(LogQueue::Append)?;
+        let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
+        let (file_id, offset) = {
+            if self.cfg.enable_write_group {
+                let mut writer = Writer::new(log_batch as &_, sync);
+                if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                    for writer in group.iter_mut() {
+                        sync |= writer.is_sync();
+                        if !log_batch.is_empty() {
+                            writer.set_output(self.pipe_log.append(
+                                LogQueue::Append,
+                                writer.get_payload().encoded_bytes(),
+                                false, /*sync*/
+                            ));
+                        } else {
+                            writer.set_output(Ok((FileId::default(), 0)));
+                        }
+                    }
+                    if sync {
+                        // fsync() is not retryable, a failed attempt could result in
+                        // unrecoverable loss of data written after last successful
+                        // fsync(). See [PostgreSQL's fsync() surprise]
+                        // (https://lwn.net/Articles/752063/) for more details.
+                        if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
+                            for writer in group.iter_mut() {
+                                writer.set_output(Err(Error::Fsync(e.to_string())));
+                            }
+                        }
+                    }
+                }
+                writer.finish()?
+            } else {
+                self.pipe_log
+                    .append(LogQueue::Append, log_batch.encoded_bytes(), sync)?
             }
-            0
-        } else {
-            let (file_id, bytes) = self.pipe_log.append(LogQueue::Append, log_batch, sync)?;
+        };
+
+        if len > 0 {
             debug_assert!(file_id.valid());
+            log_batch.finish_write(LogQueue::Append, file_id, offset);
             self.memtables
                 .apply(log_batch.drain(), LogQueue::Append, file_id);
             for listener in &self.listeners {
                 listener.post_apply_memtables(LogQueue::Append, file_id);
             }
-            bytes
-        };
+        }
+
         ENGINE_WRITE_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        ENGINE_WRITE_SIZE_HISTOGRAM.observe(bytes as f64);
-        Ok(bytes)
+        ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
+        Ok(len)
     }
 
     /// Synchronize the Raft engine.

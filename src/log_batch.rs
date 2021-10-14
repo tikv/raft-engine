@@ -348,15 +348,24 @@ impl LogItemBatch {
         self.items.drain(..)
     }
 
-    pub fn set_position(&mut self, queue: LogQueue, file_id: FileId, offset: Option<u64>) {
+    pub fn set_file_location(&mut self, queue: LogQueue, file_id: FileId) {
         for item in self.items.iter_mut() {
             if let LogItemContent::EntriesIndex(entries_index) = &mut item.content {
                 for ei in entries_index.0.iter_mut() {
                     ei.queue = queue;
                     ei.file_id = file_id;
-                    if let Some(offset) = offset {
-                        ei.entries_offset += offset;
-                    }
+                }
+            }
+        }
+    }
+
+    fn set_log_batch_location(&mut self, queue: LogQueue, file_id: FileId, log_batch_offset: u64) {
+        for item in self.items.iter_mut() {
+            if let LogItemContent::EntriesIndex(entries_index) = &mut item.content {
+                for ei in entries_index.0.iter_mut() {
+                    ei.queue = queue;
+                    ei.file_id = file_id;
+                    ei.entries_offset += log_batch_offset;
                 }
             }
         }
@@ -456,7 +465,9 @@ enum BufState {
 }
 
 // Format:
-// { u56 len | u8 compression type | u64 item offset | (compressed) entries | crc32 | item batch }
+// header = { u56 len | u8 compression type | u64 item offset }
+// entries = { [entry..] (optionally compressed) | crc32 }
+// footer = { item batch }
 pub struct LogBatch {
     item_batch: LogItemBatch,
     buf_state: BufState,
@@ -509,10 +520,6 @@ impl LogBatch {
         }
         self.item_batch.items.append(&mut rhs.item_batch.items);
         Ok(())
-    }
-
-    pub(crate) fn set_position(&mut self, queue: LogQueue, file_id: FileId, offset: Option<u64>) {
-        self.item_batch.set_position(queue, file_id, offset);
     }
 
     pub fn add_entries<M: MessageExt>(
@@ -580,12 +587,13 @@ impl LogBatch {
         self.item_batch.items.is_empty()
     }
 
-    pub(crate) fn encoded_bytes(&mut self, compression_threshold: usize) -> Result<&[u8]> {
-        // TODO: avoid to write a large batch into one compressed chunk.
-        if let BufState::Sealed(header_offset) = self.buf_state {
-            return Ok(&self.buf[header_offset..]);
-        }
+    /// Called after user finishes populating this log batch. Encode and
+    /// optionally compress log entries. Returns the encoded size.
+    pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         debug_assert!(self.buf_state == BufState::Open);
+        if self.is_empty() {
+            return Ok(0);
+        }
         self.buf_state = BufState::Incomplete;
 
         // entries
@@ -628,7 +636,21 @@ impl LogBatch {
                 }
             }
         }
-        Ok(&self.buf[header_offset..])
+        Ok(footer_roffset)
+    }
+
+    pub(crate) fn encoded_bytes(&self) -> &[u8] {
+        match self.buf_state {
+            BufState::Sealed(header_offset) => &self.buf[header_offset..],
+            _ => unreachable!(),
+        }
+    }
+
+    /// Called after finishing writing encoded data to WAL. Update file
+    /// locations to entry indexes.
+    pub(crate) fn finish_write(&mut self, queue: LogQueue, file_id: FileId, offset: u64) {
+        self.item_batch
+            .set_log_batch_location(queue, file_id, offset);
     }
 
     /// Report encoded size of current log batch.
@@ -839,7 +861,8 @@ mod tests {
             )
             .unwrap();
 
-        let encoded = batch.encoded_bytes(0).unwrap();
+        batch.finish_populate(0).unwrap();
+        let encoded = batch.encoded_bytes();
 
         // decode item batch
         let (offset, compression_type, len) = LogBatch::decode_header(&mut &encoded[..]).unwrap();
@@ -872,8 +895,9 @@ mod tests {
                     .add_entries::<Entry>(thread_rng().gen(), entries)
                     .unwrap();
             }
-            log_batch.encoded_bytes(1).unwrap();
+            log_batch.finish_populate(0).unwrap();
             let _ = log_batch.drain();
+            log_batch.finish_write(LogQueue::Append, FileId::default(), 0);
         }
         let data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
         let entries = generate_entries(1, 10, Some(data));

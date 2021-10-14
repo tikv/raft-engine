@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::log_batch::{LogBatch, LogItemBatch};
+use crate::log_batch::LogItemBatch;
 use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -99,7 +99,7 @@ pub trait PipeLog: Sized {
     ) -> Result<Vec<u8>>;
 
     /// Write a batch into the append queue.
-    fn append(&self, queue: LogQueue, batch: &mut LogBatch, sync: bool) -> Result<(FileId, usize)>;
+    fn append(&self, queue: LogQueue, bytes: &[u8], sync: bool) -> Result<(FileId, u64)>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;

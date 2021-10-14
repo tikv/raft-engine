@@ -13,15 +13,15 @@ pub enum Error {
     Other(#[from] Box<dyn error::Error + Send + Sync>),
     #[error("{0}")]
     Io(#[from] IoError),
+    #[error("Fsync failure: {0}")]
+    Fsync(String),
     #[error("Codec {0}")]
     Codec(#[from] CodecError),
     #[error("Protobuf error {0}")]
     Protobuf(#[from] protobuf::ProtobufError),
-    #[error("Parse file name {0} error")]
-    ParseFileName(String),
     #[error("Checksum expected {0}, but got {1}")]
     IncorrectChecksum(u32, u32),
-    #[error("content too short")]
+    #[error("Content too short")]
     TooShort,
     #[error("Raft group not found: {0}")]
     RaftNotFound(u64),
