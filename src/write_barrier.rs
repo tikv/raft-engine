@@ -279,7 +279,7 @@ mod tests {
         std::mem::drop(wg);
         writer.finish();
 
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
         assert_eq!(stats.leader.load(Ordering::Relaxed), 1);
         assert_eq!(stats.exited.load(Ordering::Relaxed), 0);
 
@@ -303,10 +303,10 @@ mod tests {
                     })
                     .unwrap(),
             );
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(5));
             assert_eq!(stats.leader.load(Ordering::Relaxed), 1 + i);
             rx.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(5));
             assert_eq!(stats.leader.load(Ordering::Relaxed), 2 + i);
         }
 
