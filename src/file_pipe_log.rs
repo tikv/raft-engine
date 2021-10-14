@@ -20,7 +20,6 @@ use crate::codec::{self, NumberEncoder};
 use crate::config::{Config, RecoveryMode};
 use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
-use crate::log_batch::LogBatch;
 use crate::log_file::{LogFd, LogFile};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
@@ -388,7 +387,6 @@ impl<B: FileBuilder> LogManager<B> {
 pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
     rotate_size: usize,
-    compression_threshold: usize,
     parallelize_fsync: bool,
 
     appender: Arc<RwLock<LogManager<B>>>,
@@ -499,7 +497,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
             FilePipeLog {
                 dir: cfg.dir.clone(),
                 rotate_size: cfg.target_file_size.0 as usize,
-                compression_threshold: cfg.batch_compression_threshold.0 as usize,
                 parallelize_fsync: cfg.parallelize_fsync,
                 appender,
                 rewriter,
@@ -584,7 +581,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
                     loop {
                         match reader.next() {
                             Ok(Some(mut item_batch)) => {
-                                item_batch.set_position(queue, f.file_id, None);
+                                item_batch.set_file_location(queue, f.file_id);
                                 sequential_replay_machine.replay(item_batch, queue, f.file_id)?;
                             }
                             Ok(None) => break,
@@ -677,18 +674,9 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(
-        &self,
-        queue: LogQueue,
-        batch: &mut LogBatch,
-        mut sync: bool,
-    ) -> Result<(FileId, usize)> {
-        let bytes = batch.encoded_bytes(self.compression_threshold)?;
+    fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<(FileId, u64)> {
         let start = Instant::now();
         let (file_id, offset) = self.append_bytes(queue, bytes, &mut sync)?;
-        let len = bytes.len();
-        // set fields based on the log file
-        batch.set_position(queue, file_id, Some(offset));
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
@@ -701,7 +689,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
                     .observe(start.saturating_elapsed().as_secs_f64());
             }
         }
-        Ok((file_id, len))
+        Ok((file_id, offset))
     }
 
     fn sync(&self, queue: LogQueue) -> Result<()> {
