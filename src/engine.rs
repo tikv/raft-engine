@@ -26,6 +26,7 @@ use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HashMap, InstantExt};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{GlobalStats, Result};
+use crate::Error;
 
 const SLOTS_COUNT: usize = 128;
 
@@ -418,8 +419,15 @@ where
                         }
                     }
                     if sync {
-                        self.pipe_log.sync(LogQueue::Append).unwrap();
-                        // TODO(tabokie): fail every writer if fsync fails.
+                        // fsync() is not retryable, a failed attempt could results in
+                        // unrecoverable loss of data since last successful fsync(). See
+                        // [PostgreSQL's fsync() surprise](https://lwn.net/Articles/752063/)
+                        // for more details.
+                        if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
+                            for writer in group.iter_mut() {
+                                writer.set_output(Err(Error::Fsync(e.to_string())));
+                            }
+                        }
                     }
                 }
                 writer.finish()?

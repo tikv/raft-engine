@@ -53,17 +53,17 @@ fn build_file_name(queue: LogQueue, file_id: FileId) -> String {
     }
 }
 
-fn parse_file_name(file_name: &str) -> Result<(LogQueue, FileId)> {
+fn parse_file_name(file_name: &str) -> Option<(LogQueue, FileId)> {
     if file_name.len() > LOG_NUM_LEN {
         if let Ok(num) = file_name[..LOG_NUM_LEN].parse::<u64>() {
             if file_name.ends_with(LOG_APPEND_SUFFIX) {
-                return Ok((LogQueue::Append, num.into()));
+                return Some((LogQueue::Append, num.into()));
             } else if file_name.ends_with(LOG_REWRITE_SUFFIX) {
-                return Ok((LogQueue::Rewrite, num.into()));
+                return Some((LogQueue::Rewrite, num.into()));
             }
         }
     }
-    Err(Error::ParseFileName(file_name.to_owned()))
+    None
 }
 
 fn build_file_path<P: AsRef<Path>>(dir: P, queue: LogQueue, file_id: FileId) -> PathBuf {
@@ -426,11 +426,11 @@ impl<B: FileBuilder> FilePipeLog<B> {
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
                 match parse_file_name(e.file_name().to_str().unwrap()) {
-                    Ok((LogQueue::Append, file_id)) => {
+                    Some((LogQueue::Append, file_id)) => {
                         min_append_id = FileId::min(min_append_id, file_id);
                         max_append_id = FileId::max(max_append_id, file_id);
                     }
-                    Ok((LogQueue::Rewrite, file_id)) => {
+                    Some((LogQueue::Rewrite, file_id)) => {
                         min_rewrite_id = FileId::min(min_rewrite_id, file_id);
                         max_rewrite_id = FileId::max(max_rewrite_id, file_id);
                     }
@@ -792,8 +792,8 @@ mod tests {
         assert_eq!(build_file_name(LogQueue::Rewrite, 123.into()), file_name);
 
         let invalid_file_name: &str = "123.log";
-        assert!(parse_file_name(invalid_file_name).is_err());
-        assert!(parse_file_name(invalid_file_name).is_err());
+        assert!(parse_file_name(invalid_file_name).is_none());
+        assert!(parse_file_name(invalid_file_name).is_none());
     }
 
     #[test]
