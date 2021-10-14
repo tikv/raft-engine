@@ -25,8 +25,8 @@ use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HashMap, InstantExt};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{GlobalStats, Result};
 use crate::Error;
+use crate::{GlobalStats, Result};
 
 const SLOTS_COUNT: usize = 128;
 
