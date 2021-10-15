@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use log::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::{util::ReadableSize, Result};
@@ -22,6 +23,8 @@ pub struct Config {
     pub recovery_mode: RecoveryMode,
     pub bytes_per_sync: ReadableSize,
     pub target_file_size: ReadableSize,
+
+    /// Whether to group WAL writes from multiple threads.
     pub enable_write_group: bool,
 
     /// Only purge if disk file size is greater than `purge_threshold`.
@@ -59,18 +62,24 @@ impl Config {
         Config::default()
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn sanitize(&mut self) -> Result<()> {
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge_threshold < target_file_size"));
         }
-        if self.recovery_read_block_size.0 < MIN_RECOVERY_READ_BLOCK_SIZE as u64 {
-            return Err(box_err!(
-                "recovery_read_block_size < {}",
-                MIN_RECOVERY_READ_BLOCK_SIZE
-            ));
+        let min_recovery_read_block_size = ReadableSize(MIN_RECOVERY_READ_BLOCK_SIZE as u64);
+        if self.recovery_read_block_size < min_recovery_read_block_size {
+            warn!(
+                "recovery-read-block-size ({}) is too small, setting it to {}",
+                self.recovery_read_block_size, min_recovery_read_block_size
+            );
+            self.recovery_read_block_size = min_recovery_read_block_size;
         }
         if self.recovery_threads < MIN_RECOVERY_THREADS {
-            return Err(box_err!("recovery_threads < {}", MIN_RECOVERY_THREADS));
+            warn!(
+                "recovery-threads ({}) is too small, setting it to {}",
+                self.recovery_threads, MIN_RECOVERY_THREADS
+            );
+            self.recovery_threads = MIN_RECOVERY_THREADS;
         }
         Ok(())
     }

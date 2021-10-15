@@ -341,10 +341,11 @@ where
     }
 
     pub fn open_with(
-        cfg: Config,
+        mut cfg: Config,
         file_builder: Arc<B>,
         mut listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<B, FilePipeLog<B>>> {
+        cfg.sanitize()?;
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
         let start = Instant::now();

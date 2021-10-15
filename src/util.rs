@@ -22,7 +22,7 @@ pub const GB: u64 = MB * DATA_MAGNITUDE;
 pub const TB: u64 = (GB as u64) * (DATA_MAGNITUDE as u64);
 pub const PB: u64 = (TB as u64) * (DATA_MAGNITUDE as u64);
 
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, PartialOrd)]
 pub struct ReadableSize(pub u64);
 
 impl ReadableSize {
