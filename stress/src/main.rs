@@ -549,7 +549,7 @@ fn main() {
                 .long("enable-write-group")
                 .value_name("enable")
                 .default_value("true")
-                .help("Whether to call fsync in parallel")
+                .help("Whether to group WAL writes from multiple threads")
                 .takes_value(true),
         )
         .get_matches();
@@ -622,7 +622,7 @@ fn main() {
             let _ = std::fs::remove_dir_all(&config.dir);
         }
     }
-    args.validate().unwrap();
+    args.sanitize().unwrap();
 
     let wb = Arc::new(WrittenBytesHook::new());
 
