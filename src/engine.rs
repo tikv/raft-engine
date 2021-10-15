@@ -404,38 +404,33 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let (file_id, offset) = {
-            if self.cfg.enable_write_group {
-                let mut writer = Writer::new(log_batch as &_, sync);
-                if let Some(mut group) = self.write_barrier.enter(&mut writer) {
-                    for writer in group.iter_mut() {
-                        sync |= writer.is_sync();
-                        if !log_batch.is_empty() {
-                            writer.set_output(self.pipe_log.append(
-                                LogQueue::Append,
-                                writer.get_payload().encoded_bytes(),
-                                false, /*sync*/
-                            ));
-                        } else {
-                            writer.set_output(Ok((FileId::default(), 0)));
-                        }
+            let mut writer = Writer::new(log_batch as &_, sync);
+            if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                for writer in group.iter_mut() {
+                    sync |= writer.is_sync();
+                    if !log_batch.is_empty() {
+                        writer.set_output(self.pipe_log.append(
+                            LogQueue::Append,
+                            writer.get_payload().encoded_bytes(),
+                            false, /*sync*/
+                        ));
+                    } else {
+                        writer.set_output(Ok((FileId::default(), 0)));
                     }
-                    if sync {
-                        // fsync() is not retryable, a failed attempt could result in
-                        // unrecoverable loss of data written after last successful
-                        // fsync(). See [PostgreSQL's fsync() surprise]
-                        // (https://lwn.net/Articles/752063/) for more details.
-                        if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
-                            for writer in group.iter_mut() {
-                                writer.set_output(Err(Error::Fsync(e.to_string())));
-                            }
+                }
+                if sync {
+                    // fsync() is not retryable, a failed attempt could result in
+                    // unrecoverable loss of data written after last successful
+                    // fsync(). See [PostgreSQL's fsync() surprise]
+                    // (https://lwn.net/Articles/752063/) for more details.
+                    if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
+                        for writer in group.iter_mut() {
+                            writer.set_output(Err(Error::Fsync(e.to_string())));
                         }
                     }
                 }
-                writer.finish()?
-            } else {
-                self.pipe_log
-                    .append(LogQueue::Append, log_batch.encoded_bytes(), sync)?
             }
+            writer.finish()?
         };
 
         if len > 0 {

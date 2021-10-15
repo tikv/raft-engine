@@ -544,14 +544,6 @@ fn main() {
                 .help("Compress log batch bigger than this threshold")
                 .takes_value(true),
         )
-        .arg(
-            Arg::with_name("enable_write_group")
-                .long("enable-write-group")
-                .value_name("enable")
-                .default_value("true")
-                .help("Whether to group WAL writes from multiple threads")
-                .takes_value(true),
-        )
         .get_matches();
     // Raft Engine configurations
     if let Some(s) = matches.value_of("path") {
@@ -565,9 +557,6 @@ fn main() {
     }
     if let Some(s) = matches.value_of("batch_compression_threshold") {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("enable_write_group") {
-        config.enable_write_group = s.parse::<bool>().unwrap();
     }
     // Test configurations
     if let Some(s) = matches.value_of("time") {
