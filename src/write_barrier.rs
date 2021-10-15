@@ -56,7 +56,8 @@ impl<P, O> Writer<P, O> {
 /// responsible for processing its containing writers.
 pub struct WriteGroup<'a, 'b, P: 'a, O: 'a> {
     start: Ptr<Writer<P, O>>,
-    end: Ptr<Writer<P, O>>,
+    back: Ptr<Writer<P, O>>,
+
     ref_barrier: &'a WriteBarrier<P, O>,
     marker: PhantomData<&'b Writer<P, O>>,
 }
@@ -65,7 +66,7 @@ impl<'a, 'b, P, O> WriteGroup<'a, 'b, P, O> {
     pub fn iter_mut(&mut self) -> WriterIter<'_, 'a, 'b, P, O> {
         WriterIter {
             start: self.start,
-            end: self.end,
+            back: self.back,
             marker: PhantomData,
         }
     }
@@ -80,7 +81,7 @@ impl<'a, 'b, P, O> Drop for WriteGroup<'a, 'b, P, O> {
 /// An iterator over the writers of a `WriteGroup`.
 pub struct WriterIter<'a, 'b, 'c, P: 'c, O: 'c> {
     start: Ptr<Writer<P, O>>,
-    end: Ptr<Writer<P, O>>,
+    back: Ptr<Writer<P, O>>,
     marker: PhantomData<&'a WriteGroup<'b, 'c, P, O>>,
 }
 
@@ -88,11 +89,15 @@ impl<'a, 'b, 'c, P, O> Iterator for WriterIter<'a, 'b, 'c, P, O> {
     type Item = &'a mut Writer<P, O>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.start == self.end {
+        if self.start.is_none() {
             None
         } else {
             let writer = unsafe { self.start.unwrap().as_mut() };
-            self.start = writer.get_next();
+            if self.start == self.back {
+                self.start = None;
+            } else {
+                self.start = writer.get_next();
+            }
             Some(writer)
         }
     }
@@ -162,7 +167,7 @@ impl<P, O> WriteBarrier<P, O> {
 
         Some(WriteGroup {
             start: node,
-            end: unsafe { self.tail.get().unwrap().as_ref().get_next() },
+            back: self.tail.get(),
             ref_barrier: self,
             marker: PhantomData,
         })
@@ -260,11 +265,14 @@ mod tests {
                         let wid = i + 1;
                         let mut writer = Writer::new(&wid, false);
                         if let Some(mut wg) = barrier_clone.enter(&mut writer) {
-                            for w in wg.iter_mut() {
-                                w.set_output(7);
-                            }
                             stats_clone.leader.fetch_add(1, Ordering::Relaxed);
                             tx_clone.send(()).unwrap();
+                            let mut total_writers = 0;
+                            for w in wg.iter_mut() {
+                                w.set_output(7);
+                                total_writers += 1;
+                            }
+                            assert_eq!(total_writers, 2);
                         }
                         writer.finish();
                         stats_clone.exited.fetch_add(1, Ordering::Relaxed);
@@ -292,11 +300,14 @@ mod tests {
                         let wid = i + 3;
                         let mut writer = Writer::new(&wid, false);
                         if let Some(mut wg) = barrier_clone.enter(&mut writer) {
-                            for w in wg.iter_mut() {
-                                w.set_output(7);
-                            }
                             stats_clone.leader.fetch_add(1, Ordering::Relaxed);
                             tx_clone.send(()).unwrap();
+                            let mut total_writers = 0;
+                            for w in wg.iter_mut() {
+                                w.set_output(7);
+                                total_writers += 1;
+                            }
+                            assert_eq!(total_writers, 1);
                         }
                         writer.finish();
                         stats_clone.exited.fetch_add(1, Ordering::Relaxed);
