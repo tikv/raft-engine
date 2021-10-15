@@ -622,7 +622,8 @@ fn main() {
             let _ = std::fs::remove_dir_all(&config.dir);
         }
     }
-    args.sanitize().unwrap();
+    args.validate().unwrap();
+    config.sanitize().unwrap();
 
     let wb = Arc::new(WrittenBytesHook::new());
 
