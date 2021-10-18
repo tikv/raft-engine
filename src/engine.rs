@@ -408,15 +408,17 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
-                    if !log_batch.is_empty() {
-                        writer.set_output(self.pipe_log.append(
+                    let log_batch = writer.get_payload();
+                    let res = if !log_batch.is_empty() {
+                        self.pipe_log.append(
                             LogQueue::Append,
-                            writer.get_payload().encoded_bytes(),
+                            log_batch.encoded_bytes(),
                             false, /*sync*/
-                        ));
+                        )
                     } else {
-                        writer.set_output(Ok((FileId::default(), 0)));
-                    }
+                        Ok((FileId::default(), 0))
+                    };
+                    writer.set_output(res);
                 }
                 if sync {
                     // fsync() is not retryable, a failed attempt could result in
