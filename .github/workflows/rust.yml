@@ -28,7 +28,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all
-      - name: Run tests
-        run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose
+      # - name: Run tests
+      #   run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose
       - name: Run ASAN
         run: RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test --features failpoints --verbose
