@@ -31,4 +31,7 @@ jobs:
       # - name: Run tests
       #   run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose
       - name: Run ASAN
-        run: RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test --features failpoints --verbose
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          rustup component add rust-src --toolchain nightly-2021-07-28-x86_64-unknown-linux-gnu
+          RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --features failpoints --verbose
