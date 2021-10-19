@@ -11,7 +11,6 @@ use crc32fast::Hasher;
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub use crossbeam::channel::SendError as ScheduleError;
 pub type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<fxhash::FxHasher>>;
 
 const UNIT: u64 = 1;
