@@ -1308,27 +1308,20 @@ mod tests {
         );
     }
 
-    struct ConcurrentWritePlaygroud {
+    struct ConcurrentWriteContext {
         engine: Arc<RaftLogEngine>,
         ths: Vec<std::thread::JoinHandle<()>>,
-        // thread index of leader that's currently writing
-        leader: Option<usize>,
-        // thread index of leader of next write group
-        next_leader: Option<usize>,
     }
 
-    impl ConcurrentWritePlaygroud {
+    impl ConcurrentWriteContext {
         fn new(engine: Arc<RaftLogEngine>) -> Self {
             Self {
                 engine,
                 ths: Vec::new(),
-                leader: None,
-                next_leader: None,
             }
         }
         fn leader_write(&mut self, mut log_batch: LogBatch) {
-            assert!(self.next_leader.is_none());
-            if self.leader.is_none() {
+            if self.ths.is_empty() {
                 fail::cfg("write_barrier::leader_exit", "pause").unwrap();
                 let engine_clone = self.engine.clone();
                 self.ths.push(
@@ -1338,7 +1331,6 @@ mod tests {
                         })
                         .unwrap(),
                 );
-                self.leader = Some(self.ths.len() - 1);
             }
             let engine_clone = self.engine.clone();
             self.ths.push(
@@ -1348,10 +1340,9 @@ mod tests {
                     })
                     .unwrap(),
             );
-            self.next_leader = Some(self.ths.len() - 1);
         }
         fn follower_write(&mut self, mut log_batch: LogBatch) {
-            assert!(self.next_leader.is_some());
+            assert!(self.ths.len() == 2);
             let engine_clone = self.engine.clone();
             self.ths.push(
                 ThreadBuilder::new()
@@ -1366,8 +1357,6 @@ mod tests {
             for t in self.ths.drain(..) {
                 t.join().unwrap();
             }
-            self.leader = None;
-            self.next_leader = None;
         }
     }
 
@@ -1380,7 +1369,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
-        let mut playground = ConcurrentWritePlaygroud::new(engine.clone());
+        let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
         let some_entries = vec![
             Entry::new(),
@@ -1390,18 +1379,18 @@ mod tests {
             },
         ];
 
-        playground.leader_write(LogBatch::default());
+        ctx.leader_write(LogBatch::default());
         let mut log_batch = LogBatch::default();
         log_batch.add_entries::<Entry>(1, &some_entries).unwrap();
-        playground.follower_write(log_batch);
-        playground.join();
+        ctx.follower_write(log_batch);
+        ctx.join();
 
         let mut log_batch = LogBatch::default();
         log_batch.add_entries::<Entry>(2, &some_entries).unwrap();
-        playground.leader_write(log_batch);
-        playground.follower_write(LogBatch::default());
-        playground.join();
-        drop(playground);
+        ctx.leader_write(log_batch);
+        ctx.follower_write(LogBatch::default());
+        ctx.join();
+        drop(ctx);
         drop(engine);
 
         let engine = RaftLogEngine::open(cfg).unwrap();

@@ -198,10 +198,9 @@ impl<P, O> WriteBarrier<P, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::sync::Arc;
-    use std::thread::Builder as ThreadBuilder;
+    use std::thread::{self, Builder as ThreadBuilder};
     use std::time::Duration;
 
     #[test]
@@ -229,106 +228,107 @@ mod tests {
         assert_eq!(leaders, 4);
     }
 
-    struct WriterStats {
-        leader: AtomicU32,
-        exited: AtomicU32,
+    struct ConcurrentWriteContext {
+        barrier: Arc<WriteBarrier<u32, u32>>,
+
+        writer_seq: u32,
+        ths: Vec<thread::JoinHandle<()>>,
+        tx: mpsc::SyncSender<()>,
+        rx: mpsc::Receiver<()>,
     }
 
-    impl WriterStats {
+    impl ConcurrentWriteContext {
         fn new() -> Self {
-            WriterStats {
-                leader: AtomicU32::new(0),
-                exited: AtomicU32::new(0),
+            let (tx, rx) = mpsc::sync_channel(0);
+            Self {
+                barrier: Default::default(),
+                writer_seq: 0,
+                ths: Vec::new(),
+                tx,
+                rx,
+            }
+        }
+
+        // 1) create `n` writers and form a new write group
+        // 2) current active write group finishes writing and exits
+        // 3) the new write group enters writing phrase
+        fn step(&mut self, n: usize) {
+            if self.ths.is_empty() {
+                // ensure there is one active write group.
+                self.writer_seq += 1;
+                let barrier_clone = self.barrier.clone();
+                let tx_clone = self.tx.clone();
+                let seq = self.writer_seq;
+                self.ths.push(
+                    ThreadBuilder::new()
+                        .spawn(move || {
+                            let mut writer = Writer::new(&seq, false);
+                            if let Some(mut wg) = barrier_clone.enter(&mut writer) {
+                                let mut idx = 0;
+                                for w in wg.iter_mut() {
+                                    w.set_output(seq + idx);
+                                    idx += 1;
+                                }
+                                assert_eq!(idx, 1);
+                                tx_clone.send(()).unwrap();
+                            }
+                            assert_eq!(writer.finish(), seq);
+                        })
+                        .unwrap(),
+                );
+            }
+            let prev_writers = self.ths.len();
+            let (ready_tx, ready_rx) = mpsc::channel();
+            for _ in 0..n {
+                self.writer_seq += 1;
+                let barrier_clone = self.barrier.clone();
+                let tx_clone = self.tx.clone();
+                let ready_tx_clone = ready_tx.clone();
+                let seq = self.writer_seq;
+                self.ths.push(
+                    ThreadBuilder::new()
+                        .spawn(move || {
+                            let mut writer = Writer::new(&seq, false);
+                            ready_tx_clone.send(()).unwrap();
+                            if let Some(mut wg) = barrier_clone.enter(&mut writer) {
+                                let mut idx = 0;
+                                for w in wg.iter_mut() {
+                                    w.set_output(idx);
+                                    idx += 1;
+                                }
+                                assert_eq!(idx, n as u32);
+                                tx_clone.send(()).unwrap();
+                            }
+                            writer.finish();
+                        })
+                        .unwrap(),
+                );
+            }
+            for _ in 0..n {
+                ready_rx.recv().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            // unblock current leader
+            self.rx.recv().unwrap();
+            for th in self.ths.drain(0..prev_writers) {
+                th.join().unwrap();
+            }
+        }
+
+        fn join(&mut self) {
+            self.rx.recv().unwrap();
+            for th in self.ths.drain(..) {
+                th.join().unwrap();
             }
         }
     }
 
     #[test]
     fn test_parallel_groups() {
-        let barrier: WriteBarrier<u32, u32> = Default::default();
-        let barrier = Arc::new(barrier);
-        let stats = Arc::new(WriterStats::new());
-
-        let wid = 0;
-        let (tx, rx) = mpsc::sync_channel(0);
-
-        let mut writer = Writer::new(&wid, false);
-        let mut wg = barrier.enter(&mut writer).unwrap();
-        for w in wg.iter_mut() {
-            w.set_output(7);
+        let mut ctx = ConcurrentWriteContext::new();
+        for i in 1..5 {
+            ctx.step(i);
         }
-
-        let mut ths = vec![];
-        for i in 0..2 {
-            let (barrier_clone, stats_clone, tx_clone) =
-                (barrier.clone(), stats.clone(), tx.clone());
-            ths.push(
-                ThreadBuilder::new()
-                    .spawn(move || {
-                        let wid = i + 1;
-                        let mut writer = Writer::new(&wid, false);
-                        if let Some(mut wg) = barrier_clone.enter(&mut writer) {
-                            stats_clone.leader.fetch_add(1, Ordering::Relaxed);
-                            tx_clone.send(()).unwrap();
-                            let mut total_writers = 0;
-                            for w in wg.iter_mut() {
-                                w.set_output(7);
-                                total_writers += 1;
-                            }
-                            assert_eq!(total_writers, 2);
-                        }
-                        writer.finish();
-                        stats_clone.exited.fetch_add(1, Ordering::Relaxed);
-                    })
-                    .unwrap(),
-            );
-        }
-
-        std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(stats.leader.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.exited.load(Ordering::Relaxed), 0);
-        std::mem::drop(wg);
-        writer.finish();
-
-        std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(stats.leader.load(Ordering::Relaxed), 1);
-        assert_eq!(stats.exited.load(Ordering::Relaxed), 0);
-
-        for i in 0..2 {
-            let (barrier_clone, stats_clone, tx_clone) =
-                (barrier.clone(), stats.clone(), tx.clone());
-            ths.push(
-                ThreadBuilder::new()
-                    .spawn(move || {
-                        let wid = i + 3;
-                        let mut writer = Writer::new(&wid, false);
-                        if let Some(mut wg) = barrier_clone.enter(&mut writer) {
-                            stats_clone.leader.fetch_add(1, Ordering::Relaxed);
-                            tx_clone.send(()).unwrap();
-                            let mut total_writers = 0;
-                            for w in wg.iter_mut() {
-                                w.set_output(7);
-                                total_writers += 1;
-                            }
-                            assert_eq!(total_writers, 1);
-                        }
-                        writer.finish();
-                        stats_clone.exited.fetch_add(1, Ordering::Relaxed);
-                    })
-                    .unwrap(),
-            );
-            std::thread::sleep(Duration::from_millis(5));
-            assert_eq!(stats.leader.load(Ordering::Relaxed), 1 + i);
-            rx.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(5));
-            assert_eq!(stats.leader.load(Ordering::Relaxed), 2 + i);
-        }
-
-        rx.recv().unwrap();
-        for th in ths.drain(..) {
-            th.join().unwrap();
-        }
-        assert_eq!(stats.leader.load(Ordering::Relaxed), 1 + 2);
-        assert_eq!(stats.exited.load(Ordering::Relaxed), 2 + 2);
+        ctx.join();
     }
 }
