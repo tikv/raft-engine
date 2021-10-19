@@ -1,9 +1,11 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use parking_lot::{Condvar, Mutex};
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+
+use fail::fail_point;
+use parking_lot::{Condvar, Mutex};
 
 type Ptr<T> = Option<NonNull<T>>;
 
@@ -176,6 +178,7 @@ impl<P, O> WriteBarrier<P, O> {
     /// SAFETY: Must be called when write group leader finishes processing its
     /// responsible writers, and next write group should be formed.
     fn leader_exit(&self) {
+        fail_point!("write_barrier::leader_exit", |_| {});
         let _lk = self.mutex.lock();
         if let Some(leader) = self.pending_leader.get() {
             // wake up leader of next write group.

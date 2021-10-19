@@ -164,7 +164,7 @@ impl MemTableAccessor {
         for item in log_items {
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
-            fail_point!("apply_memtable_region_3", raft == 3, |_| {});
+            fail_point!("memtable_accessor::apply::region_3", raft == 3, |_| {});
             match item.content {
                 LogItemContent::EntriesIndex(entries_to_add) => {
                     let entries_index = entries_to_add.0;
@@ -408,15 +408,17 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
-                    if !log_batch.is_empty() {
-                        writer.set_output(self.pipe_log.append(
+                    let log_batch = writer.get_payload();
+                    let res = if !log_batch.is_empty() {
+                        self.pipe_log.append(
                             LogQueue::Append,
-                            writer.get_payload().encoded_bytes(),
+                            log_batch.encoded_bytes(),
                             false, /*sync*/
-                        ));
+                        )
                     } else {
-                        writer.set_output(Ok((FileId::default(), 0)));
-                    }
+                        Ok((FileId::default(), 0))
+                    };
+                    writer.set_output(res);
                 }
                 if sync {
                     // fsync() is not retryable, a failed attempt could result in
@@ -590,6 +592,7 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::thread::Builder as ThreadBuilder;
 
     type RaftLogEngine = Engine;
     impl RaftLogEngine {
@@ -1081,7 +1084,7 @@ mod tests {
         assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
 
         // Write region 3 without applying.
-        let apply_memtable_region_3_fp = "apply_memtable_region_3";
+        let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";
         fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
         let engine_clone = engine.clone();
         let mut entry_clone = entry.clone();
@@ -1303,5 +1306,126 @@ mod tests {
                 .unwrap(),
             empty_state
         );
+    }
+
+    struct ConcurrentWritePlaygroud {
+        engine: Arc<RaftLogEngine>,
+        ths: Vec<std::thread::JoinHandle<()>>,
+        // thread index of leader that's currently writing
+        leader: Option<usize>,
+        // thread index of leader of next write group
+        next_leader: Option<usize>,
+    }
+
+    impl ConcurrentWritePlaygroud {
+        fn new(engine: Arc<RaftLogEngine>) -> Self {
+            Self {
+                engine,
+                ths: Vec::new(),
+                leader: None,
+                next_leader: None,
+            }
+        }
+        fn leader_write(&mut self, mut log_batch: LogBatch) {
+            assert!(self.next_leader.is_none());
+            if self.leader.is_none() {
+                fail::cfg("write_barrier::leader_exit", "pause").unwrap();
+                let engine_clone = self.engine.clone();
+                self.ths.push(
+                    ThreadBuilder::new()
+                        .spawn(move || {
+                            engine_clone.write(&mut LogBatch::default(), true).unwrap();
+                        })
+                        .unwrap(),
+                );
+                self.leader = Some(self.ths.len() - 1);
+            }
+            let engine_clone = self.engine.clone();
+            self.ths.push(
+                ThreadBuilder::new()
+                    .spawn(move || {
+                        engine_clone.write(&mut log_batch, true).unwrap();
+                    })
+                    .unwrap(),
+            );
+            self.next_leader = Some(self.ths.len() - 1);
+        }
+        fn follower_write(&mut self, mut log_batch: LogBatch) {
+            assert!(self.next_leader.is_some());
+            let engine_clone = self.engine.clone();
+            self.ths.push(
+                ThreadBuilder::new()
+                    .spawn(move || {
+                        engine_clone.write(&mut log_batch, true).unwrap();
+                    })
+                    .unwrap(),
+            );
+        }
+        fn join(&mut self) {
+            fail::remove("write_barrier::leader_exit");
+            for t in self.ths.drain(..) {
+                t.join().unwrap();
+            }
+            self.leader = None;
+            self.next_leader = None;
+        }
+    }
+
+    #[test]
+    fn test_concurrent_write_empty_log_batch() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_concurrent_write")
+            .tempdir()
+            .unwrap();
+        let mut cfg = Config::default();
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
+        let mut playground = ConcurrentWritePlaygroud::new(engine.clone());
+
+        let some_entries = vec![
+            Entry::new(),
+            Entry {
+                index: 1,
+                ..Default::default()
+            },
+        ];
+
+        playground.leader_write(LogBatch::default());
+        let mut log_batch = LogBatch::default();
+        log_batch.add_entries::<Entry>(1, &some_entries).unwrap();
+        playground.follower_write(log_batch);
+        playground.join();
+
+        let mut log_batch = LogBatch::default();
+        log_batch.add_entries::<Entry>(2, &some_entries).unwrap();
+        playground.leader_write(log_batch);
+        playground.follower_write(LogBatch::default());
+        playground.join();
+        drop(playground);
+        drop(engine);
+
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let mut entries = Vec::new();
+        engine
+            .fetch_entries_to::<Entry>(
+                1,    /*region*/
+                0,    /*begin*/
+                2,    /*end*/
+                None, /*max_size*/
+                &mut entries,
+            )
+            .unwrap();
+        assert_eq!(entries, some_entries);
+        entries.clear();
+        engine
+            .fetch_entries_to::<Entry>(
+                2,    /*region*/
+                0,    /*begin*/
+                2,    /*end*/
+                None, /*max_size*/
+                &mut entries,
+            )
+            .unwrap();
+        assert_eq!(entries, some_entries);
     }
 }

@@ -592,6 +592,7 @@ impl LogBatch {
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
+            self.buf_state = BufState::Sealed(self.buf.len());
             return Ok(0);
         }
         self.buf_state = BufState::Incomplete;
@@ -636,7 +637,7 @@ impl LogBatch {
                 }
             }
         }
-        Ok(footer_roffset)
+        Ok(self.buf.len() - header_offset)
     }
 
     pub(crate) fn encoded_bytes(&self) -> &[u8] {
@@ -861,8 +862,9 @@ mod tests {
             )
             .unwrap();
 
-        batch.finish_populate(0).unwrap();
+        let len = batch.finish_populate(0).unwrap();
         let encoded = batch.encoded_bytes();
+        assert_eq!(len, encoded.len());
 
         // decode item batch
         let (offset, compression_type, len) = LogBatch::decode_header(&mut &encoded[..]).unwrap();
