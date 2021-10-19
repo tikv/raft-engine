@@ -34,7 +34,7 @@ impl LogFd {
         let flags = OFlag::O_RDWR;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
-        fail_point!("log_fd_fadvise_dontneed", |_| {
+        fail_point!("log_fd::open::fadvise_dontneed", |_| {
             let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
             #[cfg(target_os = "linux")]
             unsafe {
