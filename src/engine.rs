@@ -410,17 +410,14 @@ where
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
-                        self.pipe_log.append(
-                            LogQueue::Append,
-                            log_batch.encoded_bytes(),
-                            false, /*sync*/
-                        )
+                        self.pipe_log
+                            .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
                         Ok((FileId::default(), 0))
                     };
                     writer.set_output(res);
                 }
-                if sync {
+                if sync || self.pipe_log.should_sync(LogQueue::Append) {
                     // fsync() is not retryable, a failed attempt could result in
                     // unrecoverable loss of data written after last successful
                     // fsync(). See [PostgreSQL's fsync() surprise]

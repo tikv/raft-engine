@@ -262,10 +262,11 @@ where
             return Ok(());
         }
 
-        let (file_id, offset) =
-            self.pipe_log
-                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), sync)?;
+        let (file_id, offset) = self
+            .pipe_log
+            .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
         debug_assert!(file_id.valid());
+        self.pipe_log.sync(LogQueue::Rewrite)?;
         log_batch.finish_write(LogQueue::Rewrite, file_id, offset);
         let queue = LogQueue::Rewrite;
         for item in log_batch.drain() {

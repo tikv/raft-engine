@@ -169,8 +169,8 @@ impl<W: Seek + Write> ActiveFile<W> {
     fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
             self.fd.truncate(self.written)?;
-            self.fd.sync()?;
             self.capacity = self.written;
+            self.sync()?;
         }
         Ok(())
     }
@@ -180,10 +180,10 @@ impl<W: Seek + Write> ActiveFile<W> {
         self.written = 0;
         let mut buf = Vec::with_capacity(LOG_FILE_HEADER_LEN);
         LogFileHeader::new().encode(&mut buf)?;
-        self.write(&buf, true, 0)
+        self.write(&buf, 0)
     }
 
-    fn write(&mut self, buf: &[u8], sync: bool, target_file_size: usize) -> Result<()> {
+    fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
         if self.written + buf.len() > self.capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let alloc = std::cmp::max(
@@ -200,9 +200,12 @@ impl<W: Seek + Write> ActiveFile<W> {
         }
         self.writer.write_all(buf)?;
         self.written += buf.len();
-        if sync {
-            self.last_sync = self.written;
-        }
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.fd.sync()?;
+        self.last_sync = self.written;
         Ok(())
     }
 
@@ -341,10 +344,6 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(self.all_files[file_id.step_after(&self.first_file_id).unwrap()].clone())
     }
 
-    fn get_active_fd(&self) -> Option<Arc<LogFd>> {
-        self.all_files.back().cloned()
-    }
-
     fn purge_to(&mut self, file_id: FileId) -> Result<usize> {
         if file_id > self.active_file_id {
             return Err(box_err!("Purge active or newer files"));
@@ -356,19 +355,24 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(end_offset)
     }
 
-    fn append(&mut self, content: &[u8], sync: &mut bool) -> Result<(FileId, u64, Arc<LogFd>)> {
+    fn append(&mut self, content: &[u8]) -> Result<(FileId, u64)> {
         if self.active_file.written >= self.rotate_size {
             self.new_log_file()?;
         }
-        if self.active_file.since_last_sync() >= self.bytes_per_sync {
-            *sync = true;
-        }
         let offset = self.active_file.written as u64;
-        self.active_file.write(content, *sync, self.rotate_size)?;
+        self.active_file.write(content, self.rotate_size)?;
         for listener in &self.listeners {
             listener.on_append_log_file(self.queue, self.active_file_id, content.len());
         }
-        Ok((self.active_file_id, offset, self.active_file.fd.clone()))
+        Ok((self.active_file_id, offset))
+    }
+
+    fn should_sync(&self) -> bool {
+        self.active_file.since_last_sync() >= self.bytes_per_sync
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.active_file.sync()
     }
 
     fn update_metrics(&self) {
@@ -608,21 +612,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
         Ok(sequential_replay_machine)
     }
 
-    fn append_bytes(
-        &self,
-        queue: LogQueue,
-        content: &[u8],
-        sync: &mut bool,
-    ) -> Result<(FileId, u64)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).append(content, sync)?;
-        if *sync {
-            let start = Instant::now();
-            fd.sync()?;
-            LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        }
-        Ok((file_id, offset))
-    }
-
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager<B>> {
         match queue {
             LogQueue::Append => self.appender.read(),
@@ -668,9 +657,9 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<(FileId, u64)> {
+    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<(FileId, u64)> {
         let start = Instant::now();
-        let (file_id, offset) = self.append_bytes(queue, bytes, &mut sync)?;
+        let (file_id, offset) = self.mut_queue(queue).append(bytes)?;
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
@@ -686,11 +675,12 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok((file_id, offset))
     }
 
+    fn should_sync(&self, queue: LogQueue) -> bool {
+        self.get_queue(queue).should_sync()
+    }
+
     fn sync(&self, queue: LogQueue) -> Result<()> {
-        if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fd.sync()?;
-        }
-        Ok(())
+        self.mut_queue(queue).sync()
     }
 
     fn active_file_id(&self, queue: LogQueue) -> FileId {
@@ -837,12 +827,12 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let (file_num, offset) = pipe_log.append(queue, &content).unwrap();
         assert_eq!(file_num, 1.into());
         assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_id(queue), 1.into());
 
-        let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let (file_num, offset) = pipe_log.append(queue, &content).unwrap();
         assert_eq!(file_num, 2.into());
         assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_id(queue), 2.into());
@@ -856,15 +846,11 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let (file_num, offset) = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
-            .unwrap();
+        let (file_num, offset) = pipe_log.append(queue, &s_content).unwrap();
         assert_eq!(file_num, 3.into());
         assert_eq!(offset, header_size);
 
-        let (file_num, offset) = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
-            .unwrap();
+        let (file_num, offset) = pipe_log.append(queue, &s_content).unwrap();
         assert_eq!(file_num, 3.into());
         assert_eq!(offset, header_size as u64 + s_content.len() as u64);
 
