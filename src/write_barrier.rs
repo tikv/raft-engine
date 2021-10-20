@@ -253,21 +253,25 @@ mod tests {
         // 2) current active write group finishes writing and exits
         // 3) the new write group enters writing phrase
         fn step(&mut self, n: usize) {
+            let (ready_tx, ready_rx) = mpsc::channel();
             if self.ths.is_empty() {
                 // ensure there is one active write group.
                 self.writer_seq += 1;
                 let barrier_clone = self.barrier.clone();
                 let tx_clone = self.tx.clone();
+                let ready_tx_clone = ready_tx.clone();
                 let seq = self.writer_seq;
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
                             let mut writer = Writer::new(&seq, false);
-                            println!("266");
+                            println!("268");
+                            ready_tx_clone.send(()).unwrap();
+                            println!("270");
                             if let Some(mut wg) = barrier_clone.enter(&mut writer) {
                                 let mut idx = 0;
                                 for w in wg.iter_mut() {
-                                    w.set_output(seq + idx);
+                                    w.set_output(*w.get_payload());
                                     idx += 1;
                                 }
                                 assert_eq!(idx, 1);
@@ -278,9 +282,9 @@ mod tests {
                         })
                         .unwrap(),
                 );
+                ready_rx.recv().unwrap();
             }
             let prev_writers = self.ths.len();
-            let (ready_tx, ready_rx) = mpsc::channel();
             for _ in 0..n {
                 self.writer_seq += 1;
                 let barrier_clone = self.barrier.clone();
@@ -296,14 +300,14 @@ mod tests {
                             if let Some(mut wg) = barrier_clone.enter(&mut writer) {
                                 let mut idx = 0;
                                 for w in wg.iter_mut() {
-                                    w.set_output(idx);
+                                    w.set_output(*w.get_payload());
                                     idx += 1;
                                 }
                                 assert_eq!(idx, n as u32);
                                 println!("303");
                                 tx_clone.send(()).unwrap();
                             }
-                            writer.finish();
+                            assert_eq!(writer.finish(), seq);
                         })
                         .unwrap(),
                 );
