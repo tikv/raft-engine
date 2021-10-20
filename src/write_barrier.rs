@@ -263,6 +263,7 @@ mod tests {
                     ThreadBuilder::new()
                         .spawn(move || {
                             let mut writer = Writer::new(&seq, false);
+                            println!("266");
                             if let Some(mut wg) = barrier_clone.enter(&mut writer) {
                                 let mut idx = 0;
                                 for w in wg.iter_mut() {
@@ -270,6 +271,7 @@ mod tests {
                                     idx += 1;
                                 }
                                 assert_eq!(idx, 1);
+                                println!("274");
                                 tx_clone.send(()).unwrap();
                             }
                             assert_eq!(writer.finish(), seq);
@@ -289,6 +291,7 @@ mod tests {
                     ThreadBuilder::new()
                         .spawn(move || {
                             let mut writer = Writer::new(&seq, false);
+                            println!("294");
                             ready_tx_clone.send(()).unwrap();
                             if let Some(mut wg) = barrier_clone.enter(&mut writer) {
                                 let mut idx = 0;
@@ -297,6 +300,7 @@ mod tests {
                                     idx += 1;
                                 }
                                 assert_eq!(idx, n as u32);
+                                println!("303");
                                 tx_clone.send(()).unwrap();
                             }
                             writer.finish();
@@ -304,19 +308,24 @@ mod tests {
                         .unwrap(),
                 );
             }
+            println!("311");
             for _ in 0..n {
                 ready_rx.recv().unwrap();
             }
             std::thread::sleep(Duration::from_millis(5));
             // unblock current leader
+            println!("317");
             self.rx.recv().unwrap();
+            println!("319");
             for th in self.ths.drain(0..prev_writers) {
                 th.join().unwrap();
             }
         }
 
         fn join(&mut self) {
+            println!("326");
             self.rx.recv().unwrap();
+            println!("328");
             for th in self.ths.drain(..) {
                 th.join().unwrap();
             }
