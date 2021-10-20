@@ -28,9 +28,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all
-      # - name: Run tests
-      #   run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose
+      - name: Run tests
+        run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose -- --nocapture
       - name: Run asan tests
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: |
-          RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --features failpoints --verbose -- --nocapture
+        run: RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --features failpoints --verbose -- --nocapture
