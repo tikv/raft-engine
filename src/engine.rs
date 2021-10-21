@@ -166,21 +166,21 @@ impl MemTableAccessor {
             let memtable = self.get_or_insert(raft);
             fail_point!("memtable_accessor::apply::region_3", raft == 3, |_| {});
             match item.content {
-                LogItemContent::EntriesIndex(entries_to_add) => {
-                    let entries_index = entries_to_add.0;
+                LogItemContent::EntryIndexes(entries_to_add) => {
+                    let entry_indexes = entries_to_add.0;
                     debug!(
                         "{} append to {:?}.{:?}, Entries[{:?}, {:?}:{:?})",
                         raft,
                         queue,
                         file_id,
-                        entries_index.first().map(|x| x.queue),
-                        entries_index.first().map(|x| x.index),
-                        entries_index.last().map(|x| x.index + 1),
+                        entry_indexes.first().map(|x| x.queue),
+                        entry_indexes.first().map(|x| x.index),
+                        entry_indexes.last().map(|x| x.index + 1),
                     );
                     if queue == LogQueue::Rewrite {
-                        memtable.write().append_rewrite(entries_index);
+                        memtable.write().append_rewrite(entry_indexes);
                     } else {
-                        memtable.write().append(entries_index);
+                        memtable.write().append(entry_indexes);
                     }
                 }
                 LogItemContent::Command(Command::Clean) => {
