@@ -761,10 +761,12 @@ mod tests {
         bytes_per_sync: usize,
         rotate_size: usize,
     ) -> FilePipeLog<DefaultFileBuilder> {
-        let mut cfg = Config::default();
-        cfg.dir = path.to_owned();
-        cfg.bytes_per_sync = ReadableSize(bytes_per_sync as u64);
-        cfg.target_file_size = ReadableSize(rotate_size as u64);
+        let cfg = Config {
+            dir: path.to_owned(),
+            bytes_per_sync: ReadableSize(bytes_per_sync as u64),
+            target_file_size: ReadableSize(rotate_size as u64),
+            ..Default::default()
+        };
 
         FilePipeLog::open::<BlackholeSequentialReplayMachine>(
             &cfg,

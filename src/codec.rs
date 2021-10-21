@@ -526,6 +526,7 @@ mod tests {
                 #[test]
                 fn test_order() {
                     let mut ordered_case = $cases.to_vec();
+                    #[allow(clippy::unnecessary_sort_by)]
                     ordered_case.sort_by($compare);
                     test_order!($cases, ordered_case, $enc, $dec);
                 }

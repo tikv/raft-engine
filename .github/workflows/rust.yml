@@ -27,7 +27,7 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all
+        run: cargo clippy --all --all-targets -- -D clippy::all
       - name: Run tests
         run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose -- --nocapture
       - name: Run asan tests

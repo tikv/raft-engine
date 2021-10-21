@@ -22,10 +22,12 @@ impl MessageExt for MessageExtTyped {
 fn main() {
     env_logger::init();
 
-    let mut config = Config::default();
-    config.dir = "append-compact-purge-data".to_owned();
-    config.purge_threshold = ReadableSize::gb(2);
-    config.batch_compression_threshold = ReadableSize::kb(0);
+    let config = Config {
+        dir: "append-compact-purge-data".to_owned(),
+        purge_threshold: ReadableSize::gb(2),
+        batch_compression_threshold: ReadableSize::kb(0),
+        ..Default::default()
+    };
     let engine = Engine::open(config).expect("Open raft engine");
 
     let compact_offset = 32; // In src/purge.rs, it's the limit for rewrite.
@@ -52,7 +54,7 @@ fn main() {
             let state = engine
                 .get_message::<RaftLocalState>(region, b"last_index")
                 .unwrap()
-                .unwrap_or(init_state.clone());
+                .unwrap_or_else(|| init_state.clone());
 
             let mut e = entry.clone();
             e.index = state.last_index + 1;

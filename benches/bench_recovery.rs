@@ -160,10 +160,11 @@ fn bench_recovery(c: &mut Criterion) {
         let dir = generate(&cfg).unwrap();
         let path = dir.path().to_str().unwrap().to_owned();
         fail::cfg("log_fd::open::fadvise_dontneed", "return").unwrap();
-        let mut ecfg = EngineConfig::default();
-        ecfg.dir = path.clone();
-        ecfg.batch_compression_threshold = cfg.batch_compression_threshold;
-
+        let mut ecfg = EngineConfig {
+            dir: path.clone(),
+            batch_compression_threshold: cfg.batch_compression_threshold,
+            ..Default::default()
+        };
         c.bench_with_input(
             BenchmarkId::new(
                 "Engine::open",
