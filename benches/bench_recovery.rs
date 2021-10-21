@@ -75,7 +75,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     let mut indexes: HashMap<u64, u64> = (1..cfg.region_count + 1).map(|rid| (rid, 0)).collect();
     while dir_size(&path).0 < cfg.total_size.0 {
         let mut batch = LogBatch::default();
-        while batch.size() < cfg.batch_size.0 as usize {
+        while batch.approximate_size() < cfg.batch_size.0 as usize {
             let region_id = rng.gen_range(1, cfg.region_count + 1);
             let mut item_size = 0;
             let mut entries = vec![];

@@ -893,7 +893,7 @@ mod tests {
         let mut batch1 = LogBatch::default();
         entries.push(generate_entries(1, 10, Some(vec![b'x'; 1024])));
         batch1
-            .add_entries::<Entry>(region_id, &entries.last().unwrap())
+            .add_entries::<Entry>(region_id, entries.last().unwrap())
             .unwrap();
         for i in 0..=2 {
             let (k, v) = (
@@ -907,7 +907,7 @@ mod tests {
         let mut batch2 = LogBatch::default();
         entries.push(generate_entries(11, 20, Some(vec![b'x'; 1024])));
         batch2
-            .add_entries::<Entry>(region_id, &entries.last().unwrap())
+            .add_entries::<Entry>(region_id, entries.last().unwrap())
             .unwrap();
         for i in 3..=5 {
             let (k, v) = (
@@ -937,15 +937,12 @@ mod tests {
         .unwrap();
 
         // decode and assert entries
-        let mut entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
+        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
         for item in decoded_item_batch.items.iter() {
             match &item.content {
                 LogItemContent::EntryIndexes(entry_indexes) => {
-                    let decoded_entries = decode_entries_from_bytes::<Entry>(
-                        &mut entry_bytes,
-                        &entry_indexes.0,
-                        false,
-                    );
+                    let decoded_entries =
+                        decode_entries_from_bytes::<Entry>(entry_bytes, &entry_indexes.0, false);
                     assert_eq!(entries.remove(0), decoded_entries);
                 }
                 LogItemContent::Kv(kv) => {
