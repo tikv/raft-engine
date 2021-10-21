@@ -1377,7 +1377,7 @@ mod tests {
     #[test]
     fn test_concurrent_write_empty_log_batch() {
         let dir = tempfile::Builder::new()
-            .prefix("test_concurrent_write")
+            .prefix("test_concurrent_write_empty_log_batch")
             .tempdir()
             .unwrap();
         let cfg = Config {
