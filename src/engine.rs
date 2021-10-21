@@ -596,7 +596,7 @@ mod tests {
 
     type RaftLogEngine = Engine;
     impl RaftLogEngine {
-        fn append(&self, raft_group_id: u64, entries: &Vec<Entry>) -> Result<usize> {
+        fn append(&self, raft_group_id: u64, entries: &[Entry]) -> Result<usize> {
             let mut batch = LogBatch::default();
             batch.add_entries::<Entry>(raft_group_id, entries)?;
             self.write(&mut batch, false)
@@ -606,7 +606,7 @@ mod tests {
     fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
         let mut log_batch = LogBatch::default();
         log_batch
-            .add_entries::<Entry>(raft, &vec![entry.clone()])
+            .add_entries::<Entry>(raft, &[entry.clone()])
             .unwrap();
         log_batch
             .put_message(
@@ -636,11 +636,13 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.target_file_size = ReadableSize::kb(5);
-        cfg.purge_threshold = ReadableSize::kb(80);
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(5),
+            purge_threshold: ReadableSize::kb(80),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
 
         append_log(&engine, 1, &Entry::new());
         assert!(engine.memtables.get(1).is_some());
@@ -661,17 +663,19 @@ mod tests {
                 .tempdir()
                 .unwrap();
 
-            let mut cfg = Config::default();
-            cfg.dir = dir.path().to_str().unwrap().to_owned();
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                ..Default::default()
+            };
 
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             let mut entry = Entry::new();
             entry.set_data(vec![b'x'; entry_size].into());
             for i in 10..20 {
                 entry.set_index(i);
-                engine.append(i, &vec![entry.clone()]).unwrap();
+                engine.append(i, &[entry.clone()]).unwrap();
                 entry.set_index(i + 1);
-                engine.append(i, &vec![entry.clone()]).unwrap();
+                engine.append(i, &[entry.clone()]).unwrap();
             }
 
             for i in 10..20 {
@@ -716,12 +720,14 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.target_file_size = ReadableSize::kb(5);
-        cfg.purge_threshold = ReadableSize::kb(150);
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(5),
+            purge_threshold: ReadableSize::kb(150),
+            ..Default::default()
+        };
 
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let engine = RaftLogEngine::open(cfg).unwrap();
         let mut entry = Entry::new();
         entry.set_data(vec![b'x'; 1024].into());
         for i in 0..100 {
@@ -783,10 +789,12 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.target_file_size = ReadableSize::kb(5);
-        cfg.purge_threshold = ReadableSize::kb(80);
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(5),
+            purge_threshold: ReadableSize::kb(80),
+            ..Default::default()
+        };
         let engine = RaftLogEngine::open(cfg.clone()).unwrap();
 
         // Put 100 entries into 10 regions.
@@ -825,7 +833,7 @@ mod tests {
         // Recover with rewrite queue and append queue.
         let cleaned_region_ids = engine.memtables.cleaned_region_ids();
         drop(engine);
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let engine = RaftLogEngine::open(cfg).unwrap();
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
         for i in 1..=10 {
             for j in 1..=10 {
@@ -867,10 +875,12 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.target_file_size = ReadableSize::kb(128);
-        cfg.purge_threshold = ReadableSize::kb(512);
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(128),
+            purge_threshold: ReadableSize::kb(512),
+            ..Default::default()
+        };
         let engine = RaftLogEngine::open(cfg.clone()).unwrap();
 
         let mut entry = Entry::new();
@@ -945,7 +955,7 @@ mod tests {
 
         // After the engine recovers, the removed raft group shouldn't appear again.
         drop(engine);
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let engine = RaftLogEngine::open(cfg).unwrap();
         assert!(engine.memtables.get(1).is_none());
     }
 
@@ -1029,11 +1039,13 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.target_file_size = ReadableSize::kb(128);
-        cfg.purge_threshold = ReadableSize::kb(512);
-        cfg.batch_compression_threshold = ReadableSize::kb(0);
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(128),
+            purge_threshold: ReadableSize::kb(512),
+            batch_compression_threshold: ReadableSize::kb(0),
+            ..Default::default()
+        };
 
         let hook = Arc::new(Hook::default());
         let engine =
@@ -1257,8 +1269,10 @@ mod tests {
             .prefix("test_empty_protobuf_message")
             .tempdir()
             .unwrap();
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
         let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
 
         let mut log_batch = LogBatch::default();
@@ -1363,11 +1377,13 @@ mod tests {
     #[test]
     fn test_concurrent_write_empty_log_batch() {
         let dir = tempfile::Builder::new()
-            .prefix("test_concurrent_write")
+            .prefix("test_concurrent_write_empty_log_batch")
             .tempdir()
             .unwrap();
-        let mut cfg = Config::default();
-        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
         let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
         let mut ctx = ConcurrentWriteContext::new(engine.clone());
 

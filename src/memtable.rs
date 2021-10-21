@@ -547,7 +547,7 @@ mod tests {
     fn test_memtable_append() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats);
 
         // Append entries [10, 20) file_num = 1.
         // after appending
@@ -599,7 +599,7 @@ mod tests {
     fn test_memtable_compact() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats);
 
         // After appending:
         // [0, 10) file_num = 1
@@ -645,7 +645,7 @@ mod tests {
     fn test_memtable_fetch() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats);
 
         // After appending:
         // [0, 10) file_num = 1
@@ -732,7 +732,7 @@ mod tests {
     fn test_memtable_fetch_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats);
 
         // After appending:
         // [0, 10) file_num = 1
@@ -796,7 +796,7 @@ mod tests {
     fn test_memtable_get_entry() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats);
 
         // [5, 10) file_num = 1
         // [10, 20) file_num = 2
@@ -817,7 +817,7 @@ mod tests {
     fn test_memtable_rewrite() {
         let region_id = 8;
         let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats.clone());
+        let mut memtable = MemTable::new(region_id, stats);
 
         // After appending and compacting:
         // [10, 20) file_num = 2
