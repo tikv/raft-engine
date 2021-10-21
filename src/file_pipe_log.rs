@@ -158,6 +158,9 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn rotate(&mut self, fd: Arc<LogFd>, writer: W) -> Result<()> {
+        if self.last_sync < self.written {
+            self.fd.sync()?;
+        }
         self.writer = writer;
         self.written = 0;
         self.capacity = 0;
@@ -169,7 +172,6 @@ impl<W: Seek + Write> ActiveFile<W> {
     fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
             self.fd.truncate(self.written)?;
-            self.fd.sync()?;
             self.capacity = self.written;
         }
         Ok(())
