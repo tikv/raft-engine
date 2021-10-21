@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 extern crate libc;
 
-type Engine = RaftLogEngine<MessageExtTyped>;
+type Engine = RaftLogEngine;
 
 #[derive(Clone)]
 struct MessageExtTyped;
@@ -64,11 +64,13 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     let path = dir.path().to_str().unwrap().to_owned();
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 
-    let mut ecfg = EngineConfig::new();
-    ecfg.dir = path.clone();
-    ecfg.batch_compression_threshold = cfg.batch_compression_threshold;
+    let ecfg = EngineConfig {
+        dir: path.clone(),
+        batch_compression_threshold: cfg.batch_compression_threshold,
+        ..Default::default()
+    };
 
-    let engine = Engine::open(ecfg.clone()).unwrap();
+    let engine = Engine::open(ecfg).unwrap();
 
     let mut indexes: HashMap<u64, u64> = (1..cfg.region_count + 1).map(|rid| (rid, 0)).collect();
     while dir_size(&path).0 < cfg.total_size.0 {
@@ -110,7 +112,7 @@ fn dir_size(path: &str) -> ReadableSize {
         std::fs::read_dir(PathBuf::from(path))
             .unwrap()
             .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len() as u64)
-            .fold(0, |size, x| size + x),
+            .sum(),
     )
 }
 
@@ -157,10 +159,10 @@ fn bench_recovery(c: &mut Criterion) {
     }
 
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
-        let dir = generate(&cfg).unwrap();
+        let dir = generate(cfg).unwrap();
         let path = dir.path().to_str().unwrap().to_owned();
         fail::cfg("log_fd::open::fadvise_dontneed", "return").unwrap();
-        let mut ecfg = EngineConfig {
+        let ecfg = EngineConfig {
             dir: path.clone(),
             batch_compression_threshold: cfg.batch_compression_threshold,
             ..Default::default()
