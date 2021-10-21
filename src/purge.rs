@@ -272,17 +272,17 @@ where
             let raft = item.raft_group_id;
             let memtable = self.memtables.get_or_insert(raft);
             match item.content {
-                LogItemContent::EntriesIndex(entries_to_add) => {
-                    let entries_index = entries_to_add.0;
+                LogItemContent::EntryIndexes(entries_to_add) => {
+                    let entry_indexes = entries_to_add.0;
                     debug!(
                         "{} append to {:?}.{}, Entries[{:?}:{:?})",
                         raft,
                         queue,
                         file_id,
-                        entries_index.first().map(|x| x.index),
-                        entries_index.last().map(|x| x.index + 1),
+                        entry_indexes.first().map(|x| x.index),
+                        entry_indexes.last().map(|x| x.index + 1),
                     );
-                    memtable.write().rewrite(entries_index, rewrite_watermark);
+                    memtable.write().rewrite(entry_indexes, rewrite_watermark);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => {
