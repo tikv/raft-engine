@@ -1,64 +1,79 @@
-# raft-engine
+# Raft Engine
 
 ![Rust](https://github.com/tikv/raft-engine/workflows/Rust/badge.svg?branch=master)
 
-A WAL-is-data engine that used to store multi-raft log
+Raft Engine is a log-structured engine similar to [bitcask](https://github.com/basho/bitcask). It is designed as an embedded data engine for [TiKV](https://github.com/tikv/tikv) to store [Multi-Raft](https://raft.github.io/) logs.
 
-# background
+## Features
 
-Currently, we use an individual RocksDB instance to store raft entries in TiKV, there are some problems to use RocksDB to store raft entries. First entries are appended to WAL and then flushed into SST, which are duplicated operation in this situation. On the other hand, writing amplification hurts performance when compaction. Writing is also needed when dropping applied entries. Disk read is also needed when compaction.
+- API for storing [protobuf](https://crates.io/crates/protobuf) log entries with consecutive indexes
+- Key-value storage for individual Raft group
+- Minimum write amplification
+- Collaborative garbage collection
+- Support [lz4](http://www.lz4.org/) compression over log entries
+- Support file system extension
 
-RaftEngine is aimed at replacing the RocksDB instance to store raft entries. Here I will explain how RaftEngine works and what we benefit.
+## Using this crate
 
-## thread safe
+Put this in your Cargo.toml:
 
-First of all, all operations on RaftEngine are thread safe.
+```rust
+[dependencies]
+raft-engine = { git = "https://github.com/tikv/raft-engine", branch = "master" }
+```
 
-## WAL is data
+See some basic use cases under the [examples](https://github.com/tikv/raft-engine/tree/master/examples) directory.
 
-## pipe_log
+## Design
 
-RaftEngine contains two major components, `pipe_log` and `memtable`.
-`pipe_log` is consists of a series of files, which only supports appending write and all regions share the same pipe_log. `pipe_log` is where data persist.
+Raft Engine consists of two basic constructs: memtable and log file.
 
-## memtable
+In memory, each Raft group holds its own memtable, containing all the key value pairs and the file locations of all log entries. On storage, user writes are sequentially written to the active log file, which is periodically rotated below a configurable threshold. Different Raft groups share the same log stream.
 
-Each region has an individual `memtable`. A `memtable` is consists of three members: `entries`, `kvs`, and `file_index`.
+### Write
 
-- `entries`: a `VecDeque`, which stores active entries or the position in `pipe_log` of these active entries for this region. Operation on `VecDeque` is fast.
-- `kvs`: a HashMap, stores key-value pairs for this region.
-- `file_index`: another `VecDeque`, store which files contain entries for this region, it is used to GC expired files.
+Similar to [RocksDB](https://github.com/facebook/rocksdb), Raft Engine provides atomic writes. Users can stash the changes into a log batch before submitting.
 
-## LogBatch
+The writing of one log batch can be broken down into three steps:
 
-`LogBatch` is similar to rocksdb’s WriteBatch, giving write an atomic guarantee. It supports adding entries, putting key-value pairs, deleting keys, and the command to clean a region.
+1. Optionally compress the log entries
+2. Write to log file
+3. Apply to memtable
 
-## compact entries
+At step 2, to batch concurrent requests, each writing thread must enter a queue. The first in line automatically becomes the queue leader, responsible for writing the entire batch to the log file.
 
-`compact_to(region_id, to_indx)` only drops entries in memtable, and update memtable’s `file_index`. This operation is only in memory and is very fast.
+Both synchronous and non-sync writes are supported. When one write in a batch is marked synchronous, the batch leader will call [`fdatasync()`](https://linux.die.net/man/2/fdatasync) after writing. This way, buffered data is guaranteed to be flushed out onto the storage.
 
-## recovery
+After its data is written, each writing thread will proceed to apply the changes to memtable on their own.
 
-When the engine restarts we read files in `pipe_log` one by one, and apply each LogBatch to `memtable` for each region. After that, we get the first index info from kv engine for each region and use this first index to compact `memtable`.
-Currently, we have two RocksDB instances, and each one has its own WAL. When kv engine’s WAL lost some data after the machine's crash down, the applied index which persisted in kv engine maybe fallback, but raftdb’s WAL says these entries have been dropped, which will cause panic.
-RaftEngine rarely meets such a situation because RaftEngine will keep the latest several files.
-As I have tested, recovering from 1GB `pipe_log` data takes 4.6 seconds, which is acceptable.
-After using `crc32c`, recover from 1.37GB log files takes 2.3 seconds.
+### Garbage Collection
 
-## write process
+Raft Engine's garbage collection is collaborative.
 
-Add entries or key-value pairs into LogBatch, LogBatch will be encoded to a bytes slice, and append to the currently active file. The previous writing will return the file number which serves the writing, and then apply this LogBatch to associated `memtable`s.
+First, its timing is controlled by the user. Raft engine consolidates and removes its log files only when the user voluntarily calls the `purge_expired_files()` routine. For reference, [TiKV](https://github.com/tikv/tikv) calls it every 10 seconds by default.
 
-## GC expired files
+Second, it sends useful feedback to the user. Each time the GC routine is called, Raft Engine will examine itself and return a list of Raft groups that hold particularly old log entries. Those Raft groups block the GC progress and should be compacted by the user.
 
-We use `memtable`’s `file_index` to get which file is the oldest file that contains active entries for each region, and files before the oldest file of all regions who can be dropped.
-RaftEngine has a total-size-limit parameter, which is default 1GB. And when the total size of files reaches this value, we will check whose entries left behind so long.
-If a region doesn’t have new entries for a long time, and the number of entries doesn't reach `gc_raftlog_threshold`, we need to rewrite these entries to the currently active file, and the old files can be dropped as soon as possible. Since the amount of entries is small, rewriting is trivial.
-If a region’s follower lefts behind a lot, causing entries in this region can’t be compacted. We hint `raftstore` to compact this region’s entries, since we wait for the slow follower so long, “total-size-limt’s” time.
+## Contributing
 
-## Test result in TiKV
+Contributions are always welcome! Here are a few tips for for making a PR:
 
-Reduce above 60% raft associated IO.
-Reduce disk load and disk IO utilization by 50% at lease.
-Increase data importing speed around 10%-15%.
+- All commits must be signed off (with `git commit -s`) to pass the [DCO check](https://probot.github.io/apps/dco/).
+- Tests are automatically run against the changes, some of them can be run locally:
 
+```
+cargo fmt --all -- --check
+cargo clippy --all --all-targets -- -D clippy::all
+cargo test --features failpoints --all
+```
+
+- For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.
+
+```
+cargo bench --features failpoints <bench-case-name>
+cargo run --release --package stress --help
+```
+
+## License
+
+Copyright (c) 2017-present, PingCAP, Inc. Released under the Apache 2.0 license. See [LICENSE](https://github.com/tikv/raft-engine/blob/master/LICENSE) for details.
