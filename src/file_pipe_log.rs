@@ -356,18 +356,20 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(end_offset)
     }
 
-    fn append(&mut self, content: &[u8], sync: &mut bool) -> Result<(FileId, u64, Arc<LogFd>)> {
-        if self.active_file.written >= self.rotate_size {
-            self.new_log_file()?;
-        }
-        if self.active_file.since_last_sync() >= self.bytes_per_sync {
-            *sync = true;
-        }
+    fn append(
+        &mut self,
+        content: &[u8],
+        need_sync: &mut bool,
+        need_rotate: &mut bool,
+    ) -> Result<(FileId, u64, Arc<LogFd>)> {
+        *need_sync |= self.active_file.since_last_sync() >= self.bytes_per_sync;
         let offset = self.active_file.written as u64;
-        self.active_file.write(content, *sync, self.rotate_size)?;
+        self.active_file
+            .write(content, *need_sync, self.rotate_size)?;
         for listener in &self.listeners {
             listener.on_append_log_file(self.queue, self.active_file_id, content.len());
         }
+        *need_rotate |= self.active_file.written >= self.rotate_size;
         Ok((self.active_file_id, offset, self.active_file.fd.clone()))
     }
 
@@ -613,13 +615,11 @@ impl<B: FileBuilder> FilePipeLog<B> {
         queue: LogQueue,
         content: &[u8],
         need_sync: &mut bool,
+        need_rotate: &mut bool,
     ) -> Result<(FileId, u64)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).append(content, need_sync)?;
-        // if *sync {
-        //     let start = Instant::now();
-        //     fd.sync()?;
-        //     LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        // }
+        let (file_id, offset, _) = self
+            .mut_queue(queue)
+            .append(content, need_sync, need_rotate)?;
         Ok((file_id, offset))
     }
 
@@ -668,9 +668,15 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(&self, queue: LogQueue, bytes: &[u8], need_sync: &mut bool) -> Result<(FileId, u64)> {
+    fn append(
+        &self,
+        queue: LogQueue,
+        bytes: &[u8],
+        need_sync: &mut bool,
+        need_rotate: &mut bool,
+    ) -> Result<(FileId, u64)> {
         let start = Instant::now();
-        let (file_id, offset) = self.append_bytes(queue, bytes, need_sync)?;
+        let (file_id, offset) = self.append_bytes(queue, bytes, need_sync, need_rotate)?;
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
@@ -836,34 +842,49 @@ mod tests {
         let header_size = LOG_FILE_HEADER_LEN as u64;
 
         // generate file 1, 2, 3
+        let mut need_rotate = false;
         let content: Vec<u8> = vec![b'a'; 1024];
-        let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let (file_num, offset) = pipe_log
+            .append_bytes(queue, &content, &mut false, &mut need_rotate)
+            .unwrap();
+        if need_rotate {
+            pipe_log.new_log_file(queue).unwrap();
+        }
         assert_eq!(file_num, 1.into());
-        assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_id(queue), 1.into());
-
-        let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
-        assert_eq!(file_num, 2.into());
+        assert!(need_rotate);
         assert_eq!(offset, header_size);
         assert_eq!(pipe_log.active_file_id(queue), 2.into());
+
+        need_rotate = false;
+        let (file_num, offset) = pipe_log
+            .append_bytes(queue, &content, &mut false, &mut need_rotate)
+            .unwrap();
+        if need_rotate {
+            pipe_log.new_log_file(queue).unwrap();
+        }
+        assert_eq!(file_num, 2.into());
+        assert!(need_rotate);
+        assert_eq!(offset, header_size);
+        assert_eq!(pipe_log.active_file_id(queue), 3.into());
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(queue, 2.into()).unwrap(), 1);
         assert_eq!(pipe_log.first_file_id(queue), 2.into());
 
         // cannot purge active file
-        assert!(pipe_log.purge_to(queue, 3.into()).is_err());
+        assert_eq!(pipe_log.active_file_id(queue), 3.into());
+        assert!(pipe_log.purge_to(queue, 4.into()).is_err());
 
         // append position
         let s_content = b"short content".to_vec();
         let (file_num, offset) = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
+            .append_bytes(queue, &s_content, &mut false, &mut false)
             .unwrap();
         assert_eq!(file_num, 3.into());
         assert_eq!(offset, header_size);
 
         let (file_num, offset) = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
+            .append_bytes(queue, &s_content, &mut false, &mut false)
             .unwrap();
         assert_eq!(file_num, 3.into());
         assert_eq!(offset, header_size as u64 + s_content.len() as u64);

@@ -201,7 +201,7 @@ where
         // always need sync
         self.rewrite_impl(
             &mut log_batch,
-            None, /*rewrite_watermark*/
+            None,      /*rewrite_watermark*/
             &mut true, /*sync*/
         )?;
         self.pipe_log.sync(LogQueue::Rewrite)?;
@@ -266,11 +266,18 @@ where
     ) -> Result<()> {
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         if len == 0 {
-            return Ok(())
+            return Ok(());
         }
-        let (file_id, offset) =
-            self.pipe_log
-                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), need_sync)?;
+        let mut need_rotate = false;
+        let (file_id, offset) = self.pipe_log.append(
+            LogQueue::Rewrite,
+            log_batch.encoded_bytes(),
+            need_sync,
+            &mut need_rotate,
+        )?;
+        if need_rotate {
+            self.pipe_log.new_log_file(LogQueue::Rewrite)?;
+        }
         debug_assert!(file_id.valid());
         log_batch.finish_write(LogQueue::Rewrite, file_id, offset);
         let queue = LogQueue::Rewrite;
