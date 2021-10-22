@@ -362,13 +362,13 @@ impl<B: FileBuilder> LogManager<B> {
         need_sync: &mut bool,
         need_rotate: &mut bool,
     ) -> Result<(FileId, u64, Arc<LogFd>)> {
-        *need_sync |= self.active_file.since_last_sync() >= self.bytes_per_sync;
         let offset = self.active_file.written as u64;
         self.active_file
             .write(content, *need_sync, self.rotate_size)?;
         for listener in &self.listeners {
             listener.on_append_log_file(self.queue, self.active_file_id, content.len());
         }
+        *need_sync |= self.active_file.since_last_sync() >= self.bytes_per_sync;
         *need_rotate |= self.active_file.written >= self.rotate_size;
         Ok((self.active_file_id, offset, self.active_file.fd.clone()))
     }
