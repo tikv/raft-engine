@@ -198,11 +198,14 @@ where
 
     fn rewrite_append_queue_tombstones(&self) -> Result<()> {
         let mut log_batch = self.memtables.take_cleaned_region_logs();
+        // always need sync
         self.rewrite_impl(
             &mut log_batch,
             None, /*rewrite_watermark*/
-            true, /*sync*/
-        )
+            &mut true, /*sync*/
+        )?;
+        self.pipe_log.sync(LogQueue::Rewrite)?;
+        Ok(())
     }
 
     fn rewrite_memtables(
@@ -241,30 +244,33 @@ where
 
             let target_file_size = self.cfg.target_file_size.0 as usize;
             if total_size as usize > cmp::min(MAX_REWRITE_BATCH_BYTES, target_file_size) {
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                let mut need_sync = false;
+                self.rewrite_impl(&mut log_batch, rewrite, &mut need_sync)?;
+                if need_sync {
+                    self.pipe_log.sync(LogQueue::Rewrite)?;
+                }
                 total_size = 0;
             }
         }
-        self.rewrite_impl(&mut log_batch, rewrite, true)
+        // always need sync
+        self.rewrite_impl(&mut log_batch, rewrite, &mut true)?;
+        self.pipe_log.sync(LogQueue::Rewrite)?;
+        Ok(())
     }
 
     fn rewrite_impl(
         &self,
         log_batch: &mut LogBatch,
         rewrite_watermark: Option<FileId>,
-        sync: bool,
+        need_sync: &mut bool,
     ) -> Result<()> {
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         if len == 0 {
-            if sync {
-                self.pipe_log.sync(LogQueue::Rewrite)?;
-            }
-            return Ok(());
+            return Ok(())
         }
-
         let (file_id, offset) =
             self.pipe_log
-                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), sync)?;
+                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), need_sync)?;
         debug_assert!(file_id.valid());
         log_batch.finish_write(LogQueue::Rewrite, file_id, offset);
         let queue = LogQueue::Rewrite;

@@ -99,7 +99,7 @@ pub trait PipeLog: Sized {
     ) -> Result<Vec<u8>>;
 
     /// Write a batch into the append queue.
-    fn append(&self, queue: LogQueue, bytes: &[u8], sync: bool) -> Result<(FileId, u64)>;
+    fn append(&self, queue: LogQueue, bytes: &[u8], need_sync: &mut bool) -> Result<(FileId, u64)>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;

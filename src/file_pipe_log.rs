@@ -612,14 +612,14 @@ impl<B: FileBuilder> FilePipeLog<B> {
         &self,
         queue: LogQueue,
         content: &[u8],
-        sync: &mut bool,
+        need_sync: &mut bool,
     ) -> Result<(FileId, u64)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).append(content, sync)?;
-        if *sync {
-            let start = Instant::now();
-            fd.sync()?;
-            LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        }
+        let (file_id, offset, fd) = self.mut_queue(queue).append(content, need_sync)?;
+        // if *sync {
+        //     let start = Instant::now();
+        //     fd.sync()?;
+        //     LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        // }
         Ok((file_id, offset))
     }
 
@@ -668,9 +668,9 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<(FileId, u64)> {
+    fn append(&self, queue: LogQueue, bytes: &[u8], need_sync: &mut bool) -> Result<(FileId, u64)> {
         let start = Instant::now();
-        let (file_id, offset) = self.append_bytes(queue, bytes, &mut sync)?;
+        let (file_id, offset) = self.append_bytes(queue, bytes, need_sync)?;
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC

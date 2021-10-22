@@ -410,11 +410,19 @@ where
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
-                        self.pipe_log.append(
+                        let mut need_sync = false;
+                        let r = self.pipe_log.append(
                             LogQueue::Append,
                             log_batch.encoded_bytes(),
-                            false, /*sync*/
-                        )
+                            &mut need_sync, /*sync*/
+                        );
+                        if need_sync {
+                            let start = Instant::now();
+                            self.pipe_log.sync(LogQueue::Append)?;
+                            LOG_SYNC_TIME_HISTOGRAM
+                                .observe(start.saturating_elapsed().as_secs_f64());
+                        }
+                        r
                     } else {
                         Ok((FileId::default(), 0))
                     };
