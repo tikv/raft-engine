@@ -355,15 +355,15 @@ impl MemTable {
             return Ok(());
         }
         if self.entry_indexes.is_empty() {
-            return Err(Error::EntryNotFound);
+            return Err(Error::EntryNotFound(self.region_id));
         }
         let first_index = self.entry_indexes.front().unwrap().index;
         if begin < first_index {
-            return Err(Error::EntryNotFound);
+            return Err(Error::EntryNotFound(self.region_id));
         }
         let last_index = self.entry_indexes.back().unwrap().index;
         if end > last_index + 1 {
-            return Err(Error::EntryNotFound);
+            return Err(Error::EntryNotFound(self.region_id));
         }
 
         let start_pos = (begin - first_index) as usize;
