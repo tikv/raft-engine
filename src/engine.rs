@@ -28,56 +28,57 @@ use crate::write_barrier::{WriteBarrier, Writer};
 use crate::Error;
 use crate::{GlobalStats, Result};
 
-const SLOTS_COUNT: usize = 128;
+const MEMTABLE_SLOT_COUNT: usize = 128;
 
 type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 
 /// Collection of MemTables, indexed by Raft group ID.
 #[derive(Clone)]
 pub struct MemTableAccessor {
-    slots: Vec<Arc<RwLock<MemTables>>>,
-    initializer: Arc<dyn Fn(u64) -> MemTable + Send + Sync>,
+    global_stats: Arc<GlobalStats>,
 
+    slots: Vec<Arc<RwLock<MemTables>>>,
     // Deleted region memtables that are not yet rewritten.
     removed_memtables: Arc<Mutex<VecDeque<u64>>>,
 }
 
 impl MemTableAccessor {
-    pub fn new(initializer: Arc<dyn Fn(u64) -> MemTable + Send + Sync>) -> MemTableAccessor {
-        let mut slots = Vec::with_capacity(SLOTS_COUNT);
-        for _ in 0..SLOTS_COUNT {
+    pub fn new(global_stats: Arc<GlobalStats>) -> MemTableAccessor {
+        let mut slots = Vec::with_capacity(MEMTABLE_SLOT_COUNT);
+        for _ in 0..MEMTABLE_SLOT_COUNT {
             slots.push(Arc::new(RwLock::new(MemTables::default())));
         }
         MemTableAccessor {
+            global_stats,
             slots,
-            initializer,
             removed_memtables: Default::default(),
         }
     }
 
     pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
-        let mut memtables = self.slots[raft_group_id as usize % SLOTS_COUNT].write();
+        let global_stats = self.global_stats.clone();
+        let mut memtables = self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT].write();
         let memtable = memtables
             .entry(raft_group_id)
-            .or_insert_with(|| Arc::new(RwLock::new((self.initializer)(raft_group_id))));
+            .or_insert_with(|| Arc::new(RwLock::new(MemTable::new(raft_group_id, global_stats))));
         memtable.clone()
     }
 
     pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
-        self.slots[raft_group_id as usize % SLOTS_COUNT]
+        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
             .read()
             .get(&raft_group_id)
             .cloned()
     }
 
     pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable>>) {
-        self.slots[raft_group_id as usize % SLOTS_COUNT]
+        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
             .write()
             .insert(raft_group_id, memtable);
     }
 
     pub fn remove(&self, raft_group_id: u64, queue: LogQueue, _: FileId) {
-        self.slots[raft_group_id as usize % SLOTS_COUNT]
+        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
             .write()
             .remove(&raft_group_id);
         if queue == LogQueue::Append {
@@ -197,14 +198,7 @@ impl MemTableAccessor {
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => {
                         let (key, value) = (kv.key, kv.value.unwrap());
-                        debug!(
-                            "{} append to {:?}.{}, Put({}, {})",
-                            raft,
-                            queue,
-                            file_id,
-                            hex::encode(&key),
-                            hex::encode(&value)
-                        );
+                        debug!("{} append to {:?}.{}, Put", raft, queue, file_id);
                         match queue {
                             LogQueue::Append => memtable.write().put(key, value, file_id),
                             LogQueue::Rewrite => memtable.write().put_rewrite(key, value, file_id),
@@ -212,13 +206,7 @@ impl MemTableAccessor {
                     }
                     OpType::Del => {
                         let key = kv.key;
-                        debug!(
-                            "{} append to {:?}.{}, Del({})",
-                            raft,
-                            queue,
-                            file_id,
-                            hex::encode(&key),
-                        );
+                        debug!("{} append to {:?}.{}, Del", raft, queue, file_id);
                         memtable.write().delete(key.as_slice());
                     }
                 },
@@ -228,11 +216,11 @@ impl MemTableAccessor {
 }
 
 struct ParallelRecoverContext {
+    stats: Arc<GlobalStats>,
     removed_memtables: HashSet<u64>,
     compacted_memtables: HashMap<u64, u64>,
     removed_keys: HashSet<(u64, Vec<u8>)>,
     memtables: MemTableAccessor,
-    stats: Arc<GlobalStats>,
 }
 
 impl ParallelRecoverContext {
@@ -244,15 +232,12 @@ impl ParallelRecoverContext {
 impl Default for ParallelRecoverContext {
     fn default() -> Self {
         let stats = Arc::new(GlobalStats::default());
-        let stats_clone = stats.clone();
         Self {
-            memtables: MemTableAccessor::new(Arc::new(move |id: u64| {
-                MemTable::new(id, stats_clone.clone())
-            })),
+            stats: stats.clone(),
+            memtables: MemTableAccessor::new(stats),
             removed_memtables: Default::default(),
             compacted_memtables: Default::default(),
             removed_keys: Default::default(),
-            stats,
         }
     }
 }
@@ -436,7 +421,7 @@ where
         };
 
         if len > 0 {
-            debug_assert!(file_id.valid());
+            assert!(file_id.valid());
             log_batch.finish_write(LogQueue::Append, file_id, offset);
             self.memtables
                 .apply(log_batch.drain(), LogQueue::Append, file_id);
@@ -592,7 +577,6 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
-    use std::thread::Builder as ThreadBuilder;
 
     type RaftLogEngine = Engine;
     impl RaftLogEngine {
@@ -1214,10 +1198,7 @@ mod tests {
         let (merged_memtables, merged_global_stats) = ctxs.pop_front().unwrap().finish();
         // sequential apply
         let global_stats = Arc::new(GlobalStats::default());
-        let global_stats_clone = global_stats.clone();
-        let memtables = MemTableAccessor::new(Arc::new(move |id| {
-            MemTable::new(id, global_stats_clone.clone())
-        }));
+        let memtables = MemTableAccessor::new(global_stats.clone());
         for mut batch in batches() {
             memtables.apply(batch.drain(), queue, file_id);
         }
@@ -1322,11 +1303,13 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "failpoints")]
     struct ConcurrentWriteContext {
         engine: Arc<RaftLogEngine>,
         ths: Vec<std::thread::JoinHandle<()>>,
     }
 
+    #[cfg(feature = "failpoints")]
     impl ConcurrentWriteContext {
         fn new(engine: Arc<RaftLogEngine>) -> Self {
             Self {
@@ -1334,12 +1317,13 @@ mod tests {
                 ths: Vec::new(),
             }
         }
+
         fn leader_write(&mut self, mut log_batch: LogBatch) {
             if self.ths.is_empty() {
                 fail::cfg("write_barrier::leader_exit", "pause").unwrap();
                 let engine_clone = self.engine.clone();
                 self.ths.push(
-                    ThreadBuilder::new()
+                    std::thread::Builder::new()
                         .spawn(move || {
                             engine_clone.write(&mut LogBatch::default(), true).unwrap();
                         })
@@ -1348,24 +1332,26 @@ mod tests {
             }
             let engine_clone = self.engine.clone();
             self.ths.push(
-                ThreadBuilder::new()
+                std::thread::Builder::new()
                     .spawn(move || {
                         engine_clone.write(&mut log_batch, true).unwrap();
                     })
                     .unwrap(),
             );
         }
+
         fn follower_write(&mut self, mut log_batch: LogBatch) {
             assert!(self.ths.len() == 2);
             let engine_clone = self.engine.clone();
             self.ths.push(
-                ThreadBuilder::new()
+                std::thread::Builder::new()
                     .spawn(move || {
                         engine_clone.write(&mut log_batch, true).unwrap();
                     })
                     .unwrap(),
             );
         }
+
         fn join(&mut self) {
             fail::remove("write_barrier::leader_exit");
             for t in self.ths.drain(..) {
@@ -1375,6 +1361,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "failpoints")]
     fn test_concurrent_write_empty_log_batch() {
         let dir = tempfile::Builder::new()
             .prefix("test_concurrent_write_empty_log_batch")

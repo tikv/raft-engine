@@ -419,8 +419,13 @@ impl LogItemBatch {
         compression_type: CompressionType,
     ) -> Result<LogItemBatch> {
         verify_checksum(buf)?;
+        *buf = &mut &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
-        assert!(count > 0 && !buf.is_empty());
+        if count == 0 {
+            return Err(Error::Corruption(
+                "Unexpected empty log item batch".to_owned(),
+            ));
+        }
         let mut items = LogItemBatch::with_capacity(count as usize);
         let mut entries_size = 0;
         for _ in 0..count {
@@ -603,7 +608,7 @@ impl LogBatch {
             && self.buf.len() > LOG_BATCH_HEADER_LEN + compression_threshold
         {
             let buf_len = self.buf.len();
-            lz4::append_encode_block(&mut self.buf, LOG_BATCH_HEADER_LEN);
+            lz4::append_compress_block(&mut self.buf, LOG_BATCH_HEADER_LEN)?;
             (buf_len - LOG_BATCH_HEADER_LEN, CompressionType::Lz4)
         } else {
             (0, CompressionType::None)
@@ -672,7 +677,12 @@ impl LogBatch {
     }
 
     pub(crate) fn decode_header(buf: &mut SliceReader) -> Result<(usize, CompressionType, usize)> {
-        assert!(buf.len() >= LOG_BATCH_HEADER_LEN);
+        if buf.len() < LOG_BATCH_HEADER_LEN {
+            return Err(Error::Corruption(format!(
+                "Log batch header too short {}",
+                buf.len()
+            )));
+        }
 
         let len = codec::decode_u64(buf)? as usize;
         let offset = codec::decode_u64(buf)? as usize;
@@ -700,7 +710,7 @@ impl LogBatch {
                 &buf[idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
             )?),
             CompressionType::Lz4 => {
-                let decompressed = lz4::decode_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN]);
+                let decompressed = lz4::decompress_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN])?;
                 Ok(parse_from_bytes(
                     &decompressed
                         [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
@@ -719,7 +729,7 @@ impl LogBatch {
                 [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
                 .to_owned()),
             CompressionType::Lz4 => {
-                let decompressed = lz4::decode_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN]);
+                let decompressed = lz4::decompress_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN])?;
                 Ok(decompressed
                     [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
                     .to_owned())
@@ -730,12 +740,18 @@ impl LogBatch {
 
 fn verify_checksum(buf: &[u8]) -> Result<()> {
     if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
-        return Err(Error::TooShort);
+        return Err(Error::Corruption(format!(
+            "Content too short {}",
+            buf.len()
+        )));
     }
     let expected = codec::decode_u32_le(&mut &buf[buf.len() - LOG_BATCH_CHECKSUM_LEN..])?;
     let actual = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
     if actual != expected {
-        return Err(Error::IncorrectChecksum(expected, actual));
+        return Err(Error::Corruption(format!(
+            "Checksum expected {} but got {}",
+            expected, actual
+        )));
     }
     Ok(())
 }

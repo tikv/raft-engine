@@ -351,18 +351,19 @@ impl MemTable {
         max_size: Option<usize>,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
-        assert!(end > begin, "fetch_entries_to({}, {})", begin, end);
-
+        if end <= begin {
+            return Ok(());
+        }
         if self.entry_indexes.is_empty() {
-            return Err(Error::StorageUnavailable);
+            return Err(Error::EntryNotFound);
         }
         let first_index = self.entry_indexes.front().unwrap().index;
         if begin < first_index {
-            return Err(Error::StorageCompacted);
+            return Err(Error::EntryNotFound);
         }
         let last_index = self.entry_indexes.back().unwrap().index;
         if end > last_index + 1 {
-            return Err(Error::StorageUnavailable);
+            return Err(Error::EntryNotFound);
         }
 
         let start_pos = (begin - first_index) as usize;

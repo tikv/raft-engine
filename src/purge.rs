@@ -161,7 +161,7 @@ where
         rewrite_watermark: FileId,
         compact_watermark: FileId,
     ) -> Result<Vec<u64>> {
-        assert!(compact_watermark <= rewrite_watermark);
+        debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::new();
 
         let memtables = self.memtables.collect(|t| {

@@ -388,7 +388,6 @@ impl<B: FileBuilder> LogManager<B> {
 
 pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
-    rotate_size: usize,
 
     appender: Arc<RwLock<LogManager<B>>>,
     rewriter: Arc<RwLock<LogManager<B>>>,
@@ -497,7 +496,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
         Ok((
             FilePipeLog {
                 dir: cfg.dir.clone(),
-                rotate_size: cfg.target_file_size.0 as usize,
                 appender,
                 rewriter,
                 file_builder,
@@ -703,13 +701,23 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         self.get_queue(queue).first_file_id
     }
 
-    fn file_at(&self, queue: LogQueue, position: f64) -> FileId {
-        // TODO: sanitize position
-        let cur_size = self.total_size(queue);
-        let count = (cur_size as f64 * position) as usize / self.rotate_size;
-        let file_num = self.get_queue(queue).first_file_id.forward(count);
-        assert!(file_num <= self.active_file_id(queue));
-        file_num
+    fn file_at(&self, queue: LogQueue, mut position: f64) -> FileId {
+        if position > 1.0 {
+            position = 1.0;
+        } else if position < 0.0 {
+            position = 0.0;
+        }
+        let queue = self.get_queue(queue);
+        let files = queue
+            .active_file_id
+            .step_after(&queue.first_file_id)
+            .unwrap()
+            + 1;
+        let file_id = queue
+            .first_file_id
+            .forward((files as f64 * position) as usize);
+        debug_assert!(file_id <= queue.active_file_id);
+        file_id
     }
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()> {
@@ -728,7 +736,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         for i in 0..purge_count {
             let path = build_file_path(&self.dir, queue, cur_file_id);
             if let Err(e) = fs::remove_file(&path) {
-                warn!("Remove purged log file {:?} fail: {}", path, e);
+                warn!("Remove purged log file {:?} failed: {}", path, e);
                 return Ok(i);
             }
             cur_file_id = cur_file_id.forward(1);

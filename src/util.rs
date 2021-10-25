@@ -234,17 +234,23 @@ pub fn crc32(data: &[u8]) -> u32 {
 }
 
 pub mod lz4 {
+    use crate::{Error, Result};
     use std::{i32, ptr};
 
     /// Compress content in `buf[skip..]`, and append output to `buf`.
-    pub fn append_encode_block(buf: &mut Vec<u8>, skip: usize) {
+    pub fn append_compress_block(buf: &mut Vec<u8>, skip: usize) -> Result<()> {
         let buf_len = buf.len();
         let content_len = buf_len - skip;
         if content_len > 0 {
-            assert!(content_len <= i32::MAX as usize);
+            if content_len > i32::MAX as usize {
+                return Err(Error::InvalidArgument(format!(
+                    "Content too long {}",
+                    content_len
+                )));
+            }
             unsafe {
                 let bound = lz4_sys::LZ4_compressBound(content_len as i32);
-                assert!(bound > 0);
+                debug_assert!(bound > 0);
 
                 // Layout: { decoded_len | content }
                 buf.reserve(buf_len + 4 + bound as usize);
@@ -259,13 +265,16 @@ pub mod lz4 {
                     content_len as i32,
                     bound,
                 );
-                assert!(compressed > 0);
+                if compressed == 0 {
+                    return Err(Error::Other(box_err!("Compression failed")));
+                }
                 buf.set_len(buf_len + 4 + compressed as usize);
             }
         }
+        Ok(())
     }
 
-    pub fn decode_block(src: &[u8]) -> Vec<u8> {
+    pub fn decompress_block(src: &[u8]) -> Result<Vec<u8>> {
         if src.len() > 4 {
             unsafe {
                 let len = u32::from_le(ptr::read_unaligned(src.as_ptr() as *const u32));
@@ -278,18 +287,24 @@ pub mod lz4 {
                 );
                 if l == len as i32 {
                     dst.set_len(l as usize);
-                    return dst;
-                }
-                if l < 0 {
-                    panic!("decompress failed: {}", l);
+                    Ok(dst)
+                } else if l < 0 {
+                    Err(Error::Other(box_err!("Decompression failed {}", l)))
                 } else {
-                    panic!("length of decompress result not match {} != {}", len, l);
+                    Err(Error::Corruption(format!(
+                        "Decompressed content length mismatch {} != {}",
+                        l, len
+                    )))
                 }
             }
+        } else if !src.is_empty() {
+            Err(Error::Corruption(format!(
+                "Content to compress to short {}",
+                src.len()
+            )))
         } else {
-            assert!(src.is_empty());
+            Ok(Vec::new())
         }
-        Vec::new()
     }
 
     #[cfg(test)]
@@ -299,8 +314,8 @@ pub mod lz4 {
             let vecs: Vec<Vec<u8>> = vec![b"".to_vec(), b"123".to_vec(), b"12345678910".to_vec()];
             for mut vec in vecs.into_iter() {
                 let uncompressed_len = vec.len();
-                super::append_encode_block(&mut vec, 0);
-                let res = super::decode_block(&vec[uncompressed_len..]);
+                super::append_compress_block(&mut vec, 0).unwrap();
+                let res = super::decompress_block(&vec[uncompressed_len..]).unwrap();
                 assert_eq!(res, vec[..uncompressed_len].to_owned());
             }
         }
