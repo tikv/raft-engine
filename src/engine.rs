@@ -406,43 +406,38 @@ where
         let (file_id, offset) = {
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                let mut need_sync = false;
+                let mut need_rotate = false;
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
-                        let mut need_sync = false;
-                        let mut need_rotate = false;
-                        let r = self.pipe_log.append(
+                        self.pipe_log.append(
                             LogQueue::Append,
                             log_batch.encoded_bytes(),
                             &mut need_sync,
                             &mut need_rotate,
-                        );
-                        if need_rotate {
-                            self.pipe_log.new_log_file(LogQueue::Append)?;
-                        }
-                        if need_sync {
-                            let start = Instant::now();
-                            self.pipe_log.sync(LogQueue::Append)?;
-                            LOG_SYNC_TIME_HISTOGRAM
-                                .observe(start.saturating_elapsed().as_secs_f64());
-                        }
-                        r
+                        )
                     } else {
                         Ok((FileId::default(), 0))
                     };
                     writer.set_output(res);
                 }
-                if sync {
+                if need_rotate {
+                    self.pipe_log.new_log_file(LogQueue::Append)?;
+                }
+                if need_sync {
                     // fsync() is not retryable, a failed attempt could result in
                     // unrecoverable loss of data written after last successful
                     // fsync(). See [PostgreSQL's fsync() surprise]
                     // (https://lwn.net/Articles/752063/) for more details.
+                    let start = Instant::now();
                     if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
                         for writer in group.iter_mut() {
                             writer.set_output(Err(Error::Fsync(e.to_string())));
                         }
                     }
+                    LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
                 }
             }
             writer.finish()?
