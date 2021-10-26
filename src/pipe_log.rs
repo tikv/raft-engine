@@ -121,5 +121,6 @@ pub trait PipeLog: Sized {
 
 pub trait SequentialReplayMachine: Send + Default {
     fn replay(&mut self, item_batch: LogItemBatch, queue: LogQueue, file_id: FileId) -> Result<()>;
+
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 }

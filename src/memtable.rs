@@ -4,9 +4,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{cmp, u64};
 
+use hashbrown::HashMap;
+
 use crate::log_batch::CompressionType;
 use crate::pipe_log::{FileId, LogQueue};
-use crate::util::{slices_in_range, HashMap};
+use crate::util::slices_in_range;
 use crate::{Error, GlobalStats, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -20,7 +22,7 @@ pub struct EntryIndex {
     pub queue: LogQueue,
     pub file_id: FileId,
     pub compression_type: CompressionType,
-    pub entries_offset: u64, // related to log file
+    pub entries_offset: u64,
     pub entries_len: usize,
     pub entry_offset: u64,
     pub entry_len: usize,

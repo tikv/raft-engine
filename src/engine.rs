@@ -8,6 +8,7 @@ use std::time::Instant;
 use std::u64;
 
 use fail::fail_point;
+use hashbrown::HashMap;
 use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
 use protobuf::{parse_from_bytes, Message};
@@ -23,7 +24,7 @@ use crate::memtable::{EntryIndex, MemTable};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::{HashMap, InstantExt};
+use crate::util::InstantExt;
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::Error;
 use crate::{GlobalStats, Result};
@@ -77,7 +78,7 @@ impl MemTableAccessor {
             .insert(raft_group_id, memtable);
     }
 
-    pub fn remove(&self, raft_group_id: u64, queue: LogQueue, _: FileId) {
+    pub fn remove(&self, raft_group_id: u64, queue: LogQueue) {
         self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
             .write()
             .remove(&raft_group_id);
@@ -136,7 +137,7 @@ impl MemTableAccessor {
     /// Remove contents that are deleted by coming operations.
     fn mask(&mut self, parallel_recover_context: &ParallelRecoverContext, queue: LogQueue) {
         for raft_group_id in &parallel_recover_context.removed_memtables {
-            self.remove(*raft_group_id, queue, FileId::default());
+            self.remove(*raft_group_id, queue);
         }
         for (raft_group_id, key) in &parallel_recover_context.removed_keys {
             if let Some(memtable) = self.get(*raft_group_id) {
@@ -186,7 +187,7 @@ impl MemTableAccessor {
                 }
                 LogItemContent::Command(Command::Clean) => {
                     debug!("{} append to {:?}.{}, Clean", raft, queue, file_id);
-                    self.remove(raft, queue, file_id);
+                    self.remove(raft, queue);
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
                     debug!(

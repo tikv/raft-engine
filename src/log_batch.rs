@@ -864,13 +864,13 @@ mod tests {
         let region_id = 8;
         let mut batch = LogBatch::default();
         batch
-            .add_entries::<Entry>(region_id, &generate_entries(1, 10, Some(vec![b'x'; 1024])))
+            .add_entries::<Entry>(region_id, &generate_entries(1, 11, Some(vec![b'x'; 1024])))
             .unwrap();
         batch.add_command(region_id, Command::Clean);
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
         batch.delete_message(region_id, b"key2".to_vec());
         batch
-            .add_entries::<Entry>(region_id, &generate_entries(1, 10, Some(vec![b'x'; 1024])))
+            .add_entries::<Entry>(region_id, &generate_entries(1, 11, Some(vec![b'x'; 1024])))
             .unwrap();
 
         let len = batch.finish_populate(0).unwrap();
@@ -892,7 +892,7 @@ mod tests {
         let entries = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
         for item in decoded_item_batch.items.iter() {
             if let LogItemContent::EntryIndexes(entries_index) = &item.content {
-                let origin_entries = generate_entries(1, 10, Some(vec![b'x'; 1024]));
+                let origin_entries = generate_entries(1, 11, Some(vec![b'x'; 1024]));
                 let decoded_entries =
                     decode_entries_from_bytes::<Entry>(entries, &entries_index.0, false);
                 assert_eq!(origin_entries, decoded_entries);
@@ -907,7 +907,7 @@ mod tests {
         let mut kvs = Vec::new();
 
         let mut batch1 = LogBatch::default();
-        entries.push(generate_entries(1, 10, Some(vec![b'x'; 1024])));
+        entries.push(generate_entries(1, 11, Some(vec![b'x'; 1024])));
         batch1
             .add_entries::<Entry>(region_id, entries.last().unwrap())
             .unwrap();
@@ -921,7 +921,7 @@ mod tests {
         }
 
         let mut batch2 = LogBatch::default();
-        entries.push(generate_entries(11, 20, Some(vec![b'x'; 1024])));
+        entries.push(generate_entries(11, 21, Some(vec![b'x'; 1024])));
         batch2
             .add_entries::<Entry>(region_id, entries.last().unwrap())
             .unwrap();
@@ -985,7 +985,7 @@ mod tests {
             log_batch.finish_write(LogQueue::Append, FileId::default(), 0);
         }
         let data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
-        let entries = generate_entries(1, 10, Some(data));
+        let entries = generate_entries(1, 11, Some(data));
         let mut log_batch = LogBatch::default();
         // warm up
         details(&mut log_batch, &entries, 100);

@@ -11,11 +11,9 @@ pub struct LogItemBatchFileReader<R: Read + Seek> {
     size: usize,
 
     buffer: Vec<u8>,
-
     // File offset of the data contained in `buffer`.
     buffer_offset: usize,
-
-    // File offset of the end of last decoded log batch
+    // File offset of the end of last decoded log batch.
     valid_offset: usize,
 
     read_block_size: usize,

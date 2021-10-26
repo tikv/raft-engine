@@ -1,15 +1,15 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use raft::eraftpb::Entry;
+
 use crate::{
     memtable::EntryIndex,
     pipe_log::{FileId, LogQueue},
 };
 
-use raft::eraftpb::Entry;
-
-pub fn generate_entries(first_index: u64, len: usize, data: Option<Vec<u8>>) -> Vec<Entry> {
-    let mut v = vec![Entry::new(); len];
-    let mut index = first_index;
+pub fn generate_entries(begin_index: u64, end_index: u64, data: Option<Vec<u8>>) -> Vec<Entry> {
+    let mut v = vec![Entry::new(); (end_index - begin_index) as usize];
+    let mut index = begin_index;
     for e in v.iter_mut() {
         e.set_index(index);
         if let Some(ref data) = data {
