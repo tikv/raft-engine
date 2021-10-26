@@ -47,7 +47,7 @@ impl Default for Config {
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             batch_compression_threshold: ReadableSize::kb(8),
-            recovery_read_block_size: ReadableSize::kb(4),
+            recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
         }
     }
