@@ -182,6 +182,8 @@ impl MemTable {
         };
 
         let distance = (first - front) as usize;
+        // No normal log entry mixed in rewritten entries at the front.
+        debug_assert!(distance == 0 || self.entry_indexes[distance - 1].queue == LogQueue::Rewrite);
         for (i, ei) in entry_indexes.iter().enumerate() {
             if let Some(latest_rewrite) = latest_rewrite {
                 debug_assert_eq!(self.entry_indexes[i + distance].queue, LogQueue::Append);

@@ -912,6 +912,7 @@ mod tests {
             .read()
             .kvs_max_file_id(LogQueue::Append)
             .is_none());
+        assert_eq!(engine.get_entry::<Entry>(1, 1).unwrap(), None);
         // Entries of region 1 after the clean command should be still valid.
         for j in 2..=11 {
             let entry_j = engine.get_entry::<Entry>(1, j).unwrap().unwrap();
