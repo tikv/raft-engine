@@ -62,7 +62,7 @@ type SliceReader<'a> = &'a [u8];
 
 // Format:
 // { count | first index | [ tail offsets ] }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EntryIndexes(pub Vec<EntryIndex>);
 
 impl EntryIndexes {
@@ -108,7 +108,7 @@ impl EntryIndexes {
 
 // Format:
 // { type | (index) }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Clean,
     Compact { index: u64 },
@@ -170,11 +170,12 @@ impl OpType {
 
 // Format:
 // { op_type | key len | key | ( value len | value ) }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeyValue {
     pub op_type: OpType,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
+    pub file_id: FileId,
 }
 
 impl KeyValue {
@@ -183,6 +184,7 @@ impl KeyValue {
             op_type,
             key,
             value,
+            file_id: Default::default(),
         }
     }
 
@@ -227,13 +229,13 @@ impl KeyValue {
 
 // Format:
 // { 8 byte region id | 1 byte type | item }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogItem {
     pub raft_group_id: u64,
     pub content: LogItemContent,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LogItemContent {
     EntryIndexes(EntryIndexes),
     Command(Command),
@@ -325,13 +327,17 @@ pub type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
 
 // Format:
 // { item count | [items] | crc32 }
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
 }
 
 impl LogItemBatch {
+    pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
@@ -348,25 +354,47 @@ impl LogItemBatch {
         self.items.drain(..)
     }
 
+    pub fn push(&mut self, item: LogItem) {
+        self.item_size += item.size();
+        self.items.push(item);
+    }
+
+    pub fn merge(&mut self, rhs: &mut LogItemBatch) {
+        self.item_size += rhs.item_size;
+        self.items.append(&mut rhs.items);
+    }
+
     pub fn set_file_location(&mut self, queue: LogQueue, file_id: FileId) {
         for item in self.items.iter_mut() {
-            if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
-                for ei in entry_indexes.0.iter_mut() {
-                    ei.queue = queue;
-                    ei.file_id = file_id;
+            match &mut item.content {
+                LogItemContent::EntryIndexes(entry_indexes) => {
+                    for ei in entry_indexes.0.iter_mut() {
+                        ei.queue = queue;
+                        ei.file_id = file_id;
+                    }
                 }
+                LogItemContent::Kv(kv) => {
+                    kv.file_id = file_id;
+                }
+                _ => {}
             }
         }
     }
 
     fn set_log_batch_location(&mut self, queue: LogQueue, file_id: FileId, log_batch_offset: u64) {
         for item in self.items.iter_mut() {
-            if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
-                for ei in entry_indexes.0.iter_mut() {
-                    ei.queue = queue;
-                    ei.file_id = file_id;
-                    ei.entries_offset += log_batch_offset;
+            match &mut item.content {
+                LogItemContent::EntryIndexes(entry_indexes) => {
+                    for ei in entry_indexes.0.iter_mut() {
+                        ei.queue = queue;
+                        ei.file_id = file_id;
+                        ei.entries_offset += log_batch_offset;
+                    }
                 }
+                LogItemContent::Kv(kv) => {
+                    kv.file_id = file_id;
+                }
+                _ => {}
             }
         }
     }
@@ -383,7 +411,7 @@ impl LogItemBatch {
         self.items.push(item);
     }
 
-    pub fn delete_message(&mut self, region_id: u64, key: Vec<u8>) {
+    pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::new_kv(region_id, OpType::Del, key, None);
         self.item_size += item.size();
         self.items.push(item);
@@ -577,8 +605,8 @@ impl LogBatch {
         self.item_batch.add_command(region_id, cmd);
     }
 
-    pub fn delete_message(&mut self, region_id: u64, key: Vec<u8>) {
-        self.item_batch.delete_message(region_id, key);
+    pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
+        self.item_batch.delete(region_id, key);
     }
 
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
@@ -849,7 +877,7 @@ mod tests {
         batch.add_entry_indexes(region_id + 100, entry_indexes);
         batch.add_command(region_id, Command::Clean);
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
-        batch.delete_message(region_id, b"key2".to_vec());
+        batch.delete(region_id, b"key2".to_vec());
 
         let mut encoded_batch = vec![];
         batch.encode(&mut encoded_batch).unwrap();
@@ -868,7 +896,7 @@ mod tests {
             .unwrap();
         batch.add_command(region_id, Command::Clean);
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
-        batch.delete_message(region_id, b"key2".to_vec());
+        batch.delete(region_id, b"key2".to_vec());
         batch
             .add_entries::<Entry>(region_id, &generate_entries(1, 11, Some(vec![b'x'; 1024])))
             .unwrap();

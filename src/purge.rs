@@ -9,10 +9,10 @@ use log::{debug, info};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
-use crate::engine::{read_entry_bytes_from_file, MemTableAccessor};
+use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
 use crate::log_batch::{Command, LogBatch, LogItemContent, OpType};
-use crate::memtable::MemTable;
+use crate::memtable::{MemTable, MemTableAccessor};
 use crate::metrics::*;
 use crate::pipe_log::{FileId, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};

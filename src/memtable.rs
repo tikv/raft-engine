@@ -1,18 +1,29 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::borrow::BorrowMut;
+use std::cmp;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::{cmp, u64};
 
+use fail::fail_point;
 use hashbrown::HashMap;
+use log::debug;
+use parking_lot::{Mutex, RwLock};
 
+use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::CompressionType;
+use crate::log_batch::{
+    Command, KeyValue, LogBatch, LogItemBatch, LogItemContent, LogItemDrain, OpType,
+};
 use crate::pipe_log::{FileId, LogQueue};
 use crate::util::slices_in_range;
 use crate::{Error, GlobalStats, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
+
+const MEMTABLE_SLOT_COUNT: usize = 128;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryIndex {
@@ -478,6 +489,244 @@ impl MemTable {
 
     pub fn last_index(&self) -> Option<u64> {
         self.entry_indexes.back().map(|e| e.index)
+    }
+}
+
+type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
+
+/// Collection of MemTables, indexed by Raft group ID.
+#[derive(Clone)]
+pub struct MemTableAccessor {
+    global_stats: Arc<GlobalStats>,
+
+    slots: Vec<Arc<RwLock<MemTables>>>,
+    // Deleted region memtables that are not yet rewritten.
+    removed_memtables: Arc<Mutex<VecDeque<u64>>>,
+}
+
+impl MemTableAccessor {
+    pub fn new(global_stats: Arc<GlobalStats>) -> MemTableAccessor {
+        let mut slots = Vec::with_capacity(MEMTABLE_SLOT_COUNT);
+        for _ in 0..MEMTABLE_SLOT_COUNT {
+            slots.push(Arc::new(RwLock::new(MemTables::default())));
+        }
+        MemTableAccessor {
+            global_stats,
+            slots,
+            removed_memtables: Default::default(),
+        }
+    }
+
+    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
+        let global_stats = self.global_stats.clone();
+        let mut memtables = self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT].write();
+        let memtable = memtables
+            .entry(raft_group_id)
+            .or_insert_with(|| Arc::new(RwLock::new(MemTable::new(raft_group_id, global_stats))));
+        memtable.clone()
+    }
+
+    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
+        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+            .read()
+            .get(&raft_group_id)
+            .cloned()
+    }
+
+    pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable>>) {
+        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+            .write()
+            .insert(raft_group_id, memtable);
+    }
+
+    pub fn remove(&self, raft_group_id: u64, queue: LogQueue) {
+        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+            .write()
+            .remove(&raft_group_id);
+        if queue == LogQueue::Append {
+            let mut removed_memtables = self.removed_memtables.lock();
+            removed_memtables.push_back(raft_group_id);
+        }
+    }
+
+    pub fn fold<B, F: Fn(B, &MemTable) -> B>(&self, mut init: B, fold: F) -> B {
+        for tables in &self.slots {
+            for memtable in tables.read().values() {
+                init = fold(init, &*memtable.read());
+            }
+        }
+        init
+    }
+
+    pub fn collect<F: FnMut(&MemTable) -> bool>(
+        &self,
+        mut condition: F,
+    ) -> Vec<Arc<RwLock<MemTable>>> {
+        let mut memtables = Vec::new();
+        for tables in &self.slots {
+            memtables.extend(tables.read().values().filter_map(|t| {
+                if condition(&*t.read()) {
+                    return Some(t.clone());
+                }
+                None
+            }));
+        }
+        memtables
+    }
+
+    // Returns a `LogBatch` containing Clean commands for all the removed MemTables.
+    pub fn take_cleaned_region_logs(&self) -> LogBatch {
+        let mut log_batch = LogBatch::default();
+        let mut removed_memtables = self.removed_memtables.lock();
+        for id in removed_memtables.drain(..) {
+            log_batch.add_command(id, Command::Clean);
+        }
+        log_batch
+    }
+
+    // Returns a `HashSet<u64>` containing ids for cleaned regions.
+    // Only used for recover.
+    pub fn cleaned_region_ids(&self) -> HashSet<u64> {
+        let mut ids = HashSet::default();
+        let removed_memtables = self.removed_memtables.lock();
+        for raft_id in removed_memtables.iter() {
+            ids.insert(*raft_id);
+        }
+        ids
+    }
+
+    /// Merge memtables from the next right one during segmented recovery.
+    pub fn merge_newer_neighbor(&self, rhs: &mut Self) {
+        for slot in rhs.slots.iter_mut() {
+            for (raft_group_id, memtable) in slot.write().drain() {
+                self.get_or_insert(raft_group_id)
+                    .write()
+                    .merge_newer_neighbor(memtable.write().borrow_mut());
+            }
+        }
+        self.removed_memtables
+            .lock()
+            .append(&mut rhs.removed_memtables.lock());
+    }
+
+    pub fn merge_lower_prio(&self, rhs: &mut Self) {
+        let ids = self.cleaned_region_ids();
+        for slot in rhs.slots.iter_mut() {
+            for (id, memtable) in std::mem::take(&mut *slot.write()) {
+                if let Some(existing_memtable) = self.get(id) {
+                    existing_memtable
+                        .write()
+                        .merge_lower_prio(&mut *memtable.write());
+                } else if !ids.contains(&id) {
+                    self.insert(id, memtable);
+                }
+            }
+        }
+    }
+
+    pub fn apply(&self, log_items: LogItemDrain, queue: LogQueue) {
+        for item in log_items {
+            let raft = item.raft_group_id;
+            let memtable = self.get_or_insert(raft);
+            fail_point!("memtable_accessor::apply::region_3", raft == 3, |_| {});
+            match item.content {
+                LogItemContent::EntryIndexes(entries_to_add) => {
+                    let entry_indexes = entries_to_add.0;
+                    debug!(
+                        "{} append to {:?}, Entries[{:?}, {:?}:{:?})",
+                        raft,
+                        queue,
+                        entry_indexes.first().map(|x| x.queue),
+                        entry_indexes.first().map(|x| x.index),
+                        entry_indexes.last().map(|x| x.index + 1),
+                    );
+                    if queue == LogQueue::Rewrite {
+                        memtable.write().append_rewrite(entry_indexes);
+                    } else {
+                        memtable.write().append(entry_indexes);
+                    }
+                }
+                LogItemContent::Command(Command::Clean) => {
+                    debug!("{} append to {:?}, Clean", raft, queue);
+                    self.remove(raft, queue);
+                }
+                LogItemContent::Command(Command::Compact { index }) => {
+                    debug!("{} append to {:?}, Compact({})", raft, queue, index);
+                    memtable.write().compact_to(index);
+                }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => {
+                        let value = kv.value.unwrap();
+                        debug!("{} append to {:?}, Put", raft, queue);
+                        match queue {
+                            LogQueue::Append => memtable.write().put(kv.key, value, kv.file_id),
+                            LogQueue::Rewrite => {
+                                memtable.write().put_rewrite(kv.key, value, kv.file_id)
+                            }
+                        }
+                    }
+                    OpType::Del => {
+                        let key = kv.key;
+                        debug!("{} append to {:?}, Del", raft, queue);
+                        memtable.write().delete(key.as_slice());
+                    }
+                },
+            }
+        }
+    }
+}
+
+pub struct MemTableRecoverContext {
+    stats: Arc<GlobalStats>,
+    log_batch: LogItemBatch,
+    memtables: MemTableAccessor,
+}
+
+impl MemTableRecoverContext {
+    pub fn finish(self) -> (MemTableAccessor, Arc<GlobalStats>) {
+        (self.memtables, self.stats)
+    }
+}
+
+impl Default for MemTableRecoverContext {
+    fn default() -> Self {
+        let stats = Arc::new(GlobalStats::default());
+        Self {
+            stats: stats.clone(),
+            log_batch: LogItemBatch::new(),
+            memtables: MemTableAccessor::new(stats),
+        }
+    }
+}
+
+impl ReplayMachine for MemTableRecoverContext {
+    fn replay(
+        &mut self,
+        mut item_batch: LogItemBatch,
+        queue: LogQueue,
+        _file_id: FileId,
+    ) -> Result<()> {
+        for item in item_batch.iter() {
+            match &item.content {
+                LogItemContent::Command(Command::Clean)
+                | LogItemContent::Command(Command::Compact { .. }) => {
+                    self.log_batch.push((*item).clone());
+                }
+                LogItemContent::Kv(KeyValue { op_type, .. }) if *op_type == OpType::Del => {
+                    self.log_batch.push((*item).clone());
+                }
+                _ => {}
+            }
+        }
+        self.memtables.apply(item_batch.drain(), queue);
+        Ok(())
+    }
+
+    fn merge(&mut self, mut rhs: Self, queue: LogQueue) -> Result<()> {
+        self.log_batch.merge(&mut rhs.log_batch.clone());
+        self.memtables.apply(rhs.log_batch.drain(), queue);
+        self.memtables.merge_newer_neighbor(&mut rhs.memtables);
+        Ok(())
     }
 }
 
@@ -952,5 +1201,94 @@ mod tests {
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.global_stats.rewrite_operations(), 82);
         assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
+    }
+
+    #[test]
+    fn test_memtable_recover() {
+        let queue = LogQueue::Append;
+        let file_id = FileId::from(10);
+
+        // ops:
+        //
+        // case 1:
+        //      region 10: put (key1, v1) => del (key1) => put (key1, v2)
+        // expect 1:
+        //      get (key1) == v2
+        //
+        // case 2:
+        //      region 11: put (k, _) => cleanup
+        // expect 2:
+        //      memtable 11 is none
+        //
+        // case 3:
+        //      region 12: entries [1, 10) => compact 5 => entries [11, 20)
+        // expect 3:
+        //      [1, 5) is compacted, [5, 20) remains
+        //
+
+        let batches = || {
+            let mut bs = vec![
+                LogItemBatch::with_capacity(0),
+                LogItemBatch::with_capacity(0),
+                LogItemBatch::with_capacity(0),
+            ];
+            bs[0].put(10, b"key1".to_vec(), b"val1".to_vec());
+            bs[1].delete(10, b"key1".to_vec());
+            bs[2].put(10, b"key1".to_vec(), b"val2".to_vec());
+            bs[0].put(11, b"key".to_vec(), b"ANYTHING".to_vec());
+            bs[1].add_command(11, Command::Clean);
+            bs[0].add_entry_indexes(12, generate_entry_indexes(1, 11, queue, file_id));
+            bs[1].add_command(12, Command::Compact { index: 5 });
+            bs[2].add_entry_indexes(12, generate_entry_indexes(11, 21, queue, file_id));
+            bs
+        };
+
+        // reverse merge
+        let mut ctxs = VecDeque::default();
+        for batch in batches() {
+            let mut ctx = MemTableRecoverContext::default();
+            ctx.replay(batch, queue, file_id).unwrap();
+            ctxs.push_back(ctx);
+        }
+        while ctxs.len() > 1 {
+            let (y, mut x) = (ctxs.pop_back().unwrap(), ctxs.pop_back().unwrap());
+            x.merge(y, queue).unwrap();
+            ctxs.push_back(x);
+        }
+        let (merged_memtables, merged_global_stats) = ctxs.pop_front().unwrap().finish();
+        // sequential apply
+        let global_stats = Arc::new(GlobalStats::default());
+        let memtables = MemTableAccessor::new(global_stats.clone());
+        for mut batch in batches() {
+            memtables.apply(batch.drain(), queue);
+        }
+
+        // asserts
+        assert_eq!(
+            merged_memtables
+                .get(10)
+                .unwrap()
+                .read()
+                .get(b"key1")
+                .unwrap(),
+            b"val2".to_vec(),
+        );
+        assert!(merged_memtables.get(11).is_none());
+        for i in 1..21 {
+            let opt = merged_memtables.get(12).unwrap().read().get_entry(i);
+            if i < 5 {
+                assert!(opt.is_none());
+            } else {
+                assert!(opt.is_some());
+            }
+        }
+        assert_eq!(
+            global_stats.rewrite_operations(),
+            merged_global_stats.rewrite_operations()
+        );
+        assert_eq!(
+            global_stats.compacted_rewrite_operations(),
+            merged_global_stats.compacted_rewrite_operations()
+        );
     }
 }
