@@ -99,7 +99,7 @@ pub trait PipeLog: Sized {
     ) -> Result<Vec<u8>>;
 
     /// Write a batch into the append queue.
-    fn append(&self, queue: LogQueue, bytes: &[u8], sync: bool) -> Result<(FileId, u64)>;
+    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<(FileId, u64)>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
@@ -113,10 +113,19 @@ pub trait PipeLog: Sized {
     /// Returns the oldest id containing given file size percentile.
     fn file_at(&self, queue: LogQueue, position: f64) -> FileId;
 
+    /// Rotate log file, needs to sync the origin log file and create the new log file, 
+    /// then sync dir, the new log file doesn't need to be synced, it will be synced later
+    /// with subsequent appends.
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
 
     /// Purge the append queue to the given file id.
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize>;
+
+    fn should_sync(&self, queue: LogQueue) -> bool;
+
+    fn should_rotate(&self, queue: LogQueue) -> bool;
+
+    fn rollback(&self, queue: LogQueue) -> Result<()>;
 }
 
 pub trait SequentialReplayMachine: Send + Default {

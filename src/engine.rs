@@ -14,7 +14,6 @@ use protobuf::{parse_from_bytes, Message};
 
 use crate::config::Config;
 use crate::event_listener::EventListener;
-use crate::file_builder::*;
 use crate::file_pipe_log::FilePipeLog;
 use crate::log_batch::{
     Command, KeyValue, LogBatch, LogItemBatch, LogItemContent, LogItemDrain, MessageExt, OpType,
@@ -25,7 +24,7 @@ use crate::pipe_log::{FileId, LogQueue, PipeLog, SequentialReplayMachine};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::{HashMap, InstantExt};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::Error;
+use crate::{file_builder::*, Error};
 use crate::{GlobalStats, Result};
 
 const MEMTABLE_SLOT_COUNT: usize = 128;
@@ -391,29 +390,36 @@ where
         let (file_id, offset) = {
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                assert!(!self.pipe_log.should_rotate(LogQueue::Append));
+                assert!(!self.pipe_log.should_sync(LogQueue::Append));
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
-                        self.pipe_log.append(
-                            LogQueue::Append,
-                            log_batch.encoded_bytes(),
-                            false, /*sync*/
-                        )
+                        self.pipe_log
+                            .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
                         Ok((FileId::default(), 0))
                     };
                     writer.set_output(res);
                 }
-                if sync {
-                    // fsync() is not retryable, a failed attempt could result in
-                    // unrecoverable loss of data written after last successful
-                    // fsync(). See [PostgreSQL's fsync() surprise]
-                    // (https://lwn.net/Articles/752063/) for more details.
-                    if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
-                        for writer in group.iter_mut() {
-                            writer.set_output(Err(Error::Fsync(e.to_string())));
-                        }
+                // fsync() is not retryable, a failed attempt could result in
+                // unrecoverable loss of data written after last successful
+                // fsync(). See [PostgreSQL's fsync() surprise]
+                // (https://lwn.net/Articles/752063/) for more details.
+                if let Err(e) = if self.pipe_log.should_rotate(LogQueue::Append) {
+                    self.pipe_log.new_log_file(LogQueue::Append)
+                } else if self.pipe_log.should_sync(LogQueue::Append) {
+                    self.pipe_log.sync(LogQueue::Append)
+                } else {
+                    Ok(())
+                } {
+                    for writer in group.iter_mut() {
+                        writer.set_output(Err(Error::Fsync(e.to_string())));
+                    }
+
+                    if let Err(e) = self.pipe_log.rollback(LogQueue::Append) {
+                        panic!("Failed to rollback after fsync error: {}", e);
                     }
                 }
             }
@@ -1048,7 +1054,7 @@ mod tests {
             assert_eq!(hook.0[&LogQueue::Append].appends(), i);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i);
         }
-        assert_eq!(hook.0[&LogQueue::Append].files(), 10);
+        assert_eq!(hook.0[&LogQueue::Append].files(), 11);
 
         assert!(engine
             .purge_manager
@@ -1057,7 +1063,7 @@ mod tests {
         assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
 
         // All things in a region will in one write batch.
-        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 3);
         assert_eq!(hook.0[&LogQueue::Rewrite].appends(), 2);
         assert_eq!(hook.0[&LogQueue::Rewrite].applys(), 2);
 
@@ -1077,7 +1083,7 @@ mod tests {
 
         engine.purge_manager.purge_expired_files().unwrap();
         assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
-        assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 3);
 
         // Write region 3 without applying.
         let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";

@@ -262,9 +262,29 @@ where
             return Ok(());
         }
 
-        let (file_id, offset) =
-            self.pipe_log
-                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), sync)?;
+        let (file_id, offset) = self
+            .pipe_log
+            .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
+        // fsync() is not retryable, a failed attempt could result in
+        // unrecoverable loss of data written after last successful
+        // fsync(). See [PostgreSQL's fsync() surprise]
+        // (https://lwn.net/Articles/752063/) for more details.
+        if let Err(e) = if self.pipe_log.should_rotate(LogQueue::Rewrite) {
+            self.pipe_log.new_log_file(LogQueue::Rewrite)
+        } else if sync | self.pipe_log.should_sync(LogQueue::Rewrite) {
+            self.pipe_log.sync(LogQueue::Rewrite)
+        } else {
+            Ok(())
+        } {
+            if let Err(e) = self.pipe_log.rollback(LogQueue::Rewrite) {
+                panic!("Failed to rollback after fsync error: {}", e);
+            }
+            // TODO(MrCroxx): retry rewrite
+            panic!(
+                "Rewrite queue fsync failed, retry is not implemented yet: {}",
+                e
+            );
+        }
         debug_assert!(file_id.valid());
         log_batch.finish_write(LogQueue::Rewrite, file_id, offset);
         let queue = LogQueue::Rewrite;

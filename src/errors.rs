@@ -23,6 +23,8 @@ pub enum Error {
     Protobuf(#[from] protobuf::ProtobufError),
     #[error("Requested entry in Raft group {0} not found")]
     EntryNotFound(u64),
+    #[error("Unretriable error: {0}")]
+    Unretriable(String),
     #[error("Other Error: {0}")]
     Other(#[from] Box<dyn error::Error + Send + Sync>),
 }
