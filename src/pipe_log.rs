@@ -113,7 +113,7 @@ pub trait PipeLog: Sized {
     /// Returns the oldest id containing given file size percentile.
     fn file_at(&self, queue: LogQueue, position: f64) -> FileId;
 
-    /// Rotate log file, needs to sync the origin log file and create the new log file, 
+    /// Rotate log file, needs to sync the origin log file and create the new log file,
     /// then sync dir, the new log file doesn't need to be synced, it will be synced later
     /// with subsequent appends.
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
