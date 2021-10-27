@@ -78,10 +78,12 @@ where
             self.rewrite_rewrite_queue()?;
         }
 
-        let append_queue_barrier = self.listeners.iter().fold(
-            self.pipe_log.active_file_id(LogQueue::Append),
-            |barrier, l| FileId::min(barrier, l.first_file_not_ready_for_purge(LogQueue::Append)),
-        );
+        let append_queue_barrier = self
+            .listeners
+            .iter()
+            .fold(self.pipe_log.file_span(LogQueue::Append).1, |barrier, l| {
+                FileId::min(barrier, l.first_file_not_ready_for_purge(LogQueue::Append))
+            });
 
         // Must rewrite tombstones after acquiring the barrier, in case the log file is rotated
         // shortly after a tombstone is written.
@@ -90,7 +92,7 @@ where
         let (min_file_1, min_file_2) = self.memtables.fold(
             (
                 append_queue_barrier,
-                self.pipe_log.active_file_id(LogQueue::Rewrite),
+                self.pipe_log.file_span(LogQueue::Rewrite).1,
             ),
             |(min1, min2), t| {
                 (
@@ -116,8 +118,7 @@ where
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
-        let active_file = self.pipe_log.active_file_id(queue);
-        let first_file = self.pipe_log.first_file_id(queue);
+        let (first_file, active_file) = self.pipe_log.file_span(queue);
         if active_file == first_file {
             return false;
         }
@@ -141,8 +142,7 @@ where
     fn append_queue_watermarks(&self) -> (FileId, FileId) {
         let queue = LogQueue::Append;
 
-        let first_file = self.pipe_log.first_file_id(queue);
-        let active_file = self.pipe_log.active_file_id(queue);
+        let (first_file, active_file) = self.pipe_log.file_span(queue);
         if active_file == first_file {
             // Can't rewrite or force compact the active file.
             return (Default::default(), Default::default());

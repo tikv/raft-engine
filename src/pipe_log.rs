@@ -84,11 +84,6 @@ impl FileId {
 }
 
 pub trait PipeLog: Sized {
-    fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64>;
-
-    /// Total size of the given queue.
-    fn total_size(&self, queue: LogQueue) -> usize;
-
     /// Read some bytes from the given position.
     fn read_bytes(
         &self,
@@ -104,18 +99,26 @@ pub trait PipeLog: Sized {
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
 
-    /// Active file id in the given queue.
-    fn active_file_id(&self, queue: LogQueue) -> FileId;
-
-    /// First file id in the given queue.
-    fn first_file_id(&self, queue: LogQueue) -> FileId;
+    fn file_span(&self, queue: LogQueue) -> (FileId, FileId);
 
     /// Returns the oldest id containing given file size percentile.
-    fn file_at(&self, queue: LogQueue, position: f64) -> FileId;
+    fn file_at(&self, queue: LogQueue, mut position: f64) -> FileId {
+        if position > 1.0 {
+            position = 1.0;
+        } else if position < 0.0 {
+            position = 0.0;
+        }
+        let (first, active) = self.file_span(queue);
+        let count = active.step_after(&first).unwrap() + 1;
+        let file_id = first.forward((count as f64 * position) as usize);
+        file_id
+    }
+
+    /// Total size of the given queue.
+    fn total_size(&self, queue: LogQueue) -> usize;
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
 
-    /// Purge the append queue to the given file id.
     fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize>;
 }
 

@@ -639,16 +639,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
 }
 
 impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
-    fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64> {
-        self.get_queue(queue)
-            .get_fd(file_id)
-            .map(|fd| fd.file_size().unwrap() as u64)
-    }
-
-    fn total_size(&self, queue: LogQueue) -> usize {
-        self.get_queue(queue).size()
-    }
-
     fn read_bytes(
         &self,
         queue: LogQueue,
@@ -693,31 +683,13 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(())
     }
 
-    fn active_file_id(&self, queue: LogQueue) -> FileId {
-        self.get_queue(queue).active_file_id
-    }
-
-    fn first_file_id(&self, queue: LogQueue) -> FileId {
-        self.get_queue(queue).first_file_id
-    }
-
-    fn file_at(&self, queue: LogQueue, mut position: f64) -> FileId {
-        if position > 1.0 {
-            position = 1.0;
-        } else if position < 0.0 {
-            position = 0.0;
-        }
+    fn file_span(&self, queue: LogQueue) -> (FileId, FileId) {
         let queue = self.get_queue(queue);
-        let files = queue
-            .active_file_id
-            .step_after(&queue.first_file_id)
-            .unwrap()
-            + 1;
-        let file_id = queue
-            .first_file_id
-            .forward((files as f64 * position) as usize);
-        debug_assert!(file_id <= queue.active_file_id);
-        file_id
+        (queue.first_file_id, queue.active_file_id)
+    }
+
+    fn total_size(&self, queue: LogQueue) -> usize {
+        self.get_queue(queue).size()
     }
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()> {
@@ -842,8 +814,10 @@ mod tests {
         let rotate_size = 1024;
         let bytes_per_sync = 32 * 1024;
         let pipe_log = new_test_pipe_log(path, bytes_per_sync, rotate_size);
-        assert_eq!(pipe_log.first_file_id(queue), INIT_FILE_ID.into());
-        assert_eq!(pipe_log.active_file_id(queue), INIT_FILE_ID.into());
+        assert_eq!(
+            pipe_log.file_span(queue),
+            (INIT_FILE_ID.into(), INIT_FILE_ID.into())
+        );
 
         let header_size = LOG_FILE_HEADER_LEN as u64;
 
@@ -852,16 +826,16 @@ mod tests {
         let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
         assert_eq!(file_num, 1.into());
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_id(queue), 1.into());
+        assert_eq!(pipe_log.file_span(queue).1, 1.into());
 
         let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
         assert_eq!(file_num, 2.into());
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_id(queue), 2.into());
+        assert_eq!(pipe_log.file_span(queue).1, 2.into());
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(queue, 2.into()).unwrap(), 1);
-        assert_eq!(pipe_log.first_file_id(queue), 2.into());
+        assert_eq!(pipe_log.file_span(queue).0, 2.into());
 
         // cannot purge active file
         assert!(pipe_log.purge_to(queue, 3.into()).is_err());
@@ -887,8 +861,7 @@ mod tests {
 
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(queue, 3.into()).is_ok());
-        assert_eq!(pipe_log.first_file_id(queue), 3.into());
-        assert_eq!(pipe_log.active_file_id(queue), 3.into());
+        assert_eq!(pipe_log.file_span(queue), (3.into(), 3.into()));
     }
 
     #[test]

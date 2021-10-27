@@ -741,9 +741,9 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
 
-        let old_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
+        let old_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
+        let new_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
         // Some entries are rewritten.
         assert!(new_min_file_id > old_min_file_id);
         // No regions need to be force compacted because the threshold is not reached.
@@ -757,9 +757,9 @@ mod tests {
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
-        let old_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
+        let old_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_id = engine.pipe_log.first_file_id(LogQueue::Append);
+        let new_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
         // No entries are rewritten.
         assert_eq!(new_min_file_id, old_min_file_id);
         // The region needs to be force compacted because the threshold is reached.
@@ -797,14 +797,10 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1.into());
+        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1.into());
 
-        let active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
-        let active_len = engine
-            .pipe_log
-            .file_size(LogQueue::Rewrite, active_num)
-            .unwrap();
-        assert!(active_num > 1.into() || active_len > 59); // The rewrite queue isn't empty.
+        let rewrite_file_size = engine.pipe_log.total_size(LogQueue::Rewrite);
+        assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
         for i in 1..=10 {
@@ -840,16 +836,6 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-
-        let new_active_num = engine.pipe_log.active_file_id(LogQueue::Rewrite);
-        let new_active_len = engine
-            .pipe_log
-            .file_size(LogQueue::Rewrite, new_active_num)
-            .unwrap();
-        assert!(
-            new_active_num > active_num
-                || (new_active_num == active_num && new_active_len > active_len)
-        );
     }
 
     // Raft groups can be removed when they only have entries in the rewrite queue.
@@ -888,7 +874,7 @@ mod tests {
             append_log(&engine, 1, &entry);
         }
 
-        assert_eq!(engine.pipe_log.active_file_id(LogQueue::Append), 1.into());
+        assert_eq!(engine.pipe_log.file_span(LogQueue::Append).1, 1.into());
 
         // Put more raft logs to trigger purge.
         for i in 2..64 {
@@ -903,7 +889,7 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.first_file_id(LogQueue::Append) > 1.into());
+        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1.into());
 
         // All entries of region 1 has been rewritten.
         let memtable_1 = engine.memtables.get(1).unwrap();
@@ -926,7 +912,7 @@ mod tests {
         assert!(engine.memtables.get(1).is_none());
 
         // Put more raft logs and then recover.
-        let active_file = engine.pipe_log.active_file_id(LogQueue::Append);
+        let active_file = engine.pipe_log.file_span(LogQueue::Append).1;
         for i in 64..=128 {
             for j in 1..=10 {
                 entry.set_index(j);
@@ -936,7 +922,7 @@ mod tests {
 
         if purge_before_recover {
             assert!(engine.purge_expired_files().unwrap().is_empty());
-            assert!(engine.pipe_log.first_file_id(LogQueue::Append) > active_file);
+            assert!(engine.pipe_log.file_span(LogQueue::Append).0 > active_file);
         }
 
         // After the engine recovers, the removed raft group shouldn't appear again.
@@ -1094,7 +1080,7 @@ mod tests {
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(hook.0[&LogQueue::Append].appends(), 33);
-        let file_not_applied = engine.pipe_log.active_file_id(LogQueue::Append);
+        let file_not_applied = engine.pipe_log.file_span(LogQueue::Append).1;
         assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
 
         for i in 31..=40 {
@@ -1110,7 +1096,7 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         engine.purge_manager.purge_expired_files().unwrap();
-        let first = engine.pipe_log.first_file_id(LogQueue::Append);
+        let first = engine.pipe_log.file_span(LogQueue::Append).0;
         assert_eq!(file_not_applied, first);
 
         // Resume write on region 3.
@@ -1119,7 +1105,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(200));
         engine.purge_manager.purge_expired_files().unwrap();
-        let new_first = engine.pipe_log.first_file_id(LogQueue::Append);
+        let new_first = engine.pipe_log.file_span(LogQueue::Append).0;
         assert_ne!(file_not_applied, new_first);
 
         // Drop and then recover.
