@@ -36,6 +36,7 @@ macro_rules! box_err {
 pub mod codec;
 
 mod config;
+mod consistency;
 mod engine;
 mod errors;
 mod event_listener;
