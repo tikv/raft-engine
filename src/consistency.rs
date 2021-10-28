@@ -11,7 +11,7 @@ use crate::Result;
 pub struct ConsistencyChecker {
     // Raft group id -> last index
     pending: HashMap<u64, u64>,
-    // Raft gropu id -> last uncorrupted index
+    // Raft group id -> last uncorrupted index
     corrupted: HashMap<u64, u64>,
 }
 

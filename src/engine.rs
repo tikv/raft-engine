@@ -691,6 +691,7 @@ mod tests {
     #[test]
     #[cfg(feature = "failpoints")]
     fn test_pipe_log_listeners() {
+        use std::collections::HashMap;
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         use std::time::Duration;
 
