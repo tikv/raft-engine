@@ -11,8 +11,9 @@ const MIN_RECOVERY_THREADS: usize = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecoveryMode {
-    TolerateCorruptedTailRecords = 0,
-    AbsoluteConsistency = 1,
+    AbsoluteConsistency = 0,
+    TolerateTailCorruption = 1,
+    TolerateAnyCorruption = 2,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -42,7 +43,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             dir: "".to_owned(),
-            recovery_mode: RecoveryMode::TolerateCorruptedTailRecords,
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
             bytes_per_sync: ReadableSize::kb(256),
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),

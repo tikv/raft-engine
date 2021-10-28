@@ -14,7 +14,7 @@ use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::{
-    Command, Config, Engine, EventListener, FileId, LogBatch, LogQueue, MessageExt, ReadableSize,
+    Command, Config, Engine, EventListener, FileBlockHandle, LogBatch, MessageExt, ReadableSize,
 };
 use rand::{thread_rng, Rng};
 
@@ -372,8 +372,8 @@ impl WrittenBytesHook {
 }
 
 impl EventListener for WrittenBytesHook {
-    fn on_append_log_file(&self, _queue: LogQueue, _file_id: FileId, bytes: usize) {
-        self.0.fetch_add(bytes, Ordering::Relaxed);
+    fn on_append_log_file(&self, handle: FileBlockHandle) {
+        self.0.fetch_add(handle.len, Ordering::Relaxed);
     }
 }
 

@@ -1,8 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::{HashMap as StdHashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::{self, Display, Write};
-use std::hash::BuildHasherDefault;
 use std::ops::{Div, Mul};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -11,34 +10,34 @@ use crc32fast::Hasher;
 use serde::de::{self, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub type HashMap<K, V> = StdHashMap<K, V, BuildHasherDefault<fxhash::FxHasher>>;
-
 const UNIT: u64 = 1;
-const DATA_MAGNITUDE: u64 = 1024;
-pub const KB: u64 = UNIT * DATA_MAGNITUDE;
-pub const MB: u64 = KB * DATA_MAGNITUDE;
-pub const GB: u64 = MB * DATA_MAGNITUDE;
-pub const TB: u64 = (GB as u64) * (DATA_MAGNITUDE as u64);
-pub const PB: u64 = (TB as u64) * (DATA_MAGNITUDE as u64);
+
+const BINARY_DATA_MAGNITUDE: u64 = 1024;
+pub const B: u64 = UNIT;
+pub const KIB: u64 = B * BINARY_DATA_MAGNITUDE;
+pub const MIB: u64 = KIB * BINARY_DATA_MAGNITUDE;
+pub const GIB: u64 = MIB * BINARY_DATA_MAGNITUDE;
+pub const TIB: u64 = GIB * BINARY_DATA_MAGNITUDE;
+pub const PIB: u64 = TIB * BINARY_DATA_MAGNITUDE;
 
 #[derive(Clone, Debug, Copy, PartialEq, PartialOrd)]
 pub struct ReadableSize(pub u64);
 
 impl ReadableSize {
     pub const fn kb(count: u64) -> ReadableSize {
-        ReadableSize(count * KB)
+        ReadableSize(count * KIB)
     }
 
     pub const fn mb(count: u64) -> ReadableSize {
-        ReadableSize(count * MB)
+        ReadableSize(count * MIB)
     }
 
     pub const fn gb(count: u64) -> ReadableSize {
-        ReadableSize(count * GB)
+        ReadableSize(count * GIB)
     }
 
     pub const fn as_mb(self) -> u64 {
-        self.0 / MB
+        self.0 / MIB
     }
 }
 
@@ -75,16 +74,16 @@ impl Serialize for ReadableSize {
         let mut buffer = String::new();
         if size == 0 {
             write!(buffer, "{}KiB", size).unwrap();
-        } else if size % PB == 0 {
-            write!(buffer, "{}PiB", size / PB).unwrap();
-        } else if size % TB == 0 {
-            write!(buffer, "{}TiB", size / TB).unwrap();
-        } else if size % GB as u64 == 0 {
-            write!(buffer, "{}GiB", size / GB).unwrap();
-        } else if size % MB as u64 == 0 {
-            write!(buffer, "{}MiB", size / MB).unwrap();
-        } else if size % KB as u64 == 0 {
-            write!(buffer, "{}KiB", size / KB).unwrap();
+        } else if size % PIB == 0 {
+            write!(buffer, "{}PiB", size / PIB).unwrap();
+        } else if size % TIB == 0 {
+            write!(buffer, "{}TiB", size / TIB).unwrap();
+        } else if size % GIB as u64 == 0 {
+            write!(buffer, "{}GiB", size / GIB).unwrap();
+        } else if size % MIB as u64 == 0 {
+            write!(buffer, "{}MiB", size / MIB).unwrap();
+        } else if size % KIB as u64 == 0 {
+            write!(buffer, "{}KiB", size / KIB).unwrap();
         } else {
             return serializer.serialize_u64(size);
         }
@@ -95,6 +94,7 @@ impl Serialize for ReadableSize {
 impl FromStr for ReadableSize {
     type Err = String;
 
+    // This method parses value in binary unit.
     fn from_str(s: &str) -> Result<ReadableSize, String> {
         let size_str = s.trim();
         if size_str.is_empty() {
@@ -109,19 +109,19 @@ impl FromStr for ReadableSize {
         let size_len = size_str
             .to_string()
             .chars()
-            .take_while(|c| char::is_ascii_digit(c) || *c == '.')
+            .take_while(|c| char::is_ascii_digit(c) || ['.', 'e', 'E', '-', '+'].contains(c))
             .count();
 
         // unit: alphabetic characters
         let (size, unit) = size_str.split_at(size_len);
 
         let unit = match unit.trim() {
-            "K" | "KB" | "KiB" => KB,
-            "M" | "MB" | "MiB" => MB,
-            "G" | "GB" | "GiB" => GB,
-            "T" | "TB" | "TiB" => TB,
-            "P" | "PB" | "PiB" => PB,
-            "B" | "" => UNIT,
+            "K" | "KB" | "KiB" => KIB,
+            "M" | "MB" | "MiB" => MIB,
+            "G" | "GB" | "GiB" => GIB,
+            "T" | "TB" | "TiB" => TIB,
+            "P" | "PB" | "PiB" => PIB,
+            "B" | "" => B,
             _ => {
                 return Err(format!(
                     "only B, KB, KiB, MB, MiB, GB, GiB, TB, TiB, PB, and PiB are supported: {:?}",
@@ -139,16 +139,16 @@ impl FromStr for ReadableSize {
 
 impl Display for ReadableSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 >= PB {
-            write!(f, "{:.1}PiB", self.0 as f64 / PB as f64)
-        } else if self.0 >= TB {
-            write!(f, "{:.1}TiB", self.0 as f64 / TB as f64)
-        } else if self.0 >= GB {
-            write!(f, "{:.1}GiB", self.0 as f64 / GB as f64)
-        } else if self.0 >= MB {
-            write!(f, "{:.1}MiB", self.0 as f64 / MB as f64)
-        } else if self.0 >= KB {
-            write!(f, "{:.1}KiB", self.0 as f64 / KB as f64)
+        if self.0 >= PIB {
+            write!(f, "{:.1}PiB", self.0 as f64 / PIB as f64)
+        } else if self.0 >= TIB {
+            write!(f, "{:.1}TiB", self.0 as f64 / TIB as f64)
+        } else if self.0 >= GIB {
+            write!(f, "{:.1}GiB", self.0 as f64 / GIB as f64)
+        } else if self.0 >= MIB {
+            write!(f, "{:.1}MiB", self.0 as f64 / MIB as f64)
+        } else if self.0 >= KIB {
+            write!(f, "{:.1}KiB", self.0 as f64 / KIB as f64)
         } else {
             write!(f, "{}B", self.0)
         }
