@@ -558,8 +558,10 @@ mod tests {
         // Recover with rewrite queue and append queue.
         let cleaned_region_ids = engine.memtables.cleaned_region_ids();
         drop(engine);
+
         let engine = RaftLogEngine::open(cfg).unwrap();
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
+
         for i in 1..=10 {
             for j in 1..=10 {
                 let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
@@ -702,6 +704,7 @@ mod tests {
             applys: AtomicUsize,
             purged: AtomicU64,
         }
+
         impl QueueHook {
             fn files(&self) -> usize {
                 self.files.load(Ordering::Acquire)
@@ -851,7 +854,21 @@ mod tests {
 
         // Drop and then recover.
         drop(engine);
-        RaftLogEngine::open(cfg).unwrap();
+
+        let hook = Arc::new(Hook::default());
+        let engine = RaftLogEngine::open_with_listeners(cfg, vec![hook.clone()]).unwrap();
+        assert_eq!(
+            hook.0[&LogQueue::Append].files() as u64,
+            engine.pipe_log.file_span(LogQueue::Append).1
+                - engine.pipe_log.file_span(LogQueue::Append).0
+                + 1
+        );
+        assert_eq!(
+            hook.0[&LogQueue::Rewrite].files() as u64,
+            engine.pipe_log.file_span(LogQueue::Rewrite).1
+                - engine.pipe_log.file_span(LogQueue::Rewrite).0
+                + 1
+        );
     }
 
     #[test]

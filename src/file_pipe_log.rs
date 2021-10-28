@@ -240,7 +240,15 @@ impl<B: FileBuilder> LogManager<B> {
     ) -> Result<Self> {
         let mut first_file_seq = files.first().map(|f| f.seq).unwrap_or(0);
         let mut active_file_seq = files.last().map(|f| f.seq).unwrap_or(0);
-        let mut all_files: VecDeque<Arc<LogFd>> = files.into_iter().map(|f| f.fd).collect();
+        let mut all_files: VecDeque<Arc<LogFd>> = files
+            .into_iter()
+            .map(|f| {
+                for listener in &listeners {
+                    listener.post_new_log_file(FileId { queue, seq: f.seq });
+                }
+                f.fd
+            })
+            .collect();
 
         let mut create_file = false;
         if first_file_seq == 0 {
