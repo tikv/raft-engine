@@ -322,6 +322,8 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     type RaftLogEngine = Engine;
     impl RaftLogEngine {
@@ -356,6 +358,60 @@ mod tests {
             .unwrap()
             .unwrap()
             .last_index
+    }
+
+    #[derive(Default)]
+    struct QueueHook {
+        files: AtomicUsize,
+        appends: AtomicUsize,
+        applys: AtomicUsize,
+        purged: AtomicU64,
+    }
+
+    #[allow(dead_code)]
+    impl QueueHook {
+        fn files(&self) -> usize {
+            self.files.load(Ordering::Acquire)
+        }
+        fn appends(&self) -> usize {
+            self.appends.load(Ordering::Acquire)
+        }
+        fn applys(&self) -> usize {
+            self.applys.load(Ordering::Acquire)
+        }
+        fn purged(&self) -> u64 {
+            self.purged.load(Ordering::Acquire)
+        }
+    }
+
+    struct Hook(HashMap<LogQueue, QueueHook>);
+    impl Default for Hook {
+        fn default() -> Hook {
+            let mut hash = HashMap::default();
+            hash.insert(LogQueue::Append, QueueHook::default());
+            hash.insert(LogQueue::Rewrite, QueueHook::default());
+            Hook(hash)
+        }
+    }
+
+    impl EventListener for Hook {
+        fn post_new_log_file(&self, id: FileId) {
+            self.0[&id.queue].files.fetch_add(1, Ordering::Release);
+        }
+
+        fn on_append_log_file(&self, handle: FileBlockHandle) {
+            self.0[&handle.id.queue]
+                .appends
+                .fetch_add(1, Ordering::Release);
+        }
+
+        fn post_apply_memtables(&self, id: FileId) {
+            self.0[&id.queue].applys.fetch_add(1, Ordering::Release);
+        }
+
+        fn post_purge(&self, id: FileId) {
+            self.0[&id.queue].purged.store(id.seq, Ordering::Release);
+        }
     }
 
     #[test]
@@ -558,8 +614,13 @@ mod tests {
         // Recover with rewrite queue and append queue.
         let cleaned_region_ids = engine.memtables.cleaned_region_ids();
         drop(engine);
-        let engine = RaftLogEngine::open(cfg).unwrap();
+
+        let hook = Arc::new(Hook::default());
+        let engine = RaftLogEngine::open_with_listeners(cfg, vec![hook.clone()]).unwrap();
+        assert!(hook.0[&LogQueue::Append].files() > 0);
+        assert!(hook.0[&LogQueue::Rewrite].files() > 0);
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
+
         for i in 1..=10 {
             for j in 1..=10 {
                 let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
@@ -691,61 +752,7 @@ mod tests {
     #[test]
     #[cfg(feature = "failpoints")]
     fn test_pipe_log_listeners() {
-        use std::collections::HashMap;
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         use std::time::Duration;
-
-        #[derive(Default)]
-        struct QueueHook {
-            files: AtomicUsize,
-            appends: AtomicUsize,
-            applys: AtomicUsize,
-            purged: AtomicU64,
-        }
-        impl QueueHook {
-            fn files(&self) -> usize {
-                self.files.load(Ordering::Acquire)
-            }
-            fn appends(&self) -> usize {
-                self.appends.load(Ordering::Acquire)
-            }
-            fn applys(&self) -> usize {
-                self.applys.load(Ordering::Acquire)
-            }
-            fn purged(&self) -> u64 {
-                self.purged.load(Ordering::Acquire)
-            }
-        }
-
-        struct Hook(HashMap<LogQueue, QueueHook>);
-        impl Default for Hook {
-            fn default() -> Hook {
-                let mut hash = HashMap::default();
-                hash.insert(LogQueue::Append, QueueHook::default());
-                hash.insert(LogQueue::Rewrite, QueueHook::default());
-                Hook(hash)
-            }
-        }
-
-        impl EventListener for Hook {
-            fn post_new_log_file(&self, id: FileId) {
-                self.0[&id.queue].files.fetch_add(1, Ordering::Release);
-            }
-
-            fn on_append_log_file(&self, handle: FileBlockHandle) {
-                self.0[&handle.id.queue]
-                    .appends
-                    .fetch_add(1, Ordering::Release);
-            }
-
-            fn post_apply_memtables(&self, id: FileId) {
-                self.0[&id.queue].applys.fetch_add(1, Ordering::Release);
-            }
-
-            fn post_purge(&self, id: FileId) {
-                self.0[&id.queue].purged.store(id.seq, Ordering::Release);
-            }
-        }
 
         let dir = tempfile::Builder::new()
             .prefix("test_pipe_log_listeners")
