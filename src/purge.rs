@@ -351,7 +351,6 @@ impl PurgeHook {
 
 impl EventListener for PurgeHook {
     fn post_new_log_file(&self, file_id: FileId) {
-        debug!("new log file: {:?}", file_id);
         if file_id.queue == LogQueue::Append {
             let mut active_log_files = self.active_log_files.write();
             if let Some(seq) = active_log_files.back().map(|x| x.0) {
@@ -369,7 +368,6 @@ impl EventListener for PurgeHook {
     fn on_append_log_file(&self, handle: FileBlockHandle) {
         if handle.id.queue == LogQueue::Append {
             let active_log_files = self.active_log_files.read();
-            debug!("append: {:?}", handle);
             assert!(!active_log_files.is_empty());
             let front = active_log_files[0].0;
             let counter = &active_log_files[(handle.id.seq - front) as usize].1;
