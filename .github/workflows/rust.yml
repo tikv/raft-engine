@@ -52,8 +52,9 @@ jobs:
         run: cargo test --features failpoints --all --verbose -- --nocapture --skip bench
         env:
           RUSTFLAGS: '-Zinstrument-coverage'
+          LLVM_PROFILE_FILE: '%p-%m.profraw'
       - name: Run grcov
-        run: grcov . --binary-path target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../**' --ignore '/*' -o coverage.lcov
+        run: grcov `find . \( -name "*.profraw" \) -print` --binary-path target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../**' --ignore '/*' -o coverage.lcov
       - name: Upload
         uses: codecov/codecov-action@v2
         with:
