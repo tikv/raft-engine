@@ -10,33 +10,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ ubuntu-latest, macos-latest ]
-    steps:
-      - uses: actions/checkout@v2
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: nightly-2021-07-28
-          override: true
-          components: rustfmt, clippy, rust-src
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --features failpoints --all --all-targets -- -D clippy::all
-      - name: Run tests
-        run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose -- --nocapture
-      - name: Run asan tests
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --features failpoints --verbose -- --nocapture
+  # build:
+  #   runs-on: ${{ matrix.os }}
+  #   strategy:
+  #     matrix:
+  #       os: [ ubuntu-latest, macos-latest ]
+  #   steps:
+  #     - uses: actions/checkout@v2
+  #     - name: Install nightly toolchain
+  #       uses: actions-rs/toolchain@v1
+  #       with:
+  #         profile: minimal
+  #         toolchain: nightly-2021-07-28
+  #         override: true
+  #         components: rustfmt, clippy, rust-src
+  #     - name: Format
+  #       run: cargo fmt --all -- --check
+  #     - name: Clippy
+  #       run: cargo clippy --features failpoints --all --all-targets -- -D clippy::all
+  #     - name: Run tests
+  #       run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose -- --nocapture
+  #     - name: Run asan tests
+  #       if: ${{ matrix.os == 'ubuntu-latest' }}
+  #       run: RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address RUSTDOCFLAGS=-Zsanitizer=address cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --features failpoints --verbose -- --nocapture
   coverage:
     name: Run test coverage
     runs-on: ubuntu-latest
-    needs: build
+    # needs: build
     steps:
       - uses: actions/checkout@v2
       - name: Install nightly toolchain
