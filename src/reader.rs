@@ -4,9 +4,11 @@ use std::io::{Read, Seek};
 
 use crate::file_pipe_log::{LogFileHeader, LOG_FILE_HEADER_LEN};
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
+use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
 
 pub struct LogItemBatchFileReader<R: Read + Seek> {
+    file_id: Option<FileId>,
     file: Option<R>,
     size: usize,
 
@@ -22,6 +24,7 @@ pub struct LogItemBatchFileReader<R: Read + Seek> {
 impl<R: Read + Seek> LogItemBatchFileReader<R> {
     pub fn new(read_block_size: usize) -> Self {
         Self {
+            file_id: None,
             file: None,
             size: 0,
 
@@ -33,7 +36,8 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
         }
     }
 
-    pub fn open(&mut self, file: R, size: usize) -> Result<()> {
+    pub fn open(&mut self, file_id: FileId, file: R, size: usize) -> Result<()> {
+        self.file_id = Some(file_id);
         self.file = Some(file);
         self.size = size;
         self.buffer.clear();
@@ -60,17 +64,19 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
             if self.valid_offset + len > self.size {
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
-            let entries_offset = self.valid_offset + LOG_BATCH_HEADER_LEN;
-            let entries_len = footer_offset - LOG_BATCH_HEADER_LEN;
 
+            let handle = FileBlockHandle {
+                id: self.file_id.unwrap(),
+                offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
+                len: footer_offset - LOG_BATCH_HEADER_LEN,
+            };
             let item_batch = LogItemBatch::decode(
                 &mut self.peek(
                     self.valid_offset + footer_offset,
                     len - footer_offset,
                     LOG_BATCH_HEADER_LEN,
                 )?,
-                entries_offset,
-                entries_len,
+                handle,
                 compression_type,
             )?;
             self.valid_offset += len;

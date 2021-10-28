@@ -22,12 +22,7 @@ impl ConsistencyChecker {
 }
 
 impl ReplayMachine for ConsistencyChecker {
-    fn replay(
-        &mut self,
-        item_batch: LogItemBatch,
-        _queue: LogQueue,
-        _file_id: FileId,
-    ) -> Result<()> {
+    fn replay(&mut self, item_batch: LogItemBatch, _file_id: FileId) -> Result<()> {
         for item in item_batch.iter() {
             if let LogItemContent::EntryIndexes(ents) = &item.content {
                 if !ents.0.is_empty() {

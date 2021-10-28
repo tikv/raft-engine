@@ -16,7 +16,7 @@ use crate::file_pipe_log::{FilePipeLog, ReplayMachine};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
-use crate::pipe_log::{FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::InstantExt;
 use crate::write_barrier::{WriteBarrier, Writer};
@@ -33,7 +33,7 @@ where
     pipe_log: Arc<P>,
     purge_manager: PurgeManager<P>,
 
-    write_barrier: WriteBarrier<LogBatch, Result<(FileId, u64)>>,
+    write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
 
     listeners: Vec<Arc<dyn EventListener>>,
 
@@ -118,7 +118,7 @@ where
     pub fn write(&self, log_batch: &mut LogBatch, mut sync: bool) -> Result<usize> {
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
-        let (file_id, offset) = {
+        let block_handle = {
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 for writer in group.iter_mut() {
@@ -131,7 +131,12 @@ where
                             false, /*sync*/
                         )
                     } else {
-                        Ok((FileId::default(), 0))
+                        // TODO(tabokie)
+                        Ok(FileBlockHandle {
+                            id: FileId::new(LogQueue::Append, 0),
+                            offset: 0,
+                            len: 0,
+                        })
                     };
                     writer.set_output(res);
                 }
@@ -151,11 +156,10 @@ where
         };
 
         if len > 0 {
-            assert!(file_id.valid());
-            log_batch.finish_write(LogQueue::Append, file_id, offset);
+            log_batch.finish_write(block_handle);
             self.memtables.apply(log_batch.drain(), LogQueue::Append);
             for listener in &self.listeners {
-                listener.post_apply_memtables(LogQueue::Append, file_id);
+                listener.post_apply_memtables(block_handle.id);
             }
         }
 
@@ -166,6 +170,7 @@ where
 
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
+        // TODO(tabokie): use writer.
         self.pipe_log.sync(LogQueue::Append)
     }
 
@@ -297,12 +302,7 @@ where
     M: MessageExt,
     P: PipeLog,
 {
-    let buf = pipe_log.read_bytes(
-        ent_idx.queue,
-        ent_idx.file_id,
-        ent_idx.entries_offset,
-        ent_idx.entries_len as u64,
-    )?;
+    let buf = pipe_log.read_bytes(ent_idx.entries.unwrap())?;
     let e = LogBatch::parse_entry::<M>(&buf, ent_idx)?;
     assert_eq!(M::index(&e), ent_idx.index);
     Ok(e)
@@ -312,12 +312,7 @@ pub fn read_entry_bytes_from_file<P>(pipe_log: &P, ent_idx: &EntryIndex) -> Resu
 where
     P: PipeLog,
 {
-    let entries_buf = pipe_log.read_bytes(
-        ent_idx.queue,
-        ent_idx.file_id,
-        ent_idx.entries_offset,
-        ent_idx.entries_len as u64,
-    )?;
+    let entries_buf = pipe_log.read_bytes(ent_idx.entries.unwrap())?;
     LogBatch::parse_entry_bytes(&entries_buf, ent_idx)
 }
 
@@ -325,7 +320,6 @@ where
 mod tests {
     use super::*;
     use crate::util::ReadableSize;
-    use hashbrown::HashMap;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
@@ -491,11 +485,11 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
 
-        let old_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
+        let old_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
+        let new_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
         // Some entries are rewritten.
-        assert!(new_min_file_id > old_min_file_id);
+        assert!(new_min_file_seq > old_min_file_seq);
         // No regions need to be force compacted because the threshold is not reached.
         assert!(will_force_compact.is_empty());
         // After purge, entries and raft state are still available.
@@ -507,11 +501,11 @@ mod tests {
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
-        let old_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
+        let old_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_id = engine.pipe_log.file_span(LogQueue::Append).0;
+        let new_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
         // No entries are rewritten.
-        assert_eq!(new_min_file_id, old_min_file_id);
+        assert_eq!(new_min_file_seq, old_min_file_seq);
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
@@ -547,7 +541,7 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1.into());
+        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1);
 
         let rewrite_file_size = engine.pipe_log.total_size(LogQueue::Rewrite);
         assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
@@ -624,7 +618,7 @@ mod tests {
             append_log(&engine, 1, &entry);
         }
 
-        assert_eq!(engine.pipe_log.file_span(LogQueue::Append).1, 1.into());
+        assert_eq!(engine.pipe_log.file_span(LogQueue::Append).1, 1);
 
         // Put more raft logs to trigger purge.
         for i in 2..64 {
@@ -639,14 +633,14 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1.into());
+        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1);
 
         // All entries of region 1 has been rewritten.
         let memtable_1 = engine.memtables.get(1).unwrap();
-        assert!(memtable_1.read().max_file_id(LogQueue::Append).is_none());
+        assert!(memtable_1.read().max_file_seq(LogQueue::Append).is_none());
         assert!(memtable_1
             .read()
-            .kvs_max_file_id(LogQueue::Append)
+            .kvs_max_file_seq(LogQueue::Append)
             .is_none());
         assert_eq!(engine.get_entry::<Entry>(1, 1).unwrap(), None);
         // Entries of region 1 after the clean command should be still valid.
@@ -733,26 +727,22 @@ mod tests {
         }
 
         impl EventListener for Hook {
-            fn post_new_log_file(&self, queue: LogQueue, _: FileId) {
-                self.0[&queue].files.fetch_add(1, Ordering::Release);
+            fn post_new_log_file(&self, id: FileId) {
+                self.0[&id.queue].files.fetch_add(1, Ordering::Release);
             }
 
-            fn on_append_log_file(&self, queue: LogQueue, _: FileId, _: usize) {
-                self.0[&queue].appends.fetch_add(1, Ordering::Release);
+            fn on_append_log_file(&self, handle: FileBlockHandle) {
+                self.0[&handle.id.queue]
+                    .appends
+                    .fetch_add(1, Ordering::Release);
             }
 
-            fn post_apply_memtables(&self, queue: LogQueue, _: FileId) {
-                self.0[&queue].applys.fetch_add(1, Ordering::Release);
+            fn post_apply_memtables(&self, id: FileId) {
+                self.0[&id.queue].applys.fetch_add(1, Ordering::Release);
             }
 
-            fn first_file_not_ready_for_purge(&self, _: LogQueue) -> FileId {
-                Default::default()
-            }
-
-            fn post_purge(&self, queue: LogQueue, file_id: FileId) {
-                self.0[&queue]
-                    .purged
-                    .store(file_id.as_u64(), Ordering::Release);
+            fn post_purge(&self, id: FileId) {
+                self.0[&id.queue].purged.store(id.seq, Ordering::Release);
             }
         }
 

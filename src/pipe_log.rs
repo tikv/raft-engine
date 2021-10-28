@@ -8,109 +8,69 @@ pub enum LogQueue {
     Rewrite,
 }
 
-#[derive(PartialOrd, PartialEq, Eq, Copy, Clone, Default, Debug, Hash)]
-pub struct FileId(u64);
+pub type FileSeq = u64;
 
-impl std::fmt::Display for FileId {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<u64> for FileId {
-    fn from(num: u64) -> FileId {
-        FileId(num)
-    }
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct FileId {
+    pub queue: LogQueue,
+    pub seq: FileSeq,
 }
 
 impl FileId {
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    pub fn new(queue: LogQueue, seq: FileSeq) -> Self {
+        Self { queue, seq }
     }
 
-    /// Default constructor must return an invalid instance.
-    pub fn valid(&self) -> bool {
-        self.0 > 0
+    #[cfg(test)]
+    pub fn dummy(queue: LogQueue) -> Self {
+        Self { queue, seq: 0 }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct FileBlockHandle {
+    pub id: FileId,
+    pub offset: u64,
+    pub len: usize,
+}
+
+impl FileBlockHandle {
+    pub fn new(id: FileId, offset: u64, len: usize) -> Self {
+        Self { id, offset, len }
     }
 
-    /// Returns an invalid ID when applied on an invalid file ID.
-    pub fn forward(&self, step: usize) -> Self {
-        if self.0 == 0 {
-            Default::default()
-        } else {
-            FileId(self.0 + step as u64)
-        }
-    }
-
-    /// Returns an invalid ID when out of bound or applied on an invalid file ID.
-    pub fn backward(&self, step: usize) -> Self {
-        if self.0 <= step as u64 {
-            Default::default()
-        } else {
-            FileId(self.0 - step as u64)
-        }
-    }
-
-    /// Returns step distance from another older ID.
-    pub fn step_after(&self, rhs: &Self) -> Option<usize> {
-        if self.0 == 0 || rhs.0 == 0 || self.0 < rhs.0 {
-            None
-        } else {
-            Some((self.0 - rhs.0) as usize)
-        }
-    }
-
-    pub fn min(lhs: FileId, rhs: FileId) -> FileId {
-        if !lhs.valid() {
-            rhs
-        } else if !rhs.valid() {
-            lhs
-        } else {
-            std::cmp::min(lhs.0, rhs.0).into()
-        }
-    }
-
-    pub fn max(lhs: FileId, rhs: FileId) -> FileId {
-        if !lhs.valid() {
-            rhs
-        } else if !rhs.valid() {
-            lhs
-        } else {
-            std::cmp::max(lhs.0, rhs.0).into()
+    #[cfg(test)]
+    pub fn dummy(queue: LogQueue) -> Self {
+        Self {
+            id: FileId::dummy(queue),
+            offset: 0,
+            len: 0,
         }
     }
 }
 
 pub trait PipeLog: Sized {
     /// Read some bytes from the given position.
-    fn read_bytes(
-        &self,
-        queue: LogQueue,
-        file_id: FileId,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>>;
+    fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
 
     /// Write a batch into the append queue.
-    fn append(&self, queue: LogQueue, bytes: &[u8], sync: bool) -> Result<(FileId, u64)>;
+    fn append(&self, queue: LogQueue, bytes: &[u8], sync: bool) -> Result<FileBlockHandle>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;
 
-    fn file_span(&self, queue: LogQueue) -> (FileId, FileId);
+    fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 
     /// Returns the oldest id containing given file size percentile.
-    fn file_at(&self, queue: LogQueue, mut position: f64) -> FileId {
+    fn file_at(&self, queue: LogQueue, mut position: f64) -> FileSeq {
         if position > 1.0 {
             position = 1.0;
         } else if position < 0.0 {
             position = 0.0;
         }
         let (first, active) = self.file_span(queue);
-        let count = active.step_after(&first).unwrap() + 1;
-        let file_id = first.forward((count as f64 * position) as usize);
-        file_id
+        let count = active - first + 1;
+        first + (count as f64 * position) as u64
     }
 
     /// Total size of the given queue.
@@ -118,5 +78,5 @@ pub trait PipeLog: Sized {
 
     fn new_log_file(&self, queue: LogQueue) -> Result<()>;
 
-    fn purge_to(&self, queue: LogQueue, file_id: FileId) -> Result<usize>;
+    fn purge_to(&self, file_id: FileId) -> Result<usize>;
 }

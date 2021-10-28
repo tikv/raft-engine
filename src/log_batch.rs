@@ -11,7 +11,7 @@ use protobuf::Message;
 
 use crate::codec::{self, Error as CodecError, NumberEncoder};
 use crate::memtable::EntryIndex;
-use crate::pipe_log::{FileId, LogQueue};
+use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::util::{crc32, lz4};
 use crate::{Error, Result};
 
@@ -74,7 +74,8 @@ impl EntryIndexes {
             index = codec::decode_var_u64(buf)?;
         }
         while count > 0 {
-            let entry_len = (codec::decode_var_u64(buf)? as usize) - *entries_size;
+            let t = codec::decode_var_u64(buf)?;
+            let entry_len = (t as usize) - *entries_size;
             let entry_index = EntryIndex {
                 index,
                 entry_offset: *entries_size as u64,
@@ -175,7 +176,7 @@ pub struct KeyValue {
     pub op_type: OpType,
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
-    pub file_id: FileId,
+    pub file_id: Option<FileId>,
 }
 
 impl KeyValue {
@@ -184,7 +185,7 @@ impl KeyValue {
             op_type,
             key,
             value,
-            file_id: Default::default(),
+            file_id: None,
         }
     }
 
@@ -331,17 +332,21 @@ pub type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
 pub struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
+    entries_size: usize,
+}
+
+impl Default for LogItemBatch {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl LogItemBatch {
-    pub fn new() -> Self {
-        Self::with_capacity(0)
-    }
-
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             items: Vec::with_capacity(cap),
             item_size: 0,
+            entries_size: 0,
         }
     }
 
@@ -351,6 +356,7 @@ impl LogItemBatch {
 
     pub fn drain(&mut self) -> LogItemDrain {
         self.item_size = 0;
+        self.entries_size = 0;
         self.items.drain(..)
     }
 
@@ -360,46 +366,45 @@ impl LogItemBatch {
     }
 
     pub fn merge(&mut self, rhs: &mut LogItemBatch) {
+        for item in &mut rhs.items {
+            if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
+                for ei in entry_indexes.0.iter_mut() {
+                    ei.entry_offset += self.entries_size as u64;
+                }
+            }
+        }
         self.item_size += rhs.item_size;
+        rhs.item_size = 0;
+        self.entries_size += rhs.entries_size;
+        rhs.entries_size = 0;
         self.items.append(&mut rhs.items);
     }
 
-    pub fn set_file_location(&mut self, queue: LogQueue, file_id: FileId) {
+    pub(crate) fn finish_write(&mut self, handle: FileBlockHandle) {
         for item in self.items.iter_mut() {
             match &mut item.content {
                 LogItemContent::EntryIndexes(entry_indexes) => {
                     for ei in entry_indexes.0.iter_mut() {
-                        ei.queue = queue;
-                        ei.file_id = file_id;
+                        // No assert!(ei.entries.is_none):
+                        // It's possible that batch containing rewritten index already
+                        // has entries location.
+                        ei.entries = Some(handle);
                     }
                 }
                 LogItemContent::Kv(kv) => {
-                    kv.file_id = file_id;
+                    debug_assert!(kv.file_id.is_none());
+                    kv.file_id = Some(handle.id);
                 }
                 _ => {}
             }
         }
     }
 
-    fn set_log_batch_location(&mut self, queue: LogQueue, file_id: FileId, log_batch_offset: u64) {
-        for item in self.items.iter_mut() {
-            match &mut item.content {
-                LogItemContent::EntryIndexes(entry_indexes) => {
-                    for ei in entry_indexes.0.iter_mut() {
-                        ei.queue = queue;
-                        ei.file_id = file_id;
-                        ei.entries_offset += log_batch_offset;
-                    }
-                }
-                LogItemContent::Kv(kv) => {
-                    kv.file_id = file_id;
-                }
-                _ => {}
-            }
+    pub fn add_entry_indexes(&mut self, region_id: u64, mut entry_indexes: Vec<EntryIndex>) {
+        for ei in entry_indexes.iter_mut() {
+            ei.entry_offset = self.entries_size as u64;
+            self.entries_size += ei.entry_len;
         }
-    }
-
-    pub fn add_entry_indexes(&mut self, region_id: u64, entry_indexes: Vec<EntryIndex>) {
         let item = LogItem::new_entry_indexes(region_id, entry_indexes);
         self.item_size += item.size();
         self.items.push(item);
@@ -442,8 +447,7 @@ impl LogItemBatch {
 
     pub fn decode(
         buf: &mut SliceReader,
-        entries_offset: usize,
-        entries_len: usize,
+        entries: FileBlockHandle,
         compression_type: CompressionType,
     ) -> Result<LogItemBatch> {
         verify_checksum(buf)?;
@@ -461,14 +465,16 @@ impl LogItemBatch {
             items.item_size += item.size();
             items.items.push(item);
         }
+        items.entries_size = entries_size;
 
         for item in items.items.iter_mut() {
             if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
                 for ei in entry_indexes.0.iter_mut() {
                     ei.compression_type = compression_type;
-                    ei.entries_offset = entries_offset as u64;
-                    ei.entries_len = entries_len;
+                    ei.entries = Some(entries);
                 }
+            } else if let LogItemContent::Kv(kv) = &mut item.content {
+                kv.file_id = Some(entries.id);
             }
         }
         Ok(items)
@@ -489,10 +495,10 @@ enum BufState {
     /// state only briefly exists between encoding and writing, user operation
     /// will panic under this state.
     /// # Content
-    /// counter: Buffer offset of header.
+    /// (header_offset, entries_len)
     /// # Invariants
     /// LOG_BATCH_HEADER_LEN <= buf.len()
-    Sealed(usize),
+    Sealed(usize, usize),
     /// Buffer is undergoing writes. User operation will panic under this state.
     Incomplete,
 }
@@ -501,6 +507,9 @@ enum BufState {
 // header = { u56 len | u8 compression type | u64 item offset }
 // entries = { [entry..] (optionally compressed) | crc32 }
 // footer = { item batch }
+//
+// Call member function in this order:
+// (add log items) -> finish_populate -> finish_write -> drain
 pub struct LogBatch {
     item_batch: LogItemBatch,
     buf_state: BufState,
@@ -524,36 +533,19 @@ impl LogBatch {
         }
     }
 
-    pub(crate) fn drain(&mut self) -> LogItemDrain {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_)));
-
-        self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
-        self.buf.truncate(LOG_BATCH_HEADER_LEN);
-        self.buf_state = BufState::Open;
-        self.item_batch.drain()
-    }
-
     pub fn merge(&mut self, rhs: &mut Self) {
         debug_assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
 
         if !rhs.buf.is_empty() {
             self.buf_state = BufState::Incomplete;
             rhs.buf_state = BufState::Incomplete;
-            let lhs_entries_len = self.buf.len() - LOG_BATCH_HEADER_LEN;
             self.buf.extend_from_slice(&rhs.buf[LOG_BATCH_HEADER_LEN..]);
             rhs.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
             rhs.buf.truncate(LOG_BATCH_HEADER_LEN);
-            for item in &mut rhs.item_batch.items {
-                if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
-                    for ei in entry_indexes.0.iter_mut() {
-                        ei.entry_offset += lhs_entries_len as u64;
-                    }
-                }
-            }
             self.buf_state = BufState::Open;
             rhs.buf_state = BufState::Open;
         }
-        self.item_batch.items.append(&mut rhs.item_batch.items);
+        self.item_batch.merge(&mut rhs.item_batch);
     }
 
     pub fn add_entries<M: MessageExt>(
@@ -570,7 +562,7 @@ impl LogBatch {
             e.write_to_vec(&mut self.buf)?;
             entry_indexes.push(EntryIndex {
                 index: M::index(e),
-                entry_offset: (buf_offset - LOG_BATCH_HEADER_LEN) as u64,
+                // entry_offset: (buf_offset - LOG_BATCH_HEADER_LEN) as u64,
                 entry_len: self.buf.len() - buf_offset,
                 ..Default::default()
             });
@@ -593,7 +585,7 @@ impl LogBatch {
         for (ei, e) in entry_indexes.iter_mut().zip(entries.iter()) {
             let buf_offset = self.buf.len();
             self.buf.extend(e);
-            ei.entry_offset = (buf_offset - LOG_BATCH_HEADER_LEN) as u64;
+            // ei.entry_offset = (buf_offset - LOG_BATCH_HEADER_LEN) as u64;
             ei.entry_len = self.buf.len() - buf_offset;
         }
         self.buf_state = BufState::Open;
@@ -626,7 +618,7 @@ impl LogBatch {
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
-            self.buf_state = BufState::Sealed(self.buf.len());
+            self.buf_state = BufState::Sealed(0, 0);
             return Ok(0);
         }
         self.buf_state = BufState::Incomplete;
@@ -659,15 +651,13 @@ impl LogBatch {
         (&mut self.buf[header_offset + 8..header_offset + 16])
             .write_u64::<BigEndian>(footer_roffset as u64)?;
 
-        self.buf_state = BufState::Sealed(header_offset);
+        self.buf_state = BufState::Sealed(header_offset, footer_roffset - LOG_BATCH_HEADER_LEN);
 
         // update entry indexes.
         for item in self.item_batch.items.iter_mut() {
             if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
                 for ei in entry_indexes.0.iter_mut() {
                     ei.compression_type = compression_type;
-                    ei.entries_offset = LOG_BATCH_HEADER_LEN as u64; // need to add batch offset of the file after written.
-                    ei.entries_len = footer_roffset - LOG_BATCH_HEADER_LEN;
                 }
             }
         }
@@ -676,16 +666,33 @@ impl LogBatch {
 
     pub(crate) fn encoded_bytes(&self) -> &[u8] {
         match self.buf_state {
-            BufState::Sealed(header_offset) => &self.buf[header_offset..],
+            BufState::Sealed(header_offset, _) => &self.buf[header_offset..],
             _ => unreachable!(),
         }
     }
 
     /// Called after finishing writing encoded data to WAL. Update file
     /// locations to entry indexes.
-    pub(crate) fn finish_write(&mut self, queue: LogQueue, file_id: FileId, offset: u64) {
-        self.item_batch
-            .set_log_batch_location(queue, file_id, offset);
+    pub(crate) fn finish_write(&mut self, mut handle: FileBlockHandle) {
+        // adjust log batch handle to log entries handle.
+        handle.offset += LOG_BATCH_HEADER_LEN as u64;
+        match self.buf_state {
+            BufState::Sealed(_, entries_len) => {
+                debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len);
+                handle.len = entries_len;
+            }
+            _ => unreachable!(),
+        }
+        self.item_batch.finish_write(handle);
+    }
+
+    pub(crate) fn drain(&mut self) -> LogItemDrain {
+        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+
+        self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
+        self.buf.truncate(LOG_BATCH_HEADER_LEN);
+        self.buf_state = BufState::Open;
+        self.item_batch.drain()
     }
 
     /// Returns approximate encoded size of this log batch.
@@ -695,7 +702,7 @@ impl LogBatch {
         } else {
             match self.buf_state {
                 BufState::Open => self.buf.len() + LOG_BATCH_CHECKSUM_LEN + self.item_batch.size(),
-                BufState::Sealed(header_offset) => self.buf.len() - header_offset,
+                BufState::Sealed(header_offset, _) => self.buf.len() - header_offset,
                 s => {
                     error!("querying incomplete log batch with state {:?}", s);
                     0
@@ -728,7 +735,7 @@ impl LogBatch {
     }
 
     pub(crate) fn parse_entry<M: MessageExt>(buf: &[u8], idx: &EntryIndex) -> Result<M::Entry> {
-        let len = idx.entries_len;
+        let len = idx.entries.unwrap().len;
         if len > 0 {
             // protobuf message can be serialized to empty string.
             verify_checksum(&buf[0..len])?;
@@ -748,7 +755,7 @@ impl LogBatch {
     }
 
     pub(crate) fn parse_entry_bytes(buf: &[u8], idx: &EntryIndex) -> Result<Vec<u8>> {
-        let len = idx.entries_len;
+        let len = idx.entries.unwrap().len;
         if len > 0 {
             verify_checksum(&buf[0..len])?;
         }
@@ -787,8 +794,9 @@ fn verify_checksum(buf: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LogQueue;
 
-    use crate::test_util::{generate_entries, generate_entry_indexes};
+    use crate::test_util::{generate_entries, generate_entry_indexes_opt};
     use raft::eraftpb::Entry;
     use rand::{thread_rng, Rng};
 
@@ -827,63 +835,31 @@ mod tests {
     }
 
     #[test]
-    fn test_log_item_enc_dec() {
-        let region_id = 8;
-        let entries_len = 10;
-        let entry_indexes =
-            generate_entry_indexes(1, 1 + entries_len, LogQueue::Append, FileId::from(0));
-        let items = vec![
-            LogItem::new_entry_indexes(region_id, entry_indexes),
-            LogItem::new_command(region_id, Command::Clean),
-            LogItem::new_kv(
-                region_id,
-                OpType::Put,
-                b"key".to_vec(),
-                Some(b"value".to_vec()),
-            ),
-        ];
-
-        for item in items.into_iter() {
-            let mut encoded_item = vec![];
-            item.encode(&mut encoded_item).unwrap();
-
-            let mut s = encoded_item.as_slice();
-            let decoded_item = LogItem::decode(&mut s, &mut 0).unwrap();
-
-            assert_eq!(s.len(), 0);
-            assert_eq!(item, decoded_item);
-        }
-    }
-
-    #[test]
     fn test_log_item_batch_enc_dec() {
         let region_id = 8;
-        let entries_size = 0;
-        let mut entry_indexes = vec![];
-        entry_indexes.append(&mut generate_entry_indexes(
-            1,
-            1 + entries_size as u64,
-            LogQueue::Append,
-            FileId::from(0),
-        ));
-        entry_indexes.append(&mut generate_entry_indexes(
-            100,
-            100 + entries_size as u64,
-            LogQueue::Append,
-            FileId::from(0),
-        ));
 
-        let mut batch = LogItemBatch::with_capacity(3);
-        batch.add_entry_indexes(region_id + 100, entry_indexes);
+        let mut batch = LogItemBatch::default();
+        batch.add_entry_indexes(
+            region_id,
+            generate_entry_indexes_opt(1, 5, None /*file_id*/),
+        );
+        batch.add_entry_indexes(
+            region_id + 100,
+            generate_entry_indexes_opt(100, 105, None /*file_id*/),
+        );
         batch.add_command(region_id, Command::Clean);
         batch.put(region_id, b"key".to_vec(), b"value".to_vec());
         batch.delete(region_id, b"key2".to_vec());
+        batch.finish_write(FileBlockHandle::dummy(LogQueue::Append));
 
         let mut encoded_batch = vec![];
         batch.encode(&mut encoded_batch).unwrap();
-        let decoded_batch =
-            LogItemBatch::decode(&mut encoded_batch.as_slice(), 0, 0, CompressionType::None)
-                .unwrap();
+        let decoded_batch = LogItemBatch::decode(
+            &mut encoded_batch.as_slice(),
+            FileBlockHandle::dummy(LogQueue::Append),
+            CompressionType::None,
+        )
+        .unwrap();
         assert_eq!(batch, decoded_batch);
     }
 
@@ -910,8 +886,7 @@ mod tests {
         assert_eq!(encoded.len(), len);
         let decoded_item_batch = LogItemBatch::decode(
             &mut &encoded[offset..],
-            LOG_BATCH_HEADER_LEN,
-            offset - LOG_BATCH_HEADER_LEN,
+            FileBlockHandle::dummy(LogQueue::Append),
             compression_type,
         )
         .unwrap();
@@ -974,8 +949,7 @@ mod tests {
         assert_eq!(encoded.len(), len);
         let decoded_item_batch = LogItemBatch::decode(
             &mut &encoded[offset..],
-            LOG_BATCH_HEADER_LEN,
-            offset - LOG_BATCH_HEADER_LEN,
+            FileBlockHandle::dummy(LogQueue::Append),
             compression_type,
         )
         .unwrap();
@@ -1010,7 +984,6 @@ mod tests {
             }
             log_batch.finish_populate(0).unwrap();
             let _ = log_batch.drain();
-            log_batch.finish_write(LogQueue::Append, FileId::default(), 0);
         }
         let data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
         let entries = generate_entries(1, 11, Some(data));
