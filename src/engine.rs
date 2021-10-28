@@ -1052,7 +1052,7 @@ mod tests {
             assert_eq!(hook.0[&LogQueue::Append].appends(), i);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i);
         }
-        assert_eq!(hook.0[&LogQueue::Append].files(), 10);
+        assert_eq!(hook.0[&LogQueue::Append].files(), 11);
 
         assert!(engine
             .purge_manager
@@ -1061,7 +1061,7 @@ mod tests {
         assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
 
         // All things in a region will in one write batch.
-        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 3);
         assert_eq!(hook.0[&LogQueue::Rewrite].appends(), 2);
         assert_eq!(hook.0[&LogQueue::Rewrite].applys(), 2);
 
@@ -1081,7 +1081,7 @@ mod tests {
 
         engine.purge_manager.purge_expired_files().unwrap();
         assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
-        assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
+        assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 3);
 
         // Write region 3 without applying.
         let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";

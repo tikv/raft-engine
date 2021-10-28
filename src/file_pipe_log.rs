@@ -926,34 +926,38 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let mut ctx = pipe_log.pre_write(queue);
+        let (file_num, offset) = pipe_log.append_bytes(queue, &mut ctx, &content).unwrap();
+        pipe_log.post_write(queue, ctx, false).unwrap();
         assert_eq!(file_num, 1.into());
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_id(queue), 1.into());
+        assert_eq!(pipe_log.active_file_id(queue), 2.into());
 
-        let (file_num, offset) = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let mut ctx = pipe_log.pre_write(queue);
+        let (file_num, offset) = pipe_log.append_bytes(queue, &mut ctx, &content).unwrap();
+        pipe_log.post_write(queue, ctx, false).unwrap();
         assert_eq!(file_num, 2.into());
         assert_eq!(offset, header_size);
-        assert_eq!(pipe_log.active_file_id(queue), 2.into());
+        assert_eq!(pipe_log.active_file_id(queue), 3.into());
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(queue, 2.into()).unwrap(), 1);
         assert_eq!(pipe_log.first_file_id(queue), 2.into());
 
         // cannot purge active file
-        assert!(pipe_log.purge_to(queue, 3.into()).is_err());
+        assert!(pipe_log.purge_to(queue, 4.into()).is_err());
 
         // append position
         let s_content = b"short content".to_vec();
-        let (file_num, offset) = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
-            .unwrap();
+        let mut ctx = pipe_log.pre_write(queue);
+        let (file_num, offset) = pipe_log.append_bytes(queue, &mut ctx, &s_content).unwrap();
+        pipe_log.post_write(queue, ctx, false).unwrap();
         assert_eq!(file_num, 3.into());
         assert_eq!(offset, header_size);
 
-        let (file_num, offset) = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
-            .unwrap();
+        let mut ctx = pipe_log.pre_write(queue);
+        let (file_num, offset) = pipe_log.append_bytes(queue, &mut ctx, &s_content).unwrap();
+        pipe_log.post_write(queue, ctx, false).unwrap();
         assert_eq!(file_num, 3.into());
         assert_eq!(offset, header_size as u64 + s_content.len() as u64);
 
