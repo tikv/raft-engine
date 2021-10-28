@@ -58,4 +58,9 @@ jobs:
       - name: Upload
         uses: codecov/codecov-action@v2
         with:
-          file: ./coverage.lcov
+          file: coverage.lcov
+      - name: Upload2
+        uses: coverallsapp/github-action@master
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: coverage.lcov
