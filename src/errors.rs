@@ -15,8 +15,8 @@ pub enum Error {
     Corruption(String),
     #[error("IO Error: {0}")]
     Io(#[from] IoError),
-    #[error("Fsync Error: {0}")]
-    Fsync(String),
+    #[error("Fsync Error: retriable: {0}, reason: {1}")]
+    Fsync(bool, String),
     #[error("Codec Error: {0}")]
     Codec(#[from] CodecError),
     #[error("Protobuf Error: {0}")]

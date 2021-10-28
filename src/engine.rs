@@ -391,30 +391,34 @@ where
         let (file_id, offset) = {
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                let mut ctx = self.pipe_log.pre_write(LogQueue::Append);
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
-                        self.pipe_log.append(
-                            LogQueue::Append,
-                            log_batch.encoded_bytes(),
-                            false, /*sync*/
-                        )
+                        self.pipe_log
+                            .append(LogQueue::Append, &mut ctx, log_batch.encoded_bytes())
                     } else {
                         Ok((FileId::default(), 0))
                     };
                     writer.set_output(res);
                 }
-                if sync {
-                    // fsync() is not retryable, a failed attempt could result in
-                    // unrecoverable loss of data written after last successful
-                    // fsync(). See [PostgreSQL's fsync() surprise]
-                    // (https://lwn.net/Articles/752063/) for more details.
-                    if let Err(e) = self.pipe_log.sync(LogQueue::Append) {
+                match self.pipe_log.post_write(LogQueue::Append, ctx, false) {
+                    Ok(()) => {}
+                    Err(Error::Fsync(true, msg)) => {
+                        // fsync() is not retryable, a failed attempt could result in
+                        // unrecoverable loss of data written after last successful
+                        // fsync(). See [PostgreSQL's fsync() surprise]
+                        // (https://lwn.net/Articles/752063/) for more details.
                         for writer in group.iter_mut() {
-                            writer.set_output(Err(Error::Fsync(e.to_string())));
+                            writer.set_output(Err(Error::Fsync(true, msg.to_owned())));
                         }
                     }
+                    Err(Error::Fsync(false, msg)) => {
+                        // TODO(MrCroxx): mitigate the influence?
+                        panic!("Untriable fsync error: {}", msg);
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             writer.finish()?

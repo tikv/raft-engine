@@ -84,6 +84,8 @@ impl FileId {
 }
 
 pub trait PipeLog: Sized {
+    type WriteContext;
+
     fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64>;
 
     /// Total size of the given queue.
@@ -98,8 +100,17 @@ pub trait PipeLog: Sized {
         len: u64,
     ) -> Result<Vec<u8>>;
 
+    fn pre_write(&self, queue: LogQueue) -> Self::WriteContext;
+
+    fn post_write(&self, queue: LogQueue, ctx: Self::WriteContext, force_sync: bool) -> Result<()>;
+
     /// Write a batch into the append queue.
-    fn append(&self, queue: LogQueue, bytes: &[u8], sync: bool) -> Result<(FileId, u64)>;
+    fn append(
+        &self,
+        queue: LogQueue,
+        ctx: &mut Self::WriteContext,
+        bytes: &[u8],
+    ) -> Result<(FileId, u64)>;
 
     /// Sync the given queue.
     fn sync(&self, queue: LogQueue) -> Result<()>;

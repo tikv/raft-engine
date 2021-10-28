@@ -262,9 +262,11 @@ where
             return Ok(());
         }
 
+        let mut ctx = self.pipe_log.pre_write(LogQueue::Rewrite);
         let (file_id, offset) =
             self.pipe_log
-                .append(LogQueue::Rewrite, log_batch.encoded_bytes(), sync)?;
+                .append(LogQueue::Rewrite, &mut ctx, log_batch.encoded_bytes())?;
+        self.pipe_log.post_write(LogQueue::Rewrite, ctx, sync)?;
         debug_assert!(file_id.valid());
         log_batch.finish_write(LogQueue::Rewrite, file_id, offset);
         let queue = LogQueue::Rewrite;

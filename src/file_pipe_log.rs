@@ -158,9 +158,6 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn rotate(&mut self, fd: Arc<LogFd>, writer: W) -> Result<()> {
-        if self.last_sync < self.written {
-            self.fd.sync()?;
-        }
         self.writer = writer;
         self.written = 0;
         self.capacity = 0;
@@ -177,15 +174,23 @@ impl<W: Seek + Write> ActiveFile<W> {
         Ok(())
     }
 
+    /// rockback to last synced position
+    fn rollback(&mut self) -> Result<()> {
+        self.writer
+            .seek(std::io::SeekFrom::Start(self.last_sync as u64))?;
+        self.written = self.last_sync;
+        Ok(())
+    }
+
     fn write_header(&mut self) -> Result<()> {
         self.writer.seek(std::io::SeekFrom::Start(0))?;
         self.written = 0;
         let mut buf = Vec::with_capacity(LOG_FILE_HEADER_LEN);
         LogFileHeader::new().encode(&mut buf)?;
-        self.write(&buf, true, 0)
+        self.write(&buf, 0)
     }
 
-    fn write(&mut self, buf: &[u8], sync: bool, target_file_size: usize) -> Result<()> {
+    fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
         if self.written + buf.len() > self.capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let alloc = std::cmp::max(
@@ -202,8 +207,15 @@ impl<W: Seek + Write> ActiveFile<W> {
         }
         self.writer.write_all(buf)?;
         self.written += buf.len();
-        if sync {
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        if self.last_sync < self.written {
+            let start = Instant::now();
+            self.fd.sync()?;
             self.last_sync = self.written;
+            LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
         }
         Ok(())
     }
@@ -294,17 +306,27 @@ impl<B: FileBuilder> LogManager<B> {
     }
 
     fn new_log_file(&mut self) -> Result<()> {
+        self.truncate_active_log()?;
+        // ===== old log data is safe from here =====
+        self.rotate()
+    }
+
+    fn truncate_and_sync(&mut self) -> Result<()> {
         if self.active_file_id.valid() {
             // Necessary to truncate extra zeros from fallocate().
             self.truncate_active_log()?;
         }
-        self.active_file_id = if self.active_file_id.valid() {
+        self.active_file.sync()?;
+        Ok(())
+    }
+
+    fn rotate(&mut self) -> Result<()> {
+        let new_active_file_id = if self.active_file_id.valid() {
             self.active_file_id.forward(1)
         } else {
             self.first_file_id
         };
-
-        let path = build_file_path(&self.dir, self.queue, self.active_file_id);
+        let path = build_file_path(&self.dir, self.queue, new_active_file_id);
         let fd = Arc::new(LogFd::create(&path)?);
         self.all_files.push_back(fd.clone());
         self.active_file.rotate(
@@ -313,14 +335,16 @@ impl<B: FileBuilder> LogManager<B> {
                 .build_writer(&path, LogFile::new(fd), true /*create*/)?,
         )?;
         self.sync_dir()?;
-
+        self.active_file_id = new_active_file_id;
         for listener in &self.listeners {
             listener.post_new_log_file(self.queue, self.active_file_id);
         }
-
         self.update_metrics();
-
         Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.active_file.sync()
     }
 
     fn sync_dir(&self) -> Result<()> {
@@ -358,19 +382,24 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(end_offset)
     }
 
-    fn append(&mut self, content: &[u8], sync: &mut bool) -> Result<(FileId, u64, Arc<LogFd>)> {
-        if self.active_file.written >= self.rotate_size {
-            self.new_log_file()?;
-        }
-        if self.active_file.since_last_sync() >= self.bytes_per_sync {
-            *sync = true;
-        }
+    fn append(
+        &mut self,
+        ctx: &mut FilePipeLogWriteContext,
+        content: &[u8],
+    ) -> Result<(FileId, u64)> {
         let offset = self.active_file.written as u64;
-        self.active_file.write(content, *sync, self.rotate_size)?;
+        self.active_file.write(content, self.rotate_size)?;
         for listener in &self.listeners {
             listener.on_append_log_file(self.queue, self.active_file_id, content.len());
         }
-        Ok((self.active_file_id, offset, self.active_file.fd.clone()))
+        if self.active_file.written >= self.rotate_size {
+            ctx.syncable = Syncable::NeedRotate
+        } else if self.active_file.since_last_sync() >= self.bytes_per_sync
+            && ctx.syncable == Syncable::DontNeed
+        {
+            ctx.syncable = Syncable::NeedSync
+        }
+        Ok((self.active_file_id, offset))
     }
 
     fn update_metrics(&self) {
@@ -383,6 +412,13 @@ impl<B: FileBuilder> LogManager<B> {
     fn size(&self) -> usize {
         self.active_file_id.step_after(&self.first_file_id).unwrap() * self.rotate_size
             + self.active_file.written
+    }
+
+    fn get_write_context(&self) -> FilePipeLogWriteContext {
+        FilePipeLogWriteContext {
+            synced: self.active_file.written == self.active_file.last_sync,
+            syncable: Syncable::DontNeed,
+        }
     }
 }
 
@@ -611,16 +647,10 @@ impl<B: FileBuilder> FilePipeLog<B> {
     fn append_bytes(
         &self,
         queue: LogQueue,
+        ctx: &mut FilePipeLogWriteContext,
         content: &[u8],
-        sync: &mut bool,
     ) -> Result<(FileId, u64)> {
-        let (file_id, offset, fd) = self.mut_queue(queue).append(content, sync)?;
-        if *sync {
-            let start = Instant::now();
-            fd.sync()?;
-            LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        }
-        Ok((file_id, offset))
+        self.mut_queue(queue).append(ctx, content)
     }
 
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager<B>> {
@@ -638,7 +668,22 @@ impl<B: FileBuilder> FilePipeLog<B> {
     }
 }
 
+#[derive(PartialEq)]
+enum Syncable {
+    DontNeed,
+    NeedSync,
+    NeedRotate,
+}
+
+/// invariant: non-active file must be successfully synced.
+pub struct FilePipeLogWriteContext {
+    synced: bool,
+    syncable: Syncable,
+}
+
 impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
+    type WriteContext = FilePipeLogWriteContext;
+
     fn file_size(&self, queue: LogQueue, file_id: FileId) -> Result<u64> {
         self.get_queue(queue)
             .get_fd(file_id)
@@ -668,9 +713,41 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<(FileId, u64)> {
+    fn pre_write(&self, queue: LogQueue) -> Self::WriteContext {
+        self.get_queue(queue).get_write_context()
+    }
+
+    fn post_write(
+        &self,
+        queue: LogQueue,
+        mut ctx: Self::WriteContext,
+        force_sync: bool,
+    ) -> Result<()> {
+        if ctx.syncable == Syncable::DontNeed && force_sync {
+            ctx.syncable = Syncable::NeedSync;
+        }
+        if let Err(e) = match ctx.syncable {
+            Syncable::DontNeed => Ok(()),
+            Syncable::NeedSync => self.mut_queue(queue).sync(),
+            Syncable::NeedRotate => self.mut_queue(queue).truncate_and_sync(),
+        } {
+            self.mut_queue(queue).active_file.rollback()?;
+            return Err(Error::Fsync(ctx.synced, e.to_string()));
+        }
+        if ctx.syncable == Syncable::NeedRotate {
+            self.mut_queue(queue).rotate()?;
+        }
+        Ok(())
+    }
+
+    fn append(
+        &self,
+        queue: LogQueue,
+        ctx: &mut Self::WriteContext,
+        bytes: &[u8],
+    ) -> Result<(FileId, u64)> {
         let start = Instant::now();
-        let (file_id, offset) = self.append_bytes(queue, bytes, &mut sync)?;
+        let (file_id, offset) = self.append_bytes(queue, ctx, bytes)?;
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
