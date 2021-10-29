@@ -5,10 +5,10 @@ coverage:
         # basic
         target: auto
         threshold: 3%
-        paths: "src"
+        paths: "./src/"
     patch:
       default:
         # basic
         target: auto
         threshold: 3%
-        paths: "src"
+        paths: "./src/"
