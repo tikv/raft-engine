@@ -21,8 +21,10 @@ pub enum Error {
     Codec(#[from] CodecError),
     #[error("Protobuf Error: {0}")]
     Protobuf(#[from] protobuf::ProtobufError),
-    #[error("Entry Not Found: Raft Group {0}")]
-    EntryNotFound(u64),
+    #[error("Entry Compacted")]
+    EntryCompacted,
+    #[error("Entry Not Found")]
+    EntryNotFound,
     #[error("Other Error: {0}")]
     Other(#[from] Box<dyn error::Error + Send + Sync>),
 }
