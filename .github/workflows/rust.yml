@@ -24,6 +24,7 @@ jobs:
           toolchain: nightly-2021-07-28
           override: true
           components: rustfmt, clippy, rust-src
+      - uses: Swatinem/rust-cache@v1
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -46,6 +47,7 @@ jobs:
           toolchain: nightly-2021-07-28
           override: true
           components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v1
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
       - name: Run tests
