@@ -10,3 +10,5 @@ coverage:
         # basic
         target: auto
         threshold: 3%
+ignore:
+  - "stress"
