@@ -9,7 +9,7 @@ use log::error;
 use protobuf::parse_from_bytes;
 use protobuf::Message;
 
-use crate::codec::{self, Error as CodecError, NumberEncoder};
+use crate::codec::{self, NumberEncoder};
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::util::{crc32, lz4};
@@ -102,8 +102,8 @@ impl EntryIndexes {
         Ok(())
     }
 
-    fn size(&self) -> usize {
-        8 /*count*/ + 8 /*first index*/ + 8 /*tail offset*/ * self.0.len()
+    fn approximate_size(&self) -> usize {
+        8 /*count*/ + if self.0.is_empty() { 0 } else { 8 } /*first index*/ + 8 /*tail offset*/ * self.0.len()
     }
 }
 
@@ -136,11 +136,14 @@ impl Command {
                 let index = codec::decode_var_u64(buf)?;
                 Ok(Command::Compact { index })
             }
-            _ => unreachable!(),
+            _ => Err(Error::Corruption(format!(
+                "Unrecognized command type: {}",
+                command_type
+            ))),
         }
     }
 
-    fn size(&self) -> usize {
+    fn approximate_size(&self) -> usize {
         match &self {
             Command::Clean => 1,              /*type*/
             Command::Compact { .. } => 1 + 8, /*type + index*/
@@ -223,7 +226,7 @@ impl KeyValue {
         Ok(())
     }
 
-    fn size(&self) -> usize {
+    fn approximate_size(&self) -> usize {
         1 /*op*/ + 8 /*k_len*/ + self.key.len() + 8 /*v_len*/ + self.value.as_ref().map_or_else(|| 0, |v| v.len())
     }
 }
@@ -305,7 +308,12 @@ impl LogItem {
                 let kv = KeyValue::decode(buf)?;
                 LogItemContent::Kv(kv)
             }
-            _ => return Err(Error::Codec(CodecError::KeyNotFound)),
+            _ => {
+                return Err(Error::Corruption(format!(
+                    "Unrecognized log item type: {}",
+                    item_type
+                )))
+            }
         };
         Ok(LogItem {
             raft_group_id,
@@ -313,13 +321,13 @@ impl LogItem {
         })
     }
 
-    fn size(&self) -> usize {
+    fn approximate_size(&self) -> usize {
         match &self.content {
             LogItemContent::EntryIndexes(entry_indexes) => {
-                8 /*r_id*/ + 1 /*type*/ + entry_indexes.size()
+                8 /*r_id*/ + 1 /*type*/ + entry_indexes.approximate_size()
             }
-            LogItemContent::Command(cmd) => 8 + 1 + cmd.size(),
-            LogItemContent::Kv(kv) => 8 + 1 + kv.size(),
+            LogItemContent::Command(cmd) => 8 + 1 + cmd.approximate_size(),
+            LogItemContent::Kv(kv) => 8 + 1 + kv.approximate_size(),
         }
     }
 }
@@ -361,7 +369,7 @@ impl LogItemBatch {
     }
 
     pub fn push(&mut self, item: LogItem) {
-        self.item_size += item.size();
+        self.item_size += item.approximate_size();
         self.items.push(item);
     }
 
@@ -406,19 +414,19 @@ impl LogItemBatch {
             self.entries_size += ei.entry_len;
         }
         let item = LogItem::new_entry_indexes(region_id, entry_indexes);
-        self.item_size += item.size();
+        self.item_size += item.approximate_size();
         self.items.push(item);
     }
 
     pub fn add_command(&mut self, region_id: u64, cmd: Command) {
         let item = LogItem::new_command(region_id, cmd);
-        self.item_size += item.size();
+        self.item_size += item.approximate_size();
         self.items.push(item);
     }
 
     pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
         let item = LogItem::new_kv(region_id, OpType::Del, key, None);
-        self.item_size += item.size();
+        self.item_size += item.approximate_size();
         self.items.push(item);
     }
 
@@ -429,7 +437,7 @@ impl LogItemBatch {
 
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
         let item = LogItem::new_kv(region_id, OpType::Put, key, Some(value));
-        self.item_size += item.size();
+        self.item_size += item.approximate_size();
         self.items.push(item);
     }
 
@@ -462,7 +470,7 @@ impl LogItemBatch {
         let mut entries_size = 0;
         for _ in 0..count {
             let item = LogItem::decode(buf, &mut entries_size)?;
-            items.item_size += item.size();
+            items.item_size += item.approximate_size();
             items.items.push(item);
         }
         items.entries_size = entries_size;
@@ -480,7 +488,7 @@ impl LogItemBatch {
         Ok(items)
     }
 
-    pub fn size(&self) -> usize {
+    pub fn approximate_size(&self) -> usize {
         8 /*count*/ + self.item_size + LOG_BATCH_CHECKSUM_LEN
     }
 }
@@ -509,7 +517,7 @@ enum BufState {
 // footer = { item batch }
 //
 // Call member function in this order:
-// (add log items) -> finish_populate -> finish_write -> drain
+// (add log items) -> finish_populate -> encoded_bytes / finish_write
 pub struct LogBatch {
     item_batch: LogItemBatch,
     buf_state: BufState,
@@ -562,7 +570,6 @@ impl LogBatch {
             e.write_to_vec(&mut self.buf)?;
             entry_indexes.push(EntryIndex {
                 index: M::index(e),
-                // entry_offset: (buf_offset - LOG_BATCH_HEADER_LEN) as u64,
                 entry_len: self.buf.len() - buf_offset,
                 ..Default::default()
             });
@@ -585,7 +592,6 @@ impl LogBatch {
         for (ei, e) in entry_indexes.iter_mut().zip(entries.iter()) {
             let buf_offset = self.buf.len();
             self.buf.extend(e);
-            // ei.entry_offset = (buf_offset - LOG_BATCH_HEADER_LEN) as u64;
             ei.entry_len = self.buf.len() - buf_offset;
         }
         self.buf_state = BufState::Open;
@@ -687,7 +693,7 @@ impl LogBatch {
     }
 
     pub(crate) fn drain(&mut self) -> LogItemDrain {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+        debug_assert!(!matches!(self.buf_state, BufState::Incomplete));
 
         self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
         self.buf.truncate(LOG_BATCH_HEADER_LEN);
@@ -701,7 +707,9 @@ impl LogBatch {
             0
         } else {
             match self.buf_state {
-                BufState::Open => self.buf.len() + LOG_BATCH_CHECKSUM_LEN + self.item_batch.size(),
+                BufState::Open => {
+                    self.buf.len() + LOG_BATCH_CHECKSUM_LEN + self.item_batch.approximate_size()
+                }
                 BufState::Sealed(header_offset, _) => self.buf.len() - header_offset,
                 s => {
                     error!("querying incomplete log batch with state {:?}", s);
@@ -796,7 +804,7 @@ mod tests {
     use super::*;
     use crate::LogQueue;
 
-    use crate::test_util::{generate_entries, generate_entry_indexes_opt};
+    use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use raft::eraftpb::Entry;
     use rand::{thread_rng, Rng};
 
@@ -813,25 +821,136 @@ mod tests {
     }
 
     #[test]
+    fn test_entry_indexes_enc_dec() {
+        fn encode_and_decode(entry_indexes: &mut Vec<EntryIndex>) -> EntryIndexes {
+            let mut entries_size = 0;
+            for idx in entry_indexes.iter_mut() {
+                idx.entry_offset = entries_size as u64;
+                entries_size += idx.entry_len;
+            }
+            let entry_indexes = EntryIndexes(entry_indexes.clone());
+
+            let mut encoded = vec![];
+            entry_indexes.encode(&mut encoded).unwrap();
+            let mut bytes_slice = encoded.as_slice();
+            let mut decoded_entries_size = 0;
+            let decoded_indexes =
+                EntryIndexes::decode(&mut bytes_slice, &mut decoded_entries_size).unwrap();
+            assert_eq!(bytes_slice.len(), 0);
+            assert!(decoded_indexes.approximate_size() >= encoded.len());
+            assert_eq!(decoded_entries_size, entries_size);
+            decoded_indexes
+        }
+
+        let entry_indexes = vec![Vec::new(), generate_entry_indexes_opt(7, 17, None)];
+        for mut idxs in entry_indexes.into_iter() {
+            let decoded = encode_and_decode(&mut idxs);
+            assert_eq!(idxs, decoded.0);
+        }
+
+        let mut entry_indexes_with_file_id =
+            generate_entry_indexes_opt(7, 17, Some(FileId::new(LogQueue::Append, 7)));
+        let mut decoded = encode_and_decode(&mut entry_indexes_with_file_id);
+        assert_ne!(entry_indexes_with_file_id, decoded.0);
+        for i in decoded.0.iter_mut() {
+            i.entries = None;
+        }
+        assert_ne!(entry_indexes_with_file_id, decoded.0);
+    }
+
+    #[test]
     fn test_command_enc_dec() {
-        let cmd = Command::Clean;
-        let mut encoded = vec![];
-        cmd.encode(&mut encoded);
-        let mut bytes_slice = encoded.as_slice();
-        let decoded_cmd = Command::decode(&mut bytes_slice).unwrap();
-        assert_eq!(bytes_slice.len(), 0);
-        assert_eq!(cmd, decoded_cmd);
+        let cmds = vec![Command::Clean, Command::Compact { index: 7 }];
+        let invalid_command_type = 7;
+        for cmd in cmds.into_iter() {
+            let mut encoded = vec![];
+            cmd.encode(&mut encoded);
+            let mut bytes_slice = encoded.as_slice();
+            let decoded_cmd = Command::decode(&mut bytes_slice).unwrap();
+            assert_eq!(bytes_slice.len(), 0);
+            assert!(decoded_cmd.approximate_size() >= encoded.len());
+            assert_eq!(cmd, decoded_cmd);
+
+            encoded[0] = invalid_command_type;
+            let expected = format!("Unrecognized command type: {}", invalid_command_type);
+            assert!(matches!(
+                Command::decode(&mut encoded.as_slice()),
+                Err(Error::Corruption(m)) if m == expected
+            ));
+        }
     }
 
     #[test]
     fn test_kv_enc_dec() {
-        let kv = KeyValue::new(OpType::Put, b"key".to_vec(), Some(b"value".to_vec()));
+        let kvs = vec![
+            KeyValue::new(OpType::Put, b"put".to_vec(), Some(b"put_v".to_vec())),
+            KeyValue::new(OpType::Del, b"del".to_vec(), None),
+        ];
+        let invalid_op_type = 7;
+        for kv in kvs.into_iter() {
+            let mut encoded = vec![];
+            kv.encode(&mut encoded).unwrap();
+            let mut bytes_slice = encoded.as_slice();
+            let decoded_kv = KeyValue::decode(&mut bytes_slice).unwrap();
+            assert_eq!(bytes_slice.len(), 0);
+            assert!(decoded_kv.approximate_size() >= encoded.len());
+            assert_eq!(kv, decoded_kv);
+
+            encoded[0] = invalid_op_type;
+            let expected = format!("Unrecognized op type: {}", invalid_op_type);
+            assert!(matches!(
+                KeyValue::decode(&mut encoded.as_slice()),
+                Err(Error::Corruption(m)) if m == expected
+            ));
+        }
+
+        let del_with_value = KeyValue::new(OpType::Del, b"del".to_vec(), Some(b"del_v".to_vec()));
         let mut encoded = vec![];
-        kv.encode(&mut encoded).unwrap();
+        del_with_value.encode(&mut encoded).unwrap();
         let mut bytes_slice = encoded.as_slice();
         let decoded_kv = KeyValue::decode(&mut bytes_slice).unwrap();
         assert_eq!(bytes_slice.len(), 0);
-        assert_eq!(kv, decoded_kv);
+        assert!(decoded_kv.value.is_none());
+    }
+
+    #[test]
+    fn test_log_item_enc_dec() {
+        let items = vec![
+            LogItem::new_entry_indexes(7, generate_entry_indexes_opt(7, 17, None)),
+            LogItem::new_command(17, Command::Compact { index: 7 }),
+            LogItem::new_kv(27, OpType::Put, b"key".to_vec(), Some(b"value".to_vec())),
+        ];
+        let invalid_log_item_type = 7;
+        for mut item in items.into_iter() {
+            let mut entries_size = 0;
+            if let LogItemContent::EntryIndexes(EntryIndexes(indexes)) = &mut item.content {
+                for index in indexes.iter_mut() {
+                    index.entry_offset = entries_size as u64;
+                    entries_size += index.entry_len;
+                }
+            }
+            let mut encoded = vec![];
+            item.encode(&mut encoded).unwrap();
+            let mut bytes_slice = encoded.as_slice();
+            let mut decoded_entries_size = 0;
+            let decoded_item =
+                LogItem::decode(&mut bytes_slice, &mut decoded_entries_size).unwrap();
+            assert_eq!(bytes_slice.len(), 0);
+            assert_eq!(decoded_entries_size, entries_size);
+            assert!(decoded_item.approximate_size() >= encoded.len());
+            assert_eq!(item, decoded_item);
+
+            // consume raft group id.
+            bytes_slice = encoded.as_slice();
+            codec::decode_var_u64(&mut bytes_slice).unwrap();
+            let next_u8 = encoded.len() - bytes_slice.len();
+            encoded[next_u8] = invalid_log_item_type;
+            let expected = format!("Unrecognized log item type: {}", invalid_log_item_type);
+            assert!(matches!(
+                LogItem::decode(&mut encoded.as_slice(), &mut decoded_entries_size),
+                Err(Error::Corruption(m)) if m == expected
+            ));
+        }
     }
 
     #[test]
@@ -867,6 +986,13 @@ mod tests {
     fn test_log_batch_enc_dec() {
         let region_id = 8;
         let mut batch = LogBatch::default();
+        // Test call protocol violation.
+        assert!(catch_unwind_silent(|| batch.encoded_bytes()).is_err());
+        assert!(catch_unwind_silent(
+            || batch.finish_write(FileBlockHandle::dummy(LogQueue::Append))
+        )
+        .is_err());
+
         batch
             .add_entries::<Entry>(region_id, &generate_entries(1, 11, Some(vec![b'x'; 1024])))
             .unwrap();
