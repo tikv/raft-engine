@@ -958,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_log_item_batch_enc_dec() {
-        let mut batches = Vec::new();
+        let mut batches = vec![LogItemBatch::default()];
         let mut batch = LogItemBatch::default();
         batch.add_entry_indexes(7, generate_entry_indexes_opt(1, 5, None /*file_id*/));
         batch.add_entry_indexes(
@@ -969,7 +969,6 @@ mod tests {
         batch.put(7, b"key".to_vec(), b"value".to_vec());
         batch.delete(7, b"key2".to_vec());
         batches.push(batch);
-        batches.push(LogItemBatch::default());
 
         for batch in batches.into_iter() {
             for compression_type in [CompressionType::Lz4, CompressionType::None] {
@@ -1053,8 +1052,7 @@ mod tests {
             }
         }
 
-        let mut batches = Vec::new();
-        batches.push((LogBatch::default(), Vec::new()));
+        let mut batches = vec![(LogBatch::default(), Vec::new())];
         let mut batch = LogBatch::default();
         let entry_data = vec![b'x'; 1024];
         batch
