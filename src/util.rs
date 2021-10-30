@@ -321,3 +321,110 @@ pub mod lz4 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_readable_size() {
+        let s = ReadableSize::kb(2);
+        assert_eq!(s.0, 2048);
+        assert_eq!(s.as_mb(), 0);
+        let s = ReadableSize::mb(2);
+        assert_eq!(s.0, 2 * 1024 * 1024);
+        assert_eq!(s.as_mb(), 2);
+        let s = ReadableSize::gb(2);
+        assert_eq!(s.0, 2 * 1024 * 1024 * 1024);
+        assert_eq!(s.as_mb(), 2048);
+
+        assert_eq!((ReadableSize::mb(2) / 2).0, MIB);
+        assert_eq!((ReadableSize::mb(1) / 2).0, 512 * KIB);
+        assert_eq!(ReadableSize::mb(2) / ReadableSize::kb(1), 2048);
+    }
+
+    #[test]
+    fn test_parse_readable_size() {
+        #[derive(Serialize, Deserialize)]
+        struct SizeHolder {
+            s: ReadableSize,
+        }
+
+        let legal_cases = vec![
+            (0, "0KiB"),
+            (2 * KIB, "2KiB"),
+            (4 * MIB, "4MiB"),
+            (5 * GIB, "5GiB"),
+            (7 * TIB, "7TiB"),
+            (11 * PIB, "11PiB"),
+        ];
+        for (size, exp) in legal_cases {
+            let c = SizeHolder {
+                s: ReadableSize(size),
+            };
+            let res_str = toml::to_string(&c).unwrap();
+            let exp_str = format!("s = {:?}\n", exp);
+            assert_eq!(res_str, exp_str);
+            let res_size: SizeHolder = toml::from_str(&exp_str).unwrap();
+            assert_eq!(res_size.s.0, size);
+        }
+
+        let c = SizeHolder {
+            s: ReadableSize(512),
+        };
+        let res_str = toml::to_string(&c).unwrap();
+        assert_eq!(res_str, "s = 512\n");
+        let res_size: SizeHolder = toml::from_str(&res_str).unwrap();
+        assert_eq!(res_size.s.0, c.s.0);
+
+        let decode_cases = vec![
+            (" 0.5 PB", PIB / 2),
+            ("0.5 TB", TIB / 2),
+            ("0.5GB ", GIB / 2),
+            ("0.5MB", MIB / 2),
+            ("0.5KB", KIB / 2),
+            ("0.5P", PIB / 2),
+            ("0.5T", TIB / 2),
+            ("0.5G", GIB / 2),
+            ("0.5M", MIB / 2),
+            ("0.5K", KIB / 2),
+            ("23", 23),
+            ("1", 1),
+            ("1024B", KIB),
+            // units with binary prefixes
+            (" 0.5 PiB", PIB / 2),
+            ("1PiB", PIB),
+            ("0.5 TiB", TIB / 2),
+            ("2 TiB", TIB * 2),
+            ("0.5GiB ", GIB / 2),
+            ("787GiB ", GIB * 787),
+            ("0.5MiB", MIB / 2),
+            ("3MiB", MIB * 3),
+            ("0.5KiB", KIB / 2),
+            ("1 KiB", KIB),
+            // scientific notation
+            ("0.5e6 B", B * 500000),
+            ("0.5E6 B", B * 500000),
+            ("1e6B", B * 1000000),
+            ("8E6B", B * 8000000),
+            ("8e7", B * 80000000),
+            ("1e-1MB", MIB / 10),
+            ("1e+1MB", MIB * 10),
+            ("0e+10MB", 0),
+        ];
+        for (src, exp) in decode_cases {
+            let src = format!("s = {:?}", src);
+            let res: SizeHolder = toml::from_str(&src).unwrap();
+            assert_eq!(res.s.0, exp);
+        }
+
+        let illegal_cases = vec![
+            "0.5kb", "0.5kB", "0.5Kb", "0.5k", "0.5g", "b", "gb", "1b", "B", "1K24B", " 5_KB",
+            "4B7", "5M_",
+        ];
+        for src in illegal_cases {
+            let src_str = format!("s = {:?}", src);
+            assert!(toml::from_str::<SizeHolder>(&src_str).is_err(), "{}", src);
+        }
+    }
+}
