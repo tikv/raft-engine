@@ -55,13 +55,9 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn new() -> Config {
-        Config::default()
-    }
-
     pub fn sanitize(&mut self) -> Result<()> {
         if self.purge_threshold.0 < self.target_file_size.0 {
-            return Err(box_err!("purge_threshold < target_file_size"));
+            return Err(box_err!("purge-threshold < target-file-size"));
         }
         let min_recovery_read_block_size = ReadableSize(MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         if self.recovery_read_block_size < min_recovery_read_block_size {
@@ -109,5 +105,24 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
+    }
+
+    #[test]
+    fn test_invalid() {
+        let hard_error = r#"
+            target-file-size = "5MB"
+            purge-threshold = "3MB"
+        "#;
+        let mut hard_load: Config = toml::from_str(hard_error).unwrap();
+        assert!(hard_load.sanitize().is_err());
+
+        let soft_error = r#"
+            recovery-read-block-size = "1KB"
+            recovery-threads = 0
+        "#;
+        let soft_load: Config = toml::from_str(soft_error).unwrap();
+        let mut soft_sanitized = soft_load.clone();
+        soft_sanitized.sanitize().unwrap();
+        assert_ne!(soft_load, soft_sanitized);
     }
 }

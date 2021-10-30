@@ -213,12 +213,11 @@ mod tests {
         for _ in 0..4 {
             let mut writer = Writer::new(&payload, false);
             {
-                if let Some(mut wg) = barrier.enter(&mut writer) {
-                    leaders += 1;
-                    for writer in wg.iter_mut() {
-                        writer.set_output(7);
-                        processed_writers += 1;
-                    }
+                let mut wg = barrier.enter(&mut writer).unwrap();
+                leaders += 1;
+                for writer in wg.iter_mut() {
+                    writer.set_output(7);
+                    processed_writers += 1;
                 }
             }
             assert_eq!(writer.finish(), 7);
@@ -266,7 +265,8 @@ mod tests {
                         .spawn(move || {
                             let mut writer = Writer::new(&seq, false);
                             ready_tx_clone.send(()).unwrap();
-                            if let Some(mut wg) = barrier_clone.enter(&mut writer) {
+                            {
+                                let mut wg = barrier_clone.enter(&mut writer).unwrap();
                                 let mut idx = 0;
                                 for w in wg.iter_mut() {
                                     w.set_output(*w.get_payload());
