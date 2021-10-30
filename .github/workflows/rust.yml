@@ -62,7 +62,7 @@ jobs:
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
       - name: Run tests
-        run: cargo test --features failpoints --all --verbose -- --skip bench
+        run: cargo test --features failpoints --all --verbose
         env:
           RUSTFLAGS: '-Zinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'
