@@ -183,7 +183,7 @@ impl MemTable {
         }
 
         let ioffset = (index - first_index) as usize;
-        let entry_index = self.entry_indexes[ioffset].clone();
+        let entry_index = self.entry_indexes[ioffset];
         Some(entry_index)
     }
 
@@ -362,7 +362,7 @@ impl MemTable {
                 if total_size as usize > max_size && total_size > idx.entry_len {
                     break;
                 }
-                vec_idx.push(idx.clone());
+                vec_idx.push(*idx);
             }
         } else {
             vec_idx.extend_from_slice(first);
