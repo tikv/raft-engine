@@ -84,7 +84,7 @@ where
         let (mut memtables_rewrite, rewrite_stats) = rewrite.finish();
         global_stats.merge(&rewrite_stats);
 
-        memtables.merge_lower_prio(&mut memtables_rewrite);
+        memtables.merge_rewrite_table(&mut memtables_rewrite);
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
