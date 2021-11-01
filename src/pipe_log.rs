@@ -50,25 +50,14 @@ impl FileBlockHandle {
 }
 
 pub trait PipeLog: Sized {
-    type WriteContext;
-
     /// Read some bytes from the given position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
 
-    fn pre_write(&self, queue: LogQueue) -> Self::WriteContext;
-
-    fn post_write(&self, queue: LogQueue, ctx: Self::WriteContext, force_sync: bool) -> Result<()>;
-
     /// Write a batch into the append queue.
-    fn append(
-        &self,
-        queue: LogQueue,
-        ctx: &mut Self::WriteContext,
-        bytes: &[u8],
-    ) -> Result<FileBlockHandle>;
+    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle>;
 
-    /// Sync the given queue.
-    fn sync(&self, queue: LogQueue) -> Result<()>;
+    /// Sync and rotate the given queue if needed.
+    fn sync(&self, queue: LogQueue, force: bool) -> Result<()>;
 
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 

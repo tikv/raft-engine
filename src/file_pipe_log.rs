@@ -176,14 +176,6 @@ impl<W: Seek + Write> ActiveFile<W> {
         Ok(())
     }
 
-    /// rockback to last synced position
-    fn rollback(&mut self) -> Result<()> {
-        self.writer
-            .seek(std::io::SeekFrom::Start(self.last_sync as u64))?;
-        self.written = self.last_sync;
-        Ok(())
-    }
-
     fn write_header(&mut self) -> Result<()> {
         self.writer.seek(std::io::SeekFrom::Start(0))?;
         self.written = 0;
@@ -384,10 +376,6 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(self.all_files[(file_seq - self.first_file_seq) as usize].clone())
     }
 
-    fn get_active_fd(&self) -> Option<Arc<LogFd>> {
-        self.all_files.back().cloned()
-    }
-
     fn purge_to(&mut self, file_seq: FileSeq) -> Result<usize> {
         if file_seq > self.active_file_seq {
             return Err(box_err!("Purge active or newer files"));
@@ -399,11 +387,7 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(end_offset)
     }
 
-    fn append(
-        &mut self,
-        ctx: &mut FilePipeLogWriteContext,
-        content: &[u8],
-    ) -> Result<FileBlockHandle> {
+    fn append(&mut self, content: &[u8]) -> Result<FileBlockHandle> {
         let offset = self.active_file.written as u64;
         self.active_file.write(content, self.rotate_size)?;
         let handle = FileBlockHandle {
@@ -416,13 +400,6 @@ impl<B: FileBuilder> LogManager<B> {
         };
         for listener in &self.listeners {
             listener.on_append_log_file(handle);
-        }
-        if self.active_file.written >= self.rotate_size {
-            ctx.syncable = Syncable::NeedRotate
-        } else if self.active_file.since_last_sync() >= self.bytes_per_sync
-            && ctx.syncable == Syncable::DontNeed
-        {
-            ctx.syncable = Syncable::NeedSync
         }
         Ok(handle)
     }
@@ -437,13 +414,6 @@ impl<B: FileBuilder> LogManager<B> {
     fn size(&self) -> usize {
         (self.active_file_seq - self.first_file_seq) as usize * self.rotate_size
             + self.active_file.written
-    }
-
-    fn get_write_context(&self) -> FilePipeLogWriteContext {
-        FilePipeLogWriteContext {
-            synced: self.active_file.written == self.active_file.last_sync,
-            syncable: Syncable::DontNeed,
-        }
     }
 }
 
@@ -688,13 +658,8 @@ impl<B: FileBuilder> FilePipeLog<B> {
         Ok(sequential_replay_machine)
     }
 
-    fn append_bytes(
-        &self,
-        queue: LogQueue,
-        ctx: &mut FilePipeLogWriteContext,
-        content: &[u8],
-    ) -> Result<FileBlockHandle> {
-        self.mut_queue(queue).append(ctx, content)
+    fn append_bytes(&self, queue: LogQueue, content: &[u8]) -> Result<FileBlockHandle> {
+        self.mut_queue(queue).append(content)
     }
 
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager<B>> {
@@ -712,22 +677,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
     }
 }
 
-#[derive(PartialEq)]
-enum Syncable {
-    DontNeed,
-    NeedSync,
-    NeedRotate,
-}
-
-/// invariant: non-active file must be successfully synced.
-pub struct FilePipeLogWriteContext {
-    synced: bool,
-    syncable: Syncable,
-}
-
 impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
-    type WriteContext = FilePipeLogWriteContext;
-
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_queue(handle.id.queue).get_fd(handle.id.seq)?;
         let mut reader = self
@@ -740,41 +690,9 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn pre_write(&self, queue: LogQueue) -> Self::WriteContext {
-        self.get_queue(queue).get_write_context()
-    }
-
-    fn post_write(
-        &self,
-        queue: LogQueue,
-        mut ctx: Self::WriteContext,
-        force_sync: bool,
-    ) -> Result<()> {
-        if ctx.syncable == Syncable::DontNeed && force_sync {
-            ctx.syncable = Syncable::NeedSync;
-        }
-        if let Err(e) = match ctx.syncable {
-            Syncable::DontNeed => Ok(()),
-            Syncable::NeedSync => self.mut_queue(queue).sync(),
-            Syncable::NeedRotate => self.mut_queue(queue).truncate_and_sync(),
-        } {
-            self.mut_queue(queue).active_file.rollback()?;
-            return Err(Error::Fsync(ctx.synced, e.to_string()));
-        }
-        if ctx.syncable == Syncable::NeedRotate {
-            self.mut_queue(queue).rotate()?;
-        }
-        Ok(())
-    }
-
-    fn append(
-        &self,
-        queue: LogQueue,
-        ctx: &mut Self::WriteContext,
-        bytes: &[u8],
-    ) -> Result<FileBlockHandle> {
+    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle> {
         let start = Instant::now();
-        let block_handle = self.append_bytes(queue, ctx, bytes)?;
+        let block_handle = self.append_bytes(queue, bytes)?;
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
@@ -790,10 +708,40 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(block_handle)
     }
 
-    fn sync(&self, queue: LogQueue) -> Result<()> {
-        if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fd.sync()?;
+    fn sync(&self, queue: LogQueue, force: bool) -> Result<()> {
+        let mut manager = match queue {
+            LogQueue::Append => self.appender.write(),
+            LogQueue::Rewrite => self.rewriter.write(),
+        };
+
+        if manager.active_file.written >= manager.rotate_size {
+            // need rotate
+            if let Err(e) = manager.truncate_and_sync() {
+                return Err(Error::Severe(format!(
+                    "cannot truncate and sync queue: {:?} when rotating, for there is IO error: {}",
+                    queue, e
+                )));
+            }
+            if let Err(e) = manager.rotate() {
+                return Err(Error::Severe(format!(
+                    "cannot rotate queue: {:?}, for there is IO error raised: {}",
+                    queue, e
+                )));
+            }
+        } else if manager.active_file.since_last_sync() >= manager.bytes_per_sync || force {
+            // need_sync
+            if let Err(e) = manager.sync() {
+                let truncated = match manager.truncate_and_sync() {
+                    Ok(()) => true,
+                    Err(_) => false,
+                };
+                return Err(Error::Severe(format!(
+                    "IO error raised when syncing log: {}, log file truncated: {}",
+                    e, truncated
+                )));
+            }
         }
+
         Ok(())
     }
 
@@ -938,16 +886,14 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let mut ctx = pipe_log.pre_write(queue);
-        let file_handle = pipe_log.append_bytes(queue, &mut ctx, &content).unwrap();
-        pipe_log.post_write(queue, ctx, false).unwrap();
+        let file_handle = pipe_log.append_bytes(queue, &content).unwrap();
+        pipe_log.sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 1);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        let mut ctx = pipe_log.pre_write(queue);
-        let file_handle = pipe_log.append_bytes(queue, &mut ctx, &content).unwrap();
-        pipe_log.post_write(queue, ctx, false).unwrap();
+        let file_handle = pipe_log.append_bytes(queue, &content).unwrap();
+        pipe_log.sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 3);
@@ -961,15 +907,13 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let mut ctx = pipe_log.pre_write(queue);
-        let file_handle = pipe_log.append_bytes(queue, &mut ctx, &s_content).unwrap();
-        pipe_log.post_write(queue, ctx, false).unwrap();
+        let file_handle = pipe_log.append_bytes(queue, &s_content).unwrap();
+        pipe_log.sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
-        let mut ctx = pipe_log.pre_write(queue);
-        let file_handle = pipe_log.append_bytes(queue, &mut ctx, &s_content).unwrap();
-        pipe_log.post_write(queue, ctx, false).unwrap();
+        let file_handle = pipe_log.append_bytes(queue, &s_content).unwrap();
+        pipe_log.sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
             file_handle.offset,

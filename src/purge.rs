@@ -268,17 +268,12 @@ where
     ) -> Result<()> {
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         if len == 0 {
-            if sync {
-                self.pipe_log.sync(LogQueue::Rewrite)?;
-            }
-            return Ok(());
+            return self.pipe_log.sync(LogQueue::Rewrite, sync);
         }
-
-        let mut ctx = self.pipe_log.pre_write(LogQueue::Rewrite);
-        let file_handle =
-            self.pipe_log
-                .append(LogQueue::Rewrite, &mut ctx, log_batch.encoded_bytes())?;
-        self.pipe_log.post_write(LogQueue::Rewrite, ctx, sync)?;
+        let file_handle = self
+            .pipe_log
+            .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
+        self.pipe_log.sync(LogQueue::Rewrite, sync)?;
         log_batch.finish_write(file_handle);
         for item in log_batch.drain() {
             let raft = item.raft_group_id;

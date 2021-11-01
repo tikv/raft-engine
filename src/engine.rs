@@ -20,7 +20,7 @@ use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::InstantExt;
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{Error, Result};
+use crate::Result;
 
 pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
@@ -121,13 +121,12 @@ where
         let block_handle = {
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
-                let mut ctx = self.pipe_log.pre_write(LogQueue::Append);
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
                         self.pipe_log
-                            .append(LogQueue::Append, &mut ctx, log_batch.encoded_bytes())
+                            .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
                         // TODO(tabokie)
                         Ok(FileBlockHandle {
@@ -138,22 +137,12 @@ where
                     };
                     writer.set_output(res);
                 }
-                match self.pipe_log.post_write(LogQueue::Append, ctx, false) {
-                    Ok(()) => {}
-                    Err(Error::Fsync(true, msg)) => {
-                        // fsync() is not retryable, a failed attempt could result in
-                        // unrecoverable loss of data written after last successful
-                        // fsync(). See [PostgreSQL's fsync() surprise]
-                        // (https://lwn.net/Articles/752063/) for more details.
-                        for writer in group.iter_mut() {
-                            writer.set_output(Err(Error::Fsync(true, msg.to_owned())));
-                        }
-                    }
-                    Err(Error::Fsync(false, msg)) => {
-                        // TODO(MrCroxx): mitigate the influence?
-                        panic!("Untriable fsync error: {}", msg);
-                    }
-                    Err(e) => return Err(e),
+                if let Err(e) = self.pipe_log.sync(LogQueue::Append, sync) {
+                    panic!(
+                        "Cannot sync queue: {:?}, for there is an IO error raised: {}",
+                        LogQueue::Append,
+                        e
+                    );
                 }
             }
             writer.finish()?
@@ -175,7 +164,7 @@ where
     /// Synchronize the Raft engine.
     pub fn sync(&self) -> Result<()> {
         // TODO(tabokie): use writer.
-        self.pipe_log.sync(LogQueue::Append)
+        self.pipe_log.sync(LogQueue::Append, true)
     }
 
     pub fn put_message<S: Message>(&self, region_id: u64, key: &[u8], m: &S) -> Result<()> {
