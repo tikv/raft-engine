@@ -11,7 +11,6 @@ use protobuf::{parse_from_bytes, Message};
 use crate::config::Config;
 use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
-use crate::file_builder::*;
 use crate::file_pipe_log::{FilePipeLog, ReplayMachine};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
@@ -21,6 +20,7 @@ use crate::purge::{PurgeHook, PurgeManager};
 use crate::util::InstantExt;
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::Result;
+use crate::{file_builder::*, Error};
 
 pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
@@ -135,6 +135,19 @@ where
                             len: 0,
                         })
                     };
+                    if res.is_err() {
+                        self.pipe_log
+                            .truncate(LogQueue::Append)
+                            .map_err(|e| {
+                                Error::Severe(format!(
+                                    "Cannot truncate queue: {:?} after io error, get: {}",
+                                    LogQueue::Append,
+                                    e
+                                ))
+                            })
+                            .unwrap()
+                    }
+
                     writer.set_output(res);
                 }
                 if let Err(e) = self.pipe_log.sync(LogQueue::Append, sync) {

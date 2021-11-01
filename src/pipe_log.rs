@@ -56,6 +56,9 @@ pub trait PipeLog: Sized {
     /// Write a batch into the append queue.
     fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle>;
 
+    /// Call ftruncate on active log file.
+    fn truncate(&self, queue: LogQueue) -> Result<()>;
+
     /// Sync and rotate the given queue if needed.
     fn sync(&self, queue: LogQueue, force: bool) -> Result<()>;
 

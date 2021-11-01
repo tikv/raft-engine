@@ -310,21 +310,10 @@ impl<B: FileBuilder> LogManager<B> {
     }
 
     fn new_log_file(&mut self) -> Result<()> {
+        debug_assert!(self.active_file_seq >= INIT_FILE_ID);
         // Necessary to truncate extra zeros from fallocate().
         self.truncate_active_log()?;
-        // ===== old log data is safe from here =====
-        self.rotate()
-    }
-
-    fn truncate_and_sync(&mut self) -> Result<()> {
-        debug_assert!(self.active_file_seq >= INIT_FILE_ID);
-        self.truncate_active_log()?;
-        self.active_file.sync()?;
-        Ok(())
-    }
-
-    fn rotate(&mut self) -> Result<()> {
-        debug_assert!(self.active_file_seq >= INIT_FILE_ID);
+        self.active_file.truncate()?;
         self.active_file_seq += 1;
         let path = build_file_path(
             &self.dir,
@@ -708,6 +697,10 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(block_handle)
     }
 
+    fn truncate(&self, queue: LogQueue) -> Result<()> {
+        self.mut_queue(queue).truncate_active_log()
+    }
+
     fn sync(&self, queue: LogQueue, force: bool) -> Result<()> {
         let mut manager = match queue {
             LogQueue::Append => self.appender.write(),
@@ -716,28 +709,18 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
 
         if manager.active_file.written >= manager.rotate_size {
             // need rotate
-            if let Err(e) = manager.truncate_and_sync() {
+            if let Err(e) = manager.new_log_file() {
                 return Err(Error::Severe(format!(
-                    "cannot truncate and sync queue: {:?} when rotating, for there is IO error: {}",
-                    queue, e
-                )));
-            }
-            if let Err(e) = manager.rotate() {
-                return Err(Error::Severe(format!(
-                    "cannot rotate queue: {:?}, for there is IO error raised: {}",
+                    "cannot rotate queue: {:?} when rotating, for there is IO error: {}",
                     queue, e
                 )));
             }
         } else if manager.active_file.since_last_sync() >= manager.bytes_per_sync || force {
             // need_sync
             if let Err(e) = manager.sync() {
-                let truncated = match manager.truncate_and_sync() {
-                    Ok(()) => true,
-                    Err(_) => false,
-                };
                 return Err(Error::Severe(format!(
-                    "IO error raised when syncing log: {}, log file truncated: {}",
-                    e, truncated
+                    "IO error raised when syncing log: {}",
+                    e,
                 )));
             }
         }
