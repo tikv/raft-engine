@@ -31,6 +31,9 @@ fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
 
 impl LogFd {
     pub fn open<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
+        fail_point!("log_fd::open::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         let flags = OFlag::O_RDWR;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
@@ -49,6 +52,9 @@ impl LogFd {
     }
 
     pub fn create<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
+        fail_point!("log_fd::create::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         let flags = OFlag::O_RDWR | OFlag::O_CREAT;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
@@ -57,10 +63,16 @@ impl LogFd {
     }
 
     pub fn close(&self) -> IoResult<()> {
+        fail_point!("log_fd::close::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         close(self.0).map_err(|e| from_nix_error(e, "close"))
     }
 
     pub fn sync(&self) -> IoResult<()> {
+        fail_point!("log_fd::sync::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         #[cfg(target_os = "linux")]
         {
             nix::unistd::fdatasync(self.0).map_err(|e| from_nix_error(e, "fdatasync"))
@@ -72,6 +84,9 @@ impl LogFd {
     }
 
     pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
+        fail_point!("log_fd::read::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         let mut readed = 0;
         while readed < buf.len() {
             let bytes = match pread(self.0, &mut buf[readed..], offset as i64) {
@@ -90,6 +105,10 @@ impl LogFd {
     }
 
     pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
+        fail_point!("log_fd::write::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
+        fail_point!("log_fd::write::zero", |_| { Ok(0) });
         let mut written = 0;
         while written < content.len() {
             let bytes = match pwrite(self.0, &content[written..], offset as i64) {
@@ -107,17 +126,26 @@ impl LogFd {
     }
 
     pub fn file_size(&self) -> IoResult<usize> {
+        fail_point!("log_fd::file_size::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         lseek(self.0, 0, Whence::SeekEnd)
             .map(|n| n as usize)
             .map_err(|e| from_nix_error(e, "lseek"))
     }
 
     pub fn truncate(&self, offset: usize) -> IoResult<()> {
+        fail_point!("log_fd::truncate::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
     }
 
     #[allow(unused_variables)]
     pub fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
+        fail_point!("log_fd::allocate::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         #[cfg(target_os = "linux")]
         {
             fcntl::fallocate(
