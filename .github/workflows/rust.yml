@@ -60,7 +60,7 @@ jobs:
         with:
           sharedKey: ubuntu-latest
       - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
       - name: Run tests
         run: cargo test --features failpoints --all --verbose
         env:
