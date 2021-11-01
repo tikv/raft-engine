@@ -716,7 +716,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
                 )));
             }
         } else if manager.active_file.since_last_sync() >= manager.bytes_per_sync || force {
-            // need_sync
+            // need sync
             if let Err(e) = manager.sync() {
                 return Err(Error::Severe(format!(
                     "IO error raised when syncing log: {}",
