@@ -376,6 +376,17 @@ mod tests {
         1024,
     ];
 
+    const F32_TESTS: &[f32] = &[
+        f32::EPSILON,
+        f32::MIN,
+        f32::MIN_POSITIVE,
+        f32::MAX,
+        // NAN is unequal to itself
+        // f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ];
+
     const U32_TESTS: &[u32] = &[
         i32::MIN as u32,
         i32::MAX as u32,
@@ -559,24 +570,26 @@ mod tests {
         decode_i64_le,
         I64_TESTS
     );
-
     test_serialize!(
         var_u64_little_endian_codec,
         encode_u64_le,
         decode_u64_le,
         U64_TESTS
     );
-
     test_serialize!(
         var_i32_little_endian_codec,
         encode_i32_le,
         decode_i32_le,
         I32_TESTS
     );
-
     test_serialize!(var_u16_codec, encode_u16_le, decode_u16_le, U16_TESTS);
+    test_serialize!(
+        var_f16_codec_check_eq, // work around float_cmp lint
+        encode_f32_le,
+        decode_f32_le,
+        F32_TESTS
+    );
     test_serialize!(var_u32_codec, encode_u32_le, decode_u32_le, U32_TESTS);
-
     test_serialize!(var_i64_codec, encode_var_i64, decode_var_i64, I64_TESTS);
 
     #[test]
@@ -652,5 +665,13 @@ mod tests {
 
         buf.push(0);
         assert_eq!(0, decode_var_u64(&mut buf.as_slice()).unwrap());
+    }
+
+    #[test]
+    fn test_u8_eof() {
+        let buf = vec![7];
+        let mut slice = buf.as_slice();
+        assert_eq!(7, read_u8(&mut slice).unwrap());
+        check_error!(read_u8(&mut slice), ErrorKind::UnexpectedEof);
     }
 }

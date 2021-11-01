@@ -1,4 +1,11 @@
-Cargo.lock
-target
-append-compact-purge-data
-*.log
+## File system
+.DS_Store
+
+## Build
+/target
+
+## Temporary files
+*~
+\#*
+\#*\#
+.#*

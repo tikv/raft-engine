@@ -1,8 +1,9 @@
 # Raft Engine
 
-![Rust](https://github.com/tikv/raft-engine/workflows/Rust/badge.svg?branch=master)
+[![Rust](https://github.com/tikv/raft-engine/workflows/Rust/badge.svg?branch=master)](https://github.com/tikv/raft-engine/actions/workflows/rust.yml)
+[![codecov](https://codecov.io/gh/tikv/raft-engine/branch/master/graph/badge.svg)](https://app.codecov.io/gh/tikv/raft-engine)
 
-Raft Engine is a log-structured engine similar to [bitcask](https://github.com/basho/bitcask). It is designed as an embedded data engine for [TiKV](https://github.com/tikv/tikv) to store [Multi-Raft](https://raft.github.io/) logs.
+Raft Engine is a persistent embedded storage engine with a log-structured design similar to [bitcask](https://github.com/basho/bitcask). It is built for [TiKV](https://github.com/tikv/tikv) to store [Multi-Raft](https://raft.github.io/) logs.
 
 ## Features
 
