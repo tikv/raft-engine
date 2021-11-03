@@ -1,14 +1,12 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::borrow::BorrowMut;
-use std::cmp;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use fail::fail_point;
 use hashbrown::HashMap;
-use log::debug;
 use parking_lot::{Mutex, RwLock};
 
 use crate::file_pipe_log::ReplayMachine;
@@ -25,7 +23,7 @@ const SHRINK_CACHE_LIMIT: usize = 512;
 
 const MEMTABLE_SLOT_COUNT: usize = 128;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct EntryIndex {
     pub index: u64,
 
@@ -86,20 +84,44 @@ impl MemTable {
         }
     }
 
-    pub fn get_entry(&self, index: u64) -> Option<EntryIndex> {
-        if self.entry_indexes.is_empty() {
-            return None;
+    /// Mrege from newer neighbor `rhs`.
+    /// Only called during parllel recovery.
+    pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
+        assert_eq!(self.region_id, rhs.region_id);
+        if let (Some(last), Some(next)) = (self.entry_indexes.back(), rhs.entry_indexes.front()) {
+            assert_eq!(last.index + 1, next.index);
+        }
+        self.entry_indexes.append(&mut rhs.entry_indexes);
+        self.rewrite_count += rhs.rewrite_count;
+        self.kvs.extend(rhs.kvs.drain());
+        self.global_stats.merge(&rhs.global_stats);
+    }
+
+    /// Merge a counter part that contains all rewritten data of current region.
+    pub fn merge_rewrite_table(&mut self, rhs: &mut Self) {
+        debug_assert_eq!(rhs.rewrite_count, rhs.entry_indexes.len());
+        debug_assert_eq!(self.rewrite_count, 0);
+
+        if !self.entry_indexes.is_empty() {
+            if !rhs.entry_indexes.is_empty() {
+                let front = self.entry_indexes[0].index;
+                let rewrite_front = rhs.entry_indexes.front().unwrap().index;
+                let rewrite_back = rhs.entry_indexes.back().unwrap().index;
+                if front > rewrite_back + 1 {
+                    rhs.compact_to(rewrite_back + 1);
+                } else {
+                    assert!(front >= rewrite_front);
+                    rhs.truncate_back(front);
+                }
+            }
+            rhs.entry_indexes.append(&mut self.entry_indexes);
         }
 
-        let first_index = self.entry_indexes.front().unwrap().index;
-        let last_index = self.entry_indexes.back().unwrap().index;
-        if index < first_index || index > last_index {
-            return None;
+        for (key, (value, file_id)) in std::mem::take(&mut self.kvs) {
+            rhs.kvs.insert(key, (value, file_id));
         }
 
-        let ioffset = (index - first_index) as usize;
-        let entry_index = self.entry_indexes[ioffset].clone();
-        Some(entry_index)
+        std::mem::swap(self, rhs);
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -114,12 +136,64 @@ impl MemTable {
         }
     }
 
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
+        if let Some(origin) = self.kvs.insert(key, (value, file_id)) {
+            if origin.1.queue == LogQueue::Rewrite && file_id.queue == LogQueue::Append {
+                self.global_stats.add_compacted_rewrite(1);
+            }
+        }
+        if file_id.queue == LogQueue::Rewrite {
+            self.global_stats.add_rewrite(1);
+        }
+    }
+
+    pub fn rewrite_key(&mut self, key: Vec<u8>, gate: Option<FileSeq>, seq: FileSeq) {
+        self.global_stats.add_rewrite(1);
+        if let Some(value) = self.kvs.get_mut(&key) {
+            if value.1.queue == LogQueue::Append {
+                // Always provide a gate to rewrite a normal entry.
+                if value.1.seq <= gate.unwrap() {
+                    value.1 = FileId {
+                        queue: LogQueue::Rewrite,
+                        seq,
+                    };
+                } else {
+                    // The rewritten key/value pair has been overwritten.
+                    self.global_stats.add_compacted_rewrite(1);
+                }
+            } else {
+                assert!(value.1.seq <= seq);
+                value.1.seq = seq;
+            }
+        } else {
+            // The rewritten key/value pair has been compacted.
+            self.global_stats.add_compacted_rewrite(1);
+        }
+    }
+
+    pub fn get_entry(&self, index: u64) -> Option<EntryIndex> {
+        if self.entry_indexes.is_empty() {
+            return None;
+        }
+
+        let first_index = self.entry_indexes.front().unwrap().index;
+        let last_index = self.entry_indexes.back().unwrap().index;
+        if index < first_index || index > last_index {
+            return None;
+        }
+
+        let ioffset = (index - first_index) as usize;
+        let entry_index = self.entry_indexes[ioffset];
+        Some(entry_index)
+    }
+
     pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
         if entry_indexes.is_empty() {
             return;
         }
+
         let first_index_to_add = entry_indexes[0].index;
-        self.cut_entry_indexes(first_index_to_add);
+        self.truncate_back(first_index_to_add);
 
         if let Some(index) = self.entry_indexes.back() {
             assert_eq!(
@@ -150,164 +224,100 @@ impl MemTable {
         self.rewrite_count = self.entry_indexes.len();
     }
 
-    pub fn rewrite(&mut self, entry_indexes: Vec<EntryIndex>, latest_rewrite: Option<FileSeq>) {
-        if entry_indexes.is_empty() {
+    pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, gate: Option<FileSeq>) {
+        self.global_stats.add_rewrite(rewrite_indexes.len());
+
+        if rewrite_indexes.is_empty() {
             return;
         }
-
-        // Update the counter of entries in the rewrite queue.
-        self.global_stats.add_rewrite(entry_indexes.len());
-
         if self.entry_indexes.is_empty() {
-            // All entries are compacted, update the counter.
-            self.global_stats.add_compacted_rewrite(entry_indexes.len());
+            self.global_stats
+                .add_compacted_rewrite(rewrite_indexes.len());
             return;
         }
 
-        let self_ents_len = self.entry_indexes.len();
-        let front = self.entry_indexes[0].index as usize;
-        let back = self.entry_indexes[self_ents_len - 1].index as usize;
+        let first = self.entry_indexes[0].index;
+        let last = self.entry_indexes[self.entry_indexes.len() - 1].index;
 
-        let ents_len = entry_indexes.len();
-        let first = cmp::max(entry_indexes[0].index as usize, front);
-        let last = cmp::min(entry_indexes[ents_len - 1].index as usize, back);
+        let rewrite_first = std::cmp::max(rewrite_indexes[0].index, first);
+        let rewrite_last = std::cmp::min(rewrite_indexes[rewrite_indexes.len() - 1].index, last);
+        let rewrite_len = (rewrite_last + 1).saturating_sub(rewrite_first) as usize;
+        self.global_stats
+            .add_compacted_rewrite(rewrite_indexes.len() - rewrite_len);
 
-        if last < first {
-            // All entries are compacted, update the counter.
-            self.global_stats.add_compacted_rewrite(entry_indexes.len());
+        if rewrite_len == 0 {
             return;
         }
 
-        // Some entries in `entry_indexes` are compacted or cut, update the counter.
-        let strip_count = ents_len - (last + 1 - first);
-        self.global_stats.add_compacted_rewrite(strip_count);
-
-        let (entry_indexes, ents_len) = {
-            let diff = first - entry_indexes[0].index as usize;
-            let len = last - first + 1;
-            (&entry_indexes[diff..diff + len], len)
-        };
-
-        let distance = (first - front) as usize;
+        let pos = (rewrite_first - first) as usize;
         // No normal log entry mixed in rewritten entries at the front.
         debug_assert!(
-            distance == 0
-                || self.entry_indexes[distance - 1].entries.unwrap().id.queue == LogQueue::Rewrite
+            pos == 0 || self.entry_indexes[pos - 1].entries.unwrap().id.queue == LogQueue::Rewrite
         );
-        for (i, ei) in entry_indexes.iter().enumerate() {
-            if let Some(latest_rewrite) = latest_rewrite {
-                debug_assert_eq!(
-                    self.entry_indexes[i + distance].entries.unwrap().id.queue,
-                    LogQueue::Append
-                );
-                if self.entry_indexes[i + distance].entries.unwrap().id.seq > latest_rewrite {
+        let rewrite_pos = (rewrite_first - rewrite_indexes[0].index) as usize;
+        let rewrite_indexes = &rewrite_indexes[rewrite_pos..rewrite_pos + rewrite_len];
+
+        for (i, rindex) in rewrite_indexes.iter().enumerate() {
+            let index = &mut self.entry_indexes[i + pos];
+            if let Some(gate) = gate {
+                debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::Append);
+                if index.entries.unwrap().id.seq > gate {
                     // Some entries are overwritten by new appends.
-                    self.global_stats.add_compacted_rewrite(ents_len - i);
-                    self.rewrite_count = i + distance;
+                    self.global_stats.add_compacted_rewrite(rewrite_len - i);
+                    self.rewrite_count = i + pos;
                     return;
                 }
             } else {
                 // It's a squeeze operation.
-                debug_assert_eq!(
-                    self.entry_indexes[i + distance].entries.unwrap().id.queue,
-                    LogQueue::Rewrite
-                );
+                debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::Rewrite);
             }
 
-            if self.entry_indexes[i + distance].entries.unwrap().id.queue != LogQueue::Rewrite {
-                debug_assert_eq!(ei.entries.unwrap().id.queue, LogQueue::Rewrite);
-                self.entry_indexes[i + distance].entries.unwrap().id.queue = LogQueue::Rewrite;
-            }
-
-            self.entry_indexes[i + distance].compression_type = ei.compression_type;
-            self.entry_indexes[i + distance].entries = ei.entries;
-            self.entry_indexes[i + distance].entry_offset = ei.entry_offset;
-            self.entry_indexes[i + distance].entry_len = ei.entry_len;
-            debug_assert_eq!(&self.entry_indexes[i + distance], ei);
+            *index = *rindex;
         }
 
-        self.rewrite_count = distance + ents_len;
+        self.rewrite_count = pos + rewrite_len;
     }
 
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
-        if let Some(origin) = self.kvs.insert(key, (value, file_id)) {
-            if origin.1.queue == LogQueue::Rewrite && file_id.queue == LogQueue::Append {
-                self.global_stats.add_compacted_rewrite(1);
-            }
-        }
-        if file_id.queue == LogQueue::Rewrite {
-            self.global_stats.add_rewrite(1);
-        }
-    }
-
-    pub fn rewrite_key(&mut self, key: Vec<u8>, latest_rewrite: Option<FileSeq>, seq: FileSeq) {
-        self.global_stats.add_rewrite(1);
-        if let Some(value) = self.kvs.get_mut(&key) {
-            if value.1.queue == LogQueue::Append {
-                if let Some(latest_rewrite) = latest_rewrite {
-                    if value.1.seq <= latest_rewrite {
-                        value.1 = FileId {
-                            queue: LogQueue::Rewrite,
-                            seq,
-                        };
-                    }
-                } else {
-                    // The rewritten key/value pair has been overwritten.
-                    self.global_stats.add_compacted_rewrite(1);
-                }
-            } else {
-                assert!(value.1.seq <= seq);
-                value.1.seq = seq;
-            }
-        } else {
-            // The rewritten key/value pair has been compacted.
-            self.global_stats.add_compacted_rewrite(1);
-        }
-    }
-
-    pub fn compact_to(&mut self, mut idx: u64) -> u64 {
-        let first_idx = match self.entry_indexes.front() {
-            Some(e) if e.index < idx => e.index,
-            _ => return 0,
-        };
-        let last_idx = self.entry_indexes.back().unwrap().index;
-        idx = cmp::min(last_idx + 1, idx);
-
-        let drain_end = (idx - first_idx) as usize;
-        self.entry_indexes.drain(..drain_end);
-        self.maybe_shrink_entry_indexes();
-
-        let rewrite_sub = cmp::min(drain_end, self.rewrite_count);
-        self.rewrite_count -= rewrite_sub;
-        self.global_stats.add_compacted_rewrite(rewrite_sub);
-        drain_end as u64
-    }
-
-    // Removes all entry indexes with index greater than or equal to the given.
-    // Returns the truncated amount.
-    fn cut_entry_indexes(&mut self, index: u64) -> usize {
+    // Removes all entry indexes with index smaller than to `index`.
+    // Returns the number of deleted entries.
+    pub fn compact_to(&mut self, index: u64) -> u64 {
         if self.entry_indexes.is_empty() {
             return 0;
         }
-        let last_index = self.entry_indexes.back().unwrap().index;
-        let first_index = self.entry_indexes.front().unwrap().index;
-        // Compacted entries can't be overwritten.
-        assert!(first_index <= index, "corrupted raft {}", self.region_id);
-
-        let to_truncate = if index <= last_index {
-            (index - first_index) as usize
-        } else {
+        let first = self.entry_indexes[0].index;
+        if index <= first {
             return 0;
-        };
-        self.entry_indexes.truncate(to_truncate);
+        }
+        let count = std::cmp::min((index - first) as usize, self.entry_indexes.len());
+        self.entry_indexes.drain(..count);
+        self.maybe_shrink_entry_indexes();
+
+        let compacted_rewrite = std::cmp::min(count, self.rewrite_count);
+        self.rewrite_count -= compacted_rewrite;
+        self.global_stats.add_compacted_rewrite(compacted_rewrite);
+        count as u64
+    }
+
+    // Removes all entry indexes with index greater than or equal to `index`.
+    // Returns the truncated amount.
+    fn truncate_back(&mut self, index: u64) -> usize {
+        if self.entry_indexes.is_empty() {
+            return 0;
+        }
+        let first = self.entry_indexes[0].index;
+        let last = self.entry_indexes[self.entry_indexes.len() - 1].index;
+        // Compacted entries can't be overwritten.
+        assert!(first <= index, "corrupted raft {}", self.region_id);
+
+        self.entry_indexes.truncate((index - first) as usize);
 
         if self.rewrite_count > self.entry_indexes.len() {
-            let diff = self.rewrite_count - self.entry_indexes.len();
+            let compacted_rewrite = self.rewrite_count - self.entry_indexes.len();
             self.rewrite_count = self.entry_indexes.len();
-            self.global_stats.add_compacted_rewrite(diff);
+            self.global_stats.add_compacted_rewrite(compacted_rewrite);
         }
 
-        (last_index - index + 1) as usize
+        (last + 1).saturating_sub(index) as usize
     }
 
     fn maybe_shrink_entry_indexes(&mut self) {
@@ -316,50 +326,6 @@ impl MemTable {
         {
             self.entry_indexes.shrink_to(SHRINK_CACHE_CAPACITY);
         }
-    }
-
-    /// Mrege from newer neighbor `rhs`.
-    /// Only called during parllel recovery.
-    pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
-        assert_eq!(self.region_id, rhs.region_id);
-        if let (Some(last), Some(next)) = (self.entry_indexes.back(), rhs.entry_indexes.front()) {
-            assert_eq!(last.index + 1, next.index);
-        }
-        self.entry_indexes.append(&mut rhs.entry_indexes);
-        self.rewrite_count += rhs.rewrite_count;
-        self.kvs.extend(rhs.kvs.drain());
-        self.global_stats.merge(&rhs.global_stats);
-    }
-
-    /// Merge from `rhs`, which has a lower priority.
-    pub fn merge_lower_prio(&mut self, rhs: &mut Self) {
-        debug_assert_eq!(rhs.rewrite_count, rhs.entry_indexes.len());
-        debug_assert_eq!(self.rewrite_count, 0);
-
-        if !self.entry_indexes.is_empty() {
-            if !rhs.entry_indexes.is_empty() {
-                let front = self.entry_indexes[0].index;
-                let self_back = rhs.entry_indexes.back().unwrap().index;
-                let self_front = rhs.entry_indexes.front().unwrap().index;
-                if front > self_back + 1 {
-                    rhs.compact_to(self_back + 1);
-                } else if front >= self_front {
-                    rhs.cut_entry_indexes(front);
-                } else {
-                    unreachable!();
-                }
-            }
-            rhs.entry_indexes.reserve(self.entry_indexes.len());
-            for ei in std::mem::take(&mut self.entry_indexes) {
-                rhs.entry_indexes.push_back(ei);
-            }
-        }
-
-        for (key, (value, file_id)) in std::mem::take(&mut self.kvs) {
-            rhs.kvs.insert(key, (value, file_id));
-        }
-
-        std::mem::swap(self, rhs);
     }
 
     pub fn fetch_entries_to(
@@ -396,7 +362,7 @@ impl MemTable {
                 if total_size as usize > max_size && total_size > idx.entry_len {
                     break;
                 }
-                vec_idx.push(idx.clone());
+                vec_idx.push(*idx);
             }
         } else {
             vec_idx.extend_from_slice(first);
@@ -407,7 +373,7 @@ impl MemTable {
 
     pub fn fetch_entry_indexes_before(
         &self,
-        latest_rewrite: FileSeq,
+        gate: FileSeq,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         let begin = self
@@ -418,7 +384,7 @@ impl MemTable {
             .entry_indexes
             .iter()
             .rev()
-            .find(|e| e.entries.unwrap().id.seq <= latest_rewrite);
+            .find(|e| e.entries.unwrap().id.seq <= gate);
         if let (Some(begin), Some(end)) = (begin, end) {
             if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec_idx);
@@ -431,14 +397,15 @@ impl MemTable {
         if self.rewrite_count > 0 {
             let end = self.entry_indexes[self.rewrite_count - 1].index + 1;
             let first = self.entry_indexes.front().unwrap().index;
-            return self.fetch_entries_to(first, end, None, vec_idx);
+            self.fetch_entries_to(first, end, None, vec_idx)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
-    pub fn fetch_kvs_before(&self, latest_rewrite: FileSeq, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+    pub fn fetch_kvs_before(&self, gate: FileSeq, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, file_id)) in &self.kvs {
-            if file_id.queue == LogQueue::Append && file_id.seq <= latest_rewrite {
+            if file_id.queue == LogQueue::Append && file_id.seq <= gate {
                 vec.push((key.clone(), value.clone()));
             }
         }
@@ -492,6 +459,32 @@ impl MemTable {
 
     pub fn last_index(&self) -> Option<u64> {
         self.entry_indexes.back().map(|e| e.index)
+    }
+
+    #[cfg(test)]
+    fn consistency_check(&self) {
+        let mut seen_append = false;
+        let mut last_index = None;
+        for idx in self.entry_indexes.iter() {
+            // Check 1: indexes are contiguous.
+            if let Some(last_index) = last_index {
+                assert_eq!(idx.index, last_index + 1);
+            }
+            last_index = Some(idx.index);
+            // Check 2: rewrites are at the front.
+            let queue = idx.entries.unwrap().id.queue;
+            if queue == LogQueue::Append {
+                seen_append = true;
+            }
+            assert_eq!(
+                queue,
+                if seen_append {
+                    LogQueue::Append
+                } else {
+                    LogQueue::Rewrite
+                }
+            );
+        }
     }
 }
 
@@ -612,14 +605,14 @@ impl MemTableAccessor {
             .append(&mut rhs.removed_memtables.lock());
     }
 
-    pub fn merge_lower_prio(&self, rhs: &mut Self) {
+    pub fn merge_rewrite_table(&self, rhs: &mut Self) {
         let ids = self.cleaned_region_ids();
         for slot in rhs.slots.iter_mut() {
             for (id, memtable) in std::mem::take(&mut *slot.write()) {
                 if let Some(existing_memtable) = self.get(id) {
                     existing_memtable
                         .write()
-                        .merge_lower_prio(&mut *memtable.write());
+                        .merge_rewrite_table(&mut *memtable.write());
                 } else if !ids.contains(&id) {
                     self.insert(id, memtable);
                 }
@@ -635,14 +628,6 @@ impl MemTableAccessor {
             match item.content {
                 LogItemContent::EntryIndexes(entries_to_add) => {
                     let entry_indexes = entries_to_add.0;
-                    debug!(
-                        "{} append to {:?}, Entries[{:?}, {:?}:{:?})",
-                        raft,
-                        queue,
-                        entry_indexes.first().map(|x| x.entries.unwrap().id.queue),
-                        entry_indexes.first().map(|x| x.index),
-                        entry_indexes.last().map(|x| x.index + 1),
-                    );
                     if queue == LogQueue::Rewrite {
                         memtable.write().append_rewrite(entry_indexes);
                     } else {
@@ -650,22 +635,18 @@ impl MemTableAccessor {
                     }
                 }
                 LogItemContent::Command(Command::Clean) => {
-                    debug!("{} append to {:?}, Clean", raft, queue);
                     self.remove(raft, queue);
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
-                    debug!("{} append to {:?}, Compact({})", raft, queue, index);
                     memtable.write().compact_to(index);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => {
                         let value = kv.value.unwrap();
-                        debug!("{} append to {:?}, Put", raft, queue);
                         memtable.write().put(kv.key, value, kv.file_id.unwrap());
                     }
                     OpType::Del => {
                         let key = kv.key;
-                        debug!("{} append to {:?}, Del", raft, queue);
                         memtable.write().delete(key.as_slice());
                     }
                 },
@@ -726,7 +707,7 @@ impl ReplayMachine for MemTableRecoverContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::generate_entry_indexes;
+    use crate::test_util::{catch_unwind_silent, generate_entry_indexes};
 
     impl MemTable {
         pub fn max_file_seq(&self, queue: LogQueue) -> Option<FileSeq> {
@@ -775,61 +756,53 @@ mod tests {
                 .iter()
                 .fold(0, |acc, e| acc + e.entry_len) as usize
         }
-
-        fn check_entry_indexes(&self) {
-            if self.entry_indexes.is_empty() {
-                return;
-            }
-
-            let ei_first = self.entry_indexes.front().unwrap();
-            let ei_last = self.entry_indexes.back().unwrap();
-            assert_eq!(
-                ei_last.index - ei_first.index + 1,
-                self.entry_indexes.len() as u64
-            );
-        }
     }
 
     #[test]
     fn test_memtable_append() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
 
         // Append entries [10, 20) file_num = 1.
         // after appending
         // [10, 20) file_num = 1
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             10,
             20,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 1),
+        ));
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 1);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
+
+        // Empty.
+        memtable.append(Vec::new());
+
+        // Hole.
+        assert!(
+            catch_unwind_silent(|| memtable.append(generate_entry_indexes(
+                21,
+                22,
+                FileId::dummy(LogQueue::Append)
+            )))
+            .is_err()
+        );
+        memtable.consistency_check();
 
         // Append entries [20, 30) file_num = 2.
         // after appending:
         // [10, 20) file_num = 1
         // [20, 30) file_num = 2
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             20,
             30,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 2),
+        ));
         assert_eq!(memtable.entries_size(), 20);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 2);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
 
         // Partial overlap Appending.
         // Append entries [25, 35) file_num = 3.
@@ -837,154 +810,138 @@ mod tests {
         // [10, 20) file_num = 1
         // [20, 25) file_num = 2
         // [25, 35) file_num = 3
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             25,
             35,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 3),
+        ));
         assert_eq!(memtable.entries_size(), 25);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
 
         // Full overlap Appending.
         // Append entries [10, 40) file_num = 4.
         // After appending:
         // [10, 40) file_num = 4
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             10,
             40,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 4,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 4),
+        ));
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
     }
 
     #[test]
     fn test_memtable_compact() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             0,
             10,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 1),
+        ));
+        memtable.append(generate_entry_indexes(
             10,
             15,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 2),
+        ));
+        memtable.append(generate_entry_indexes(
             15,
             20,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 2),
+        ));
+        memtable.append(generate_entry_indexes(
             20,
             25,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 3),
+        ));
 
         assert_eq!(memtable.entries_size(), 25);
+        assert_eq!(memtable.first_index().unwrap(), 0);
+        assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
 
         // Compact to 5.
         // Only index is needed to compact.
         assert_eq!(memtable.compact_to(5), 5);
         assert_eq!(memtable.entries_size(), 20);
+        assert_eq!(memtable.first_index().unwrap(), 5);
+        assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
 
         // Compact to 20.
         assert_eq!(memtable.compact_to(20), 15);
         assert_eq!(memtable.entries_size(), 5);
+        assert_eq!(memtable.first_index().unwrap(), 20);
+        assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
 
         // Compact to 20 or smaller index, nothing happens.
         assert_eq!(memtable.compact_to(20), 0);
         assert_eq!(memtable.compact_to(15), 0);
         assert_eq!(memtable.entries_size(), 5);
-        memtable.check_entry_indexes();
+        assert_eq!(memtable.first_index().unwrap(), 20);
+        assert_eq!(memtable.last_index().unwrap(), 24);
+        memtable.consistency_check();
     }
 
     #[test]
     fn test_memtable_fetch() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+
+        let mut ents_idx = vec![];
+
+        // Fetch empty.
+        memtable.fetch_all(&mut ents_idx);
+        assert!(ents_idx.is_empty());
+        memtable
+            .fetch_entries_to(0, 0, None, &mut ents_idx)
+            .unwrap();
+        assert!(matches!(
+            memtable
+                .fetch_entries_to(0, 1, None, &mut ents_idx)
+                .unwrap_err(),
+            Error::EntryNotFound
+        ));
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 15) file_num = 2
         // [15, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             0,
             10,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 1),
+        ));
+        memtable.append(generate_entry_indexes(
             10,
             20,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 2),
+        ));
+        memtable.append(generate_entry_indexes(
             20,
             25,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 3),
+        ));
 
         // Fetching all
-        let mut ents_idx = vec![];
         memtable.fetch_all(&mut ents_idx);
         assert_eq!(ents_idx.len(), 25);
         assert_eq!(ents_idx[0].index, 0);
@@ -998,15 +955,21 @@ mod tests {
 
         // Out of range fetching.
         ents_idx.clear();
-        assert!(memtable
-            .fetch_entries_to(5, 15, None, &mut ents_idx)
-            .is_err());
+        assert!(matches!(
+            memtable
+                .fetch_entries_to(5, 15, None, &mut ents_idx)
+                .unwrap_err(),
+            Error::EntryCompacted
+        ));
 
         // Out of range fetching.
         ents_idx.clear();
-        assert!(memtable
-            .fetch_entries_to(20, 30, None, &mut ents_idx)
-            .is_err());
+        assert!(matches!(
+            memtable
+                .fetch_entries_to(20, 30, None, &mut ents_idx)
+                .unwrap_err(),
+            Error::EntryNotFound
+        ));
 
         ents_idx.clear();
         memtable
@@ -1055,80 +1018,73 @@ mod tests {
     #[test]
     fn test_memtable_fetch_rewrite() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+        let (k1, v1) = (b"key1", b"value1");
+        let (k2, v2) = (b"key2", b"value2");
+        let (k3, v3) = (b"key3", b"value3");
 
         // After appending:
         // [0, 10) file_num = 1
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             0,
             10,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        memtable.append(ents_idx);
-        memtable.put(
-            b"k1".to_vec(),
-            b"v1".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 1),
+        ));
+        memtable.put(k1.to_vec(), v1.to_vec(), FileId::new(LogQueue::Append, 1));
+        memtable.append(generate_entry_indexes(
             10,
             20,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
-        memtable.put(
-            b"k2".to_vec(),
-            b"v2".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 2),
+        ));
+        memtable.put(k2.to_vec(), v2.to_vec(), FileId::new(LogQueue::Append, 2));
+        memtable.append(generate_entry_indexes(
             20,
             25,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
-        );
-        memtable.append(ents_idx);
-        memtable.put(
-            b"k3".to_vec(),
-            b"v3".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
-        );
+            FileId::new(LogQueue::Append, 3),
+        ));
+        memtable.put(k3.to_vec(), v3.to_vec(), FileId::new(LogQueue::Append, 3));
+        memtable.consistency_check();
 
-        // After rewriting:
+        // Rewrite keys:
+        memtable.rewrite_key(k1.to_vec(), Some(1), 50);
+        let mut kvs = Vec::new();
+        memtable.fetch_kvs_before(1, &mut kvs);
+        assert!(kvs.is_empty());
+        memtable.fetch_rewritten_kvs(&mut kvs);
+        assert_eq!(kvs.len(), 1);
+        assert_eq!(kvs.pop().unwrap(), (k1.to_vec(), v1.to_vec()));
+        // 1. Key is deleted
+        memtable.delete(k1.as_ref());
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 1);
+        memtable.rewrite_key(k1.to_vec(), Some(1), 50);
+        assert_eq!(memtable.get(k1.as_ref()), None);
+        memtable.fetch_rewritten_kvs(&mut kvs);
+        assert!(kvs.is_empty());
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 2);
+        // 2. Key is newer
+        memtable.rewrite_key(k2.to_vec(), Some(1), 50);
+        memtable.fetch_rewritten_kvs(&mut kvs);
+        assert!(kvs.is_empty());
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 3);
+        // 3. Multiple rewrites
+        assert!(catch_unwind_silent(|| memtable.rewrite_key(k3.to_vec(), None, 50)).is_err());
+        memtable.rewrite_key(k3.to_vec(), Some(10), 50);
+        memtable.rewrite_key(k3.to_vec(), None, 51);
+        memtable.rewrite_key(k3.to_vec(), Some(11), 52);
+        memtable.fetch_rewritten_kvs(&mut kvs);
+        assert_eq!(kvs.len(), 1);
+        assert_eq!(kvs.pop().unwrap(), (k3.to_vec(), v3.to_vec()));
+
+        // Rewrite indexes:
         // [0, 10) queue = rewrite, file_num = 50,
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = generate_entry_indexes(
-            0,
-            10,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 50,
-            },
-        );
+        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 50));
         memtable.rewrite(ents_idx, Some(1));
-        memtable.rewrite_key(b"k1".to_vec(), Some(1), 50);
         assert_eq!(memtable.entries_size(), 25);
+        memtable.consistency_check();
 
         let mut ents_idx = vec![];
         assert!(memtable
@@ -1149,27 +1105,12 @@ mod tests {
     #[test]
     fn test_memtable_kv_operations() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
 
         let (k1, v1) = (b"key1", b"value1");
         let (k5, v5) = (b"key5", b"value5");
-        memtable.put(
-            k1.to_vec(),
-            v1.to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        memtable.put(
-            k5.to_vec(),
-            v5.to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 5,
-            },
-        );
+        memtable.put(k1.to_vec(), v1.to_vec(), FileId::new(LogQueue::Append, 1));
+        memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 5));
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
@@ -1177,34 +1118,49 @@ mod tests {
 
         memtable.delete(k5.as_ref());
         assert_eq!(memtable.get(k5.as_ref()), None);
+        assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
+        assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 1);
+
+        memtable.put(k1.to_vec(), v1.to_vec(), FileId::new(LogQueue::Rewrite, 2));
+        memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Rewrite, 3));
+        assert_eq!(memtable.min_file_seq(LogQueue::Append), None);
+        assert_eq!(memtable.max_file_seq(LogQueue::Append), None);
+        assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 2);
+        assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 3);
+        assert_eq!(memtable.global_stats.rewrite_operations(), 2);
+
+        memtable.delete(k1.as_ref());
+        assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 3);
+        assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 3);
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 1);
+
+        memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 7));
+        assert_eq!(memtable.min_file_seq(LogQueue::Rewrite), None);
+        assert_eq!(memtable.max_file_seq(LogQueue::Rewrite), None);
+        assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 7);
+        assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 7);
+        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 2);
     }
 
     #[test]
     fn test_memtable_get_entry() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+
+        assert_eq!(memtable.get_entry(0), None);
 
         // [5, 10) file_num = 1
         // [10, 20) file_num = 2
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             5,
             10,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 1,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
+            FileId::new(LogQueue::Append, 1),
+        ));
+        memtable.append(generate_entry_indexes(
             10,
             20,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 2),
+        ));
 
         // Not in range.
         assert_eq!(memtable.get_entry(2), None);
@@ -1217,263 +1173,399 @@ mod tests {
     #[test]
     fn test_memtable_rewrite() {
         let region_id = 8;
-        let stats = Arc::new(GlobalStats::default());
-        let mut memtable = MemTable::new(region_id, stats);
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+        let mut expected_rewrite = 0;
+        let mut expected_compacted_rewrite = 0;
+
+        // Rewrite to empty table.
+        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1));
+        memtable.rewrite(ents_idx, Some(1));
+        expected_rewrite += 10;
+        expected_compacted_rewrite += 10;
+        assert_eq!(memtable.min_file_seq(LogQueue::Rewrite), None);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
 
         // After appending and compacting:
         // [10, 20) file_num = 2
         // [20, 30) file_num = 3
         // [30, 40) file_num = 4
-        let ents_idx = generate_entry_indexes(
+        // kk1 -> 2, kk2 -> 3, kk3 -> 4
+        memtable.append(generate_entry_indexes(
             10,
             20,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 2),
+        ));
         memtable.put(
             b"kk1".to_vec(),
             b"vv1".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 2,
-            },
+            FileId::new(LogQueue::Append, 2),
         );
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             20,
             30,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 3),
+        ));
         memtable.put(
             b"kk2".to_vec(),
             b"vv2".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 3,
-            },
+            FileId::new(LogQueue::Append, 3),
         );
-        let ents_idx = generate_entry_indexes(
+        memtable.append(generate_entry_indexes(
             30,
             40,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 4,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 4),
+        ));
         memtable.put(
             b"kk3".to_vec(),
             b"vv3".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 4,
-            },
+            FileId::new(LogQueue::Append, 4),
         );
-
         assert_eq!(memtable.entries_size(), 30);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
-        memtable.check_entry_indexes();
+        memtable.consistency_check();
 
         // Rewrite compacted entries.
-        let ents_idx = generate_entry_indexes(
-            0,
-            10,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 50,
-            },
-        );
+        // [10, 20) file_num = 2
+        // [20, 30) file_num = 3
+        // [30, 40) file_num = 4
+        // kk1 -> 2, kk2 -> 3, kk3 -> 4
+        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 50));
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
-
+        expected_rewrite += 10 + 1;
+        expected_compacted_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         assert!(memtable.min_file_seq(LogQueue::Rewrite).is_none());
         assert!(memtable.max_file_seq(LogQueue::Rewrite).is_none());
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.get(b"kk0"), None);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 11);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 11);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
         // Rewrite compacted entries + valid entries.
-        let ents_idx = generate_entry_indexes(
-            0,
-            20,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 100,
-            },
-        );
+        // [10, 20) file_num = 100(r)
+        // [20, 30) file_num = 3
+        // [30, 40) file_num = 4
+        // kk1 -> 100(r), kk2 -> 3, kk3 -> 4
+        let ents_idx = generate_entry_indexes(0, 20, FileId::new(LogQueue::Rewrite, 100));
         memtable.rewrite(ents_idx, Some(2));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 31);
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
         memtable.rewrite_key(b"kk1".to_vec(), Some(2), 100);
-
+        expected_rewrite += 20 + 2;
+        expected_compacted_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.get(b"kk1"), Some(b"vv1".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 33);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
         // Rewrite vaild entries.
-        let ents_idx = generate_entry_indexes(
-            20,
-            30,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 101,
-            },
-        );
+        // [10, 20) file_num = 100(r)
+        // [20, 30) file_num = 101(r)
+        // [30, 40) file_num = 4
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 4
+        let ents_idx = generate_entry_indexes(20, 30, FileId::new(LogQueue::Rewrite, 101));
         memtable.rewrite(ents_idx, Some(3));
         memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
-
+        expected_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 101);
         assert_eq!(memtable.rewrite_count, 20);
         assert_eq!(memtable.get(b"kk2"), Some(b"vv2".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 44);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 22);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
         // Put some entries overwritting entires in file 4.
-        let ents_idx = generate_entry_indexes(
+        // [10, 20) file_num = 100(r)
+        // [20, 30) file_num = 101(r)
+        // [30, 35) file_num = 4
+        // 35 file_num = 5
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 5
+        memtable.append(generate_entry_indexes(
             35,
             36,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 5,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 5),
+        ));
         memtable.put(
             b"kk3".to_vec(),
             b"vv33".to_vec(),
-            FileId {
-                queue: LogQueue::Append,
-                seq: 5,
-            },
+            FileId::new(LogQueue::Append, 5),
         );
-        assert_eq!(memtable.entry_indexes.back().unwrap().index, 35);
+        assert_eq!(memtable.last_index().unwrap(), 35);
+        memtable.consistency_check();
 
         // Rewrite valid + overwritten entries.
-        let ents_idx = generate_entry_indexes(
-            30,
-            40,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 102,
-            },
-        );
+        // [10, 20) file_num = 100(r)
+        // [20, 30) file_num = 101(r)
+        // [30, 35) file_num = 102(r)
+        // 35 file_num = 5
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 5
+        let ents_idx = generate_entry_indexes(30, 40, FileId::new(LogQueue::Rewrite, 102));
         memtable.rewrite(ents_idx, Some(4));
         memtable.rewrite_key(b"kk3".to_vec(), Some(4), 102);
-
+        expected_rewrite += 10 + 1;
+        expected_compacted_rewrite += 5 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 102);
         assert_eq!(memtable.rewrite_count, 25);
         assert_eq!(memtable.get(b"kk3"), Some(b"vv33".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), 55);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 27);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
         // Compact after rewrite.
-        let ents_idx = generate_entry_indexes(
+        // [30, 35) file_num = 102(r)
+        // [35, 50) file_num = 6
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 5
+        memtable.append(generate_entry_indexes(
             35,
             50,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 6,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 6),
+        ));
         memtable.compact_to(30);
-        assert_eq!(memtable.entry_indexes.back().unwrap().index, 49);
+        expected_compacted_rewrite += 20;
+        assert_eq!(memtable.last_index().unwrap(), 49);
         assert_eq!(memtable.rewrite_count, 5);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 55);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 47);
-        memtable.compact_to(40);
-        assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 55);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 52);
-
-        let ents_idx = generate_entry_indexes(
-            30,
-            36,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 103,
-            },
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
         );
+
+        // [40, 50) file_num = 6
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 5
+        memtable.compact_to(40);
+        expected_compacted_rewrite += 5;
+        assert_eq!(memtable.rewrite_count, 0);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
+
+        // [40, 50) file_num = 6
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 103(r)
+        let ents_idx = generate_entry_indexes(30, 36, FileId::new(LogQueue::Rewrite, 103));
         memtable.rewrite(ents_idx, Some(5));
         memtable.rewrite_key(b"kk3".to_vec(), Some(5), 103);
-
+        expected_rewrite += 6 + 1;
+        expected_compacted_rewrite += 6;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 6);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 6);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 103);
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 62);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 58);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
         // Rewrite after cut.
-        let ents_idx = generate_entry_indexes(
+        // [40, 50) file_num = 104(r)
+        // [50, 55) file_num = 7
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 103(r)
+        memtable.append(generate_entry_indexes(
             50,
             55,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 7,
-            },
-        );
-        memtable.append(ents_idx);
-        let ents_idx = generate_entry_indexes(
-            30,
-            50,
-            FileId {
-                queue: LogQueue::Rewrite,
-                seq: 104,
-            },
-        );
+            FileId::new(LogQueue::Append, 7),
+        ));
+        let ents_idx = generate_entry_indexes(30, 50, FileId::new(LogQueue::Rewrite, 104));
         memtable.rewrite(ents_idx, Some(6));
+        expected_rewrite += 20;
+        expected_compacted_rewrite += 10;
         assert_eq!(memtable.rewrite_count, 10);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 82);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 68);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
-        let ents_idx = generate_entry_indexes(
+        // [40, 45) file_num = 104(r)
+        // [45, 50) file_num = 7
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 103(r)
+        memtable.append(generate_entry_indexes(
             45,
             50,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 7,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 7),
+        ));
+        expected_compacted_rewrite += 5;
         assert_eq!(memtable.rewrite_count, 5);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 82);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 73);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
 
-        let ents_idx = generate_entry_indexes(
+        // [40, 50) file_num = 7
+        // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 103(r)
+        memtable.append(generate_entry_indexes(
             40,
             50,
-            FileId {
-                queue: LogQueue::Append,
-                seq: 7,
-            },
-        );
-        memtable.append(ents_idx);
+            FileId::new(LogQueue::Append, 7),
+        ));
+        expected_compacted_rewrite += 5;
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 82);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 78);
+        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
+        assert_eq!(
+            memtable.global_stats.compacted_rewrite_operations(),
+            expected_compacted_rewrite
+        );
+        memtable.consistency_check();
+    }
+
+    #[test]
+    fn test_memtable_merge_rewrite() {
+        let region_id = 7;
+        fn empty_table(id: u64) -> MemTable {
+            MemTable::new(id, Arc::new(GlobalStats::default()))
+        }
+        fn sequence_1(mut memtable: MemTable, on: Option<LogQueue>) -> MemTable {
+            match on {
+                Some(LogQueue::Append) => {
+                    memtable.append(generate_entry_indexes(
+                        0,
+                        10,
+                        FileId::new(LogQueue::Append, 1),
+                    ));
+                    memtable.append(generate_entry_indexes(
+                        7,
+                        15,
+                        FileId::new(LogQueue::Append, 2),
+                    ));
+                    memtable.compact_to(7);
+                }
+                Some(LogQueue::Rewrite) => {
+                    memtable.append_rewrite(generate_entry_indexes(
+                        0,
+                        10,
+                        FileId::new(LogQueue::Rewrite, 1),
+                    ));
+                }
+                None => {
+                    memtable.append(generate_entry_indexes(
+                        0,
+                        10,
+                        FileId::new(LogQueue::Append, 1),
+                    ));
+                    memtable.append(generate_entry_indexes(
+                        7,
+                        15,
+                        FileId::new(LogQueue::Append, 2),
+                    ));
+                    memtable.rewrite(
+                        generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
+                        Some(1),
+                    );
+                }
+            }
+            memtable
+        }
+
+        fn sequence_2(mut memtable: MemTable, on: Option<LogQueue>) -> MemTable {
+            match on {
+                Some(LogQueue::Append) => {
+                    memtable.append(generate_entry_indexes(
+                        0,
+                        10,
+                        FileId::new(LogQueue::Append, 1),
+                    ));
+                    memtable.append(generate_entry_indexes(
+                        7,
+                        15,
+                        FileId::new(LogQueue::Append, 2),
+                    ));
+                    memtable.compact_to(10);
+                }
+                Some(LogQueue::Rewrite) => {
+                    memtable.append_rewrite(generate_entry_indexes(
+                        0,
+                        7,
+                        FileId::new(LogQueue::Rewrite, 1),
+                    ));
+                }
+                None => {
+                    memtable.append(generate_entry_indexes(
+                        0,
+                        10,
+                        FileId::new(LogQueue::Append, 1),
+                    ));
+                    memtable.append(generate_entry_indexes(
+                        7,
+                        15,
+                        FileId::new(LogQueue::Append, 2),
+                    ));
+                    memtable.rewrite(
+                        generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
+                        Some(1),
+                    );
+                    memtable.compact_to(10);
+                }
+            }
+            memtable
+        }
+
+        // merge against empty table.
+        for sequence in [sequence_1, sequence_2] {
+            let mut lhs = empty_table(region_id);
+            let mut rhs = sequence(empty_table(region_id), Some(LogQueue::Rewrite));
+            lhs.merge_rewrite_table(&mut rhs);
+            assert_eq!(
+                lhs.entry_indexes,
+                sequence(empty_table(region_id), Some(LogQueue::Rewrite)).entry_indexes,
+            );
+            assert!(rhs.entry_indexes.is_empty());
+
+            let mut lhs = sequence(empty_table(region_id), Some(LogQueue::Append));
+            let mut rhs = empty_table(region_id);
+            lhs.merge_rewrite_table(&mut rhs);
+            assert_eq!(
+                lhs.entry_indexes,
+                sequence(empty_table(region_id), Some(LogQueue::Append)).entry_indexes
+            );
+            assert!(rhs.entry_indexes.is_empty());
+        }
+
+        for sequence in [sequence_1, sequence_2] {
+            let mut lhs = sequence(empty_table(region_id), Some(LogQueue::Append));
+            let mut rhs = sequence(empty_table(region_id), Some(LogQueue::Rewrite));
+            lhs.merge_rewrite_table(&mut rhs);
+            let expected = sequence(empty_table(region_id), None);
+            // stats could differ.
+            assert_eq!(lhs.entry_indexes, expected.entry_indexes);
+            assert!(rhs.entry_indexes.is_empty());
+        }
     }
 
     #[test]
