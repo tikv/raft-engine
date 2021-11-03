@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use fail::fail_point;
 use fs2::FileExt;
 use log::{debug, info, warn};
 use num_derive::{FromPrimitive, ToPrimitive};
@@ -169,6 +170,10 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn truncate(&mut self) -> Result<()> {
+        fail_point!("active_file::truncate::force", |_| {
+            self.fd.truncate(self.written)?;
+            Ok(())
+        });
         if self.written < self.capacity {
             self.fd.truncate(self.written)?;
             self.capacity = self.written;

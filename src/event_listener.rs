@@ -19,4 +19,7 @@ pub trait EventListener: Sync + Send {
 
     /// Called *after* a log file get purged.
     fn post_purge(&self, _file_id: FileId) {}
+
+    #[cfg(feature = "failpoints")]
+    fn pre_append(&self) {}
 }

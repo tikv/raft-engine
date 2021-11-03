@@ -122,6 +122,12 @@ where
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 for writer in group.iter_mut() {
+                    #[cfg(feature = "failpoints")]
+                    {
+                        for listener in &self.listeners {
+                            listener.pre_append();
+                        }
+                    }
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {

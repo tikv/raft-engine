@@ -58,3 +58,9 @@ members = [ "stress" ]
 name = "bench_recovery"
 harness = false
 required-features = ["failpoints"]
+
+[[test]]
+name = "io_error_test"
+path = "failpoints/io_error_test.rs"
+harness = true
+required-features = ["failpoints"]
