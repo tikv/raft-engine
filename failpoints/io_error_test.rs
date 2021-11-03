@@ -59,12 +59,12 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            bytes_per_sync: bytes_per_sync,
-            target_file_size: target_file_size,
+            bytes_per_sync,
+            target_file_size,
             batch_compression_threshold: ReadableSize(0),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let engine = RaftLogEngine::open(cfg).unwrap();
 
         let entry_data = vec![b'x'; entry_size];
         let mut index = 1;
@@ -156,7 +156,7 @@ mod tests {
             };
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
             drop(engine);
-            let _ = RaftLogEngine::open(cfg.clone()).unwrap();
+            let _ = RaftLogEngine::open(cfg).unwrap();
         })
         .is_err());
         fail::cfg("log_fd::open::err", "off").unwrap();
@@ -199,9 +199,11 @@ mod tests {
         fail::cfg("log_fd::write::err", "off").unwrap();
     }
 
+    type Action = dyn FnOnce() + Send + Sync;
+
     #[derive(Default)]
     struct FailpointsHook {
-        pre_append_action: Arc<RwLock<HashMap<u64, Box<dyn FnOnce() -> () + Send + Sync>>>>,
+        pre_append_action: Arc<RwLock<HashMap<u64, Box<Action>>>>,
         pre_append_timer: AtomicU64,
     }
 
@@ -216,7 +218,7 @@ mod tests {
         fn register_pre_append_action(
             &mut self,
             index: u64,
-            action: impl FnOnce() -> () + Send + Sync + 'static,
+            action: impl FnOnce() + Send + Sync + 'static,
         ) {
             self.pre_append_action
                 .write()
@@ -259,14 +261,14 @@ mod tests {
             fail::cfg("log_fd::write::err", "off").unwrap();
         });
         let hook = Arc::new(hook);
-        let engine = Arc::new(RaftLogEngine::open_with_listeners(cfg.clone(), vec![hook]).unwrap());
+        let engine = Arc::new(RaftLogEngine::open_with_listeners(cfg, vec![hook]).unwrap());
         let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
         let content = vec![b'x'; 1024];
 
         ctx.leader_write(generate_batch(1, 1, 11, Some(content.clone())), false);
         ctx.follower_write(generate_batch(2, 1, 11, Some(content.clone())), false);
-        ctx.follower_write(generate_batch(3, 1, 11, Some(content.clone())), false);
+        ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
         let r = ctx.join();
         assert!(r.len() == 4);
         assert!(r.get(1).unwrap().is_ok());
@@ -319,15 +321,14 @@ mod tests {
                 fail::cfg("log_fd::truncate::err", "off").unwrap();
             });
             let hook = Arc::new(hook);
-            let engine =
-                Arc::new(RaftLogEngine::open_with_listeners(cfg.clone(), vec![hook]).unwrap());
-            let mut ctx = ConcurrentWriteContext::new(engine.clone());
+            let engine = Arc::new(RaftLogEngine::open_with_listeners(cfg, vec![hook]).unwrap());
+            let mut ctx = ConcurrentWriteContext::new(engine);
 
             let content = vec![b'x'; 1024];
 
             ctx.leader_write(generate_batch(1, 1, 11, Some(content.clone())), false);
             ctx.follower_write(generate_batch(2, 1, 11, Some(content.clone())), false);
-            ctx.follower_write(generate_batch(3, 1, 11, Some(content.clone())), false);
+            ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
             ctx.join();
         })
         .is_err());
