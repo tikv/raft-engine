@@ -199,7 +199,7 @@ where
 
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<()> {
-        self.pipe_log.new_log_file(LogQueue::Rewrite)?;
+        self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let memtables = self
             .memtables
@@ -268,12 +268,12 @@ where
     ) -> Result<()> {
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         if len == 0 {
-            return self.pipe_log.sync(LogQueue::Rewrite, sync);
+            return self.pipe_log.maybe_sync(LogQueue::Rewrite, sync);
         }
         let file_handle = self
             .pipe_log
             .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
-        self.pipe_log.sync(LogQueue::Rewrite, sync)?;
+        self.pipe_log.maybe_sync(LogQueue::Rewrite, sync)?;
         log_batch.finish_write(file_handle);
         for item in log_batch.drain() {
             let raft = item.raft_group_id;

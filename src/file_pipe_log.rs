@@ -309,10 +309,9 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(manager)
     }
 
-    fn new_log_file(&mut self) -> Result<()> {
+    fn rotate(&mut self) -> Result<()> {
         debug_assert!(self.active_file_seq >= INIT_FILE_ID);
         // Necessary to truncate extra zeros from fallocate().
-        self.truncate_active_log()?;
         self.active_file.truncate()?;
         self.active_file_seq += 1;
         let path = build_file_path(
@@ -351,10 +350,6 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(())
     }
 
-    fn truncate_active_log(&mut self) -> Result<()> {
-        self.active_file.truncate()
-    }
-
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<LogFd>> {
         if file_seq < self.first_file_seq || file_seq > self.active_file_seq {
             return Err(Error::Io(IoError::new(
@@ -378,7 +373,15 @@ impl<B: FileBuilder> LogManager<B> {
 
     fn append(&mut self, content: &[u8]) -> Result<FileBlockHandle> {
         let offset = self.active_file.written as u64;
-        self.active_file.write(content, self.rotate_size)?;
+        if let Err(e) = self.active_file.write(content, self.rotate_size) {
+            if let Err(te) = self.active_file.truncate() {
+                panic!(
+                    "error when truncate {} after error: {}, get: {}",
+                    self.active_file_seq, e, te
+                );
+            }
+            return Err(e);
+        }
         let handle = FileBlockHandle {
             id: FileId {
                 queue: self.queue,
@@ -647,10 +650,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
         Ok(sequential_replay_machine)
     }
 
-    fn append_bytes(&self, queue: LogQueue, content: &[u8]) -> Result<FileBlockHandle> {
-        self.mut_queue(queue).append(content)
-    }
-
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager<B>> {
         match queue {
             LogQueue::Append => self.appender.read(),
@@ -681,7 +680,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
 
     fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle> {
         let start = Instant::now();
-        let block_handle = self.append_bytes(queue, bytes)?;
+        let block_handle = self.mut_queue(queue).append(bytes)?;
         match queue {
             LogQueue::Rewrite => {
                 LOG_APPEND_TIME_HISTOGRAM_VEC
@@ -697,11 +696,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(block_handle)
     }
 
-    fn truncate(&self, queue: LogQueue) -> Result<()> {
-        self.mut_queue(queue).truncate_active_log()
-    }
-
-    fn sync(&self, queue: LogQueue, force: bool) -> Result<()> {
+    fn maybe_sync(&self, queue: LogQueue, force: bool) -> Result<()> {
         let mut manager = match queue {
             LogQueue::Append => self.appender.write(),
             LogQueue::Rewrite => self.rewriter.write(),
@@ -709,19 +704,19 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
 
         if manager.active_file.written >= manager.rotate_size {
             // need rotate
-            if let Err(e) = manager.new_log_file() {
-                return Err(Error::Severe(format!(
-                    "cannot rotate queue: {:?} when rotating, for there is IO error: {}",
-                    queue, e
-                )));
+            if let Err(e) = manager.rotate() {
+                panic!(
+                    "error when rotate [{:?}:{}]: {}",
+                    queue, manager.active_file_seq, e
+                );
             }
         } else if manager.active_file.since_last_sync() >= manager.bytes_per_sync || force {
             // need sync
             if let Err(e) = manager.sync() {
-                return Err(Error::Severe(format!(
-                    "IO error raised when syncing log: {}",
-                    e,
-                )));
+                panic!(
+                    "error when sync [{:?}:{}]: {}",
+                    queue, manager.active_file_seq, e,
+                );
             }
         }
 
@@ -737,8 +732,8 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         self.get_queue(queue).size()
     }
 
-    fn new_log_file(&self, queue: LogQueue) -> Result<()> {
-        self.mut_queue(queue).new_log_file()
+    fn rotate(&self, queue: LogQueue) -> Result<()> {
+        self.mut_queue(queue).rotate()
     }
 
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
@@ -869,14 +864,14 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let file_handle = pipe_log.append_bytes(queue, &content).unwrap();
-        pipe_log.sync(queue, false).unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 1);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        let file_handle = pipe_log.append_bytes(queue, &content).unwrap();
-        pipe_log.sync(queue, false).unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 3);
@@ -890,13 +885,13 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let file_handle = pipe_log.append_bytes(queue, &s_content).unwrap();
-        pipe_log.sync(queue, false).unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&s_content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
-        let file_handle = pipe_log.append_bytes(queue, &s_content).unwrap();
-        pipe_log.sync(queue, false).unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&s_content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
             file_handle.offset,

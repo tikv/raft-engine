@@ -54,13 +54,18 @@ pub trait PipeLog: Sized {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
 
     /// Write a batch into the append queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if cannot rollback to a consistent state when error.
     fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle>;
 
-    /// Call ftruncate on active log file.
-    fn truncate(&self, queue: LogQueue) -> Result<()>;
-
     /// Sync and rotate the given queue if needed.
-    fn sync(&self, queue: LogQueue, force: bool) -> Result<()>;
+    ///
+    /// # Panics
+    ///
+    /// Panics if sync goes wrong.
+    fn maybe_sync(&self, queue: LogQueue, force: bool) -> Result<()>;
 
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 
@@ -79,7 +84,7 @@ pub trait PipeLog: Sized {
     /// Total size of the given queue.
     fn total_size(&self, queue: LogQueue) -> usize;
 
-    fn new_log_file(&self, queue: LogQueue) -> Result<()>;
+    fn rotate(&self, queue: LogQueue) -> Result<()>;
 
     fn purge_to(&self, file_id: FileId) -> Result<usize>;
 }
