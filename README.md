@@ -67,7 +67,7 @@ Contributions are always welcome! Here are a few tips for making a PR:
 ```
 cargo fmt --all -- --check
 cargo clippy --all --all-targets -- -D clippy::all
-cargo test --features failpoints --all
+cargo test --features failpoints --workspace -- --skip io_error_tests
 cargo test --package raft-engine --test io_error_test --features failpoints -- --test-threads 1
 ```
 
