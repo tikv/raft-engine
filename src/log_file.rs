@@ -122,6 +122,9 @@ impl LogFd {
             written += bytes;
             offset += bytes;
         }
+        fail_point!("log_fd::write::post_err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         Ok(written)
     }
 

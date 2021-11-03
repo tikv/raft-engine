@@ -3,22 +3,19 @@
 
 #[cfg(test)]
 #[cfg(feature = "failpoints")]
-mod tests {
-
-    use parking_lot::{Mutex, RwLock};
+mod io_error_tests {
     use raft::eraftpb::Entry;
     use raft_engine::{
-        Config, Engine as RaftLogEngine, EventListener, LogBatch, MessageExt, ReadableSize, Result,
+        Config, Engine as RaftLogEngine, LogBatch, MessageExt, ReadableSize, Result,
     };
-    use std::collections::HashMap;
     use std::panic;
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
 
     #[derive(Clone)]
-    pub struct MessageExtTyped;
+    pub struct M;
 
-    impl MessageExt for MessageExtTyped {
+    impl MessageExt for M {
         type Entry = Entry;
 
         fn index(e: &Entry) -> u64 {
@@ -42,7 +39,7 @@ mod tests {
             }
             index += 1;
         }
-        batch.add_entries::<MessageExtTyped>(region, &v).unwrap();
+        batch.add_entries::<M>(region, &v).unwrap();
         batch
     }
 
@@ -81,7 +78,6 @@ mod tests {
     struct ConcurrentWriteContext {
         engine: Arc<RaftLogEngine>,
         ths: Vec<std::thread::JoinHandle<()>>,
-        res: Arc<Mutex<Vec<Result<usize>>>>,
     }
 
     impl ConcurrentWriteContext {
@@ -89,53 +85,64 @@ mod tests {
             Self {
                 engine,
                 ths: Vec::new(),
-                res: Arc::new(Mutex::new(Vec::default())),
             }
         }
 
-        fn leader_write(&mut self, mut log_batch: LogBatch, sync: bool) {
+        fn leader_write<F: FnOnce(Result<usize>) + Send + Sync + 'static>(
+            &mut self,
+            mut log_batch: LogBatch,
+            sync: bool,
+            cb: Option<F>,
+        ) {
             if self.ths.is_empty() {
                 fail::cfg("write_barrier::leader_exit", "pause").unwrap();
                 let engine_clone = self.engine.clone();
-                let res = self.res.clone();
                 self.ths.push(
                     std::thread::Builder::new()
                         .spawn(move || {
-                            res.lock()
-                                .push(engine_clone.write(&mut LogBatch::default(), sync));
+                            engine_clone.write(&mut LogBatch::default(), false).unwrap();
                         })
                         .unwrap(),
                 );
             }
             let engine_clone = self.engine.clone();
-            let res = self.res.clone();
             self.ths.push(
                 std::thread::Builder::new()
                     .spawn(move || {
-                        res.lock().push(engine_clone.write(&mut log_batch, sync));
+                        let r = engine_clone.write(&mut log_batch, sync);
+                        if let Some(f) = cb {
+                            f(r)
+                        }
                     })
                     .unwrap(),
             );
         }
 
-        fn follower_write(&mut self, mut log_batch: LogBatch, sync: bool) {
+        fn follower_write<F: FnOnce(Result<usize>) + Send + Sync + 'static>(
+            &mut self,
+            mut log_batch: LogBatch,
+            sync: bool,
+            cb: Option<F>,
+        ) {
+            assert!(self.ths.len() >= 2);
             let engine_clone = self.engine.clone();
-            let res = self.res.clone();
             self.ths.push(
                 std::thread::Builder::new()
                     .spawn(move || {
-                        res.lock().push(engine_clone.write(&mut log_batch, sync));
+                        let r = engine_clone.write(&mut log_batch, sync);
+                        if let Some(f) = cb {
+                            f(r)
+                        }
                     })
                     .unwrap(),
             );
         }
 
-        fn join(&mut self) -> Vec<Result<usize>> {
+        fn join(&mut self) {
             fail::remove("write_barrier::leader_exit");
             for t in self.ths.drain(..) {
                 t.join().unwrap();
             }
-            self.res.lock().drain(..).collect()
         }
     }
 
@@ -199,46 +206,19 @@ mod tests {
         fail::cfg("log_fd::write::err", "off").unwrap();
     }
 
-    type Action = dyn FnOnce() + Send + Sync;
-
-    #[derive(Default)]
-    struct FailpointsHook {
-        pre_append_action: Arc<RwLock<HashMap<u64, Box<Action>>>>,
-        pre_append_timer: AtomicU64,
-    }
-
-    impl FailpointsHook {
-        fn new() -> Self {
-            Self {
-                pre_append_action: Arc::new(RwLock::new(HashMap::default())),
-                pre_append_timer: AtomicU64::new(0),
-            }
-        }
-
-        fn register_pre_append_action(
-            &mut self,
-            index: u64,
-            action: impl FnOnce() + Send + Sync + 'static,
-        ) {
-            self.pre_append_action
-                .write()
-                .insert(index, Box::new(action));
-        }
-    }
-
-    impl EventListener for FailpointsHook {
-        fn pre_append(&self) {
-            let idx = self
-                .pre_append_timer
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if let Some(action) = self.pre_append_action.write().remove(&idx) {
-                action();
-            }
-        }
-    }
-
     #[test]
     fn test_concurrent_write_error() {
+        // b1 success; b2 fail, truncate; b3 success
+        let timer = AtomicU64::new(0);
+        fail::cfg_callback("engine::write::pre", move || {
+            match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                2 => fail::cfg("log_fd::write::post_err", "return").unwrap(),
+                3 => fail::cfg("log_fd::write::post_err", "off").unwrap(),
+                _ => {}
+            }
+        })
+        .unwrap();
+
         // truncate and sync when write error
         let dir = tempfile::Builder::new()
             .prefix("handle_io_error")
@@ -252,52 +232,76 @@ mod tests {
             ..Default::default()
         };
 
-        // b0 (ctx); b1 success; b2 fail, truncate; b3 success
-        let mut hook = FailpointsHook::new();
-        hook.register_pre_append_action(2, || {
-            fail::cfg("log_fd::write::err", "return").unwrap();
-        });
-        hook.register_pre_append_action(3, || {
-            fail::cfg("log_fd::write::err", "off").unwrap();
-        });
-        let hook = Arc::new(hook);
-        let engine = Arc::new(RaftLogEngine::open_with_listeners(cfg, vec![hook]).unwrap());
+        let engine = Arc::new(RaftLogEngine::open(cfg).unwrap());
         let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
         let content = vec![b'x'; 1024];
 
-        ctx.leader_write(generate_batch(1, 1, 11, Some(content.clone())), false);
-        ctx.follower_write(generate_batch(2, 1, 11, Some(content.clone())), false);
-        ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
-        let r = ctx.join();
-        assert!(r.len() == 4);
-        assert!(r.get(1).unwrap().is_ok());
-        assert!(r.get(2).unwrap().is_err());
-        assert!(r.get(3).unwrap().is_ok());
+        ctx.leader_write(
+            generate_batch(1, 1, 11, Some(content.clone())),
+            false,
+            Some(|r: Result<usize>| {
+                assert!(r.is_ok());
+            }),
+        );
+        ctx.follower_write(
+            generate_batch(2, 1, 11, Some(content.clone())),
+            false,
+            Some(|r: Result<usize>| {
+                assert!(r.is_err());
+            }),
+        );
+        ctx.follower_write(
+            generate_batch(3, 1, 11, Some(content)),
+            false,
+            Some(|r: Result<usize>| {
+                assert!(r.is_ok());
+            }),
+        );
+        // ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
+        ctx.join();
         assert_eq!(
             10,
             engine
-                .fetch_entries_to::<MessageExtTyped>(1, 1, 11, None, &mut vec![])
+                .fetch_entries_to::<M>(1, 1, 11, None, &mut vec![])
                 .unwrap()
         );
         assert_eq!(
             0,
             engine
-                .fetch_entries_to::<MessageExtTyped>(2, 1, 11, None, &mut vec![])
+                .fetch_entries_to::<M>(2, 1, 11, None, &mut vec![])
                 .unwrap()
         );
         assert_eq!(
             10,
             engine
-                .fetch_entries_to::<MessageExtTyped>(3, 1, 11, None, &mut vec![])
+                .fetch_entries_to::<M>(3, 1, 11, None, &mut vec![])
                 .unwrap()
         );
+        fail::cfg("engine::write::pre", "off").unwrap();
     }
 
     #[test]
     fn test_concurrent_write_truncate_error() {
+        // truncate and sync when write error
         assert!(panic::catch_unwind(|| {
-            // truncate and sync when write error
+            // b0 (ctx); b1 success; b2 fail, truncate, panic; b3(x)
+            let timer = AtomicU64::new(0);
+            fail::cfg_callback("engine::write::pre", move || {
+                match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    2 => {
+                        fail::cfg("log_fd::write::err", "return").unwrap();
+                        fail::cfg("log_fd::truncate::err", "return").unwrap()
+                    }
+                    3 => {
+                        fail::cfg("log_fd::write::err", "off").unwrap();
+                        fail::cfg("log_fd::truncate::err", "off").unwrap()
+                    }
+                    _ => {}
+                }
+            })
+            .unwrap();
+
             let dir = tempfile::Builder::new()
                 .prefix("handle_io_error")
                 .tempdir()
@@ -310,25 +314,26 @@ mod tests {
                 ..Default::default()
             };
 
-            // b0 (ctx); b1 success; b2 fail, truncate, panic; b3(x)
-            let mut hook = FailpointsHook::new();
-            hook.register_pre_append_action(2, || {
-                fail::cfg("log_fd::write::err", "return").unwrap();
-                fail::cfg("log_fd::truncate::err", "return").unwrap();
-            });
-            hook.register_pre_append_action(3, || {
-                fail::cfg("log_fd::write::err", "off").unwrap();
-                fail::cfg("log_fd::truncate::err", "off").unwrap();
-            });
-            let hook = Arc::new(hook);
-            let engine = Arc::new(RaftLogEngine::open_with_listeners(cfg, vec![hook]).unwrap());
+            let engine = Arc::new(RaftLogEngine::open(cfg).unwrap());
             let mut ctx = ConcurrentWriteContext::new(engine);
 
             let content = vec![b'x'; 1024];
 
-            ctx.leader_write(generate_batch(1, 1, 11, Some(content.clone())), false);
-            ctx.follower_write(generate_batch(2, 1, 11, Some(content.clone())), false);
-            ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
+            ctx.leader_write(
+                generate_batch(1, 1, 11, Some(content.clone())),
+                false,
+                None::<fn(_)>,
+            );
+            ctx.follower_write(
+                generate_batch(2, 1, 11, Some(content.clone())),
+                false,
+                None::<fn(_)>,
+            );
+            ctx.follower_write(
+                generate_batch(3, 1, 11, Some(content)),
+                false,
+                None::<fn(_)>,
+            );
             ctx.join();
         })
         .is_err());

@@ -36,7 +36,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --features failpoints --all --all-targets -- -D clippy::all
       - name: Run tests
-        run: RUST_BACKTRACE=1 cargo test --features failpoints --all --verbose -- --nocapture
+        run: RUST_BACKTRACE=1 cargo test --features failpoints --workspace --verbose -- --nocapture --skip io_error_tests
       - name: Run IO tests
         run: RUST_BACKTRACE=1 cargo test --package raft-engine --test io_error_test --features failpoints -- --test-threads 1
       - name: Run asan tests
