@@ -71,30 +71,6 @@ pub struct GlobalStats {
     compacted_rewrite_operations: AtomicUsize,
 }
 
-impl PartialEq for GlobalStats {
-    fn eq(&self, other: &GlobalStats) -> bool {
-        self.rewrite_operations.load(Ordering::Acquire)
-            == other.rewrite_operations.load(Ordering::Acquire)
-            && self.compacted_rewrite_operations.load(Ordering::Acquire)
-                == other.compacted_rewrite_operations.load(Ordering::Acquire)
-    }
-}
-
-impl std::fmt::Debug for GlobalStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("GlobalStats")
-            .field(
-                "rewrite_operations",
-                &self.rewrite_operations.load(Ordering::Acquire),
-            )
-            .field(
-                "compacted_rewrite_operations",
-                &self.compacted_rewrite_operations.load(Ordering::Acquire),
-            )
-            .finish()
-    }
-}
-
 impl GlobalStats {
     pub fn add_rewrite(&self, count: usize) {
         self.rewrite_operations.fetch_add(count, Ordering::Release);

@@ -57,7 +57,6 @@ impl Default for EntryIndex {
  *                      |                                        |
  *                 first entry                               last entry
  */
-#[derive(Debug, PartialEq)]
 pub struct MemTable {
     region_id: u64,
 
@@ -398,9 +397,10 @@ impl MemTable {
         if self.rewrite_count > 0 {
             let end = self.entry_indexes[self.rewrite_count - 1].index + 1;
             let first = self.entry_indexes.front().unwrap().index;
-            return self.fetch_entries_to(first, end, None, vec_idx);
+            self.fetch_entries_to(first, end, None, vec_idx)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     pub fn fetch_kvs_before(&self, gate: FileSeq, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
@@ -1542,19 +1542,19 @@ mod tests {
             let mut rhs = sequence(empty_table(region_id), Some(LogQueue::Rewrite));
             lhs.merge_rewrite_table(&mut rhs);
             assert_eq!(
-                lhs,
-                sequence(empty_table(region_id), Some(LogQueue::Rewrite))
+                lhs.entry_indexes,
+                sequence(empty_table(region_id), Some(LogQueue::Rewrite)).entry_indexes,
             );
-            assert_eq!(rhs, empty_table(region_id));
+            assert!(rhs.entry_indexes.is_empty());
 
             let mut lhs = sequence(empty_table(region_id), Some(LogQueue::Append));
             let mut rhs = empty_table(region_id);
             lhs.merge_rewrite_table(&mut rhs);
             assert_eq!(
-                lhs,
-                sequence(empty_table(region_id), Some(LogQueue::Append))
+                lhs.entry_indexes,
+                sequence(empty_table(region_id), Some(LogQueue::Append)).entry_indexes
             );
-            assert_eq!(rhs, empty_table(region_id));
+            assert!(rhs.entry_indexes.is_empty());
         }
 
         for sequence in [sequence_1, sequence_2] {
@@ -1564,7 +1564,7 @@ mod tests {
             let expected = sequence(empty_table(region_id), None);
             // stats could differ.
             assert_eq!(lhs.entry_indexes, expected.entry_indexes);
-            assert_eq!(rhs, empty_table(region_id));
+            assert!(rhs.entry_indexes.is_empty());
         }
     }
 
