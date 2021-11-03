@@ -313,6 +313,7 @@ impl<B: FileBuilder> LogManager<B> {
         debug_assert!(self.active_file_seq >= INIT_FILE_ID);
         // Necessary to truncate extra zeros from fallocate().
         self.active_file.truncate()?;
+        self.active_file.sync()?;
         self.active_file_seq += 1;
         let path = build_file_path(
             &self.dir,
