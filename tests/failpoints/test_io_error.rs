@@ -1,19 +1,8 @@
+use crate::util::catch_unwind_silent;
 use raft::eraftpb::Entry;
 use raft_engine::{Config, Engine as RaftLogEngine, LogBatch, MessageExt, ReadableSize, Result};
-use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-
-pub fn catch_unwind_silent<F, R>(f: F) -> std::thread::Result<R>
-where
-    F: FnOnce() -> R,
-{
-    let prev_hook = panic::take_hook();
-    panic::set_hook(Box::new(|_| {}));
-    let result = panic::catch_unwind(AssertUnwindSafe(f));
-    panic::set_hook(prev_hook);
-    result
-}
 
 #[derive(Clone)]
 pub struct M;
@@ -100,6 +89,7 @@ impl ConcurrentWriteContext {
         mut log_batch: LogBatch,
         sync: bool,
         cb: Option<F>,
+        panic: bool,
     ) {
         if self.ths.is_empty() {
             fail::cfg("write_barrier::leader_exit", "pause").unwrap();
@@ -125,6 +115,13 @@ impl ConcurrentWriteContext {
             std::thread::Builder::new()
                 .spawn(move || {
                     while ticket != timer.load(std::sync::atomic::Ordering::Acquire) {}
+                    if panic {
+                        assert!(catch_unwind_silent(|| {
+                            engine_clone.write(&mut log_batch, sync).unwrap();
+                        })
+                        .is_err());
+                        return;
+                    }
                     let r = engine_clone.write(&mut log_batch, sync);
                     timer.store(ticket + 1, std::sync::atomic::Ordering::Release);
                     if let Some(f) = cb {
@@ -140,6 +137,7 @@ impl ConcurrentWriteContext {
         mut log_batch: LogBatch,
         sync: bool,
         cb: Option<F>,
+        panic: bool,
     ) {
         assert!(self.ticket >= 2);
         let engine_clone = self.engine.clone();
@@ -150,6 +148,13 @@ impl ConcurrentWriteContext {
             std::thread::Builder::new()
                 .spawn(move || {
                     while ticket != timer.load(std::sync::atomic::Ordering::Acquire) {}
+                    if panic {
+                        assert!(catch_unwind_silent(|| {
+                            engine_clone.write(&mut log_batch, sync).unwrap();
+                        })
+                        .is_err());
+                        return;
+                    }
                     let r = engine_clone.write(&mut log_batch, sync);
                     if let Some(f) = cb {
                         f(r)
@@ -230,12 +235,12 @@ fn test_rotate_error() {
 
 #[test]
 fn test_concurrent_write_error() {
-    // b1 success; b2 fail, truncate; b3 success
+    // write-1 success; write-2 fail, truncate; write-3 success
     let timer = AtomicU64::new(0);
     fail::cfg_callback("engine::write::pre", move || {
         match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-            2 => fail::cfg("log_fd::write::post_err", "return").unwrap(),
-            3 => fail::cfg("log_fd::write::post_err", "off").unwrap(),
+            2 => fail::cfg("log_fd::write::err", "return").unwrap(),
+            3 => fail::cfg("log_fd::write::err", "off").unwrap(),
             _ => {}
         }
     })
@@ -265,6 +270,7 @@ fn test_concurrent_write_error() {
         Some(|r: Result<usize>| {
             assert!(r.is_ok());
         }),
+        false,
     );
     ctx.follower_write(
         generate_batch(2, 1, 11, Some(content.clone())),
@@ -272,6 +278,7 @@ fn test_concurrent_write_error() {
         Some(|r: Result<usize>| {
             assert!(r.is_err());
         }),
+        false,
     );
     ctx.follower_write(
         generate_batch(3, 1, 11, Some(content)),
@@ -279,6 +286,7 @@ fn test_concurrent_write_error() {
         Some(|r: Result<usize>| {
             assert!(r.is_ok());
         }),
+        false,
     );
     ctx.join();
     assert_eq!(
@@ -305,57 +313,51 @@ fn test_concurrent_write_error() {
 #[test]
 fn test_concurrent_write_truncate_error() {
     // truncate and sync when write error
-    assert!(catch_unwind_silent(|| {
-        // b1 success; b2 fail, truncate, panic; b3 (x)
-        let timer = AtomicU64::new(0);
-        fail::cfg_callback("engine::write::pre", move || {
-            match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-                2 => {
-                    fail::cfg("log_fd::write::err", "return").unwrap();
-                    fail::cfg("log_fd::truncate::err", "return").unwrap()
-                }
-                3 => {
-                    fail::cfg("log_fd::write::err", "off").unwrap();
-                    fail::cfg("log_fd::truncate::err", "off").unwrap()
-                }
-                _ => {}
+    // write-1 success; write-2 fail, truncate, panic; write-3 (x)
+    let timer = AtomicU64::new(0);
+    fail::cfg_callback("engine::write::pre", move || {
+        match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            2 => {
+                fail::cfg("log_fd::write::err", "return").unwrap();
+                fail::cfg("log_fd::truncate::err", "return").unwrap()
             }
-        })
-        .unwrap();
-
-        let dir = tempfile::Builder::new()
-            .prefix("test_concurrent_write_truncate_error")
-            .tempdir()
-            .unwrap();
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            bytes_per_sync: ReadableSize::kb(1024),
-            target_file_size: ReadableSize::kb(1024),
-            batch_compression_threshold: ReadableSize(0),
-            ..Default::default()
-        };
-
-        let engine = Arc::new(RaftLogEngine::open(cfg).unwrap());
-        let mut ctx = ConcurrentWriteContext::new(engine);
-
-        let content = vec![b'x'; 1024];
-
-        ctx.leader_write(
-            generate_batch(1, 1, 11, Some(content.clone())),
-            false,
-            None::<fn(_)>,
-        );
-        ctx.follower_write(
-            generate_batch(2, 1, 11, Some(content.clone())),
-            false,
-            None::<fn(_)>,
-        );
-        ctx.follower_write(
-            generate_batch(3, 1, 11, Some(content)),
-            false,
-            None::<fn(_)>,
-        );
-        ctx.join();
+            3 => {
+                fail::cfg("log_fd::write::err", "off").unwrap();
+                fail::cfg("log_fd::truncate::err", "off").unwrap()
+            }
+            _ => {}
+        }
     })
-    .is_err());
+    .unwrap();
+
+    let dir = tempfile::Builder::new()
+        .prefix("test_concurrent_write_truncate_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        bytes_per_sync: ReadableSize::kb(1024),
+        target_file_size: ReadableSize::kb(1024),
+        batch_compression_threshold: ReadableSize(0),
+        ..Default::default()
+    };
+
+    let engine = Arc::new(RaftLogEngine::open(cfg).unwrap());
+    let mut ctx = ConcurrentWriteContext::new(engine);
+
+    let content = vec![b'x'; 1024];
+
+    ctx.leader_write(
+        generate_batch(1, 1, 11, Some(content.clone())),
+        false,
+        None::<fn(_)>,
+        false,
+    );
+    ctx.follower_write(
+        generate_batch(2, 1, 11, Some(content)),
+        false,
+        Some(|_| unreachable!()),
+        true,
+    );
+    ctx.join();
 }
