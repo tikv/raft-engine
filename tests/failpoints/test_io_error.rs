@@ -81,6 +81,7 @@ fn write_tmp_engine(
 struct ConcurrentWriteContext {
     engine: Arc<RaftLogEngine>,
     ths: Vec<std::thread::JoinHandle<()>>,
+    ticket: u64,
     timer: Arc<AtomicU64>,
 }
 
@@ -89,6 +90,7 @@ impl ConcurrentWriteContext {
         Self {
             engine,
             ths: Vec::new(),
+            ticket: 0,
             timer: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -102,25 +104,29 @@ impl ConcurrentWriteContext {
         if self.ths.is_empty() {
             fail::cfg("write_barrier::leader_exit", "pause").unwrap();
             let engine_clone = self.engine.clone();
+            let ticket = self.ticket;
+            self.ticket += 1;
             let timer = self.timer.clone();
             self.ths.push(
                 std::thread::Builder::new()
                     .spawn(move || {
-                        while 0 != timer.load(std::sync::atomic::Ordering::Acquire) {}
+                        while ticket != timer.load(std::sync::atomic::Ordering::Acquire) {}
                         engine_clone.write(&mut LogBatch::default(), false).unwrap();
-                        timer.store(1, std::sync::atomic::Ordering::Release);
+                        timer.store(ticket + 1, std::sync::atomic::Ordering::Release);
                     })
                     .unwrap(),
             );
         }
         let engine_clone = self.engine.clone();
+        let ticket = self.ticket;
+        self.ticket += 1;
         let timer = self.timer.clone();
         self.ths.push(
             std::thread::Builder::new()
                 .spawn(move || {
-                    while 1 != timer.load(std::sync::atomic::Ordering::Acquire) {}
+                    while ticket != timer.load(std::sync::atomic::Ordering::Acquire) {}
                     let r = engine_clone.write(&mut log_batch, sync);
-                    timer.store(2, std::sync::atomic::Ordering::Release);
+                    timer.store(ticket + 1, std::sync::atomic::Ordering::Release);
                     if let Some(f) = cb {
                         f(r)
                     }
@@ -135,17 +141,20 @@ impl ConcurrentWriteContext {
         sync: bool,
         cb: Option<F>,
     ) {
-        assert!(self.ths.len() == 2);
+        assert!(self.ticket >= 2);
         let engine_clone = self.engine.clone();
+        let ticket = self.ticket;
+        self.ticket += 1;
         let timer = self.timer.clone();
         self.ths.push(
             std::thread::Builder::new()
                 .spawn(move || {
-                    while 2 != timer.load(std::sync::atomic::Ordering::Acquire) {}
+                    while ticket != timer.load(std::sync::atomic::Ordering::Acquire) {}
                     let r = engine_clone.write(&mut log_batch, sync);
                     if let Some(f) = cb {
                         f(r)
                     }
+                    timer.store(ticket + 1, std::sync::atomic::Ordering::Release);
                 })
                 .unwrap(),
         );
@@ -221,12 +230,12 @@ fn test_rotate_error() {
 
 #[test]
 fn test_concurrent_write_error() {
-    // b1 fail, truncate; b2 success
+    // b1 success; b2 fail, truncate; b3 success
     let timer = AtomicU64::new(0);
     fail::cfg_callback("engine::write::pre", move || {
         match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-            1 => fail::cfg("log_fd::write::post_err", "return").unwrap(),
-            2 => fail::cfg("log_fd::write::post_err", "off").unwrap(),
+            2 => fail::cfg("log_fd::write::post_err", "return").unwrap(),
+            3 => fail::cfg("log_fd::write::post_err", "off").unwrap(),
             _ => {}
         }
     })
@@ -254,28 +263,40 @@ fn test_concurrent_write_error() {
         generate_batch(1, 1, 11, Some(content.clone())),
         false,
         Some(|r: Result<usize>| {
+            assert!(r.is_ok());
+        }),
+    );
+    ctx.follower_write(
+        generate_batch(2, 1, 11, Some(content.clone())),
+        false,
+        Some(|r: Result<usize>| {
             assert!(r.is_err());
         }),
     );
     ctx.follower_write(
-        generate_batch(2, 1, 11, Some(content)),
+        generate_batch(3, 1, 11, Some(content)),
         false,
         Some(|r: Result<usize>| {
             assert!(r.is_ok());
         }),
     );
-    // ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
     ctx.join();
     assert_eq!(
-        0,
+        10,
         engine
             .fetch_entries_to::<M>(1, 1, 11, None, &mut vec![])
             .unwrap()
     );
     assert_eq!(
-        10,
+        0,
         engine
             .fetch_entries_to::<M>(2, 1, 11, None, &mut vec![])
+            .unwrap()
+    );
+    assert_eq!(
+        10,
+        engine
+            .fetch_entries_to::<M>(3, 1, 11, None, &mut vec![])
             .unwrap()
     );
     fail::cfg("engine::write::pre", "off").unwrap();
@@ -285,15 +306,15 @@ fn test_concurrent_write_error() {
 fn test_concurrent_write_truncate_error() {
     // truncate and sync when write error
     assert!(catch_unwind_silent(|| {
-        // b1 fail, truncate, panic; b2 (x)
+        // b1 success; b2 fail, truncate, panic; b3 (x)
         let timer = AtomicU64::new(0);
         fail::cfg_callback("engine::write::pre", move || {
             match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-                1 => {
+                2 => {
                     fail::cfg("log_fd::write::err", "return").unwrap();
                     fail::cfg("log_fd::truncate::err", "return").unwrap()
                 }
-                2 => {
+                3 => {
                     fail::cfg("log_fd::write::err", "off").unwrap();
                     fail::cfg("log_fd::truncate::err", "off").unwrap()
                 }
@@ -325,7 +346,12 @@ fn test_concurrent_write_truncate_error() {
             None::<fn(_)>,
         );
         ctx.follower_write(
-            generate_batch(2, 1, 11, Some(content)),
+            generate_batch(2, 1, 11, Some(content.clone())),
+            false,
+            None::<fn(_)>,
+        );
+        ctx.follower_write(
+            generate_batch(3, 1, 11, Some(content)),
             false,
             None::<fn(_)>,
         );
