@@ -87,10 +87,16 @@ impl MemTable {
     /// Mrege from newer neighbor `rhs`.
     /// Only called during parllel recovery.
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
-        assert_eq!(self.region_id, rhs.region_id);
+        debug_assert_eq!(self.region_id, rhs.region_id);
         if let (Some(last), Some(next)) = (self.entry_indexes.back(), rhs.entry_indexes.front()) {
-            assert_eq!(last.index + 1, next.index);
+            assert_eq!(
+                last.index + 1,
+                next.index,
+                "memtable {} has a hole",
+                self.region_id
+            );
         }
+        debug_assert!(rhs.rewrite_count == 0 || self.rewrite_count == self.entry_indexes.len());
         self.entry_indexes.append(&mut rhs.entry_indexes);
         self.rewrite_count += rhs.rewrite_count;
         self.kvs.extend(rhs.kvs.drain());
@@ -102,16 +108,13 @@ impl MemTable {
         debug_assert_eq!(rhs.rewrite_count, rhs.entry_indexes.len());
         debug_assert_eq!(self.rewrite_count, 0);
 
-        if !self.entry_indexes.is_empty() {
-            if !rhs.entry_indexes.is_empty() {
-                let front = self.entry_indexes[0].index;
-                let rewrite_front = rhs.entry_indexes.front().unwrap().index;
-                let rewrite_back = rhs.entry_indexes.back().unwrap().index;
-                if front > rewrite_back + 1 {
-                    rhs.compact_to(rewrite_back + 1);
+        if let Some((first, _)) = self.span() {
+            if let Some((_, rewrite_last)) = rhs.span() {
+                if first > rewrite_last + 1 {
+                    rhs.compact_to(rewrite_last + 1);
                 } else {
-                    assert!(front >= rewrite_front);
-                    rhs.truncate_back(front);
+                    // TODO(tabokie): add test case for first < rewrite_first.
+                    rhs.unsafe_truncate_back(first);
                 }
             }
             rhs.entry_indexes.append(&mut self.entry_indexes);
@@ -172,38 +175,37 @@ impl MemTable {
     }
 
     pub fn get_entry(&self, index: u64) -> Option<EntryIndex> {
-        if self.entry_indexes.is_empty() {
-            return None;
-        }
+        if let Some((first, last)) = self.span() {
+            if index < first || index > last {
+                return None;
+            }
 
-        let first_index = self.entry_indexes.front().unwrap().index;
-        let last_index = self.entry_indexes.back().unwrap().index;
-        if index < first_index || index > last_index {
-            return None;
+            let ioffset = (index - first) as usize;
+            let entry_index = self.entry_indexes[ioffset];
+            Some(entry_index)
+        } else {
+            None
         }
-
-        let ioffset = (index - first_index) as usize;
-        let entry_index = self.entry_indexes[ioffset];
-        Some(entry_index)
     }
 
     pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
         if entry_indexes.is_empty() {
             return;
         }
-
-        let first_index_to_add = entry_indexes[0].index;
-        self.truncate_back(first_index_to_add);
-
-        if let Some(index) = self.entry_indexes.back() {
-            assert_eq!(
-                index.index + 1,
-                first_index_to_add,
+        if let Some((first, last)) = self.span() {
+            let first_index_to_add = entry_indexes[0].index;
+            assert!(
+                first <= first_index_to_add,
+                "corrupted raft {}",
+                self.region_id
+            );
+            assert!(
+                last + 1 >= first_index_to_add,
                 "memtable {} has a hole",
                 self.region_id
             );
+            self.unsafe_truncate_back(first_index_to_add);
         }
-
         self.entry_indexes.extend(entry_indexes);
     }
 
@@ -230,15 +232,14 @@ impl MemTable {
         if rewrite_indexes.is_empty() {
             return;
         }
-        if self.entry_indexes.is_empty() {
+        let len = self.entry_indexes.len();
+        if len == 0 {
             self.global_stats
                 .add_compacted_rewrite(rewrite_indexes.len());
             return;
         }
-
         let first = self.entry_indexes[0].index;
-        let last = self.entry_indexes[self.entry_indexes.len() - 1].index;
-
+        let last = self.entry_indexes[len - 1].index;
         let rewrite_first = std::cmp::max(rewrite_indexes[0].index, first);
         let rewrite_last = std::cmp::min(rewrite_indexes[rewrite_indexes.len() - 1].index, last);
         let rewrite_len = (rewrite_last + 1).saturating_sub(rewrite_first) as usize;
@@ -300,24 +301,21 @@ impl MemTable {
 
     // Removes all entry indexes with index greater than or equal to `index`.
     // Returns the truncated amount.
-    fn truncate_back(&mut self, index: u64) -> usize {
-        if self.entry_indexes.is_empty() {
-            return 0;
+    fn unsafe_truncate_back(&mut self, index: u64) -> usize {
+        if let Some((first, last)) = self.span() {
+            self.entry_indexes
+                .truncate(index.saturating_sub(first) as usize);
+
+            if self.rewrite_count > self.entry_indexes.len() {
+                let compacted_rewrite = self.rewrite_count - self.entry_indexes.len();
+                self.rewrite_count = self.entry_indexes.len();
+                self.global_stats.add_compacted_rewrite(compacted_rewrite);
+            }
+
+            (last + 1).saturating_sub(index) as usize
+        } else {
+            0
         }
-        let first = self.entry_indexes[0].index;
-        let last = self.entry_indexes[self.entry_indexes.len() - 1].index;
-        // Compacted entries can't be overwritten.
-        assert!(first <= index, "corrupted raft {}", self.region_id);
-
-        self.entry_indexes.truncate((index - first) as usize);
-
-        if self.rewrite_count > self.entry_indexes.len() {
-            let compacted_rewrite = self.rewrite_count - self.entry_indexes.len();
-            self.rewrite_count = self.entry_indexes.len();
-            self.global_stats.add_compacted_rewrite(compacted_rewrite);
-        }
-
-        (last + 1).saturating_sub(index) as usize
     }
 
     fn maybe_shrink_entry_indexes(&mut self) {
@@ -338,19 +336,20 @@ impl MemTable {
         if end <= begin {
             return Ok(());
         }
-        if self.entry_indexes.is_empty() {
+        let len = self.entry_indexes.len();
+        if len == 0 {
             return Err(Error::EntryNotFound);
         }
-        let first_index = self.entry_indexes.front().unwrap().index;
-        if begin < first_index {
+        let first = self.entry_indexes[0].index;
+        if begin < first {
             return Err(Error::EntryCompacted);
         }
-        let last_index = self.entry_indexes.back().unwrap().index;
-        if end > last_index + 1 {
+        let last = self.entry_indexes[len - 1].index;
+        if end > last + 1 {
             return Err(Error::EntryNotFound);
         }
 
-        let start_pos = (begin - first_index) as usize;
+        let start_pos = (begin - first) as usize;
         let end_pos = (end - begin) as usize + start_pos;
 
         let (first, second) = slices_in_range(&self.entry_indexes, start_pos, end_pos);
@@ -395,8 +394,8 @@ impl MemTable {
 
     pub fn fetch_rewritten_entry_indexes(&self, vec_idx: &mut Vec<EntryIndex>) -> Result<()> {
         if self.rewrite_count > 0 {
+            let first = self.entry_indexes[0].index;
             let end = self.entry_indexes[self.rewrite_count - 1].index + 1;
-            let first = self.entry_indexes.front().unwrap().index;
             self.fetch_entries_to(first, end, None, vec_idx)
         } else {
             Ok(())
@@ -459,6 +458,19 @@ impl MemTable {
 
     pub fn last_index(&self) -> Option<u64> {
         self.entry_indexes.back().map(|e| e.index)
+    }
+
+    #[inline]
+    fn span(&self) -> Option<(u64, u64)> {
+        let len = self.entry_indexes.len();
+        if len > 0 {
+            Some((
+                self.entry_indexes[0].index,
+                self.entry_indexes[len - 1].index,
+            ))
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]
