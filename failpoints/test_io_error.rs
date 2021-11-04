@@ -81,6 +81,7 @@ fn write_tmp_engine(
 struct ConcurrentWriteContext {
     engine: Arc<RaftLogEngine>,
     ths: Vec<std::thread::JoinHandle<()>>,
+    timer: Arc<AtomicU64>,
 }
 
 impl ConcurrentWriteContext {
@@ -88,6 +89,7 @@ impl ConcurrentWriteContext {
         Self {
             engine,
             ths: Vec::new(),
+            timer: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -100,19 +102,25 @@ impl ConcurrentWriteContext {
         if self.ths.is_empty() {
             fail::cfg("write_barrier::leader_exit", "pause").unwrap();
             let engine_clone = self.engine.clone();
+            let timer = self.timer.clone();
             self.ths.push(
                 std::thread::Builder::new()
                     .spawn(move || {
+                        while 0 != timer.load(std::sync::atomic::Ordering::Acquire) {}
                         engine_clone.write(&mut LogBatch::default(), false).unwrap();
+                        timer.store(1, std::sync::atomic::Ordering::Release);
                     })
                     .unwrap(),
             );
         }
         let engine_clone = self.engine.clone();
+        let timer = self.timer.clone();
         self.ths.push(
             std::thread::Builder::new()
                 .spawn(move || {
+                    while 1 != timer.load(std::sync::atomic::Ordering::Acquire) {}
                     let r = engine_clone.write(&mut log_batch, sync);
+                    timer.store(2, std::sync::atomic::Ordering::Release);
                     if let Some(f) = cb {
                         f(r)
                     }
@@ -127,11 +135,13 @@ impl ConcurrentWriteContext {
         sync: bool,
         cb: Option<F>,
     ) {
-        assert!(self.ths.len() >= 2);
+        assert!(self.ths.len() == 2);
         let engine_clone = self.engine.clone();
+        let timer = self.timer.clone();
         self.ths.push(
             std::thread::Builder::new()
                 .spawn(move || {
+                    while 2 != timer.load(std::sync::atomic::Ordering::Acquire) {}
                     let r = engine_clone.write(&mut log_batch, sync);
                     if let Some(f) = cb {
                         f(r)
