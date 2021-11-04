@@ -1,8 +1,19 @@
 use raft::eraftpb::Entry;
 use raft_engine::{Config, Engine as RaftLogEngine, LogBatch, MessageExt, ReadableSize, Result};
-use std::panic;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+
+pub fn catch_unwind_silent<F, R>(f: F) -> std::thread::Result<R>
+where
+    F: FnOnce() -> R,
+{
+    let prev_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let result = panic::catch_unwind(AssertUnwindSafe(f));
+    panic::set_hook(prev_hook);
+    result
+}
 
 #[derive(Clone)]
 pub struct M;
@@ -141,7 +152,7 @@ impl ConcurrentWriteContext {
 #[test]
 fn test_open_error() {
     fail::cfg("log_fd::open::err", "return").unwrap();
-    assert!(panic::catch_unwind(|| {
+    assert!(catch_unwind_silent(|| {
         let dir = tempfile::Builder::new()
             .prefix("test_open_error")
             .tempdir()
@@ -166,7 +177,7 @@ fn test_rotate_error() {
     // panic when truncate
     fail::cfg("active_file::truncate::force", "return").unwrap();
     fail::cfg("log_fd::truncate::err", "return").unwrap();
-    assert!(panic::catch_unwind(|| {
+    assert!(catch_unwind_silent(|| {
         write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
     })
     .is_err());
@@ -175,7 +186,7 @@ fn test_rotate_error() {
     fail::cfg("active_file::truncate::force", "off").unwrap();
     fail::cfg("log_fd::truncate::err", "off").unwrap();
     fail::cfg("log_fd::sync::err", "return").unwrap();
-    assert!(panic::catch_unwind(|| {
+    assert!(catch_unwind_silent(|| {
         write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
     })
     .is_err());
@@ -183,7 +194,7 @@ fn test_rotate_error() {
     // panic when create file
     fail::cfg("log_fd::sync::err", "off").unwrap();
     fail::cfg("log_fd::create::err", "return").unwrap();
-    assert!(panic::catch_unwind(|| {
+    assert!(catch_unwind_silent(|| {
         write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
     })
     .is_err());
@@ -191,7 +202,7 @@ fn test_rotate_error() {
     // panic when write header
     fail::cfg("log_fd::create::err", "off").unwrap();
     fail::cfg("log_fd::write::err", "return").unwrap();
-    assert!(panic::catch_unwind(|| {
+    assert!(catch_unwind_silent(|| {
         write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
     })
     .is_err());
@@ -276,7 +287,7 @@ fn test_concurrent_write_error() {
 #[test]
 fn test_concurrent_write_truncate_error() {
     // truncate and sync when write error
-    assert!(panic::catch_unwind(|| {
+    assert!(catch_unwind_silent(|| {
         // b0 (ctx); b1 success; b2 fail, truncate, panic; b3(x)
         let timer = AtomicU64::new(0);
         fail::cfg_callback("engine::write::pre", move || {
