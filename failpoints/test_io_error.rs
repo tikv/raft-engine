@@ -211,12 +211,12 @@ fn test_rotate_error() {
 
 #[test]
 fn test_concurrent_write_error() {
-    // b1 success; b2 fail, truncate; b3 success
+    // b1 fail, truncate; b2 success
     let timer = AtomicU64::new(0);
     fail::cfg_callback("engine::write::pre", move || {
         match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-            2 => fail::cfg("log_fd::write::post_err", "return").unwrap(),
-            3 => fail::cfg("log_fd::write::post_err", "off").unwrap(),
+            1 => fail::cfg("log_fd::write::post_err", "return").unwrap(),
+            2 => fail::cfg("log_fd::write::post_err", "off").unwrap(),
             _ => {}
         }
     })
@@ -244,18 +244,11 @@ fn test_concurrent_write_error() {
         generate_batch(1, 1, 11, Some(content.clone())),
         false,
         Some(|r: Result<usize>| {
-            assert!(r.is_ok());
-        }),
-    );
-    ctx.follower_write(
-        generate_batch(2, 1, 11, Some(content.clone())),
-        false,
-        Some(|r: Result<usize>| {
             assert!(r.is_err());
         }),
     );
     ctx.follower_write(
-        generate_batch(3, 1, 11, Some(content)),
+        generate_batch(2, 1, 11, Some(content)),
         false,
         Some(|r: Result<usize>| {
             assert!(r.is_ok());
@@ -264,21 +257,15 @@ fn test_concurrent_write_error() {
     // ctx.follower_write(generate_batch(3, 1, 11, Some(content)), false);
     ctx.join();
     assert_eq!(
-        10,
+        0,
         engine
             .fetch_entries_to::<M>(1, 1, 11, None, &mut vec![])
             .unwrap()
     );
     assert_eq!(
-        0,
-        engine
-            .fetch_entries_to::<M>(2, 1, 11, None, &mut vec![])
-            .unwrap()
-    );
-    assert_eq!(
         10,
         engine
-            .fetch_entries_to::<M>(3, 1, 11, None, &mut vec![])
+            .fetch_entries_to::<M>(2, 1, 11, None, &mut vec![])
             .unwrap()
     );
     fail::cfg("engine::write::pre", "off").unwrap();
@@ -288,15 +275,15 @@ fn test_concurrent_write_error() {
 fn test_concurrent_write_truncate_error() {
     // truncate and sync when write error
     assert!(catch_unwind_silent(|| {
-        // b0 (ctx); b1 success; b2 fail, truncate, panic; b3(x)
+        // b1 fail, truncate, panic; b2 (x)
         let timer = AtomicU64::new(0);
         fail::cfg_callback("engine::write::pre", move || {
             match timer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
-                2 => {
+                1 => {
                     fail::cfg("log_fd::write::err", "return").unwrap();
                     fail::cfg("log_fd::truncate::err", "return").unwrap()
                 }
-                3 => {
+                2 => {
                     fail::cfg("log_fd::write::err", "off").unwrap();
                     fail::cfg("log_fd::truncate::err", "off").unwrap()
                 }
@@ -328,12 +315,7 @@ fn test_concurrent_write_truncate_error() {
             None::<fn(_)>,
         );
         ctx.follower_write(
-            generate_batch(2, 1, 11, Some(content.clone())),
-            false,
-            None::<fn(_)>,
-        );
-        ctx.follower_write(
-            generate_batch(3, 1, 11, Some(content)),
+            generate_batch(2, 1, 11, Some(content)),
             false,
             None::<fn(_)>,
         );
