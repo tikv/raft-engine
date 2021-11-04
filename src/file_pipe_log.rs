@@ -709,7 +709,6 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         };
 
         if manager.active_file.written >= manager.rotate_size {
-            // need rotate
             if let Err(e) = manager.rotate() {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
@@ -717,7 +716,6 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
                 );
             }
         } else if manager.active_file.since_last_sync() >= manager.bytes_per_sync || force {
-            // need sync
             if let Err(e) = manager.sync() {
                 panic!(
                     "error when sync [{:?}:{}]: {}",
