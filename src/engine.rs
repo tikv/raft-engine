@@ -273,6 +273,16 @@ where
             v
         })
     }
+
+    pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
+        self.pipe_log.file_span(queue)
+    }
+}
+
+impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
+    pub fn consistency_check(path: &std::path::Path) -> Result<Vec<(u64, u64)>> {
+        Self::consistency_check_with(path, Arc::new(DefaultFileBuilder {}))
+    }
 }
 
 impl<B> Engine<B, FilePipeLog<B>>
@@ -281,7 +291,7 @@ where
 {
     /// Returns a list of corrupted Raft groups, including their id and last unaffected
     /// log index. Head or tail corruption might not be detected.
-    pub fn consistency_check(
+    pub fn consistency_check_with(
         path: &std::path::Path,
         file_builder: Arc<B>,
     ) -> Result<Vec<(u64, u64)>> {
@@ -297,7 +307,7 @@ where
             map.entry(id).or_insert(index);
         }
         let mut list: Vec<(u64, u64)> = map.into_iter().collect();
-        list.sort();
+        list.sort_unstable();
         Ok(list)
     }
 }
@@ -324,7 +334,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::catch_unwind_silent;
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
@@ -332,7 +341,7 @@ mod tests {
     type RaftLogEngine = Engine;
     impl RaftLogEngine {
         fn append(&self, raft_group_id: u64, entries: &[Entry]) {
-            if entries.len() > 0 {
+            if !entries.is_empty() {
                 let mut batch = LogBatch::default();
                 batch.add_entries::<Entry>(raft_group_id, entries).unwrap();
                 batch
@@ -694,187 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "failpoints")]
-    fn test_pipe_log_listeners() {
-        use std::collections::HashMap;
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-        use std::time::Duration;
-
-        #[derive(Default)]
-        struct QueueHook {
-            files: AtomicUsize,
-            appends: AtomicUsize,
-            applys: AtomicUsize,
-            purged: AtomicU64,
-        }
-
-        impl QueueHook {
-            fn files(&self) -> usize {
-                self.files.load(Ordering::Acquire)
-            }
-            fn appends(&self) -> usize {
-                self.appends.load(Ordering::Acquire)
-            }
-            fn applys(&self) -> usize {
-                self.applys.load(Ordering::Acquire)
-            }
-            fn purged(&self) -> u64 {
-                self.purged.load(Ordering::Acquire)
-            }
-        }
-
-        struct Hook(HashMap<LogQueue, QueueHook>);
-        impl Default for Hook {
-            fn default() -> Hook {
-                let mut hash = HashMap::default();
-                hash.insert(LogQueue::Append, QueueHook::default());
-                hash.insert(LogQueue::Rewrite, QueueHook::default());
-                Hook(hash)
-            }
-        }
-
-        impl EventListener for Hook {
-            fn post_new_log_file(&self, id: FileId) {
-                self.0[&id.queue].files.fetch_add(1, Ordering::Release);
-            }
-
-            fn on_append_log_file(&self, handle: FileBlockHandle) {
-                self.0[&handle.id.queue]
-                    .appends
-                    .fetch_add(1, Ordering::Release);
-            }
-
-            fn post_apply_memtables(&self, id: FileId) {
-                self.0[&id.queue].applys.fetch_add(1, Ordering::Release);
-            }
-
-            fn post_purge(&self, id: FileId) {
-                self.0[&id.queue].purged.store(id.seq, Ordering::Release);
-            }
-        }
-
-        let dir = tempfile::Builder::new()
-            .prefix("test_pipe_log_listeners")
-            .tempdir()
-            .unwrap();
-
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::kb(128),
-            purge_threshold: ReadableSize::kb(512),
-            batch_compression_threshold: ReadableSize::kb(0),
-            ..Default::default()
-        };
-
-        let hook = Arc::new(Hook::default());
-        let engine =
-            Arc::new(RaftLogEngine::open_with_listeners(cfg.clone(), vec![hook.clone()]).unwrap());
-        assert_eq!(hook.0[&LogQueue::Append].files(), 1);
-        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 1);
-
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 64 * 1024].into());
-
-        // Append 10 logs for region 1, 10 logs for region 2.
-        for i in 1..=20 {
-            let region_id = (i as u64 - 1) % 2 + 1;
-            entry.set_index((i as u64 + 1) / 2);
-            engine.append_one(region_id, &entry);
-            assert_eq!(hook.0[&LogQueue::Append].appends(), i);
-            assert_eq!(hook.0[&LogQueue::Append].applys(), i);
-        }
-        assert_eq!(hook.0[&LogQueue::Append].files(), 10);
-
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
-        engine.purge_manager.purge_expired_files().unwrap();
-        assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
-
-        // All things in a region will in one write batch.
-        assert_eq!(hook.0[&LogQueue::Rewrite].files(), 2);
-        assert_eq!(hook.0[&LogQueue::Rewrite].appends(), 2);
-        assert_eq!(hook.0[&LogQueue::Rewrite].applys(), 2);
-
-        // Append 5 logs for region 1, 5 logs for region 2.
-        for i in 21..=30 {
-            let region_id = (i as u64 - 1) % 2 + 1;
-            entry.set_index((i as u64 + 1) / 2);
-            engine.append_one(region_id, &entry);
-            assert_eq!(hook.0[&LogQueue::Append].appends(), i);
-            assert_eq!(hook.0[&LogQueue::Append].applys(), i);
-        }
-        // Compact so that almost all content of rewrite queue will become garbage.
-        engine.compact_to(1, 14);
-        engine.compact_to(2, 14);
-        assert_eq!(hook.0[&LogQueue::Append].appends(), 32);
-        assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
-
-        engine.purge_manager.purge_expired_files().unwrap();
-        assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
-        assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 2);
-
-        // Write region 3 without applying.
-        let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";
-        fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
-        let engine_clone = engine.clone();
-        let mut entry_clone = entry.clone();
-        let th = std::thread::spawn(move || {
-            entry_clone.set_index(1);
-            engine_clone.append_one(3, &entry_clone);
-        });
-
-        // Sleep a while to wait the log batch `Append(3, [1])` to get written.
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(hook.0[&LogQueue::Append].appends(), 33);
-        let file_not_applied = engine.pipe_log.file_span(LogQueue::Append).1;
-        assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
-
-        for i in 31..=40 {
-            let region_id = (i as u64 - 1) % 2 + 1;
-            entry.set_index((i as u64 + 1) / 2);
-            engine.append_one(region_id, &entry);
-            assert_eq!(hook.0[&LogQueue::Append].appends(), i + 3);
-            assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
-        }
-
-        // Can't purge because region 3 is not yet applied.
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
-        engine.purge_manager.purge_expired_files().unwrap();
-        let first = engine.pipe_log.file_span(LogQueue::Append).0;
-        assert_eq!(file_not_applied, first);
-
-        // Resume write on region 3.
-        fail::remove(apply_memtable_region_3_fp);
-        th.join().unwrap();
-
-        std::thread::sleep(Duration::from_millis(200));
-        engine.purge_manager.purge_expired_files().unwrap();
-        let new_first = engine.pipe_log.file_span(LogQueue::Append).0;
-        assert_ne!(file_not_applied, new_first);
-
-        // Drop and then recover.
-        drop(engine);
-
-        let hook = Arc::new(Hook::default());
-        let engine = RaftLogEngine::open_with_listeners(cfg, vec![hook.clone()]).unwrap();
-        assert_eq!(
-            hook.0[&LogQueue::Append].files() as u64,
-            engine.pipe_log.file_span(LogQueue::Append).1
-                - engine.pipe_log.file_span(LogQueue::Append).0
-                + 1
-        );
-        assert_eq!(
-            hook.0[&LogQueue::Rewrite].files() as u64,
-            engine.pipe_log.file_span(LogQueue::Rewrite).1
-                - engine.pipe_log.file_span(LogQueue::Rewrite).0
-                + 1
-        );
-    }
-
-    #[test]
     fn test_empty_protobuf_message() {
         let dir = tempfile::Builder::new()
             .prefix("test_empty_protobuf_message")
@@ -931,161 +759,5 @@ mod tests {
                 .unwrap(),
             empty_state
         );
-    }
-
-    #[cfg(feature = "failpoints")]
-    struct ConcurrentWriteContext {
-        engine: Arc<RaftLogEngine>,
-        ths: Vec<std::thread::JoinHandle<()>>,
-    }
-
-    #[cfg(feature = "failpoints")]
-    impl ConcurrentWriteContext {
-        fn new(engine: Arc<RaftLogEngine>) -> Self {
-            Self {
-                engine,
-                ths: Vec::new(),
-            }
-        }
-
-        fn leader_write(&mut self, mut log_batch: LogBatch) {
-            if self.ths.is_empty() {
-                fail::cfg("write_barrier::leader_exit", "pause").unwrap();
-                let engine_clone = self.engine.clone();
-                self.ths.push(
-                    std::thread::Builder::new()
-                        .spawn(move || {
-                            engine_clone.write(&mut LogBatch::default(), true).unwrap();
-                        })
-                        .unwrap(),
-                );
-            }
-            let engine_clone = self.engine.clone();
-            self.ths.push(
-                std::thread::Builder::new()
-                    .spawn(move || {
-                        engine_clone.write(&mut log_batch, true).unwrap();
-                    })
-                    .unwrap(),
-            );
-        }
-
-        fn follower_write(&mut self, mut log_batch: LogBatch) {
-            assert!(self.ths.len() == 2);
-            let engine_clone = self.engine.clone();
-            self.ths.push(
-                std::thread::Builder::new()
-                    .spawn(move || {
-                        engine_clone.write(&mut log_batch, true).unwrap();
-                    })
-                    .unwrap(),
-            );
-        }
-
-        fn join(&mut self) {
-            fail::remove("write_barrier::leader_exit");
-            for t in self.ths.drain(..) {
-                t.join().unwrap();
-            }
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "failpoints")]
-    fn test_concurrent_write_empty_log_batch() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_concurrent_write_empty_log_batch")
-            .tempdir()
-            .unwrap();
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            ..Default::default()
-        };
-        let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
-        let mut ctx = ConcurrentWriteContext::new(engine.clone());
-
-        let some_entries = vec![
-            Entry::new(),
-            Entry {
-                index: 1,
-                ..Default::default()
-            },
-        ];
-
-        ctx.leader_write(LogBatch::default());
-        let mut log_batch = LogBatch::default();
-        log_batch.add_entries::<Entry>(1, &some_entries).unwrap();
-        ctx.follower_write(log_batch);
-        ctx.join();
-
-        let mut log_batch = LogBatch::default();
-        log_batch.add_entries::<Entry>(2, &some_entries).unwrap();
-        ctx.leader_write(log_batch);
-        ctx.follower_write(LogBatch::default());
-        ctx.join();
-        drop(ctx);
-        drop(engine);
-
-        let engine = RaftLogEngine::open(cfg).unwrap();
-        let mut entries = Vec::new();
-        engine
-            .fetch_entries_to::<Entry>(
-                1,    /*region*/
-                0,    /*begin*/
-                2,    /*end*/
-                None, /*max_size*/
-                &mut entries,
-            )
-            .unwrap();
-        assert_eq!(entries, some_entries);
-        entries.clear();
-        engine
-            .fetch_entries_to::<Entry>(
-                2,    /*region*/
-                0,    /*begin*/
-                2,    /*end*/
-                None, /*max_size*/
-                &mut entries,
-            )
-            .unwrap();
-        assert_eq!(entries, some_entries);
-    }
-
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn test_consistency_tools() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_consistency_tools1")
-            .tempdir()
-            .unwrap();
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize(128),
-            ..Default::default()
-        };
-        let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 128].into());
-        for index in 1..=100 {
-            entry.set_index(index);
-            for rid in 1..=10 {
-                if index == rid * rid {
-                    fail::cfg("log_batch::corrupted_items", "return").unwrap();
-                }
-                engine.append_one(rid, &entry);
-                if index == rid * rid {
-                    fail::remove("log_batch::corrupted_items");
-                }
-            }
-        }
-        drop(engine);
-
-        let ids =
-            RaftLogEngine::consistency_check(dir.path(), Arc::new(DefaultFileBuilder {})).unwrap();
-        for (id, index) in ids.iter() {
-            assert_eq!(id * id, index + 1);
-        }
-
-        assert!(catch_unwind_silent(|| RaftLogEngine::open(cfg.clone()).unwrap()).is_err());
     }
 }

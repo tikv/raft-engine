@@ -8,6 +8,17 @@ edition = "2018"
 name = "append-compact-purge"
 path = "examples/append_compact_purge.rs"
 
+[[test]]
+name = "failpoints"
+path = "tests/failpoints/mod.rs"
+required-features = ["failpoints"]
+
+[[bench]]
+name = "benches"
+path = "tests/benches/mod.rs"
+harness = false
+required-features = ["failpoints"]
+
 [dependencies]
 byteorder = "1.2"
 crc32fast = "1.2"
@@ -53,8 +64,3 @@ protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82
 
 [workspace]
 members = [ "stress" ]
-
-[[bench]]
-name = "bench_recovery"
-harness = false
-required-features = ["failpoints"]
