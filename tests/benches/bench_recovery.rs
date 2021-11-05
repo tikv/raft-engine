@@ -1,18 +1,14 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, BenchmarkId, Criterion};
 use raft::eraftpb::Entry;
 use raft_engine::ReadableSize;
-use raft_engine::{Config as EngineConfig, Engine as RaftLogEngine, LogBatch, MessageExt, Result};
+use raft_engine::{Config as EngineConfig, Engine, LogBatch, MessageExt, Result};
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use tempfile::TempDir;
-
-extern crate libc;
-
-type Engine = RaftLogEngine;
 
 #[derive(Clone)]
 struct MessageExtTyped;
@@ -187,4 +183,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = bench_recovery
 }
-criterion_main!(benches);
