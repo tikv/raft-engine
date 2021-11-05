@@ -8,11 +8,11 @@ use std::u64;
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
-use crate::config::Config;
+use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
-use crate::file_pipe_log::{FilePipeLog, ReplayMachine};
+use crate::file_pipe_log::FilePipeLog;
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
@@ -279,21 +279,26 @@ impl<B> Engine<B, FilePipeLog<B>>
 where
     B: FileBuilder,
 {
-    /// Return a list of corrupted Raft groups, including their id and last unaffected
-    /// log index.
-    pub fn consistency_check(cfg: Config, file_builder: Arc<B>) -> Result<Vec<(u64, u64)>> {
-        let (_, mut append, rewrite) =
+    /// Returns a list of corrupted Raft groups, including their id and last unaffected
+    /// log index. Head or tail corruption might not be detected.
+    pub fn consistency_check(
+        path: &std::path::Path,
+        file_builder: Arc<B>,
+    ) -> Result<Vec<(u64, u64)>> {
+        let cfg = Config {
+            dir: path.to_str().unwrap().to_owned(),
+            recovery_mode: RecoveryMode::TolerateAnyCorruption,
+            ..Default::default()
+        };
+        let (_, append, rewrite) =
             FilePipeLog::open::<ConsistencyChecker>(&cfg, file_builder, vec![])?;
-        append.merge(rewrite, LogQueue::Rewrite)?;
-        Ok(append.finish())
-    }
-
-    pub fn unsafe_truncate_raft_groups(
-        _cfg: Config,
-        _file_builder: Arc<B>,
-        _raft_groups: Vec<(u64, Option<u64>)>,
-    ) -> Result<()> {
-        todo!()
+        let mut map = rewrite.finish();
+        for (id, index) in append.finish() {
+            map.entry(id).or_insert(index);
+        }
+        let mut list: Vec<(u64, u64)> = map.into_iter().collect();
+        list.sort();
+        Ok(list)
     }
 }
 
@@ -319,43 +324,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::catch_unwind_silent;
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
     type RaftLogEngine = Engine;
     impl RaftLogEngine {
-        fn append(&self, raft_group_id: u64, entries: &[Entry]) -> Result<usize> {
-            let mut batch = LogBatch::default();
-            batch.add_entries::<Entry>(raft_group_id, entries)?;
-            self.write(&mut batch, false)
+        fn append(&self, raft_group_id: u64, entries: &[Entry]) {
+            if entries.len() > 0 {
+                let mut batch = LogBatch::default();
+                batch.add_entries::<Entry>(raft_group_id, entries).unwrap();
+                batch
+                    .put_message(
+                        raft_group_id,
+                        b"last_index".to_vec(),
+                        &RaftLocalState {
+                            last_index: entries[entries.len() - 1].index,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                self.write(&mut batch, true).unwrap();
+            }
         }
-    }
 
-    fn append_log(engine: &RaftLogEngine, raft: u64, entry: &Entry) {
-        let mut log_batch = LogBatch::default();
-        log_batch
-            .add_entries::<Entry>(raft, &[entry.clone()])
-            .unwrap();
-        log_batch
-            .put_message(
-                raft,
-                b"last_index".to_vec(),
-                &RaftLocalState {
-                    last_index: entry.index,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        engine.write(&mut log_batch, false).unwrap();
-    }
+        fn append_one(&self, raft_group_id: u64, entry: &Entry) {
+            self.append(raft_group_id, &[entry.clone()])
+        }
 
-    fn last_index(engine: &RaftLogEngine, raft: u64) -> u64 {
-        engine
-            .get_message::<RaftLocalState>(raft, b"last_index")
-            .unwrap()
-            .unwrap()
-            .last_index
+        fn last_index_slow(&self, raft_group_id: u64) -> u64 {
+            self.get_message::<RaftLocalState>(raft_group_id, b"last_index")
+                .unwrap()
+                .unwrap()
+                .last_index
+        }
     }
 
     #[test]
@@ -373,7 +376,7 @@ mod tests {
         };
         let engine = RaftLogEngine::open(cfg).unwrap();
 
-        append_log(&engine, 1, &Entry::new());
+        engine.append_one(1, &Entry::new());
         assert!(engine.memtables.get(1).is_some());
 
         let mut log_batch = LogBatch::default();
@@ -402,9 +405,9 @@ mod tests {
             entry.set_data(vec![b'x'; entry_size].into());
             for i in 10..20 {
                 entry.set_index(i);
-                engine.append(i, &[entry.clone()]).unwrap();
+                engine.append_one(i, &entry);
                 entry.set_index(i + 1);
-                engine.append(i, &[entry.clone()]).unwrap();
+                engine.append_one(i, &entry);
             }
 
             for i in 10..20 {
@@ -461,7 +464,7 @@ mod tests {
         entry.set_data(vec![b'x'; 1024].into());
         for i in 0..100 {
             entry.set_index(i);
-            append_log(&engine, 1, &entry);
+            engine.append_one(1, &entry);
         }
 
         // GC all log entries. Won't trigger purge because total size is not enough.
@@ -474,7 +477,7 @@ mod tests {
         // Append more logs to make total size greater than `purge_threshold`.
         for i in 100..250 {
             entry.set_index(i);
-            append_log(&engine, 1, &entry);
+            engine.append_one(1, &entry);
         }
 
         // GC first 101 log entries.
@@ -532,7 +535,7 @@ mod tests {
         for i in 1..=10 {
             for j in 1..=10 {
                 entry.set_index(i);
-                append_log(&engine, j, &entry);
+                engine.append_one(j, &entry);
             }
         }
 
@@ -551,7 +554,7 @@ mod tests {
             for j in 1..=10 {
                 let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
                 assert_eq!(e.get_data(), entry.get_data());
-                assert_eq!(last_index(&engine, j), 10);
+                assert_eq!(engine.last_index_slow(j), 10);
             }
         }
 
@@ -566,7 +569,7 @@ mod tests {
             for j in 1..=10 {
                 let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
                 assert_eq!(e.get_data(), entry.get_data());
-                assert_eq!(last_index(&engine, j), 10);
+                assert_eq!(engine.last_index_slow(j), 10);
             }
         }
 
@@ -574,7 +577,7 @@ mod tests {
         for i in 11..=20 {
             for j in 1..=10 {
                 entry.set_index(i);
-                append_log(&engine, j, &entry);
+                engine.append_one(j, &entry);
             }
         }
 
@@ -607,7 +610,7 @@ mod tests {
         // entries[1..10], Clean, entries[2..11]
         for j in 1..=10 {
             entry.set_index(j);
-            append_log(&engine, 1, &entry);
+            engine.append_one(1, &entry);
         }
         let mut log_batch = LogBatch::with_capacity(1);
         log_batch.add_command(1, Command::Clean);
@@ -617,7 +620,7 @@ mod tests {
         entry.set_data(vec![b'y'; 1024].into());
         for j in 2..=11 {
             entry.set_index(j);
-            append_log(&engine, 1, &entry);
+            engine.append_one(1, &entry);
         }
 
         assert_eq!(engine.pipe_log.file_span(LogQueue::Append).1, 1);
@@ -626,7 +629,7 @@ mod tests {
         for i in 2..64 {
             for j in 1..=10 {
                 entry.set_index(j);
-                append_log(&engine, i, &entry);
+                engine.append_one(i, &entry);
             }
         }
 
@@ -662,7 +665,7 @@ mod tests {
         for i in 64..=128 {
             for j in 1..=10 {
                 entry.set_index(j);
-                append_log(&engine, i, &entry);
+                engine.append_one(i, &entry);
             }
         }
 
@@ -776,7 +779,7 @@ mod tests {
         for i in 1..=20 {
             let region_id = (i as u64 - 1) % 2 + 1;
             entry.set_index((i as u64 + 1) / 2);
-            append_log(&engine, region_id, &entry);
+            engine.append_one(region_id, &entry);
             assert_eq!(hook.0[&LogQueue::Append].appends(), i);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i);
         }
@@ -797,7 +800,7 @@ mod tests {
         for i in 21..=30 {
             let region_id = (i as u64 - 1) % 2 + 1;
             entry.set_index((i as u64 + 1) / 2);
-            append_log(&engine, region_id, &entry);
+            engine.append_one(region_id, &entry);
             assert_eq!(hook.0[&LogQueue::Append].appends(), i);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i);
         }
@@ -818,7 +821,7 @@ mod tests {
         let mut entry_clone = entry.clone();
         let th = std::thread::spawn(move || {
             entry_clone.set_index(1);
-            append_log(&engine_clone, 3, &entry_clone);
+            engine_clone.append_one(3, &entry_clone);
         });
 
         // Sleep a while to wait the log batch `Append(3, [1])` to get written.
@@ -830,7 +833,7 @@ mod tests {
         for i in 31..=40 {
             let region_id = (i as u64 - 1) % 2 + 1;
             entry.set_index((i as u64 + 1) / 2);
-            append_log(&engine, region_id, &entry);
+            engine.append_one(region_id, &entry);
             assert_eq!(hook.0[&LogQueue::Append].appends(), i + 3);
             assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
         }
@@ -1046,5 +1049,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(entries, some_entries);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn test_consistency_tools() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_consistency_tools1")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(128),
+            ..Default::default()
+        };
+        let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
+        let mut entry = Entry::new();
+        entry.set_data(vec![b'x'; 128].into());
+        for index in 1..=100 {
+            entry.set_index(index);
+            for rid in 1..=10 {
+                if index == rid * rid {
+                    fail::cfg("log_batch::corrupted_items", "return").unwrap();
+                }
+                engine.append_one(rid, &entry);
+                if index == rid * rid {
+                    fail::remove("log_batch::corrupted_items");
+                }
+            }
+        }
+        drop(engine);
+
+        let ids =
+            RaftLogEngine::consistency_check(dir.path(), Arc::new(DefaultFileBuilder {})).unwrap();
+        for (id, index) in ids.iter() {
+            assert_eq!(id * id, index + 1);
+        }
+
+        assert!(catch_unwind_silent(|| RaftLogEngine::open(cfg.clone()).unwrap()).is_err());
     }
 }
