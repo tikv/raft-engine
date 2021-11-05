@@ -37,8 +37,8 @@ jobs:
         run: cargo clippy --features failpoints --all --all-targets -- -D clippy::all
       - name: Run tests
         run: |
-          cargo test --features failpoints --all --verbose
-          cargo test --test failpoints --features failpoints -- --test-threads 1 --nocapture
+          cargo test --all --verbose
+          cargo test --test failpoints --features failpoints --verbose -- --test-threads 1 --nocapture
         env:
           RUST_BACKTRACE: 1
       - name: Run asan tests
@@ -67,7 +67,7 @@ jobs:
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
       - name: Run tests
         run: |
-          cargo test --features failpoints --all --verbose
+          cargo test --all --verbose
           cargo test --test failpoints --features failpoints -- --test-threads 1 --nocapture
         env:
           RUSTFLAGS: '-Zinstrument-coverage'
