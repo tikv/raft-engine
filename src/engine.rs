@@ -80,11 +80,8 @@ where
         let pipe_log = Arc::new(pipe_log);
         info!("Recovering raft logs takes {:?}", start.elapsed());
 
+        append.merge_rewrite_context(rewrite);
         let (memtables, global_stats) = append.finish();
-        let (mut memtables_rewrite, rewrite_stats) = rewrite.finish();
-        global_stats.merge(&rewrite_stats);
-
-        memtables.merge_rewrite_table(&mut memtables_rewrite);
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
@@ -172,12 +169,6 @@ where
     pub fn sync(&self) -> Result<()> {
         // TODO(tabokie): use writer.
         self.pipe_log.sync(LogQueue::Append)
-    }
-
-    pub fn put_message<S: Message>(&self, region_id: u64, key: &[u8], m: &S) -> Result<()> {
-        let mut log_batch = LogBatch::default();
-        log_batch.put_message(region_id, key.to_vec(), m)?;
-        self.write(&mut log_batch, false).map(|_| ())
     }
 
     pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
@@ -281,7 +272,7 @@ where
 
 impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
     pub fn consistency_check(path: &std::path::Path) -> Result<Vec<(u64, u64)>> {
-        Self::consistency_check_with(path, Arc::new(DefaultFileBuilder {}))
+        Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder {}))
     }
 }
 
@@ -291,7 +282,7 @@ where
 {
     /// Returns a list of corrupted Raft groups, including their id and last unaffected
     /// log index. Head or tail corruption might not be detected.
-    pub fn consistency_check_with(
+    pub fn consistency_check_with_file_builder(
         path: &std::path::Path,
         file_builder: Arc<B>,
     ) -> Result<Vec<(u64, u64)>> {
@@ -334,19 +325,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
 
-    type RaftLogEngine = Engine;
-    impl RaftLogEngine {
-        fn append(&self, raft_group_id: u64, entries: &[Entry]) {
+    type RaftLogEngine<B = DefaultFileBuilder> = Engine<B>;
+    impl<B: FileBuilder> RaftLogEngine<B> {
+        fn append(&self, rid: u64, start_index: u64, end_index: u64, data: Option<&[u8]>) {
+            let entries = generate_entries(start_index, end_index, data);
             if !entries.is_empty() {
                 let mut batch = LogBatch::default();
-                batch.add_entries::<Entry>(raft_group_id, entries).unwrap();
+                batch.add_entries::<Entry>(rid, &entries).unwrap();
                 batch
                     .put_message(
-                        raft_group_id,
+                        rid,
                         b"last_index".to_vec(),
                         &RaftLocalState {
                             last_index: entries[entries.len() - 1].index,
@@ -358,109 +351,373 @@ mod tests {
             }
         }
 
-        fn append_one(&self, raft_group_id: u64, entry: &Entry) {
-            self.append(raft_group_id, &[entry.clone()])
+        fn get(&self, rid: u64, key: &[u8]) -> Option<Vec<u8>> {
+            if let Some(memtable) = self.memtables.get(rid) {
+                if let Some(value) = memtable.read().get(key) {
+                    return Some(value);
+                }
+            }
+            None
         }
 
-        fn last_index_slow(&self, raft_group_id: u64) -> u64 {
-            self.get_message::<RaftLocalState>(raft_group_id, b"last_index")
-                .unwrap()
-                .unwrap()
-                .last_index
+        fn clean(&self, rid: u64) {
+            let mut log_batch = LogBatch::default();
+            log_batch.add_command(rid, Command::Clean);
+            self.write(&mut log_batch, true).unwrap();
         }
-    }
 
-    #[test]
-    fn test_clean_memtable() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_clean_memtable")
-            .tempdir()
+        fn last_index_slow(&self, rid: u64) -> Option<u64> {
+            let mem = self.last_index(rid);
+            let disk = self
+                .get_message::<RaftLocalState>(rid, b"last_index")
+                .unwrap()
+                .map(|s| s.last_index);
+            assert_eq!(mem, disk);
+            mem
+        }
+
+        fn reopen(self) -> Self {
+            let cfg: Config = self.cfg.as_ref().clone();
+            let file_builder = self.pipe_log.file_builder.clone();
+            let mut listeners = self.listeners.clone();
+            listeners.pop();
+            drop(self);
+            RaftLogEngine::open_with(cfg, file_builder, listeners).unwrap()
+        }
+
+        fn scan<F: Fn(u64, LogQueue, &[u8])>(&self, rid: u64, start: u64, end: u64, reader: F) {
+            let mut entries = Vec::new();
+            self.fetch_entries_to::<Entry>(
+                rid,
+                self.first_index(rid).unwrap(),
+                self.last_index(rid).unwrap() + 1,
+                None,
+                &mut entries,
+            )
             .unwrap();
-
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::kb(5),
-            purge_threshold: ReadableSize::kb(80),
-            ..Default::default()
-        };
-        let engine = RaftLogEngine::open(cfg).unwrap();
-
-        engine.append_one(1, &Entry::new());
-        assert!(engine.memtables.get(1).is_some());
-
-        let mut log_batch = LogBatch::default();
-        log_batch.add_command(1, Command::Clean);
-        engine.write(&mut log_batch, false).unwrap();
-        assert!(engine.memtables.get(1).is_none());
+            assert_eq!(entries.first().unwrap().index, start);
+            assert_eq!(
+                entries.last().unwrap().index,
+                self.last_index_slow(rid).unwrap()
+            );
+            assert_eq!(entries.last().unwrap().index + 1, end);
+            for e in entries.iter() {
+                let entry_index = self
+                    .memtables
+                    .get(rid)
+                    .unwrap()
+                    .read()
+                    .get_entry(e.index)
+                    .unwrap();
+                assert_eq!(&self.get_entry::<Entry>(rid, e.index).unwrap().unwrap(), e);
+                reader(e.index, entry_index.entries.unwrap().id.queue, &e.data);
+            }
+        }
     }
 
     #[test]
-    fn test_get_entry_from_file_id() {
+    fn test_get_entry() {
         let normal_batch_size = 10;
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size, compressed_batch_size] {
             let dir = tempfile::Builder::new()
-                .prefix("test_get_entry_from_file")
+                .prefix("test_get_entry")
                 .tempdir()
                 .unwrap();
-
             let cfg = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 ..Default::default()
             };
 
             let engine = RaftLogEngine::open(cfg.clone()).unwrap();
-            let mut entry = Entry::new();
-            entry.set_data(vec![b'x'; entry_size].into());
+            let data = vec![b'x'; entry_size];
             for i in 10..20 {
-                entry.set_index(i);
-                engine.append_one(i, &entry);
-                entry.set_index(i + 1);
-                engine.append_one(i, &entry);
+                let rid = i;
+                let index = i;
+                engine.append(rid, index, index + 2, Some(&data));
             }
-
             for i in 10..20 {
-                // Test get_entry from file.
-                entry.set_index(i);
-                assert_eq!(
-                    engine.get_entry::<Entry>(i, i).unwrap(),
-                    Some(entry.clone())
-                );
-                entry.set_index(i + 1);
-                assert_eq!(
-                    engine.get_entry::<Entry>(i, i + 1).unwrap(),
-                    Some(entry.clone())
-                );
+                let rid = i;
+                let index = i;
+                engine.scan(rid, index, index + 2, |_, q, d| {
+                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(d, &data);
+                });
             }
-
-            drop(engine);
 
             // Recover the engine.
-            let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+            let engine = engine.reopen();
             for i in 10..20 {
-                entry.set_index(i + 1);
-                assert_eq!(
-                    engine.get_entry::<Entry>(i, i + 1).unwrap(),
-                    Some(entry.clone())
-                );
-
-                entry.set_index(i);
-                assert_eq!(
-                    engine.get_entry::<Entry>(i, i).unwrap(),
-                    Some(entry.clone())
-                );
+                let rid = i;
+                let index = i;
+                engine.scan(rid, index, index + 2, |_, q, d| {
+                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(d, &data);
+                });
             }
         }
     }
 
-    // Test whether GC works fine or not, and purge should be triggered correctly.
     #[test]
-    fn test_gc_and_purge() {
+    fn test_clean_raft_group() {
+        let rid = 1;
+        let data = vec![b'x'; 1024];
+
+        let steps = [Some((1, 5)), None];
+        // TODO: Support recreating region and active this test case.
+        // let steps = [Some((1, 5)), None, Some((2, 6)), None, Some((3, 7)), None];
+        for n_step in 2..=steps.len() {
+            // Rewrite after step N.
+            for rewrite_step in 1..=n_step {
+                let exit_purge_after_steps = if rewrite_step == n_step {
+                    // Simulate a hard failure during purge.
+                    vec![None, Some(1), Some(2)]
+                } else {
+                    vec![None]
+                };
+                for exit_purge in exit_purge_after_steps {
+                    let _guard = PanicGuard::with_prompt(format!(
+                        "case: [{}, {}, {:?}]",
+                        n_step, rewrite_step, exit_purge
+                    ));
+                    let dir = tempfile::Builder::new()
+                        .prefix("test_clean_raft_group")
+                        .tempdir()
+                        .unwrap();
+                    let cfg = Config {
+                        dir: dir.path().to_str().unwrap().to_owned(),
+                        ..Default::default()
+                    };
+                    let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+
+                    for (i, step) in steps.iter().enumerate().take(n_step) {
+                        if let Some((start, end)) = *step {
+                            engine.append(rid, start, end, Some(&data));
+                        } else {
+                            engine.clean(rid);
+                        }
+                        if i + 1 == rewrite_step {
+                            engine
+                                .purge_manager
+                                .must_rewrite_append_queue(None, exit_purge);
+                        }
+                    }
+
+                    let engine = engine.reopen();
+                    if let Some((start, end)) = steps[n_step - 1] {
+                        engine.scan(rid, start, end, |_, _, d| {
+                            assert_eq!(d, &data);
+                        });
+                    } else {
+                        assert!(engine.raft_groups().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_delete_key_value() {
         let dir = tempfile::Builder::new()
-            .prefix("test_gc_and_purge")
+            .prefix("test_delete_key_value")
             .tempdir()
             .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let rid = 1;
+        let key = b"key".to_vec();
+        let (v1, v2) = (b"v1".to_vec(), b"v2".to_vec());
+        let mut batch_1 = LogBatch::default();
+        batch_1.put(rid, key.clone(), v1);
+        let mut batch_2 = LogBatch::default();
+        batch_2.put(rid, key.clone(), v2.clone());
+        let mut delete_batch = LogBatch::default();
+        delete_batch.delete(rid, key.clone());
 
+        // put | delete
+        //     ^ rewrite
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key), None);
+
+        // TODO: Preserve kv tombstone during rewrite and activate this test case.
+        // put | delete |
+        //              ^ rewrite
+        // let engine = engine.reopen();
+        // engine.write(&mut batch_1.clone(), true).unwrap();
+        // engine.write(&mut delete_batch.clone(), true).unwrap();
+        // engine.purge_manager.must_rewrite_append_queue(None, None);
+        // let engine = engine.reopen();
+        // assert_eq!(engine.get(rid, &key), None);
+
+        // put | delete | put
+        //     ^ rewrite
+        let engine = engine.reopen();
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
+
+        // put | delete | put
+        //              ^ rewrite
+        let engine = engine.reopen();
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
+
+        // put | delete | put |
+        //                    ^ rewrite
+        let engine = engine.reopen();
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
+        //
+        let engine = engine.reopen();
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(1));
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
+        //
+        let engine = engine.reopen();
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
+    }
+
+    #[test]
+    fn test_compact_raft_group() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_compact_raft_group")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 1024];
+
+        // rewrite:[1  ..10]
+        // append:   [5..10]
+        let mut rid = 7;
+        engine.append(rid, 1, 10, Some(&data));
+        // Files are not purged.
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        let mut compact_log = LogBatch::default();
+        compact_log.add_command(rid, Command::Compact { index: 5 });
+        engine.write(&mut compact_log, true).unwrap();
+        let engine = engine.reopen();
+        engine.scan(rid, 5, 10, |_, q, d| {
+            assert_eq!(q, LogQueue::Append);
+            assert_eq!(d, &data);
+        });
+
+        // rewrite:   [20..25]
+        // append: [10   ..25]
+        rid += 1;
+        engine.append(rid, 5, 15, Some(&data));
+        let mut compact_log = LogBatch::default();
+        compact_log.add_command(rid, Command::Compact { index: 10 });
+        engine.write(&mut compact_log, true).unwrap();
+        engine.append(rid, 15, 25, Some(&data));
+        // Files are not purged.
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        // Simulate loss of buffered write.
+        let mut compact_log = LogBatch::default();
+        compact_log.add_command(rid, Command::Compact { index: 20 });
+        engine
+            .memtables
+            .apply(compact_log.drain(), LogQueue::Append);
+        engine.purge_manager.must_rewrite_rewrite_queue();
+        let engine = engine.reopen();
+        engine.scan(rid, 10, 25, |_, q, d| {
+            assert_eq!(q, LogQueue::Append);
+            assert_eq!(d, &data);
+        });
+        // rewrite: [20..25][10..25]
+        // append: [10..25]
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        let engine = engine.reopen();
+        engine.scan(rid, 10, 25, |_, q, d| {
+            assert_eq!(q, LogQueue::Append);
+            assert_eq!(d, &data);
+        });
+
+        // rewrite:[10..15][15  ..25]
+        // append:           [20..25]
+        rid += 1;
+        engine.append(rid, 5, 15, Some(&data));
+        let mut compact_log = LogBatch::default();
+        compact_log.add_command(rid, Command::Compact { index: 10 });
+        engine.write(&mut compact_log, true).unwrap();
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.append(rid, 15, 25, Some(&data));
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        let mut compact_log = LogBatch::default();
+        compact_log.add_command(rid, Command::Compact { index: 20 });
+        engine.write(&mut compact_log, true).unwrap();
+        let engine = engine.reopen();
+        engine.scan(rid, 20, 25, |_, q, d| {
+            assert_eq!(q, LogQueue::Append);
+            assert_eq!(d, &data);
+        });
+
+        // rewrite:[1..5] [10..15]
+        // append:        [10..15]
+        rid += 1;
+        engine.append(rid, 1, 5, Some(&data));
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.append(rid, 5, 15, Some(&data));
+        let mut compact_log = LogBatch::default();
+        compact_log.add_command(rid, Command::Compact { index: 10 });
+        engine.write(&mut compact_log, true).unwrap();
+        // Files are not purged.
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        let engine = engine.reopen();
+        engine.scan(rid, 10, 15, |_, q, d| {
+            assert_eq!(q, LogQueue::Append);
+            assert_eq!(d, &data);
+        });
+    }
+
+    #[test]
+    fn test_purge_triggered_by_compact() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_purge_triggered_by_compact")
+            .tempdir()
+            .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
@@ -469,11 +726,9 @@ mod tests {
         };
 
         let engine = RaftLogEngine::open(cfg).unwrap();
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024].into());
-        for i in 0..100 {
-            entry.set_index(i);
-            engine.append_one(1, &entry);
+        let data = vec![b'x'; 1024];
+        for index in 0..100 {
+            engine.append(1, index, index + 1, Some(&data));
         }
 
         // GC all log entries. Won't trigger purge because total size is not enough.
@@ -484,14 +739,12 @@ mod tests {
             .needs_rewrite_log_files(LogQueue::Append));
 
         // Append more logs to make total size greater than `purge_threshold`.
-        for i in 100..250 {
-            entry.set_index(i);
-            engine.append_one(1, &entry);
+        for index in 100..250 {
+            engine.append(1, index, index + 1, Some(&data));
         }
 
         // GC first 101 log entries.
-        let count = engine.compact_to(1, 101);
-        assert_eq!(count, 1);
+        assert_eq!(engine.compact_to(1, 101), 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
             .purge_manager
@@ -507,8 +760,7 @@ mod tests {
         // After purge, entries and raft state are still available.
         assert!(engine.get_entry::<Entry>(1, 101).unwrap().is_some());
 
-        let count = engine.compact_to(1, 102);
-        assert_eq!(count, 1);
+        assert_eq!(engine.compact_to(1, 102), 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
             .purge_manager
@@ -529,22 +781,19 @@ mod tests {
             .prefix("test_rewrite_and_recover")
             .tempdir()
             .unwrap();
-
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
             purge_threshold: ReadableSize::kb(80),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 1024];
 
         // Put 100 entries into 10 regions.
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024].into());
-        for i in 1..=10 {
-            for j in 1..=10 {
-                entry.set_index(i);
-                engine.append_one(j, &entry);
+        for index in 1..=10 {
+            for rid in 1..=10 {
+                engine.append(rid, index, index + 1, Some(&data));
             }
         }
 
@@ -559,34 +808,28 @@ mod tests {
         assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
-        for i in 1..=10 {
-            for j in 1..=10 {
-                let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
-                assert_eq!(e.get_data(), entry.get_data());
-                assert_eq!(engine.last_index_slow(j), 10);
-            }
+        for rid in 1..=10 {
+            engine.scan(rid, 1, 11, |_, _, d| {
+                assert_eq!(d, &data);
+            });
         }
 
         // Recover with rewrite queue and append queue.
         let cleaned_region_ids = engine.memtables.cleaned_region_ids();
-        drop(engine);
 
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine = engine.reopen();
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
 
-        for i in 1..=10 {
-            for j in 1..=10 {
-                let e = engine.get_entry::<Entry>(j, i).unwrap().unwrap();
-                assert_eq!(e.get_data(), entry.get_data());
-                assert_eq!(engine.last_index_slow(j), 10);
-            }
+        for rid in 1..=10 {
+            engine.scan(rid, 1, 11, |_, _, d| {
+                assert_eq!(d, &data);
+            });
         }
 
         // Rewrite again to check the rewrite queue is healthy.
-        for i in 11..=20 {
-            for j in 1..=10 {
-                entry.set_index(i);
-                engine.append_one(j, &entry);
+        for index in 11..=20 {
+            for rid in 1..=10 {
+                engine.append(rid, index, index + 1, Some(&data));
             }
         }
 
@@ -594,112 +837,6 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-    }
-
-    // Raft groups can be removed when they only have entries in the rewrite queue.
-    // We need to ensure that these raft groups won't appear again after recover.
-    fn test_clean_raft_with_only_rewrite(purge_before_recover: bool) {
-        let dir = tempfile::Builder::new()
-            .prefix("test_clean_raft_with_only_rewrite")
-            .tempdir()
-            .unwrap();
-
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::kb(128),
-            purge_threshold: ReadableSize::kb(512),
-            ..Default::default()
-        };
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
-
-        let mut entry = Entry::new();
-        entry.set_data(vec![b'x'; 1024].into());
-
-        // Layout of region 1 in file 1:
-        // entries[1..10], Clean, entries[2..11]
-        for j in 1..=10 {
-            entry.set_index(j);
-            engine.append_one(1, &entry);
-        }
-        let mut log_batch = LogBatch::with_capacity(1);
-        log_batch.add_command(1, Command::Clean);
-        engine.write(&mut log_batch, false).unwrap();
-        assert!(engine.memtables.get(1).is_none());
-
-        entry.set_data(vec![b'y'; 1024].into());
-        for j in 2..=11 {
-            entry.set_index(j);
-            engine.append_one(1, &entry);
-        }
-
-        assert_eq!(engine.pipe_log.file_span(LogQueue::Append).1, 1);
-
-        // Put more raft logs to trigger purge.
-        for i in 2..64 {
-            for j in 1..=10 {
-                entry.set_index(j);
-                engine.append_one(i, &entry);
-            }
-        }
-
-        // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
-        assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1);
-
-        // All entries of region 1 has been rewritten.
-        let memtable_1 = engine.memtables.get(1).unwrap();
-        assert!(memtable_1.read().max_file_seq(LogQueue::Append).is_none());
-        assert!(memtable_1
-            .read()
-            .kvs_max_file_seq(LogQueue::Append)
-            .is_none());
-        assert_eq!(engine.get_entry::<Entry>(1, 1).unwrap(), None);
-        // Entries of region 1 after the clean command should be still valid.
-        for j in 2..=11 {
-            let entry_j = engine.get_entry::<Entry>(1, j).unwrap().unwrap();
-            assert_eq!(entry_j.get_data(), entry.get_data());
-        }
-
-        // Clean the raft group again.
-        let mut log_batch = LogBatch::with_capacity(1);
-        log_batch.add_command(1, Command::Clean);
-        engine.write(&mut log_batch, false).unwrap();
-        assert!(engine.memtables.get(1).is_none());
-
-        // Put more raft logs and then recover.
-        let active_file = engine.pipe_log.file_span(LogQueue::Append).1;
-        for i in 64..=128 {
-            for j in 1..=10 {
-                entry.set_index(j);
-                engine.append_one(i, &entry);
-            }
-        }
-
-        if purge_before_recover {
-            assert!(engine.purge_expired_files().unwrap().is_empty());
-            assert!(engine.pipe_log.file_span(LogQueue::Append).0 > active_file);
-        }
-
-        // After the engine recovers, the removed raft group shouldn't appear again.
-        drop(engine);
-        let engine = RaftLogEngine::open(cfg).unwrap();
-        assert!(engine.memtables.get(1).is_none());
-    }
-
-    // Test `purge` should copy `LogBatch::Clean` to rewrite queue from append queue.
-    // So that after recover the cleaned raft group won't appear again.
-    #[test]
-    fn test_clean_raft_with_only_rewrite_1() {
-        test_clean_raft_with_only_rewrite(true);
-    }
-
-    // Test `recover` can handle `LogBatch::Clean` in append queue correctly.
-    #[test]
-    fn test_clean_raft_with_only_rewrite_2() {
-        test_clean_raft_with_only_rewrite(false);
     }
 
     #[test]
@@ -712,7 +849,7 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine = Arc::new(RaftLogEngine::open(cfg.clone()).unwrap());
+        let engine = RaftLogEngine::open(cfg).unwrap();
 
         let mut log_batch = LogBatch::default();
         let empty_entry = Entry::new();
@@ -724,19 +861,18 @@ mod tests {
         let empty_state = RaftLocalState::new();
         assert_eq!(empty_state.compute_size(), 0);
         log_batch
-            .put_message(1, b"last_index".to_vec(), &empty_state)
+            .put_message(1, b"key".to_vec(), &empty_state)
             .unwrap();
         engine.write(&mut log_batch, false).unwrap();
         log_batch
             .add_entries::<Entry>(2, &[empty_entry.clone()])
             .unwrap();
         log_batch
-            .put_message(2, b"last_index".to_vec(), &empty_state)
+            .put_message(2, b"key".to_vec(), &empty_state)
             .unwrap();
         engine.write(&mut log_batch, true).unwrap();
-        drop(engine);
 
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine = engine.reopen();
         assert_eq!(
             engine.get_entry::<Entry>(0, 0).unwrap().unwrap(),
             empty_entry
@@ -747,17 +883,117 @@ mod tests {
         );
         assert_eq!(
             engine
-                .get_message::<RaftLocalState>(1, b"last_index")
+                .get_message::<RaftLocalState>(1, b"key")
                 .unwrap()
                 .unwrap(),
             empty_state
         );
         assert_eq!(
             engine
-                .get_message::<RaftLocalState>(2, b"last_index")
+                .get_message::<RaftLocalState>(2, b"key")
                 .unwrap()
                 .unwrap(),
             empty_state
         );
+    }
+
+    #[test]
+    fn test_file_builder() {
+        use std::io::{Read, Result, Result as IoResult, Seek, SeekFrom, Write};
+        struct TestFile<F> {
+            inner: F,
+            offset: u64,
+        }
+
+        impl<F: Write> Write for TestFile<F> {
+            fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+                let mut new_buf = buf.to_owned();
+                for c in &mut new_buf {
+                    *c = c.wrapping_add(1);
+                }
+                let len = self.inner.write(&new_buf)?;
+                self.offset += len as u64;
+                Ok(len)
+            }
+
+            fn flush(&mut self) -> IoResult<()> {
+                self.inner.flush()
+            }
+        }
+
+        impl<F: Read> Read for TestFile<F> {
+            fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+                let len = self.inner.read(buf)?;
+                for c in buf {
+                    *c = c.wrapping_sub(1);
+                }
+                self.offset += len as u64;
+                Ok(len)
+            }
+        }
+
+        impl<F: Seek> Seek for TestFile<F> {
+            fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
+                self.offset = self.inner.seek(pos)?;
+                Ok(self.offset)
+            }
+        }
+
+        struct TestFileBuilder;
+
+        impl FileBuilder for TestFileBuilder {
+            type Reader<R: Seek + Read + Send> = TestFile<R>;
+            type Writer<W: Seek + Write + Send> = TestFile<W>;
+
+            fn build_reader<R>(&self, _path: &std::path::Path, inner: R) -> Result<Self::Reader<R>>
+            where
+                R: Seek + Read + Send,
+            {
+                Ok(TestFile { inner, offset: 0 })
+            }
+
+            fn build_writer<W>(
+                &self,
+                _path: &std::path::Path,
+                inner: W,
+                _create: bool,
+            ) -> Result<Self::Writer<W>>
+            where
+                W: Seek + Write + Send,
+            {
+                Ok(TestFile { inner, offset: 0 })
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("test_file_builder")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+
+        let engine = RaftLogEngine::open_with_file_builder(cfg, Arc::new(TestFileBuilder)).unwrap();
+        let data = vec![b'x'; 128];
+        for rid in 10..20 {
+            let index = rid * 2;
+            engine.append(rid, index, index + rid, Some(&data));
+        }
+        for rid in 10..20 {
+            let index = rid * 2;
+            engine.scan(rid, index, index + rid, |_, q, d| {
+                assert_eq!(q, LogQueue::Append);
+                assert_eq!(d, &data);
+            });
+        }
+        let engine = engine.reopen();
+        for rid in 10..20 {
+            let index = rid * 2;
+            engine.scan(rid, index, index + rid, |_, q, d| {
+                assert_eq!(q, LogQueue::Append);
+                assert_eq!(d, &data);
+            });
+        }
     }
 }
