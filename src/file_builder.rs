@@ -22,7 +22,7 @@ pub trait FileBuilder: Send + Sync {
 
 /// `DefaultFileBuilder` is a `FileBuilder` that builds out the original
 /// `Reader`/`Writer` as it is.
-pub struct DefaultFileBuilder {}
+pub struct DefaultFileBuilder;
 
 impl FileBuilder for DefaultFileBuilder {
     type Reader<R: Seek + Read + Send> = R;
