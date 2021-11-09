@@ -51,7 +51,6 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
 
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
         if self.valid_offset < LOG_BATCH_HEADER_LEN {
-            // TODO: cov
             return Err(Error::Corruption(
                 "attempt to read file with broken header".to_owned(),
             ));
@@ -63,7 +62,6 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
                 0,
             )?)?;
             if self.valid_offset + len > self.size {
-                // TODO: cov
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
 
@@ -98,7 +96,6 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
             f.seek(std::io::SeekFrom::Start(self.buffer_offset as u64))?;
             let read = f.read(&mut self.buffer)?;
             if read < size {
-                // TODO: cov
                 return Err(Error::Corruption(format!(
                     "unexpected eof at {}",
                     self.buffer_offset + read
@@ -117,7 +114,6 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
                 );
                 let read = f.read(&mut self.buffer[prev_len..])?;
                 if read + prefetch < should_read {
-                    // TODO: cov
                     return Err(Error::Corruption(format!(
                         "unexpected eof at {}",
                         read_offset + read,

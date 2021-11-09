@@ -387,7 +387,6 @@ impl MemTable {
             if begin.index <= end.index {
                 return self.fetch_entries_to(begin.index, end.index + 1, None, vec_idx);
             }
-            // TODO: cov
         }
         Ok(())
     }
@@ -398,7 +397,6 @@ impl MemTable {
             let end = self.entry_indexes[self.rewrite_count - 1].index + 1;
             self.fetch_entries_to(first, end, None, vec_idx)
         } else {
-            // TODO: cov
             Ok(())
         }
     }
@@ -1108,10 +1106,10 @@ mod tests {
         assert_eq!(kvs.pop().unwrap(), (k3.to_vec(), v3.to_vec()));
 
         // Rewrite indexes:
-        // [0, 10) queue = rewrite, file_num = 50,
+        // [0, 10) queue = rewrite, file_num = 1,
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 50));
+        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1));
         memtable.rewrite(ents_idx, Some(1));
         assert_eq!(memtable.entries_size(), 25);
         memtable.consistency_check();
@@ -1122,6 +1120,11 @@ mod tests {
             .is_ok());
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
+        ents_idx.clear();
+        assert!(memtable
+            .fetch_entry_indexes_before(1, &mut ents_idx)
+            .is_ok());
+        assert!(ents_idx.is_empty());
 
         ents_idx.clear();
         assert!(memtable
