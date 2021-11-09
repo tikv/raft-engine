@@ -15,35 +15,26 @@ impl MessageExt for M {
     }
 }
 
-fn generate_batch(
-    region: u64,
-    begin_index: u64,
-    end_index: u64,
-    data: Option<Vec<u8>>,
-) -> LogBatch {
+fn generate_batch(region: u64, begin_index: u64, end_index: u64, data: Vec<u8>) -> LogBatch {
     let mut batch = LogBatch::default();
     let mut v = vec![Entry::new(); (end_index - begin_index) as usize];
     let mut index = begin_index;
     for e in v.iter_mut() {
         e.set_index(index);
-        if let Some(ref data) = data {
-            e.set_data(data.clone().into())
-        }
+        e.set_data(data.clone().into());
         index += 1;
     }
     batch.add_entries::<M>(region, &v).unwrap();
     batch
 }
 
-fn write_tmp_engine(
+fn tmp_engine(
+    path_perfix: &str,
     bytes_per_sync: ReadableSize,
     target_file_size: ReadableSize,
-    entry_size: usize,
-    entry_count: u64,
-    batch_count: u64,
-) -> Result<usize> {
+) -> RaftLogEngine {
     let dir = tempfile::Builder::new()
-        .prefix("test_io_error")
+        .prefix(path_perfix)
         .tempdir()
         .unwrap();
     let cfg = Config {
@@ -53,18 +44,7 @@ fn write_tmp_engine(
         batch_compression_threshold: ReadableSize(0),
         ..Default::default()
     };
-    let engine = RaftLogEngine::open(cfg).unwrap();
-
-    let entry_data = vec![b'x'; entry_size];
-    let mut index = 1;
-    let mut written = 0;
-    for _ in 0..batch_count {
-        let mut log_batch =
-            generate_batch(1, index, index + entry_count + 1, Some(entry_data.clone()));
-        index += entry_count;
-        written += engine.write(&mut log_batch, false)?;
-    }
-    Ok(written)
+    RaftLogEngine::open(cfg).unwrap()
 }
 
 struct ConcurrentWriteContext {
@@ -175,22 +155,23 @@ impl ConcurrentWriteContext {
 
 #[test]
 fn test_open_error() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_open_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        bytes_per_sync: ReadableSize::kb(1),
+        target_file_size: ReadableSize::kb(4),
+        batch_compression_threshold: ReadableSize(0),
+        ..Default::default()
+    };
+    // fp "log_fd::open::err" is only triggered when opening existing log files
     fail::cfg("log_fd::open::err", "return").unwrap();
+    let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+    drop(engine);
     assert!(catch_unwind_silent(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("test_open_error")
-            .tempdir()
-            .unwrap();
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            bytes_per_sync: ReadableSize::kb(1),
-            target_file_size: ReadableSize::kb(4),
-            batch_compression_threshold: ReadableSize(0),
-            ..Default::default()
-        };
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
-        drop(engine);
-        let _ = RaftLogEngine::open(cfg).unwrap();
+        RaftLogEngine::open(cfg.clone()).unwrap();
     })
     .is_err());
     fail::cfg("log_fd::open::err", "off").unwrap();
@@ -198,36 +179,102 @@ fn test_open_error() {
 
 #[test]
 fn test_rotate_error() {
+    let entry = vec![b'x'; 1024];
+
     // panic when truncate
+    let engine = tmp_engine(
+        "test_rotate_error_truncate",
+        ReadableSize::kb(1024),
+        ReadableSize::kb(4),
+    );
+    engine
+        .write(&mut generate_batch(1, 1, 2, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 2, 3, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 3, 4, entry.clone()), false)
+        .unwrap();
     fail::cfg("active_file::truncate::force", "return").unwrap();
     fail::cfg("log_fd::truncate::err", "return").unwrap();
     assert!(catch_unwind_silent(|| {
-        write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
+        engine
+            .write(&mut generate_batch(1, 4, 5, entry.clone()), false)
+            .unwrap();
     })
     .is_err());
-
-    // panic when sync
     fail::cfg("active_file::truncate::force", "off").unwrap();
     fail::cfg("log_fd::truncate::err", "off").unwrap();
+
+    // panic when sync
+    let engine = tmp_engine(
+        "test_rotate_error_sync",
+        ReadableSize::kb(4),
+        ReadableSize::kb(1024),
+    );
+    engine
+        .write(&mut generate_batch(1, 1, 2, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 2, 3, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 3, 4, entry.clone()), false)
+        .unwrap();
     fail::cfg("log_fd::sync::err", "return").unwrap();
     assert!(catch_unwind_silent(|| {
-        write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
+        engine
+            .write(&mut generate_batch(1, 4, 5, entry.clone()), false)
+            .unwrap();
     })
     .is_err());
+    fail::cfg("log_fd::sync::err", "off").unwrap();
 
     // panic when create file
-    fail::cfg("log_fd::sync::err", "off").unwrap();
+    let engine = tmp_engine(
+        "test_rotate_error_create",
+        ReadableSize::kb(1024),
+        ReadableSize::kb(4),
+    );
+    engine
+        .write(&mut generate_batch(1, 1, 2, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 2, 3, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 3, 4, entry.clone()), false)
+        .unwrap();
     fail::cfg("log_fd::create::err", "return").unwrap();
     assert!(catch_unwind_silent(|| {
-        write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
+        engine
+            .write(&mut generate_batch(1, 4, 5, entry.clone()), false)
+            .unwrap();
     })
     .is_err());
+    fail::cfg("log_fd::create::err", "off").unwrap();
 
     // panic when write header
-    fail::cfg("log_fd::create::err", "off").unwrap();
+    let engine = tmp_engine(
+        "test_rotate_error_create",
+        ReadableSize::kb(1024),
+        ReadableSize::kb(4),
+    );
+    engine
+        .write(&mut generate_batch(1, 1, 2, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 2, 3, entry.clone()), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 3, 4, entry.clone()), false)
+        .unwrap();
     fail::cfg("log_fd::write::err", "return").unwrap();
     assert!(catch_unwind_silent(|| {
-        write_tmp_engine(ReadableSize::kb(1024), ReadableSize::kb(4), 1024, 1, 4)
+        engine
+            .write(&mut generate_batch(1, 4, 5, entry.clone()), false)
+            .unwrap();
     })
     .is_err());
     fail::cfg("log_fd::write::err", "off").unwrap();
@@ -265,7 +312,7 @@ fn test_concurrent_write_error() {
     let content = vec![b'x'; 1024];
 
     ctx.leader_write(
-        generate_batch(1, 1, 11, Some(content.clone())),
+        generate_batch(1, 1, 11, content.clone()),
         false,
         Some(|r: Result<usize>| {
             assert!(r.is_ok());
@@ -273,7 +320,7 @@ fn test_concurrent_write_error() {
         false,
     );
     ctx.follower_write(
-        generate_batch(2, 1, 11, Some(content.clone())),
+        generate_batch(2, 1, 11, content.clone()),
         false,
         Some(|r: Result<usize>| {
             assert!(r.is_err());
@@ -281,7 +328,7 @@ fn test_concurrent_write_error() {
         false,
     );
     ctx.follower_write(
-        generate_batch(3, 1, 11, Some(content)),
+        generate_batch(3, 1, 11, content),
         false,
         Some(|r: Result<usize>| {
             assert!(r.is_ok());
@@ -348,16 +395,18 @@ fn test_concurrent_write_truncate_error() {
     let content = vec![b'x'; 1024];
 
     ctx.leader_write(
-        generate_batch(1, 1, 11, Some(content.clone())),
+        generate_batch(1, 1, 11, content.clone()),
         false,
         None::<fn(_)>,
         false,
     );
     ctx.follower_write(
-        generate_batch(2, 1, 11, Some(content)),
+        generate_batch(2, 1, 11, content),
         false,
         Some(|_| unreachable!()),
         true,
     );
     ctx.join();
+    fail::cfg("log_fd::write::err", "off").unwrap();
+    fail::cfg("log_fd::truncate::err", "off").unwrap()
 }
