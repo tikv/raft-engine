@@ -110,7 +110,7 @@ where
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
-            self.pipe_log.new_log_file(LogQueue::Append).unwrap();
+            self.pipe_log.rotate(LogQueue::Append).unwrap();
         }
         self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
             .unwrap();
