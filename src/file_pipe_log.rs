@@ -7,7 +7,6 @@ use std::io::BufRead;
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use fs2::FileExt;
 use log::{debug, info, warn};
@@ -25,7 +24,6 @@ use crate::log_file::{LogFd, LogFile};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::reader::LogItemBatchFileReader;
-use crate::util::InstantExt;
 use crate::{Error, Result};
 
 const LOG_NUM_LEN: usize = 16;
@@ -659,9 +657,8 @@ impl<B: FileBuilder> FilePipeLog<B> {
     ) -> Result<FileBlockHandle> {
         let (block_handle, fd) = self.mut_queue(queue).append(content, sync)?;
         if *sync {
-            let start = Instant::now();
+            let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
             fd.sync()?;
-            LOG_SYNC_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
         }
         Ok(block_handle)
     }
@@ -695,21 +692,7 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
     }
 
     fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<FileBlockHandle> {
-        let start = Instant::now();
-        let block_handle = self.append_bytes(queue, bytes, &mut sync)?;
-        match queue {
-            LogQueue::Rewrite => {
-                LOG_APPEND_TIME_HISTOGRAM_VEC
-                    .rewrite
-                    .observe(start.saturating_elapsed().as_secs_f64());
-            }
-            LogQueue::Append => {
-                LOG_APPEND_TIME_HISTOGRAM_VEC
-                    .append
-                    .observe(start.saturating_elapsed().as_secs_f64());
-            }
-        }
-        Ok(block_handle)
+        self.append_bytes(queue, bytes, &mut sync)
     }
 
     fn sync(&self, queue: LogQueue) -> Result<()> {

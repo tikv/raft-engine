@@ -136,7 +136,7 @@ impl<P, O> Default for WriteBarrier<P, O> {
 
 impl<P, O> WriteBarrier<P, O> {
     /// Waits until the caller should perform some work. If `writer` has
-    /// become the leader of a set writers, returns a `WriteGroup` that
+    /// become the leader of a set of writers, returns a `WriteGroup` that
     /// contains them, `writer` included.
     pub fn enter<'a>(&self, writer: &'a mut Writer<P, O>) -> Option<WriteGroup<'_, 'a, P, O>> {
         let node = unsafe { Some(NonNull::new_unchecked(writer)) };

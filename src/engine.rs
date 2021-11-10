@@ -18,7 +18,6 @@ use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::util::InstantExt;
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, Result};
 
@@ -118,6 +117,7 @@ where
         let block_handle = {
             let mut writer = Writer::new(log_batch as &_, sync);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                let _t = StopWatch::new(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM);
                 for writer in group.iter_mut() {
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
@@ -152,15 +152,22 @@ where
             writer.finish()?
         };
 
-        if len > 0 {
+        let end = if len > 0 {
+            let start = Instant::now();
             log_batch.finish_write(block_handle);
             self.memtables.apply(log_batch.drain(), LogQueue::Append);
             for listener in &self.listeners {
                 listener.post_apply_memtables(block_handle.id);
             }
-        }
+            let end = Instant::now();
+            ENGINE_WRITE_APPLY_DURATION_HISTOGRAM
+                .observe(end.saturating_duration_since(start).as_secs_f64());
+            end
+        } else {
+            Instant::now()
+        };
 
-        ENGINE_WRITE_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
+        ENGINE_WRITE_DURATION_HISTOGRAM.observe(end.saturating_duration_since(start).as_secs_f64());
         ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
         Ok(len)
     }
@@ -172,6 +179,7 @@ where
     }
 
     pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
+        let _t = StopWatch::new(&ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(value) = memtable.read().get(key) {
                 return Ok(Some(parse_from_bytes(&value)?));
@@ -185,20 +193,23 @@ where
         region_id: u64,
         log_idx: u64,
     ) -> Result<Option<M::Entry>> {
-        let start = Instant::now();
-        let mut entry = None;
+        let _t = StopWatch::new(&ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.read().get_entry(log_idx) {
-                entry = Some(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), &idx)?);
+                ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(1.0);
+                return Ok(Some(read_entry_from_file::<M, _>(
+                    self.pipe_log.as_ref(),
+                    &idx,
+                )?));
             }
         }
-        ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-        Ok(entry)
+        Ok(None)
     }
 
     /// Purge expired logs files and return a set of Raft group ids
     /// which needs to be compacted ASAP.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM);
         self.purge_manager.purge_expired_files()
     }
 
@@ -211,18 +222,17 @@ where
         max_size: Option<usize>,
         vec: &mut Vec<M::Entry>,
     ) -> Result<usize> {
-        let start = Instant::now();
+        let _t = StopWatch::new(&ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
-            let old_len = vec.len();
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
             memtable
                 .read()
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
-            for i in ents_idx {
-                vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), &i)?);
+            for i in ents_idx.iter() {
+                vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?);
             }
-            ENGINE_READ_ENTRY_TIME_HISTOGRAM.observe(start.saturating_elapsed().as_secs_f64());
-            return Ok(vec.len() - old_len);
+            ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
+            return Ok(ents_idx.len());
         }
         Ok(0)
     }
@@ -244,6 +254,7 @@ where
     /// Like `cut_logs` but the range could be very large. Return the deleted count.
     /// Generally, `from` can be passed in `0`.
     pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
+        let _t = StopWatch::new(&ENGINE_COMPACT_DURATION_HISTOGRAM);
         let first_index = match self.first_index(region_id) {
             Some(index) => index,
             None => return 0,

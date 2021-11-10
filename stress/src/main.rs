@@ -417,7 +417,6 @@ fn main() {
                 .conflicts_with("compact_count")
                 .long("compact-ttl")
                 .value_name("ttl[s]")
-                .default_value(formatcp!("{}", DEFAULT_COMPACT_TTL.as_secs()))
                 .help("Compact log entries older than TTL")
                 .takes_value(true),
         )
