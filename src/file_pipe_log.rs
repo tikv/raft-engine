@@ -370,7 +370,7 @@ impl<B: FileBuilder> LogManager<B> {
         if file_seq > self.active_file_seq {
             return Err(box_err!("Purge active or newer files"));
         }
-        let end_offset = (file_seq - self.first_file_seq) as usize;
+        let end_offset = file_seq.saturating_sub(self.first_file_seq) as usize;
         self.all_files.drain(..end_offset);
         self.first_file_seq = file_seq;
         self.update_metrics();
@@ -423,7 +423,7 @@ pub trait ReplayMachine: Send + Default {
 
 pub struct FilePipeLog<B: FileBuilder> {
     dir: String,
-    file_builder: Arc<B>,
+    pub(crate) file_builder: Arc<B>,
 
     appender: Arc<RwLock<LogManager<B>>>,
     rewriter: Arc<RwLock<LogManager<B>>>,
@@ -823,9 +823,10 @@ mod tests {
         assert_eq!(parse_file_name(file_name).unwrap(), file_id,);
         assert_eq!(build_file_name(file_id), file_name);
 
-        let invalid_file_name: &str = "123.log";
-        assert!(parse_file_name(invalid_file_name).is_none());
-        assert!(parse_file_name(invalid_file_name).is_none());
+        let invalid_cases = vec!["0000000000000123.log", "123.rewrite"];
+        for case in invalid_cases {
+            assert!(parse_file_name(case).is_none());
+        }
     }
 
     #[test]

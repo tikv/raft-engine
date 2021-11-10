@@ -88,43 +88,49 @@ where
             },
         );
 
-        // Must rewrite tombstones after acquiring the barrier, in case the log file is rotated
-        // shortly after a tombstone is written.
+        // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
         self.rewrite_append_queue_tombstones()?;
 
-        let (min_file_1, min_file_2) = self.memtables.fold(
-            (
-                append_queue_barrier,
-                self.pipe_log.file_span(LogQueue::Rewrite).1,
-            ),
-            |(min1, min2), t| {
-                (
-                    t.min_file_seq(LogQueue::Append)
-                        .map_or(min1, |m| std::cmp::min(min1, m)),
-                    t.min_file_seq(LogQueue::Rewrite)
-                        .map_or(min2, |m| std::cmp::min(min2, m)),
-                )
-            },
-        );
-
-        for (purge_to, queue) in &[
-            (min_file_1, LogQueue::Append),
-            (min_file_2, LogQueue::Rewrite),
-        ] {
-            let purged = self.pipe_log.purge_to(FileId {
-                queue: *queue,
-                seq: *purge_to,
-            })?;
-            info!("purged {} expired log files for queue {:?}", purged, *queue);
-            for listener in &self.listeners {
-                listener.post_purge(FileId {
-                    queue: *queue,
-                    seq: purge_to - 1,
-                });
-            }
-        }
-
+        self.purge_to(
+            append_queue_barrier,
+            self.pipe_log.file_span(LogQueue::Rewrite).1,
+        )?;
         Ok(should_compact)
+    }
+
+    /// Rewrite append files with seqno no larger than `watermark`. When it's None,
+    /// rewrite the entire queue. Returns the number of purged files.
+    #[cfg(test)]
+    pub fn must_rewrite_append_queue(
+        &self,
+        watermark: Option<FileSeq>,
+        exit_after_step: Option<u64>,
+    ) {
+        let _lk = self.purge_mutex.try_lock().unwrap();
+        let (_, last) = self.pipe_log.file_span(LogQueue::Append);
+        let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
+        if watermark == last {
+            self.pipe_log.new_log_file(LogQueue::Append).unwrap();
+        }
+        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
+            .unwrap();
+        if exit_after_step == Some(1) {
+            return;
+        }
+        self.rewrite_append_queue_tombstones().unwrap();
+        if exit_after_step == Some(2) {
+            return;
+        }
+        self.purge_to(self.pipe_log.file_span(LogQueue::Append).1, 1)
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    pub fn must_rewrite_rewrite_queue(&self) {
+        let _lk = self.purge_mutex.try_lock().unwrap();
+        self.rewrite_rewrite_queue().unwrap();
+        self.purge_to(1, self.pipe_log.file_span(LogQueue::Rewrite).1)
+            .unwrap();
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
@@ -214,6 +220,38 @@ where
             None, /*rewrite_watermark*/
             true, /*sync*/
         )
+    }
+
+    // Exclusive.
+    fn purge_to(&self, append_seq: FileSeq, rewrite_seq: FileSeq) -> Result<()> {
+        let (min_file_1, min_file_2) =
+            self.memtables
+                .fold((append_seq, rewrite_seq), |(min1, min2), t| {
+                    (
+                        t.min_file_seq(LogQueue::Append)
+                            .map_or(min1, |m| std::cmp::min(min1, m)),
+                        t.min_file_seq(LogQueue::Rewrite)
+                            .map_or(min2, |m| std::cmp::min(min2, m)),
+                    )
+                });
+
+        for (purge_to, queue) in &[
+            (min_file_1, LogQueue::Append),
+            (min_file_2, LogQueue::Rewrite),
+        ] {
+            let purged = self.pipe_log.purge_to(FileId {
+                queue: *queue,
+                seq: *purge_to,
+            })?;
+            info!("purged {} expired log files for queue {:?}", purged, *queue);
+            for listener in &self.listeners {
+                listener.post_purge(FileId {
+                    queue: *queue,
+                    seq: purge_to - 1,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn rewrite_memtables(
