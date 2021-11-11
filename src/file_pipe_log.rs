@@ -320,7 +320,7 @@ impl<B: FileBuilder> LogManager<B> {
             &self.dir,
             FileId {
                 queue: self.queue,
-                seq: self.active_file_seq,
+                seq: self.active_file_seq + 1,
             },
         );
         let fd = Arc::new(LogFd::create(&path)?);
