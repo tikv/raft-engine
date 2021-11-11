@@ -21,19 +21,13 @@ fn test_file_open_error() {
 
     {
         let _f = FailGuard::new("log_fd::create::err", "return");
-        assert!(catch_unwind_silent(|| {
-            let _ = Engine::open(cfg.clone());
-        })
-        .is_err());
+        assert!(Engine::open(cfg.clone()).is_err());
     }
 
     {
         let _f = FailGuard::new("log_fd::open::err", "return");
         let _ = Engine::open(cfg.clone()).unwrap();
-        assert!(catch_unwind_silent(|| {
-            let _ = Engine::open(cfg.clone());
-        })
-        .is_err());
+        assert!(Engine::open(cfg).is_err());
     }
 }
 
