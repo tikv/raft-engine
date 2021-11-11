@@ -158,20 +158,19 @@ impl<W: Seek + Write> ActiveFile<W> {
         Ok(f)
     }
 
-    fn rotate(&mut self, fd: Arc<LogFd>, writer: W) -> Result<()> {
-        self.writer = writer;
-        self.written = 0;
-        self.capacity = 0;
-        self.fd = fd;
-        self.last_sync = 0;
-        self.write_header()
+    fn new(fd: Arc<LogFd>, writer: W) -> Result<Self> {
+        let mut f = Self {
+            fd,
+            writer,
+            written: 0,
+            capacity: 0,
+            last_sync: 0,
+        };
+        f.write_header()?;
+        Ok(f)
     }
 
     fn truncate(&mut self) -> Result<()> {
-        fail_point!("active_file::truncate::force", |_| {
-            self.fd.truncate(self.written)?;
-            Ok(())
-        });
         if self.written < self.capacity {
             self.fd.truncate(self.written)?;
             self.capacity = self.written;
@@ -316,7 +315,7 @@ impl<B: FileBuilder> LogManager<B> {
         // Necessary to truncate extra zeros from fallocate().
         self.active_file.truncate()?;
         self.active_file.sync()?;
-        self.active_file_seq += 1;
+
         let path = build_file_path(
             &self.dir,
             FileId {
@@ -324,15 +323,19 @@ impl<B: FileBuilder> LogManager<B> {
                 seq: self.active_file_seq,
             },
         );
-
         let fd = Arc::new(LogFd::create(&path)?);
-        self.all_files.push_back(fd.clone());
-        self.active_file.rotate(
-            fd.clone(),
-            self.file_builder
-                .build_writer(&path, LogFile::new(fd), true /*create*/)?,
-        )?;
         self.sync_dir()?;
+
+        self.active_file = ActiveFile::new(
+            fd.clone(),
+            self.file_builder.build_writer(
+                &path,
+                LogFile::new(fd.clone()),
+                true, /*create*/
+            )?,
+        )?;
+        self.active_file_seq += 1;
+        self.all_files.push_back(fd);
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
                 queue: self.queue,
@@ -375,6 +378,7 @@ impl<B: FileBuilder> LogManager<B> {
     }
 
     fn append(&mut self, content: &[u8]) -> Result<FileBlockHandle> {
+        fail_point!("file_pipe_log::append");
         let offset = self.active_file.written as u64;
         if let Err(e) = self.active_file.write(content, self.rotate_size) {
             if let Err(te) = self.active_file.truncate() {
