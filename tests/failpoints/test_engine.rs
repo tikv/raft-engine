@@ -6,7 +6,7 @@ use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 use raft_engine::*;
 
-use crate::util::{catch_unwind_silent, MessageExtTyped};
+use crate::util::*;
 
 fn append(engine: &Engine, raft_group_id: u64, entries: &[Entry]) {
     if !entries.is_empty() {
@@ -201,61 +201,6 @@ fn test_pipe_log_listeners() {
     );
 }
 
-struct ConcurrentWriteContext {
-    engine: Arc<Engine>,
-    ths: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl ConcurrentWriteContext {
-    fn new(engine: Arc<Engine>) -> Self {
-        Self {
-            engine,
-            ths: Vec::new(),
-        }
-    }
-
-    fn leader_write(&mut self, mut log_batch: LogBatch) {
-        if self.ths.is_empty() {
-            fail::cfg("write_barrier::leader_exit", "pause").unwrap();
-            let engine_clone = self.engine.clone();
-            self.ths.push(
-                std::thread::Builder::new()
-                    .spawn(move || {
-                        engine_clone.write(&mut LogBatch::default(), true).unwrap();
-                    })
-                    .unwrap(),
-            );
-        }
-        let engine_clone = self.engine.clone();
-        self.ths.push(
-            std::thread::Builder::new()
-                .spawn(move || {
-                    engine_clone.write(&mut log_batch, true).unwrap();
-                })
-                .unwrap(),
-        );
-    }
-
-    fn follower_write(&mut self, mut log_batch: LogBatch) {
-        assert!(self.ths.len() == 2);
-        let engine_clone = self.engine.clone();
-        self.ths.push(
-            std::thread::Builder::new()
-                .spawn(move || {
-                    engine_clone.write(&mut log_batch, true).unwrap();
-                })
-                .unwrap(),
-        );
-    }
-
-    fn join(&mut self) {
-        fail::remove("write_barrier::leader_exit");
-        for t in self.ths.drain(..) {
-            t.join().unwrap();
-        }
-    }
-}
-
 #[test]
 fn test_concurrent_write_empty_log_batch() {
     let dir = tempfile::Builder::new()
@@ -277,20 +222,20 @@ fn test_concurrent_write_empty_log_batch() {
         },
     ];
 
-    ctx.leader_write(LogBatch::default());
+    ctx.write(LogBatch::default());
     let mut log_batch = LogBatch::default();
     log_batch
         .add_entries::<MessageExtTyped>(1, &some_entries)
         .unwrap();
-    ctx.follower_write(log_batch);
+    ctx.write(log_batch);
     ctx.join();
 
     let mut log_batch = LogBatch::default();
     log_batch
         .add_entries::<MessageExtTyped>(2, &some_entries)
         .unwrap();
-    ctx.leader_write(log_batch);
-    ctx.follower_write(LogBatch::default());
+    ctx.write(log_batch);
+    ctx.write(LogBatch::default());
     ctx.join();
     drop(ctx);
     drop(engine);
@@ -323,7 +268,7 @@ fn test_concurrent_write_empty_log_batch() {
 #[test]
 fn test_consistency_tools() {
     let dir = tempfile::Builder::new()
-        .prefix("test_consistency_tools1")
+        .prefix("test_consistency_tools")
         .tempdir()
         .unwrap();
     let cfg = Config {
@@ -353,5 +298,5 @@ fn test_consistency_tools() {
         assert_eq!(id * id, index + 1);
     }
 
-    assert!(catch_unwind_silent(|| Engine::open(cfg.clone()).unwrap()).is_err());
+    assert!(catch_unwind_silent(|| Engine::open(cfg.clone())).is_err());
 }

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::u64;
 
-use fail::fail_point;
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
@@ -120,7 +119,6 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let _t = StopWatch::new(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM);
                 for writer in group.iter_mut() {
-                    fail_point!("engine::write::pre");
                     sync |= writer.is_sync();
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
