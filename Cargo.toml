@@ -63,4 +63,5 @@ protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
 
 [workspace]
-members = [ "stress" ]
+members = [ "stress", "ctl"]
+default-members = ["ctl"]

@@ -295,6 +295,13 @@ where
         path: &std::path::Path,
         file_builder: Arc<B>,
     ) -> Result<Vec<(u64, u64)>> {
+        if !path.exists() {
+            return Err(Error::InvalidArgument(format!(
+                "raft-engine directory '{}' does not exist.",
+                path.to_str().unwrap().to_owned()
+            )));
+        }
+
         let cfg = Config {
             dir: path.to_str().unwrap().to_owned(),
             recovery_mode: RecoveryMode::TolerateAnyCorruption,
