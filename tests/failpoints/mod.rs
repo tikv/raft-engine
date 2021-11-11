@@ -7,3 +7,4 @@ extern crate test;
 mod util;
 
 mod test_engine;
+mod test_io_error;

@@ -8,6 +8,7 @@ use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use fail::fail_point;
 use fs2::FileExt;
 use log::{debug, info, warn};
 use num_derive::{FromPrimitive, ToPrimitive};
@@ -158,9 +159,6 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn rotate(&mut self, fd: Arc<LogFd>, writer: W) -> Result<()> {
-        if self.last_sync < self.written {
-            self.fd.sync()?;
-        }
         self.writer = writer;
         self.written = 0;
         self.capacity = 0;
@@ -170,6 +168,10 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn truncate(&mut self) -> Result<()> {
+        fail_point!("active_file::truncate::force", |_| {
+            self.fd.truncate(self.written)?;
+            Ok(())
+        });
         if self.written < self.capacity {
             self.fd.truncate(self.written)?;
             self.capacity = self.written;
@@ -182,10 +184,10 @@ impl<W: Seek + Write> ActiveFile<W> {
         self.written = 0;
         let mut buf = Vec::with_capacity(LOG_FILE_HEADER_LEN);
         LogFileHeader::new().encode(&mut buf)?;
-        self.write(&buf, true, 0)
+        self.write(&buf, 0)
     }
 
-    fn write(&mut self, buf: &[u8], sync: bool, target_file_size: usize) -> Result<()> {
+    fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
         if self.written + buf.len() > self.capacity {
             // Use fallocate to pre-allocate disk space for active file.
             let alloc = std::cmp::max(
@@ -202,7 +204,13 @@ impl<W: Seek + Write> ActiveFile<W> {
         }
         self.writer.write_all(buf)?;
         self.written += buf.len();
-        if sync {
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        if self.last_sync < self.written {
+            StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
+            self.fd.sync()?;
             self.last_sync = self.written;
         }
         Ok(())
@@ -303,12 +311,12 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(manager)
     }
 
-    fn new_log_file(&mut self) -> Result<()> {
+    fn rotate(&mut self) -> Result<()> {
         debug_assert!(self.active_file_seq >= INIT_FILE_ID);
         // Necessary to truncate extra zeros from fallocate().
-        self.truncate_active_log()?;
+        self.active_file.truncate()?;
+        self.active_file.sync()?;
         self.active_file_seq += 1;
-
         let path = build_file_path(
             &self.dir,
             FileId {
@@ -316,6 +324,7 @@ impl<B: FileBuilder> LogManager<B> {
                 seq: self.active_file_seq,
             },
         );
+
         let fd = Arc::new(LogFd::create(&path)?);
         self.all_files.push_back(fd.clone());
         self.active_file.rotate(
@@ -324,27 +333,24 @@ impl<B: FileBuilder> LogManager<B> {
                 .build_writer(&path, LogFile::new(fd), true /*create*/)?,
         )?;
         self.sync_dir()?;
-
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
                 queue: self.queue,
                 seq: self.active_file_seq,
             });
         }
-
         self.update_metrics();
-
         Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.active_file.sync()
     }
 
     fn sync_dir(&self) -> Result<()> {
         let path = PathBuf::from(&self.dir);
         std::fs::File::open(path).and_then(|d| d.sync_all())?;
         Ok(())
-    }
-
-    fn truncate_active_log(&mut self) -> Result<()> {
-        self.active_file.truncate()
     }
 
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<LogFd>> {
@@ -355,10 +361,6 @@ impl<B: FileBuilder> LogManager<B> {
             )));
         }
         Ok(self.all_files[(file_seq - self.first_file_seq) as usize].clone())
-    }
-
-    fn get_active_fd(&self) -> Option<Arc<LogFd>> {
-        self.all_files.back().cloned()
     }
 
     fn purge_to(&mut self, file_seq: FileSeq) -> Result<usize> {
@@ -372,15 +374,17 @@ impl<B: FileBuilder> LogManager<B> {
         Ok(end_offset)
     }
 
-    fn append(&mut self, content: &[u8], sync: &mut bool) -> Result<(FileBlockHandle, Arc<LogFd>)> {
-        if self.active_file.written >= self.rotate_size {
-            self.new_log_file()?;
-        }
-        if self.active_file.since_last_sync() >= self.bytes_per_sync {
-            *sync = true;
-        }
+    fn append(&mut self, content: &[u8]) -> Result<FileBlockHandle> {
         let offset = self.active_file.written as u64;
-        self.active_file.write(content, *sync, self.rotate_size)?;
+        if let Err(e) = self.active_file.write(content, self.rotate_size) {
+            if let Err(te) = self.active_file.truncate() {
+                panic!(
+                    "error when truncate {} after error: {}, get: {}",
+                    self.active_file_seq, e, te
+                );
+            }
+            return Err(e);
+        }
         let handle = FileBlockHandle {
             id: FileId {
                 queue: self.queue,
@@ -392,7 +396,7 @@ impl<B: FileBuilder> LogManager<B> {
         for listener in &self.listeners {
             listener.on_append_log_file(handle);
         }
-        Ok((handle, self.active_file.fd.clone()))
+        Ok(handle)
     }
 
     fn update_metrics(&self) {
@@ -636,7 +640,6 @@ impl<B: FileBuilder> FilePipeLog<B> {
                         }
                     }
                 }
-                debug!("Recover queue:{:?} finish.", queue);
                 Ok(sequential_replay_machine)
             })
             .try_reduce(
@@ -646,21 +649,8 @@ impl<B: FileBuilder> FilePipeLog<B> {
                     Ok(sequential_replay_machine_left)
                 },
             )?;
+        debug!("Recover queue:{:?} finish.", queue);
         Ok(sequential_replay_machine)
-    }
-
-    fn append_bytes(
-        &self,
-        queue: LogQueue,
-        content: &[u8],
-        sync: &mut bool,
-    ) -> Result<FileBlockHandle> {
-        let (block_handle, fd) = self.mut_queue(queue).append(content, sync)?;
-        if *sync {
-            let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
-            fd.sync()?;
-        }
-        Ok(block_handle)
     }
 
     fn get_queue(&self, queue: LogQueue) -> RwLockReadGuard<LogManager<B>> {
@@ -691,14 +681,32 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         Ok(buf)
     }
 
-    fn append(&self, queue: LogQueue, bytes: &[u8], mut sync: bool) -> Result<FileBlockHandle> {
-        self.append_bytes(queue, bytes, &mut sync)
+    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle> {
+        self.mut_queue(queue).append(bytes)
     }
 
-    fn sync(&self, queue: LogQueue) -> Result<()> {
-        if let Some(fd) = self.get_queue(queue).get_active_fd() {
-            fd.sync()?;
+    fn maybe_sync(&self, queue: LogQueue, force: bool) -> Result<()> {
+        let mut manager = match queue {
+            LogQueue::Append => self.appender.write(),
+            LogQueue::Rewrite => self.rewriter.write(),
+        };
+
+        if manager.active_file.written >= manager.rotate_size {
+            if let Err(e) = manager.rotate() {
+                panic!(
+                    "error when rotate [{:?}:{}]: {}",
+                    queue, manager.active_file_seq, e
+                );
+            }
+        } else if manager.active_file.since_last_sync() >= manager.bytes_per_sync || force {
+            if let Err(e) = manager.sync() {
+                panic!(
+                    "error when sync [{:?}:{}]: {}",
+                    queue, manager.active_file_seq, e,
+                );
+            }
         }
+
         Ok(())
     }
 
@@ -711,8 +719,8 @@ impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
         self.get_queue(queue).size()
     }
 
-    fn new_log_file(&self, queue: LogQueue) -> Result<()> {
-        self.mut_queue(queue).new_log_file()
+    fn rotate(&self, queue: LogQueue) -> Result<()> {
+        self.mut_queue(queue).rotate()
     }
 
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
@@ -844,34 +852,34 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let file_handle = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 1);
         assert_eq!(file_handle.offset, header_size);
-        assert_eq!(pipe_log.file_span(queue).1, 1);
+        assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        let file_handle = pipe_log.append_bytes(queue, &content, &mut false).unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
-        assert_eq!(pipe_log.file_span(queue).1, 2);
+        assert_eq!(pipe_log.file_span(queue).1, 3);
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
         assert_eq!(pipe_log.file_span(queue).0, 2);
 
         // cannot purge active file
-        assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_err());
+        assert!(pipe_log.purge_to(FileId { queue, seq: 4 }).is_err());
 
         // append position
         let s_content = b"short content".to_vec();
-        let file_handle = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
-            .unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&s_content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
-        let file_handle = pipe_log
-            .append_bytes(queue, &s_content, &mut false)
-            .unwrap();
+        let file_handle = pipe_log.mut_queue(queue).append(&s_content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
             file_handle.offset,
