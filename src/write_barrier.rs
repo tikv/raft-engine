@@ -105,11 +105,7 @@ impl<'a, 'b, 'c, P, O> Iterator for WriterIter<'a, 'b, 'c, P, O> {
     }
 }
 
-pub struct WriteBarrier<P, O> {
-    mutex: Mutex<()>,
-    leader_cv: Condvar,
-    follower_cvs: [Condvar; 2],
-
+struct WriteBarrierInner<P, O> {
     head: Cell<Ptr<Writer<P, O>>>,
     tail: Cell<Ptr<Writer<P, O>>>,
 
@@ -117,19 +113,31 @@ pub struct WriteBarrier<P, O> {
     pending_index: Cell<usize>,
 }
 
-unsafe impl<P: Send, O: Send> Send for WriteBarrier<P, O> {}
-unsafe impl<P: Send, O: Send> Sync for WriteBarrier<P, O> {}
+unsafe impl<P: Send, O: Send> Send for WriteBarrierInner<P, O> {}
 
-impl<P, O> Default for WriteBarrier<P, O> {
+impl<P, O> Default for WriteBarrierInner<P, O> {
     fn default() -> Self {
-        WriteBarrier {
-            mutex: Mutex::new(()),
-            leader_cv: Condvar::new(),
-            follower_cvs: [Condvar::new(), Condvar::new()],
+        WriteBarrierInner {
             head: Cell::new(None),
             tail: Cell::new(None),
             pending_leader: Cell::new(None),
             pending_index: Cell::new(0),
+        }
+    }
+}
+
+pub struct WriteBarrier<P, O> {
+    inner: Mutex<WriteBarrierInner<P, O>>,
+    leader_cv: Condvar,
+    follower_cvs: [Condvar; 2],
+}
+
+impl<P, O> Default for WriteBarrier<P, O> {
+    fn default() -> Self {
+        WriteBarrier {
+            leader_cv: Condvar::new(),
+            follower_cvs: [Condvar::new(), Condvar::new()],
+            inner: Mutex::new(WriteBarrierInner::default()),
         }
     }
 }
@@ -140,36 +148,37 @@ impl<P, O> WriteBarrier<P, O> {
     /// contains them, `writer` included.
     pub fn enter<'a>(&self, writer: &'a mut Writer<P, O>) -> Option<WriteGroup<'_, 'a, P, O>> {
         let node = unsafe { Some(NonNull::new_unchecked(writer)) };
-        let mut lk = self.mutex.lock();
-        if let Some(tail) = self.tail.get() {
+        let mut inner = self.inner.lock();
+        if let Some(tail) = inner.tail.get() {
             unsafe {
                 tail.as_ref().set_next(node);
             }
-            self.tail.set(node);
+            inner.tail.set(node);
 
-            if self.pending_leader.get().is_some() {
+            if inner.pending_leader.get().is_some() {
                 // follower of next write group.
-                self.follower_cvs[self.pending_index.get() % 2].wait(&mut lk);
+                self.follower_cvs[inner.pending_index.get() % 2].wait(&mut inner);
                 return None;
             } else {
                 // leader of next write group.
-                self.pending_leader.set(node);
-                self.pending_index
-                    .set(self.pending_index.get().wrapping_add(1));
+                inner.pending_leader.set(node);
+                inner
+                    .pending_index
+                    .set(inner.pending_index.get().wrapping_add(1));
                 //
-                self.leader_cv.wait(&mut lk);
-                self.pending_leader.set(None);
+                self.leader_cv.wait(&mut inner);
+                inner.pending_leader.set(None);
             }
         } else {
             // leader of a empty write group. proceed directly.
-            debug_assert!(self.pending_leader.get().is_none());
-            self.head.set(node);
-            self.tail.set(node);
+            debug_assert!(inner.pending_leader.get().is_none());
+            inner.head.set(node);
+            inner.tail.set(node);
         }
 
         Some(WriteGroup {
             start: node,
-            back: self.tail.get(),
+            back: inner.tail.get(),
             ref_barrier: self,
             marker: PhantomData,
         })
@@ -179,18 +188,18 @@ impl<P, O> WriteBarrier<P, O> {
     /// responsible writers, and next write group should be formed.
     fn leader_exit(&self) {
         fail_point!("write_barrier::leader_exit", |_| {});
-        let _lk = self.mutex.lock();
-        if let Some(leader) = self.pending_leader.get() {
+        let inner = self.inner.lock();
+        if let Some(leader) = inner.pending_leader.get() {
             // wake up leader of next write group.
             self.leader_cv.notify_one();
             // wake up follower of current write group.
-            self.follower_cvs[self.pending_index.get().wrapping_sub(1) % 2].notify_all();
-            self.head.set(Some(leader));
+            self.follower_cvs[inner.pending_index.get().wrapping_sub(1) % 2].notify_all();
+            inner.head.set(Some(leader));
         } else {
             // wake up follower of current write group.
-            self.follower_cvs[self.pending_index.get() % 2].notify_all();
-            self.head.set(None);
-            self.tail.set(None);
+            self.follower_cvs[inner.pending_index.get() % 2].notify_all();
+            inner.head.set(None);
+            inner.tail.set(None);
         }
     }
 }
