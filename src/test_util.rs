@@ -9,13 +9,13 @@ use crate::{
     pipe_log::{FileBlockHandle, FileId},
 };
 
-pub fn generate_entries(begin_index: u64, end_index: u64, data: Option<Vec<u8>>) -> Vec<Entry> {
+pub fn generate_entries(begin_index: u64, end_index: u64, data: Option<&[u8]>) -> Vec<Entry> {
     let mut v = vec![Entry::new(); (end_index - begin_index) as usize];
     let mut index = begin_index;
     for e in v.iter_mut() {
         e.set_index(index);
-        if let Some(ref data) = data {
-            e.set_data(data.clone().into())
+        if let Some(data) = data {
+            e.set_data(data.to_vec().into())
         }
         index += 1;
     }
@@ -56,4 +56,36 @@ where
     let result = panic::catch_unwind(AssertUnwindSafe(f));
     panic::set_hook(prev_hook);
     result
+}
+
+pub struct PanicGuard {
+    prev_hook: *mut (dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static),
+}
+
+struct PointerHolder<T: ?Sized>(*mut T);
+
+unsafe impl<T: Send + ?Sized> Send for PointerHolder<T> {}
+unsafe impl<T: Sync + ?Sized> Sync for PointerHolder<T> {}
+
+impl PanicGuard {
+    pub fn with_prompt(s: String) -> Self {
+        let prev_hook = Box::into_raw(panic::take_hook());
+        let sendable_prev_hook = PointerHolder(prev_hook);
+        panic::set_hook(Box::new(move |info| {
+            eprintln!("{}", s);
+            unsafe { (*sendable_prev_hook.0)(info) };
+        }));
+        PanicGuard { prev_hook }
+    }
+}
+
+impl Drop for PanicGuard {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = panic::take_hook();
+            unsafe {
+                panic::set_hook(Box::from_raw(self.prev_hook));
+            }
+        }
+    }
 }

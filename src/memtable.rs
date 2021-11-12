@@ -113,7 +113,6 @@ impl MemTable {
                 if first > rewrite_last + 1 {
                     rhs.compact_to(rewrite_last + 1);
                 } else {
-                    // TODO(tabokie): add test case for first < rewrite_first.
                     rhs.unsafe_truncate_back(first);
                 }
             }
@@ -211,16 +210,15 @@ impl MemTable {
 
     // This will only be called during recovery.
     pub fn append_rewrite(&mut self, entry_indexes: Vec<EntryIndex>) {
-        self.global_stats.add_rewrite(entry_indexes.len());
-        match (
-            self.entry_indexes.back().map(|x| x.index),
-            entry_indexes.first(),
-        ) {
-            (Some(back_idx), Some(first)) if back_idx + 1 < first.index => {
-                // It's possible that a hole occurs in the rewrite queue.
-                self.compact_to(back_idx + 1);
+        let len = entry_indexes.len();
+        self.global_stats.add_rewrite(len);
+        if len > 0 {
+            let first_to_add = entry_indexes[0].index;
+            if let Some((first, last)) = self.span() {
+                if last + 1 < first_to_add || first_to_add < first {
+                    self.compact_to(last + 1);
+                }
             }
-            _ => {}
         }
         self.append(entry_indexes);
         self.rewrite_count = self.entry_indexes.len();
@@ -370,6 +368,7 @@ impl MemTable {
         Ok(())
     }
 
+    // Inclusive.
     pub fn fetch_entry_indexes_before(
         &self,
         gate: FileSeq,
@@ -402,6 +401,7 @@ impl MemTable {
         }
     }
 
+    // Inclusive.
     pub fn fetch_kvs_before(&self, gate: FileSeq, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, file_id)) in &self.kvs {
             if file_id.queue == LogQueue::Append && file_id.seq <= gate {
@@ -677,6 +677,13 @@ impl MemTableRecoverContext {
     pub fn finish(self) -> (MemTableAccessor, Arc<GlobalStats>) {
         (self.memtables, self.stats)
     }
+
+    pub fn merge_rewrite_context(&self, mut rewrite: MemTableRecoverContext) {
+        rewrite
+            .memtables
+            .apply(self.log_batch.clone().drain(), LogQueue::Append);
+        self.memtables.merge_rewrite_table(&mut rewrite.memtables);
+    }
 }
 
 impl Default for MemTableRecoverContext {
@@ -892,6 +899,15 @@ mod tests {
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
+        // Can't override compacted entries.
+        assert!(
+            catch_unwind_silent(|| memtable.append(generate_entry_indexes(
+                4,
+                5,
+                FileId::dummy(LogQueue::Append)
+            )))
+            .is_err()
+        );
         memtable.consistency_check();
 
         // Compact to 20.
@@ -1090,10 +1106,10 @@ mod tests {
         assert_eq!(kvs.pop().unwrap(), (k3.to_vec(), v3.to_vec()));
 
         // Rewrite indexes:
-        // [0, 10) queue = rewrite, file_num = 50,
+        // [0, 10) queue = rewrite, file_num = 1,
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
-        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 50));
+        let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1));
         memtable.rewrite(ents_idx, Some(1));
         assert_eq!(memtable.entries_size(), 25);
         memtable.consistency_check();
@@ -1104,6 +1120,11 @@ mod tests {
             .is_ok());
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
+        ents_idx.clear();
+        assert!(memtable
+            .fetch_entry_indexes_before(1, &mut ents_idx)
+            .is_ok());
+        assert!(ents_idx.is_empty());
 
         ents_idx.clear();
         assert!(memtable
@@ -1463,117 +1484,118 @@ mod tests {
         fn empty_table(id: u64) -> MemTable {
             MemTable::new(id, Arc::new(GlobalStats::default()))
         }
-        fn sequence_1(mut memtable: MemTable, on: Option<LogQueue>) -> MemTable {
-            match on {
-                Some(LogQueue::Append) => {
-                    memtable.append(generate_entry_indexes(
-                        0,
-                        10,
-                        FileId::new(LogQueue::Append, 1),
-                    ));
-                    memtable.append(generate_entry_indexes(
-                        7,
-                        15,
-                        FileId::new(LogQueue::Append, 2),
-                    ));
-                    memtable.compact_to(7);
+        let cases = [
+            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+                match on {
+                    None => {
+                        memtable.append(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Append, 1),
+                        ));
+                        memtable.append(generate_entry_indexes(
+                            7,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        memtable.rewrite(
+                            generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
+                            Some(1),
+                        );
+                    }
+                    Some(LogQueue::Append) => {
+                        memtable.append(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Append, 1),
+                        ));
+                        memtable.append(generate_entry_indexes(
+                            7,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        memtable.compact_to(7);
+                    }
+                    Some(LogQueue::Rewrite) => {
+                        memtable.append_rewrite(generate_entry_indexes(
+                            0,
+                            7,
+                            FileId::new(LogQueue::Rewrite, 1),
+                        ));
+                    }
                 }
-                Some(LogQueue::Rewrite) => {
-                    memtable.append_rewrite(generate_entry_indexes(
-                        0,
-                        10,
-                        FileId::new(LogQueue::Rewrite, 1),
-                    ));
+                memtable
+            },
+            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+                match on {
+                    None => {
+                        memtable.append(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Append, 1),
+                        ));
+                        memtable.append(generate_entry_indexes(
+                            7,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        memtable.rewrite(
+                            generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
+                            Some(1),
+                        );
+                        memtable.compact_to(10);
+                    }
+                    Some(LogQueue::Append) => {
+                        memtable.append(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Append, 1),
+                        ));
+                        memtable.append(generate_entry_indexes(
+                            7,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        memtable.compact_to(10);
+                    }
+                    Some(LogQueue::Rewrite) => {
+                        memtable.append_rewrite(generate_entry_indexes(
+                            0,
+                            7,
+                            FileId::new(LogQueue::Rewrite, 1),
+                        ));
+                    }
                 }
-                None => {
-                    memtable.append(generate_entry_indexes(
-                        0,
-                        10,
-                        FileId::new(LogQueue::Append, 1),
-                    ));
-                    memtable.append(generate_entry_indexes(
-                        7,
-                        15,
-                        FileId::new(LogQueue::Append, 2),
-                    ));
-                    memtable.rewrite(
-                        generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
-                        Some(1),
-                    );
-                }
-            }
-            memtable
-        }
-
-        fn sequence_2(mut memtable: MemTable, on: Option<LogQueue>) -> MemTable {
-            match on {
-                Some(LogQueue::Append) => {
-                    memtable.append(generate_entry_indexes(
-                        0,
-                        10,
-                        FileId::new(LogQueue::Append, 1),
-                    ));
-                    memtable.append(generate_entry_indexes(
-                        7,
-                        15,
-                        FileId::new(LogQueue::Append, 2),
-                    ));
-                    memtable.compact_to(10);
-                }
-                Some(LogQueue::Rewrite) => {
-                    memtable.append_rewrite(generate_entry_indexes(
-                        0,
-                        7,
-                        FileId::new(LogQueue::Rewrite, 1),
-                    ));
-                }
-                None => {
-                    memtable.append(generate_entry_indexes(
-                        0,
-                        10,
-                        FileId::new(LogQueue::Append, 1),
-                    ));
-                    memtable.append(generate_entry_indexes(
-                        7,
-                        15,
-                        FileId::new(LogQueue::Append, 2),
-                    ));
-                    memtable.rewrite(
-                        generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
-                        Some(1),
-                    );
-                    memtable.compact_to(10);
-                }
-            }
-            memtable
-        }
+                memtable
+            },
+        ];
 
         // merge against empty table.
-        for sequence in [sequence_1, sequence_2] {
+        for case in cases {
             let mut lhs = empty_table(region_id);
-            let mut rhs = sequence(empty_table(region_id), Some(LogQueue::Rewrite));
+            let mut rhs = case(empty_table(region_id), Some(LogQueue::Rewrite));
             lhs.merge_rewrite_table(&mut rhs);
             assert_eq!(
                 lhs.entry_indexes,
-                sequence(empty_table(region_id), Some(LogQueue::Rewrite)).entry_indexes,
+                case(empty_table(region_id), Some(LogQueue::Rewrite)).entry_indexes,
             );
             assert!(rhs.entry_indexes.is_empty());
 
-            let mut lhs = sequence(empty_table(region_id), Some(LogQueue::Append));
+            let mut lhs = case(empty_table(region_id), Some(LogQueue::Append));
             let mut rhs = empty_table(region_id);
             lhs.merge_rewrite_table(&mut rhs);
             assert_eq!(
                 lhs.entry_indexes,
-                sequence(empty_table(region_id), Some(LogQueue::Append)).entry_indexes
+                case(empty_table(region_id), Some(LogQueue::Append)).entry_indexes
             );
             assert!(rhs.entry_indexes.is_empty());
         }
 
-        for sequence in [sequence_1, sequence_2] {
-            let mut lhs = sequence(empty_table(region_id), Some(LogQueue::Append));
-            let mut rhs = sequence(empty_table(region_id), Some(LogQueue::Rewrite));
+        for case in cases {
+            let mut lhs = case(empty_table(region_id), Some(LogQueue::Append));
+            let mut rhs = case(empty_table(region_id), Some(LogQueue::Rewrite));
             lhs.merge_rewrite_table(&mut rhs);
-            let expected = sequence(empty_table(region_id), None);
+            let expected = case(empty_table(region_id), None);
             // stats could differ.
             assert_eq!(lhs.entry_indexes, expected.entry_indexes);
             assert!(rhs.entry_indexes.is_empty());
@@ -1581,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memtable_recover() {
+    fn test_memtable_merge_neighbor() {
         let file_id = FileId::new(LogQueue::Append, 10);
 
         // ops:

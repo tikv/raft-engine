@@ -84,11 +84,11 @@ impl LogFd {
     }
 
     pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
-        fail_point!("log_fd::read::err", |_| {
-            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
-        });
         let mut readed = 0;
         while readed < buf.len() {
+            fail_point!("log_fd::read::err", |_| {
+                Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+            });
             let bytes = match pread(self.0, &mut buf[readed..], offset as i64) {
                 Ok(bytes) => bytes,
                 Err(e) if e.as_errno() == Some(Errno::EAGAIN) => continue,
@@ -105,9 +105,6 @@ impl LogFd {
     }
 
     pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
-        fail_point!("log_fd::write::err", |_| {
-            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
-        });
         fail_point!("log_fd::write::zero", |_| { Ok(0) });
         let mut written = 0;
         while written < content.len() {
@@ -122,6 +119,9 @@ impl LogFd {
             written += bytes;
             offset += bytes;
         }
+        fail_point!("log_fd::write::err", |_| {
+            Err(from_nix_error(nix::Error::invalid_argument(), "fp"))
+        });
         Ok(written)
     }
 
