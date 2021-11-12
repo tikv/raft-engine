@@ -17,6 +17,8 @@ jobs:
         os: [ ubuntu-latest, macos-latest ]
     steps:
       - uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Install nightly toolchain
         uses: actions-rs/toolchain@v1
         with:
