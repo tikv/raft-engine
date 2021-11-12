@@ -19,7 +19,7 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::Result;
+use crate::{Result, Error};
 
 pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
