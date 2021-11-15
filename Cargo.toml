@@ -64,4 +64,3 @@ protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82
 
 [workspace]
 members = ["stress", "ctl"]
-default-members = ["ctl"]
