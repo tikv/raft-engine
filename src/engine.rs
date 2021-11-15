@@ -13,13 +13,13 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::FilePipeLog;
-use crate::log_batch::{Command, LogBatch, MessageExt};
+use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::Result;
+use crate::{Error, Result};
 
 pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
@@ -278,6 +278,32 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
     pub fn consistency_check(path: &std::path::Path) -> Result<Vec<(u64, u64)>> {
         Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder {}))
     }
+
+    // Repair log entry holes by fill in empty message
+    /// queue: accept "append", "rewrite", "all"
+    #[allow(unused_variables)]
+    pub fn auto_fill(path: &std::path::Path, queue: &str, raft_groups: &[u64]) -> Result<()> {
+        todo!()
+    }
+
+    // Trunate all files unsafely
+    /// mode: accept "front", "back", "all"
+    /// queue: accept "append", "rewrite", "all"
+    #[allow(unused_variables)]
+    pub fn truncate(
+        path: &std::path::Path,
+        mode: &str,
+        queue: &str,
+        raft_groups: &[u64],
+    ) -> Result<()> {
+        todo!()
+    }
+
+    // Dump all all operations in log files
+    #[allow(unused_variables)]
+    pub fn dump(path: &std::path::Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
+        todo!()
+    }
 }
 
 impl<B> Engine<B, FilePipeLog<B>>
@@ -290,6 +316,13 @@ where
         path: &std::path::Path,
         file_builder: Arc<B>,
     ) -> Result<Vec<(u64, u64)>> {
+        if !path.exists() {
+            return Err(Error::InvalidArgument(format!(
+                "raft-engine directory '{}' does not exist.",
+                path.to_str().unwrap()
+            )));
+        }
+
         let cfg = Config {
             dir: path.to_str().unwrap().to_owned(),
             recovery_mode: RecoveryMode::TolerateAnyCorruption,

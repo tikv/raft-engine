@@ -12,3 +12,4 @@ coverage:
         threshold: 3%
 ignore:
   - "stress"
+  - "ctl"
