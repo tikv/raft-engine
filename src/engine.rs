@@ -319,7 +319,7 @@ where
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
                 "raft-engine directory '{}' does not exist.",
-                path.to_str().unwrap().to_owned()
+                path.to_str().unwrap()
             )));
         }
 
