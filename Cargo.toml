@@ -22,7 +22,7 @@ required-features = ["failpoints"]
 [dependencies]
 byteorder = "1.2"
 crc32fast = "1.2"
-fail = "0.4"
+fail = "0.5"
 fs2 = "0.4"
 hashbrown = "0.11"
 hex = "0.4"
