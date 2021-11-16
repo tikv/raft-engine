@@ -115,11 +115,16 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
-            let mut writer = Writer::new(log_batch as &_, sync);
+            let mut writer = Writer::new(log_batch, sync, start);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
-                let _t = StopWatch::new(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM);
+                let now = Instant::now();
+                let _t = StopWatch::new_with(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 for writer in group.iter_mut() {
-                    sync |= writer.is_sync();
+                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM.observe(
+                        now.saturating_duration_since(writer.start_time)
+                            .as_secs_f64(),
+                    );
+                    sync |= writer.sync;
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
                         self.pipe_log

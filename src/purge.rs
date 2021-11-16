@@ -243,7 +243,9 @@ where
                 queue: *queue,
                 seq: *purge_to,
             })?;
-            info!("purged {} expired log files for queue {:?}", purged, *queue);
+            if purged > 0 {
+                info!("purged {} expired log files for queue {:?}", purged, *queue);
+            }
             for listener in &self.listeners {
                 listener.post_purge(FileId {
                     queue: *queue,
