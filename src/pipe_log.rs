@@ -4,8 +4,8 @@ use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LogQueue {
-    Append,
-    Rewrite,
+    Append = 0,
+    Rewrite = 1,
 }
 
 pub type FileSeq = u64;
@@ -65,7 +65,7 @@ pub trait PipeLog: Sized {
     /// # Panics
     ///
     /// Panics if sync goes wrong.
-    fn maybe_sync(&self, queue: LogQueue, force: bool) -> Result<()>;
+    fn maybe_sync(&self, queue: LogQueue, sync: bool) -> Result<()>;
 
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 

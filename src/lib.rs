@@ -43,12 +43,10 @@ mod event_listener;
 mod file_builder;
 mod file_pipe_log;
 mod log_batch;
-mod log_file;
 mod memtable;
 mod metrics;
 mod pipe_log;
 mod purge;
-mod reader;
 #[cfg(test)]
 mod test_util;
 mod util;
@@ -65,30 +63,76 @@ pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine
 
 #[derive(Default)]
 pub struct GlobalStats {
-    // How many operations in the rewrite queue.
-    rewrite_operations: AtomicUsize,
-    // How many compacted operations in the rewrite queue.
-    compacted_rewrite_operations: AtomicUsize,
+    live_append_entries: AtomicUsize,
+    rewrite_entries: AtomicUsize,
+    deleted_rewrite_entries: AtomicUsize,
 }
 
 impl GlobalStats {
-    pub fn add_rewrite(&self, count: usize) {
-        self.rewrite_operations.fetch_add(count, Ordering::Release);
-    }
-    pub fn add_compacted_rewrite(&self, count: usize) {
-        self.compacted_rewrite_operations
-            .fetch_add(count, Ordering::Release);
-    }
-    pub fn rewrite_operations(&self) -> usize {
-        self.rewrite_operations.load(Ordering::Acquire)
-    }
-    pub fn compacted_rewrite_operations(&self) -> usize {
-        self.compacted_rewrite_operations.load(Ordering::Acquire)
+    #[inline]
+    pub fn add(&self, queue: LogQueue, count: usize) {
+        match queue {
+            LogQueue::Append => {
+                self.live_append_entries.fetch_add(count, Ordering::Relaxed);
+            }
+            LogQueue::Rewrite => {
+                self.rewrite_entries.fetch_add(count, Ordering::Relaxed);
+            }
+        }
     }
 
-    pub fn merge(&self, rhs: &Self) {
-        self.add_rewrite(rhs.rewrite_operations());
-        self.add_compacted_rewrite(rhs.compacted_rewrite_operations())
+    #[inline]
+    pub fn delete(&self, queue: LogQueue, count: usize) {
+        match queue {
+            LogQueue::Append => {
+                self.live_append_entries.fetch_sub(count, Ordering::Relaxed);
+            }
+            LogQueue::Rewrite => {
+                self.deleted_rewrite_entries
+                    .fetch_add(count, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn rewrite_entries(&self) -> usize {
+        self.rewrite_entries.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn deleted_rewrite_entries(&self) -> usize {
+        self.deleted_rewrite_entries.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn reset_rewrite_counters(&self) {
+        let dop = self.deleted_rewrite_entries.load(Ordering::Relaxed);
+        self.deleted_rewrite_entries
+            .fetch_sub(dop, Ordering::Relaxed);
+        self.rewrite_entries.fetch_sub(dop, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn live_entries(&self, queue: LogQueue) -> usize {
+        match queue {
+            LogQueue::Append => self.live_append_entries.load(Ordering::Relaxed),
+            LogQueue::Rewrite => {
+                let op = self.rewrite_entries.load(Ordering::Relaxed);
+                let dop = self.deleted_rewrite_entries.load(Ordering::Relaxed);
+                debug_assert!(op >= dop);
+                op.saturating_sub(dop)
+            }
+        }
+    }
+
+    #[inline]
+    pub fn flush_metrics(&self) {
+        metrics::LOG_ENTRY_COUNT
+            .rewrite
+            .set(self.live_entries(LogQueue::Rewrite) as i64);
+        metrics::LOG_ENTRY_COUNT
+            .append
+            .set(self.live_entries(LogQueue::Append) as i64);
     }
 }
 

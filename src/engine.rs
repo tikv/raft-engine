@@ -12,14 +12,14 @@ use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
-use crate::file_pipe_log::FilePipeLog;
+use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{Error, Result};
+use crate::{Error, GlobalStats, Result};
 
 pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
@@ -27,14 +27,14 @@ where
     P: PipeLog,
 {
     cfg: Arc<Config>,
+    listeners: Vec<Arc<dyn EventListener>>,
 
+    stats: Arc<GlobalStats>,
     memtables: MemTableAccessor,
     pipe_log: Arc<P>,
     purge_manager: PurgeManager<P>,
 
     write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
-
-    listeners: Vec<Arc<dyn EventListener>>,
 
     _phantom: PhantomData<B>,
 }
@@ -74,30 +74,32 @@ where
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
-        let (pipe_log, append, rewrite) =
-            FilePipeLog::open::<MemTableRecoverContext>(&cfg, file_builder, listeners.clone())?;
-        let pipe_log = Arc::new(pipe_log);
+        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
+        builder.scan()?;
+        let (append, rewrite) = builder.recover::<MemTableRecoverContext>()?;
+        let pipe_log = Arc::new(builder.finish()?);
         info!("Recovering raft logs takes {:?}", start.elapsed());
 
-        append.merge_rewrite_context(rewrite);
-        let (memtables, global_stats) = append.finish();
+        rewrite.merge_append_context(append);
+        let (memtables, stats) = rewrite.finish();
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
             cfg.clone(),
             memtables.clone(),
             pipe_log.clone(),
-            global_stats,
+            stats.clone(),
             listeners.clone(),
         );
 
         Ok(Self {
             cfg,
+            listeners,
+            stats,
             memtables,
             pipe_log,
             purge_manager,
             write_barrier: Default::default(),
-            listeners,
             _phantom: PhantomData,
         })
     }
@@ -115,11 +117,16 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
-            let mut writer = Writer::new(log_batch as &_, sync);
+            let mut writer = Writer::new(log_batch, sync, start);
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
-                let _t = StopWatch::new(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM);
+                let now = Instant::now();
+                let _t = StopWatch::new_with(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 for writer in group.iter_mut() {
-                    sync |= writer.is_sync();
+                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM.observe(
+                        now.saturating_duration_since(writer.start_time)
+                            .as_secs_f64(),
+                    );
+                    sync |= writer.sync;
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
                         self.pipe_log
@@ -203,6 +210,10 @@ where
     /// which needs to be compacted ASAP.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM);
+
+        // TODO: Move this to a dedicated thread.
+        self.stats.flush_metrics();
+
         self.purge_manager.purge_expired_files()
     }
 
@@ -328,8 +339,9 @@ where
             recovery_mode: RecoveryMode::TolerateAnyCorruption,
             ..Default::default()
         };
-        let (_, append, rewrite) =
-            FilePipeLog::open::<ConsistencyChecker>(&cfg, file_builder, vec![])?;
+        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
+        builder.scan()?;
+        let (append, rewrite) = builder.recover::<ConsistencyChecker>()?;
         let mut map = rewrite.finish();
         for (id, index) in append.finish() {
             map.entry(id).or_insert(index);
@@ -415,7 +427,7 @@ mod tests {
 
         fn reopen(self) -> Self {
             let cfg: Config = self.cfg.as_ref().clone();
-            let file_builder = self.pipe_log.file_builder.clone();
+            let file_builder = self.pipe_log.file_builder();
             let mut listeners = self.listeners.clone();
             listeners.pop();
             drop(self);

@@ -3,6 +3,7 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::time::Instant;
 
 use fail::fail_point;
 use parking_lot::{Condvar, Mutex};
@@ -11,28 +12,27 @@ type Ptr<T> = Option<NonNull<T>>;
 
 pub struct Writer<P, O> {
     next: Cell<Ptr<Writer<P, O>>>,
-    payload: *const P,
-    sync: bool,
+    payload: *mut P,
     output: Option<O>,
+
+    pub(crate) sync: bool,
+    pub(crate) start_time: Instant,
 }
 
 impl<P, O> Writer<P, O> {
-    // SAFETY: `payload` mustn't be modified during the lifetime of this writer.
-    pub fn new(payload: &P, sync: bool) -> Self {
+    // SAFETY: Data pointed by `payload` is owned by this writer during its lifetime.
+    pub fn new(payload: &mut P, sync: bool, start_time: Instant) -> Self {
         Writer {
             next: Cell::new(None),
-            payload: payload as *const _,
-            sync,
+            payload: payload as *mut _,
             output: None,
+            sync,
+            start_time,
         }
     }
 
     pub fn get_payload(&self) -> &P {
         unsafe { &*self.payload }
-    }
-
-    pub fn is_sync(&self) -> bool {
-        self.sync
     }
 
     pub fn set_output(&mut self, output: O) {
@@ -215,12 +215,12 @@ mod tests {
     #[test]
     fn test_sequential_groups() {
         let barrier: WriteBarrier<(), u32> = Default::default();
-        let payload = ();
+        let mut payload = ();
         let mut leaders = 0;
         let mut processed_writers = 0;
 
         for _ in 0..4 {
-            let mut writer = Writer::new(&payload, false);
+            let mut writer = Writer::new(&mut payload, false, Instant::now());
             {
                 let mut wg = barrier.enter(&mut writer).unwrap();
                 leaders += 1;
@@ -268,11 +268,11 @@ mod tests {
                 let barrier_clone = self.barrier.clone();
                 let tx_clone = self.tx.clone();
                 let ready_tx_clone = ready_tx.clone();
-                let seq = self.writer_seq;
+                let mut seq = self.writer_seq;
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
-                            let mut writer = Writer::new(&seq, false);
+                            let mut writer = Writer::new(&mut seq, false, Instant::now());
                             ready_tx_clone.send(()).unwrap();
                             {
                                 let mut wg = barrier_clone.enter(&mut writer).unwrap();
@@ -296,11 +296,11 @@ mod tests {
                 let barrier_clone = self.barrier.clone();
                 let tx_clone = self.tx.clone();
                 let ready_tx_clone = ready_tx.clone();
-                let seq = self.writer_seq;
+                let mut seq = self.writer_seq;
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
-                            let mut writer = Writer::new(&seq, false);
+                            let mut writer = Writer::new(&mut seq, false, Instant::now());
                             ready_tx_clone.send(()).unwrap();
                             if let Some(mut wg) = barrier_clone.enter(&mut writer) {
                                 let mut idx = 0;

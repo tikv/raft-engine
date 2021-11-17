@@ -22,21 +22,22 @@ required-features = ["failpoints"]
 [dependencies]
 byteorder = "1.2"
 crc32fast = "1.2"
+crossbeam = "0.8"
 fail = "0.5"
 fs2 = "0.4"
 hashbrown = "0.11"
 hex = "0.4"
 lazy_static = "1.3"
-libc = "0.2.99"
+libc = "0.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
-lz4-sys = "1.9.2"
-nix = "0.18.0"
+lz4-sys = "1.9"
+nix = "0.19"
 num-derive = "0.3"
 num-traits = "0.2"
 parking_lot = "0.11"
 prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
-protobuf = "=2.8.0"
+protobuf = "2"
 rayon = "1.5.0"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
@@ -58,9 +59,9 @@ failpoints = [
 ]
 
 [patch.crates-io]
-raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false }
-protobuf = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
-protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", rev = "82b49fea7e696fd647b5aca0a6c6ec944eab3189" }
+raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
+protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 
 [workspace]
 members = ["stress", "ctl"]

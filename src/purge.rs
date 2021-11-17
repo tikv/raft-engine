@@ -144,9 +144,8 @@ where
         match queue {
             LogQueue::Append => total_size > purge_threshold,
             LogQueue::Rewrite => {
-                let compacted_rewrites_ratio = self.global_stats.compacted_rewrite_operations()
-                    as f64
-                    / self.global_stats.rewrite_operations() as f64;
+                let compacted_rewrites_ratio = self.global_stats.deleted_rewrite_entries() as f64
+                    / self.global_stats.rewrite_entries() as f64;
                 total_size * 10 > purge_threshold && compacted_rewrites_ratio > 0.5
             }
         }
@@ -210,7 +209,9 @@ where
             .memtables
             .collect(|t| t.min_file_seq(LogQueue::Rewrite).is_some());
 
-        self.rewrite_memtables(memtables, 0 /*expect_rewrites_per_memtable*/, None)
+        self.rewrite_memtables(memtables, 0 /*expect_rewrites_per_memtable*/, None)?;
+        self.global_stats.reset_rewrite_counters();
+        Ok(())
     }
 
     fn rewrite_append_queue_tombstones(&self) -> Result<()> {
@@ -243,7 +244,9 @@ where
                 queue: *queue,
                 seq: *purge_to,
             })?;
-            info!("purged {} expired log files for queue {:?}", purged, *queue);
+            if purged > 0 {
+                info!("purged {} expired log files for queue {:?}", purged, *queue);
+            }
             for listener in &self.listeners {
                 listener.post_purge(FileId {
                     queue: *queue,
