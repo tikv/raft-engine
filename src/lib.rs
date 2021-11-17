@@ -63,53 +63,76 @@ pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine
 
 #[derive(Default)]
 pub struct GlobalStats {
-    entries: [AtomicUsize; 2],
-    deleted_entries: [AtomicUsize; 2],
+    live_append_entries: AtomicUsize,
+    rewrite_entries: AtomicUsize,
+    deleted_rewrite_entries: AtomicUsize,
 }
 
 impl GlobalStats {
     #[inline]
     pub fn add(&self, queue: LogQueue, count: usize) {
-        self.entries[queue as usize].fetch_add(count, Ordering::Relaxed);
+        match queue {
+            LogQueue::Append => {
+                self.live_append_entries.fetch_add(count, Ordering::Relaxed);
+            }
+            LogQueue::Rewrite => {
+                self.rewrite_entries.fetch_add(count, Ordering::Relaxed);
+            }
+        }
     }
 
     #[inline]
     pub fn delete(&self, queue: LogQueue, count: usize) {
-        self.deleted_entries[queue as usize].fetch_add(count, Ordering::Relaxed);
+        match queue {
+            LogQueue::Append => {
+                self.live_append_entries.fetch_sub(count, Ordering::Relaxed);
+            }
+            LogQueue::Rewrite => {
+                self.deleted_rewrite_entries
+                    .fetch_add(count, Ordering::Relaxed);
+            }
+        }
     }
 
     #[inline]
-    pub fn entries(&self, queue: LogQueue) -> usize {
-        self.entries[queue as usize].load(Ordering::Relaxed)
+    pub fn rewrite_entries(&self) -> usize {
+        self.rewrite_entries.load(Ordering::Relaxed)
     }
 
     #[inline]
-    pub fn deleted_entries(&self, queue: LogQueue) -> usize {
-        self.deleted_entries[queue as usize].load(Ordering::Relaxed)
+    pub fn deleted_rewrite_entries(&self) -> usize {
+        self.deleted_rewrite_entries.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn reset_rewrite_counters(&self) {
+        let dop = self.deleted_rewrite_entries.load(Ordering::Relaxed);
+        self.deleted_rewrite_entries
+            .fetch_sub(dop, Ordering::Relaxed);
+        self.rewrite_entries.fetch_sub(dop, Ordering::Relaxed);
     }
 
     #[inline]
     pub fn live_entries(&self, queue: LogQueue) -> usize {
-        let op = self.entries[queue as usize].load(Ordering::Relaxed);
-        let cop = self.entries[queue as usize].load(Ordering::Relaxed);
-        debug_assert!(op >= cop);
-        op.saturating_sub(cop)
+        match queue {
+            LogQueue::Append => self.live_append_entries.load(Ordering::Relaxed),
+            LogQueue::Rewrite => {
+                let op = self.rewrite_entries.load(Ordering::Relaxed);
+                let dop = self.deleted_rewrite_entries.load(Ordering::Relaxed);
+                debug_assert!(op >= dop);
+                op.saturating_sub(dop)
+            }
+        }
     }
 
     #[inline]
     pub fn flush_metrics(&self) {
-        let mut total_entries = 0;
-        let mut tombstones = 0;
-        for queue in [LogQueue::Append, LogQueue::Rewrite] {
-            total_entries += self.entries(queue);
-            tombstones += self.deleted_entries(queue);
-        }
         metrics::LOG_ENTRY_COUNT
-            .with_label_values(&["total"])
-            .set(total_entries as i64);
+            .rewrite
+            .set(self.live_entries(LogQueue::Rewrite) as i64);
         metrics::LOG_ENTRY_COUNT
-            .with_label_values(&["tombstone"])
-            .set(tombstones as i64);
+            .append
+            .set(self.live_entries(LogQueue::Append) as i64);
     }
 }
 

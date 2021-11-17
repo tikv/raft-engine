@@ -149,7 +149,8 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
-    pub static ref LOG_ENTRY_COUNT: IntGaugeVec = register_int_gauge_vec!(
+    pub static ref LOG_ENTRY_COUNT: LogQueueGaugeVec = register_static_int_gauge_vec!(
+        LogQueueGaugeVec,
         "raft_engine_log_entry_count",
         "Number of log entries in Raft engine",
         &["type"]

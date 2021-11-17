@@ -80,8 +80,8 @@ where
         let pipe_log = Arc::new(builder.finish()?);
         info!("Recovering raft logs takes {:?}", start.elapsed());
 
-        append.merge_rewrite_context(rewrite);
-        let (memtables, stats) = append.finish();
+        rewrite.merge_append_context(append);
+        let (memtables, stats) = rewrite.finish();
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
