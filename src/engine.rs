@@ -12,7 +12,7 @@ use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
-use crate::file_pipe_log::FilePipeLog;
+use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
@@ -74,9 +74,10 @@ where
         listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
-        let (pipe_log, append, rewrite) =
-            FilePipeLog::open::<MemTableRecoverContext>(&cfg, file_builder, listeners.clone())?;
-        let pipe_log = Arc::new(pipe_log);
+        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
+        builder.scan()?;
+        let (append, rewrite) = builder.recover::<MemTableRecoverContext>()?;
+        let pipe_log = Arc::new(builder.finish()?);
         info!("Recovering raft logs takes {:?}", start.elapsed());
 
         append.merge_rewrite_context(rewrite);
@@ -333,8 +334,9 @@ where
             recovery_mode: RecoveryMode::TolerateAnyCorruption,
             ..Default::default()
         };
-        let (_, append, rewrite) =
-            FilePipeLog::open::<ConsistencyChecker>(&cfg, file_builder, vec![])?;
+        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
+        builder.scan()?;
+        let (append, rewrite) = builder.recover::<ConsistencyChecker>()?;
         let mut map = rewrite.finish();
         for (id, index) in append.finish() {
             map.entry(id).or_insert(index);
@@ -420,7 +422,7 @@ mod tests {
 
         fn reopen(self) -> Self {
             let cfg: Config = self.cfg.as_ref().clone();
-            let file_builder = self.pipe_log.file_builder.clone();
+            let file_builder = self.pipe_log.file_builder();
             let mut listeners = self.listeners.clone();
             listeners.pop();
             drop(self);

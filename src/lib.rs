@@ -43,12 +43,10 @@ mod event_listener;
 mod file_builder;
 mod file_pipe_log;
 mod log_batch;
-mod log_file;
 mod memtable;
 mod metrics;
 mod pipe_log;
 mod purge;
-mod reader;
 #[cfg(test)]
 mod test_util;
 mod util;

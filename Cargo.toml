@@ -22,6 +22,7 @@ required-features = ["failpoints"]
 [dependencies]
 byteorder = "1.2"
 crc32fast = "1.2"
+crossbeam = "0.8"
 fail = "0.5"
 fs2 = "0.4"
 hashbrown = "0.11"

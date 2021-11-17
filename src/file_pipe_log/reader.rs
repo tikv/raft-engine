@@ -2,10 +2,11 @@
 
 use std::io::{Read, Seek};
 
-use crate::file_pipe_log::{LogFileHeader, LOG_FILE_HEADER_LEN};
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
+
+use super::format::LogFileHeader;
 
 pub struct LogItemBatchFileReader<R: Read + Seek> {
     file_id: Option<FileId>,
@@ -43,9 +44,9 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
-        let mut header = self.peek(0, LOG_FILE_HEADER_LEN, LOG_BATCH_HEADER_LEN)?;
+        let mut header = self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
         LogFileHeader::decode(&mut header)?;
-        self.valid_offset = LOG_FILE_HEADER_LEN;
+        self.valid_offset = LogFileHeader::len();
         Ok(())
     }
 
