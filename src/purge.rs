@@ -144,9 +144,9 @@ where
         match queue {
             LogQueue::Append => total_size > purge_threshold,
             LogQueue::Rewrite => {
-                let compacted_rewrites_ratio = self.global_stats.compacted_rewrite_operations()
+                let compacted_rewrites_ratio = self.global_stats.deleted_entries(LogQueue::Rewrite)
                     as f64
-                    / self.global_stats.rewrite_operations() as f64;
+                    / self.global_stats.entries(LogQueue::Rewrite) as f64;
                 total_size * 10 > purge_threshold && compacted_rewrites_ratio > 0.5
             }
         }

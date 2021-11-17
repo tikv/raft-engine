@@ -19,7 +19,7 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{Error, Result};
+use crate::{Error, GlobalStats, Result};
 
 pub struct Engine<B = DefaultFileBuilder, P = FilePipeLog<B>>
 where
@@ -27,14 +27,14 @@ where
     P: PipeLog,
 {
     cfg: Arc<Config>,
+    listeners: Vec<Arc<dyn EventListener>>,
 
+    stats: Arc<GlobalStats>,
     memtables: MemTableAccessor,
     pipe_log: Arc<P>,
     purge_manager: PurgeManager<P>,
 
     write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
-
-    listeners: Vec<Arc<dyn EventListener>>,
 
     _phantom: PhantomData<B>,
 }
@@ -81,24 +81,25 @@ where
         info!("Recovering raft logs takes {:?}", start.elapsed());
 
         append.merge_rewrite_context(rewrite);
-        let (memtables, global_stats) = append.finish();
+        let (memtables, stats) = append.finish();
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
             cfg.clone(),
             memtables.clone(),
             pipe_log.clone(),
-            global_stats,
+            stats.clone(),
             listeners.clone(),
         );
 
         Ok(Self {
             cfg,
+            listeners,
+            stats,
             memtables,
             pipe_log,
             purge_manager,
             write_barrier: Default::default(),
-            listeners,
             _phantom: PhantomData,
         })
     }
@@ -209,6 +210,10 @@ where
     /// which needs to be compacted ASAP.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM);
+
+        // TODO: Move this to a dedicated thread.
+        self.stats.flush_metrics();
+
         self.purge_manager.purge_expired_files()
     }
 

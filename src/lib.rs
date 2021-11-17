@@ -63,30 +63,57 @@ pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine
 
 #[derive(Default)]
 pub struct GlobalStats {
-    // How many operations in the rewrite queue.
-    rewrite_operations: AtomicUsize,
-    // How many compacted operations in the rewrite queue.
-    compacted_rewrite_operations: AtomicUsize,
+    entries: [AtomicUsize; 2],
+    deleted_entries: [AtomicUsize; 2],
 }
 
 impl GlobalStats {
-    pub fn add_rewrite(&self, count: usize) {
-        self.rewrite_operations.fetch_add(count, Ordering::Release);
-    }
-    pub fn add_compacted_rewrite(&self, count: usize) {
-        self.compacted_rewrite_operations
-            .fetch_add(count, Ordering::Release);
-    }
-    pub fn rewrite_operations(&self) -> usize {
-        self.rewrite_operations.load(Ordering::Acquire)
-    }
-    pub fn compacted_rewrite_operations(&self) -> usize {
-        self.compacted_rewrite_operations.load(Ordering::Acquire)
+    #[inline]
+    pub fn add(&self, queue: LogQueue, count: usize) {
+        self.entries[queue as usize].fetch_add(count, Ordering::Relaxed);
     }
 
+    #[inline]
+    pub fn delete(&self, queue: LogQueue, count: usize) {
+        self.deleted_entries[queue as usize].fetch_add(count, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn entries(&self, queue: LogQueue) -> usize {
+        self.entries[queue as usize].load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn deleted_entries(&self, queue: LogQueue) -> usize {
+        self.deleted_entries[queue as usize].load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn live_entries(&self, queue: LogQueue) -> usize {
+        let op = self.entries[queue as usize].load(Ordering::Relaxed);
+        let cop = self.entries[queue as usize].load(Ordering::Relaxed);
+        debug_assert!(op >= cop);
+        op.saturating_sub(cop)
+    }
+
+    #[inline]
     pub fn merge(&self, rhs: &Self) {
-        self.add_rewrite(rhs.rewrite_operations());
-        self.add_compacted_rewrite(rhs.compacted_rewrite_operations())
+        for queue in [LogQueue::Append, LogQueue::Rewrite] {
+            self.add(queue, rhs.entries(queue));
+            self.delete(queue, rhs.deleted_entries(queue));
+        }
+    }
+
+    #[inline]
+    pub fn flush_metrics(&self) {
+        let mut total_entries = 0;
+        let mut tombstones = 0;
+        for queue in [LogQueue::Append, LogQueue::Rewrite] {
+            total_entries += self.entries(queue);
+            tombstones += self.deleted_entries(queue);
+        }
+        metrics::LOG_ENTRY_COUNT.with_label_values(&["total"]).set(total_entries as i64);
+        metrics::LOG_ENTRY_COUNT.with_label_values(&["tombstone"]).set(tombstones as i64);
     }
 }
 

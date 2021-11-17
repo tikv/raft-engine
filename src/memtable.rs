@@ -109,11 +109,11 @@ impl MemTable {
         debug_assert_eq!(self.rewrite_count, 0);
 
         if let Some((first, _)) = self.span() {
-            if let Some((_, rewrite_last)) = rhs.span() {
+            if let Some((rewrite_first, rewrite_last)) = rhs.span() {
                 if first > rewrite_last + 1 {
-                    rhs.compact_to(rewrite_last + 1);
-                } else {
-                    rhs.unsafe_truncate_back(first);
+                    rhs.unsafe_truncate_back(rewrite_first, 0, rewrite_last);
+                } else if first != rewrite_last + 1 {
+                    rhs.unsafe_truncate_back(rewrite_first, first, rewrite_last);
                 }
             }
             rhs.entry_indexes.append(&mut self.entry_indexes);
@@ -132,44 +132,40 @@ impl MemTable {
 
     pub fn delete(&mut self, key: &[u8]) {
         if let Some(value) = self.kvs.remove(key) {
-            if value.1.queue == LogQueue::Rewrite {
-                self.global_stats.add_compacted_rewrite(1);
-            }
+            self.global_stats.delete(value.1.queue, 1);
         }
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
         if let Some(origin) = self.kvs.insert(key, (value, file_id)) {
-            if origin.1.queue == LogQueue::Rewrite && file_id.queue == LogQueue::Append {
-                self.global_stats.add_compacted_rewrite(1);
-            }
+            self.global_stats.delete(origin.1.queue, 1);
         }
-        if file_id.queue == LogQueue::Rewrite {
-            self.global_stats.add_rewrite(1);
-        }
+        self.global_stats.add(file_id.queue, 1);
     }
 
     pub fn rewrite_key(&mut self, key: Vec<u8>, gate: Option<FileSeq>, seq: FileSeq) {
-        self.global_stats.add_rewrite(1);
-        if let Some(value) = self.kvs.get_mut(&key) {
-            if value.1.queue == LogQueue::Append {
+        self.global_stats.add(LogQueue::Rewrite, 1);
+        if let Some(origin) = self.kvs.get_mut(&key) {
+            if origin.1.queue == LogQueue::Append {
                 // Always provide a gate to rewrite a normal entry.
-                if value.1.seq <= gate.unwrap() {
-                    value.1 = FileId {
+                if origin.1.seq <= gate.unwrap() {
+                    origin.1 = FileId {
                         queue: LogQueue::Rewrite,
                         seq,
                     };
+                    self.global_stats.delete(LogQueue::Append, 1);
                 } else {
                     // The rewritten key/value pair has been overwritten.
-                    self.global_stats.add_compacted_rewrite(1);
+                    self.global_stats.delete(LogQueue::Rewrite, 1);
                 }
             } else {
-                assert!(value.1.seq <= seq);
-                value.1.seq = seq;
+                assert!(origin.1.seq <= seq);
+                origin.1.seq = seq;
+                self.global_stats.delete(LogQueue::Rewrite, 1);
             }
         } else {
             // The rewritten key/value pair has been compacted.
-            self.global_stats.add_compacted_rewrite(1);
+            self.global_stats.delete(LogQueue::Rewrite, 1);
         }
     }
 
@@ -188,90 +184,106 @@ impl MemTable {
     }
 
     pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
-        if entry_indexes.is_empty() {
-            return;
+        let len = entry_indexes.len();
+        if len > 0 {
+            if let Some((first, last)) = self.span() {
+                let first_to_add = entry_indexes[0].index;
+                assert!(first <= first_to_add, "corrupted raft {}", self.region_id);
+                assert!(
+                    last + 1 >= first_to_add,
+                    "memtable {} has a hole",
+                    self.region_id
+                );
+                if first_to_add <= last {
+                    self.unsafe_truncate_back(first, first_to_add, last);
+                }
+            }
+            self.global_stats.add(LogQueue::Append, len);
+            // TODO: Optimize this.
+            self.entry_indexes.extend(entry_indexes);
         }
-        if let Some((first, last)) = self.span() {
-            let first_index_to_add = entry_indexes[0].index;
-            assert!(
-                first <= first_index_to_add,
-                "corrupted raft {}",
-                self.region_id
-            );
-            assert!(
-                last + 1 >= first_index_to_add,
-                "memtable {} has a hole",
-                self.region_id
-            );
-            self.unsafe_truncate_back(first_index_to_add);
-        }
-        self.entry_indexes.extend(entry_indexes);
     }
 
     // This will only be called during recovery.
     pub fn append_rewrite(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
-        self.global_stats.add_rewrite(len);
         if len > 0 {
-            let first_to_add = entry_indexes[0].index;
+            debug_assert_eq!(self.rewrite_count, self.entry_indexes.len());
             if let Some((first, last)) = self.span() {
+                let first_to_add = entry_indexes[0].index;
                 if last + 1 < first_to_add || first_to_add < first {
-                    self.compact_to(last + 1);
+                    self.unsafe_truncate_back(first, 0, last);
+                } else if first_to_add <= last {
+                    self.unsafe_truncate_back(first, first_to_add, last);
                 }
             }
+            self.global_stats.add(LogQueue::Rewrite, len);
+            self.entry_indexes.extend(entry_indexes);
+            self.rewrite_count = self.entry_indexes.len();
         }
-        self.append(entry_indexes);
-        self.rewrite_count = self.entry_indexes.len();
     }
 
     pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, gate: Option<FileSeq>) {
-        self.global_stats.add_rewrite(rewrite_indexes.len());
-
         if rewrite_indexes.is_empty() {
             return;
         }
+        self.global_stats
+            .add(LogQueue::Rewrite, rewrite_indexes.len());
+
         let len = self.entry_indexes.len();
         if len == 0 {
             self.global_stats
-                .add_compacted_rewrite(rewrite_indexes.len());
+                .delete(LogQueue::Rewrite, rewrite_indexes.len());
             return;
         }
+
         let first = self.entry_indexes[0].index;
         let last = self.entry_indexes[len - 1].index;
         let rewrite_first = std::cmp::max(rewrite_indexes[0].index, first);
         let rewrite_last = std::cmp::min(rewrite_indexes[rewrite_indexes.len() - 1].index, last);
-        let rewrite_len = (rewrite_last + 1).saturating_sub(rewrite_first) as usize;
-        self.global_stats
-            .add_compacted_rewrite(rewrite_indexes.len() - rewrite_len);
-
+        let mut rewrite_len = (rewrite_last + 1).saturating_sub(rewrite_first) as usize;
         if rewrite_len == 0 {
+            self.global_stats
+                .delete(LogQueue::Rewrite, rewrite_indexes.len());
             return;
         }
 
         let pos = (rewrite_first - first) as usize;
         // No normal log entry mixed in rewritten entries at the front.
-        debug_assert!(
+        assert!(
             pos == 0 || self.entry_indexes[pos - 1].entries.unwrap().id.queue == LogQueue::Rewrite
         );
         let rewrite_pos = (rewrite_first - rewrite_indexes[0].index) as usize;
-        let rewrite_indexes = &rewrite_indexes[rewrite_pos..rewrite_pos + rewrite_len];
 
-        for (i, rindex) in rewrite_indexes.iter().enumerate() {
+        for (i, rindex) in rewrite_indexes[rewrite_pos..rewrite_pos + rewrite_len]
+            .iter()
+            .enumerate()
+        {
             let index = &mut self.entry_indexes[i + pos];
             if let Some(gate) = gate {
                 debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::Append);
                 if index.entries.unwrap().id.seq > gate {
                     // Some entries are overwritten by new appends.
-                    self.global_stats.add_compacted_rewrite(rewrite_len - i);
-                    self.rewrite_count = i + pos;
-                    return;
+                    rewrite_len = i;
+                    break;
                 }
-            } else {
-                // It's a squeeze operation.
-                debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::Rewrite);
+            } else if index.entries.unwrap().id.queue == LogQueue::Append {
+                // Squeeze operation encounters a new append.
+                // TODO: Test case.
+                rewrite_len = i;
+                break;
             }
 
             *index = *rindex;
+        }
+
+        if gate.is_none() {
+            self.global_stats
+                .delete(LogQueue::Rewrite, rewrite_indexes.len());
+        } else {
+            self.global_stats.delete(LogQueue::Append, rewrite_len);
+            self.global_stats
+                .delete(LogQueue::Rewrite, rewrite_indexes.len() - rewrite_len);
         }
 
         self.rewrite_count = pos + rewrite_len;
@@ -293,27 +305,32 @@ impl MemTable {
 
         let compacted_rewrite = std::cmp::min(count, self.rewrite_count);
         self.rewrite_count -= compacted_rewrite;
-        self.global_stats.add_compacted_rewrite(compacted_rewrite);
+        self.global_stats
+            .delete(LogQueue::Rewrite, compacted_rewrite);
+        self.global_stats
+            .delete(LogQueue::Append, count - compacted_rewrite);
         count as u64
     }
 
     // Removes all entry indexes with index greater than or equal to `index`.
     // Returns the truncated amount.
-    fn unsafe_truncate_back(&mut self, index: u64) -> usize {
-        if let Some((first, last)) = self.span() {
-            self.entry_indexes
-                .truncate(index.saturating_sub(first) as usize);
+    // Assumes index <= last.
+    fn unsafe_truncate_back(&mut self, first: u64, index: u64, last: u64) -> usize {
+        self.entry_indexes
+            .truncate(index.saturating_sub(first) as usize);
+        let truncated = (last - index + 1) as usize;
 
-            if self.rewrite_count > self.entry_indexes.len() {
-                let compacted_rewrite = self.rewrite_count - self.entry_indexes.len();
-                self.rewrite_count = self.entry_indexes.len();
-                self.global_stats.add_compacted_rewrite(compacted_rewrite);
-            }
-
-            (last + 1).saturating_sub(index) as usize
+        if self.rewrite_count > self.entry_indexes.len() {
+            let truncated_rewrite = self.rewrite_count - self.entry_indexes.len();
+            self.rewrite_count = self.entry_indexes.len();
+            self.global_stats
+                .delete(LogQueue::Rewrite, truncated_rewrite);
+            self.global_stats
+                .delete(LogQueue::Append, truncated - truncated_rewrite);
         } else {
-            0
+            self.global_stats.delete(LogQueue::Append, truncated);
         }
+        truncated
     }
 
     fn maybe_shrink_entry_indexes(&mut self) {
@@ -1085,17 +1102,17 @@ mod tests {
         assert_eq!(kvs.pop().unwrap(), (k1.to_vec(), v1.to_vec()));
         // 1. Key is deleted
         memtable.delete(k1.as_ref());
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 1);
+        assert_eq!(memtable.global_stats.deleted_entries(LogQueue::Rewrite), 1);
         memtable.rewrite_key(k1.to_vec(), Some(1), 50);
         assert_eq!(memtable.get(k1.as_ref()), None);
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert!(kvs.is_empty());
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 2);
+        assert_eq!(memtable.global_stats.deleted_entries(LogQueue::Rewrite), 2);
         // 2. Key is newer
         memtable.rewrite_key(k2.to_vec(), Some(1), 50);
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert!(kvs.is_empty());
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 3);
+        assert_eq!(memtable.global_stats.deleted_entries(LogQueue::Rewrite), 3);
         // 3. Multiple rewrites
         assert!(catch_unwind_silent(|| memtable.rewrite_key(k3.to_vec(), None, 50)).is_err());
         memtable.rewrite_key(k3.to_vec(), Some(10), 50);
@@ -1160,19 +1177,19 @@ mod tests {
         assert_eq!(memtable.max_file_seq(LogQueue::Append), None);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 3);
-        assert_eq!(memtable.global_stats.rewrite_operations(), 2);
+        assert_eq!(memtable.global_stats.entries(LogQueue::Rewrite), 2);
 
         memtable.delete(k1.as_ref());
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 3);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 1);
+        assert_eq!(memtable.global_stats.deleted_entries(LogQueue::Rewrite), 1);
 
         memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 7));
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite), None);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite), None);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 7);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 7);
-        assert_eq!(memtable.global_stats.compacted_rewrite_operations(), 2);
+        assert_eq!(memtable.global_stats.deleted_entries(LogQueue::Rewrite), 2);
     }
 
     #[test]
@@ -1208,18 +1225,21 @@ mod tests {
         let region_id = 8;
         let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
         let mut expected_rewrite = 0;
-        let mut expected_compacted_rewrite = 0;
+        let mut expected_deleted_rewrite = 0;
 
         // Rewrite to empty table.
         let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1));
         memtable.rewrite(ents_idx, Some(1));
         expected_rewrite += 10;
-        expected_compacted_rewrite += 10;
+        expected_deleted_rewrite += 10;
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite), None);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
 
         // After appending and compacting:
@@ -1271,17 +1291,20 @@ mod tests {
         memtable.rewrite(ents_idx, Some(1));
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
         expected_rewrite += 10 + 1;
-        expected_compacted_rewrite += 10 + 1;
+        expected_deleted_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         assert!(memtable.min_file_seq(LogQueue::Rewrite).is_none());
         assert!(memtable.max_file_seq(LogQueue::Rewrite).is_none());
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.get(b"kk0"), None);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1295,17 +1318,20 @@ mod tests {
         memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
         memtable.rewrite_key(b"kk1".to_vec(), Some(2), 100);
         expected_rewrite += 20 + 2;
-        expected_compacted_rewrite += 10 + 1;
+        expected_deleted_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.rewrite_count, 10);
         assert_eq!(memtable.get(b"kk1"), Some(b"vv1".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1324,10 +1350,13 @@ mod tests {
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 101);
         assert_eq!(memtable.rewrite_count, 20);
         assert_eq!(memtable.get(b"kk2"), Some(b"vv2".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1360,17 +1389,20 @@ mod tests {
         memtable.rewrite(ents_idx, Some(4));
         memtable.rewrite_key(b"kk3".to_vec(), Some(4), 102);
         expected_rewrite += 10 + 1;
-        expected_compacted_rewrite += 5 + 1;
+        expected_deleted_rewrite += 5 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 102);
         assert_eq!(memtable.rewrite_count, 25);
         assert_eq!(memtable.get(b"kk3"), Some(b"vv33".to_vec()));
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1384,24 +1416,30 @@ mod tests {
             FileId::new(LogQueue::Append, 6),
         ));
         memtable.compact_to(30);
-        expected_compacted_rewrite += 20;
+        expected_deleted_rewrite += 20;
         assert_eq!(memtable.last_index().unwrap(), 49);
         assert_eq!(memtable.rewrite_count, 5);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
 
         // [40, 50) file_num = 6
         // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 5
         memtable.compact_to(40);
-        expected_compacted_rewrite += 5;
+        expected_deleted_rewrite += 5;
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1411,16 +1449,19 @@ mod tests {
         memtable.rewrite(ents_idx, Some(5));
         memtable.rewrite_key(b"kk3".to_vec(), Some(5), 103);
         expected_rewrite += 6 + 1;
-        expected_compacted_rewrite += 6;
+        expected_deleted_rewrite += 6;
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 6);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 6);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 100);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 103);
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1436,12 +1477,15 @@ mod tests {
         let ents_idx = generate_entry_indexes(30, 50, FileId::new(LogQueue::Rewrite, 104));
         memtable.rewrite(ents_idx, Some(6));
         expected_rewrite += 20;
-        expected_compacted_rewrite += 10;
+        expected_deleted_rewrite += 10;
         assert_eq!(memtable.rewrite_count, 10);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1453,11 +1497,11 @@ mod tests {
             50,
             FileId::new(LogQueue::Append, 7),
         ));
-        expected_compacted_rewrite += 5;
+        expected_deleted_rewrite += 5;
         assert_eq!(memtable.rewrite_count, 5);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
 
@@ -1468,12 +1512,15 @@ mod tests {
             50,
             FileId::new(LogQueue::Append, 7),
         ));
-        expected_compacted_rewrite += 5;
+        expected_deleted_rewrite += 5;
         assert_eq!(memtable.rewrite_count, 0);
-        assert_eq!(memtable.global_stats.rewrite_operations(), expected_rewrite);
         assert_eq!(
-            memtable.global_stats.compacted_rewrite_operations(),
-            expected_compacted_rewrite
+            memtable.global_stats.entries(LogQueue::Rewrite),
+            expected_rewrite
+        );
+        assert_eq!(
+            memtable.global_stats.deleted_entries(LogQueue::Rewrite),
+            expected_deleted_rewrite
         );
         memtable.consistency_check();
     }
@@ -1681,12 +1728,12 @@ mod tests {
             }
         }
         assert_eq!(
-            global_stats.rewrite_operations(),
-            merged_global_stats.rewrite_operations()
+            global_stats.entries(LogQueue::Rewrite),
+            merged_global_stats.entries(LogQueue::Rewrite)
         );
         assert_eq!(
-            global_stats.compacted_rewrite_operations(),
-            merged_global_stats.compacted_rewrite_operations()
+            global_stats.deleted_entries(LogQueue::Rewrite),
+            merged_global_stats.deleted_entries(LogQueue::Rewrite)
         );
     }
 }
