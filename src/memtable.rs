@@ -88,19 +88,19 @@ impl MemTable {
     /// Only called during parllel recovery.
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
-        if let (Some(last), Some(next)) = (self.entry_indexes.back(), rhs.entry_indexes.front()) {
-            assert_eq!(
-                last.index + 1,
-                next.index,
-                "memtable {} has a hole",
-                self.region_id
+        if let Some((rhs_first, _)) = rhs.span() {
+            self.prepare_append(rhs_first, false, true);
+            self.global_stats.add(
+                rhs.entry_indexes[0].entries.unwrap().id.queue,
+                rhs.entry_indexes.len(),
             );
+            self.rewrite_count += rhs.rewrite_count;
+            self.entry_indexes.append(&mut rhs.entry_indexes);
         }
-        debug_assert!(rhs.rewrite_count == 0 || self.rewrite_count == self.entry_indexes.len());
-        self.entry_indexes.append(&mut rhs.entry_indexes);
-        self.rewrite_count += rhs.rewrite_count;
-        self.kvs.extend(rhs.kvs.drain());
-        self.global_stats.merge(&rhs.global_stats);
+
+        for (key, (value, file_id)) in rhs.kvs.drain() {
+            self.put(key, value, file_id);
+        }
     }
 
     /// Merge a counter part that contains all rewritten data of current region.
@@ -109,18 +109,12 @@ impl MemTable {
         debug_assert_eq!(self.rewrite_count, 0);
 
         if let Some((first, _)) = self.span() {
-            if let Some((rewrite_first, rewrite_last)) = rhs.span() {
-                if first > rewrite_last + 1 {
-                    rhs.unsafe_truncate_back(rewrite_first, 0, rewrite_last);
-                } else if first != rewrite_last + 1 {
-                    rhs.unsafe_truncate_back(rewrite_first, first, rewrite_last);
-                }
-            }
+            rhs.prepare_append(first, true, true);
             rhs.entry_indexes.append(&mut self.entry_indexes);
         }
 
-        for (key, (value, file_id)) in std::mem::take(&mut self.kvs) {
-            rhs.kvs.insert(key, (value, file_id));
+        for (key, (value, file_id)) in self.kvs.drain() {
+            rhs.put(key, value, file_id);
         }
 
         std::mem::swap(self, rhs);
@@ -186,18 +180,7 @@ impl MemTable {
     pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
-            if let Some((first, last)) = self.span() {
-                let first_to_add = entry_indexes[0].index;
-                assert!(first <= first_to_add, "corrupted raft {}", self.region_id);
-                assert!(
-                    last + 1 >= first_to_add,
-                    "memtable {} has a hole",
-                    self.region_id
-                );
-                if first_to_add <= last {
-                    self.unsafe_truncate_back(first, first_to_add, last);
-                }
-            }
+            self.prepare_append(entry_indexes[0].index, false, false);
             self.global_stats.add(LogQueue::Append, len);
             // TODO: Optimize this.
             self.entry_indexes.extend(entry_indexes);
@@ -209,14 +192,7 @@ impl MemTable {
         let len = entry_indexes.len();
         if len > 0 {
             debug_assert_eq!(self.rewrite_count, self.entry_indexes.len());
-            if let Some((first, last)) = self.span() {
-                let first_to_add = entry_indexes[0].index;
-                if last + 1 < first_to_add || first_to_add < first {
-                    self.unsafe_truncate_back(first, 0, last);
-                } else if first_to_add <= last {
-                    self.unsafe_truncate_back(first, first_to_add, last);
-                }
-            }
+            self.prepare_append(entry_indexes[0].index, true, true);
             self.global_stats.add(LogQueue::Rewrite, len);
             self.entry_indexes.extend(entry_indexes);
             self.rewrite_count = self.entry_indexes.len();
@@ -331,6 +307,35 @@ impl MemTable {
             self.global_stats.delete(LogQueue::Append, truncated);
         }
         truncated
+    }
+
+    #[inline]
+    fn prepare_append(
+        &mut self,
+        first_index_to_add: u64,
+        allow_hole: bool,
+        allow_overwrite_compacted: bool,
+    ) {
+        if let Some((first, last)) = self.span() {
+            if first_index_to_add < first {
+                if allow_overwrite_compacted {
+                    self.unsafe_truncate_back(first, 0, last);
+                } else {
+                    panic!(
+                        "attempt to overwrite compacted entries in {}",
+                        self.region_id
+                    );
+                }
+            } else if last + 1 < first_index_to_add {
+                if allow_hole {
+                    self.unsafe_truncate_back(first, 0, last);
+                } else {
+                    panic!("memtable {} has a hole", self.region_id);
+                }
+            } else if first_index_to_add != last + 1 {
+                self.unsafe_truncate_back(first, first_index_to_add, last);
+            }
+        }
     }
 
     fn maybe_shrink_entry_indexes(&mut self) {

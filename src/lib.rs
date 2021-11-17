@@ -97,14 +97,6 @@ impl GlobalStats {
     }
 
     #[inline]
-    pub fn merge(&self, rhs: &Self) {
-        for queue in [LogQueue::Append, LogQueue::Rewrite] {
-            self.add(queue, rhs.entries(queue));
-            self.delete(queue, rhs.deleted_entries(queue));
-        }
-    }
-
-    #[inline]
     pub fn flush_metrics(&self) {
         let mut total_entries = 0;
         let mut tombstones = 0;
@@ -112,8 +104,12 @@ impl GlobalStats {
             total_entries += self.entries(queue);
             tombstones += self.deleted_entries(queue);
         }
-        metrics::LOG_ENTRY_COUNT.with_label_values(&["total"]).set(total_entries as i64);
-        metrics::LOG_ENTRY_COUNT.with_label_values(&["tombstone"]).set(tombstones as i64);
+        metrics::LOG_ENTRY_COUNT
+            .with_label_values(&["total"])
+            .set(total_entries as i64);
+        metrics::LOG_ENTRY_COUNT
+            .with_label_values(&["tombstone"])
+            .set(tombstones as i64);
     }
 }
 
