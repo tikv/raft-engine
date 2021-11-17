@@ -28,7 +28,7 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 struct FileCollection {
     first_seq: FileSeq,
     active_seq: FileSeq,
-    all_files: VecDeque<Arc<LogFd>>,
+    fds: VecDeque<Arc<LogFd>>,
 }
 
 struct ActiveFile<W: Seek + Write> {
@@ -60,7 +60,11 @@ impl<W: Seek + Write> ActiveFile<W> {
         Ok(f)
     }
 
-    fn new(seq: FileSeq, fd: Arc<LogFd>, writer: W) -> Result<Self> {
+    fn rotate(&mut self, seq: FileSeq, fd: Arc<LogFd>, writer: W) -> Result<()> {
+        // Necessary to truncate extra zeros from fallocate().
+        self.truncate()?;
+        self.sync()?;
+
         let mut f = Self {
             seq,
             fd,
@@ -70,7 +74,9 @@ impl<W: Seek + Write> ActiveFile<W> {
             last_sync: 0,
         };
         f.write_header()?;
-        Ok(f)
+
+        *self = f;
+        Ok(())
     }
 
     fn truncate(&mut self) -> Result<()> {
@@ -100,6 +106,7 @@ impl<W: Seek + Write> ActiveFile<W> {
                 ),
             );
             if alloc > 0 {
+                let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
                 self.fd.allocate(self.capacity, alloc)?;
                 self.capacity += alloc;
             }
@@ -111,7 +118,7 @@ impl<W: Seek + Write> ActiveFile<W> {
 
     fn sync(&mut self) -> Result<()> {
         if self.last_sync < self.written {
-            StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
+            let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
             self.fd.sync()?;
             self.last_sync = self.written;
         }
@@ -126,7 +133,7 @@ impl<W: Seek + Write> ActiveFile<W> {
 pub struct FilePipeLogImp<B: FileBuilder> {
     queue: LogQueue,
     dir: String,
-    rotate_size: usize,
+    target_file_size: usize,
     bytes_per_sync: usize,
     file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
@@ -142,7 +149,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut first_seq: FileSeq,
-        mut all_files: VecDeque<Arc<LogFd>>,
+        mut fds: VecDeque<Arc<LogFd>>,
     ) -> Result<Self> {
         let create_file = first_seq == 0;
         let active_seq = if create_file {
@@ -152,10 +159,10 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
                 seq: first_seq,
             };
             let fd = Arc::new(LogFd::create(&file_id.build_file_path(&cfg.dir))?);
-            all_files.push_back(fd);
+            fds.push_back(fd);
             first_seq
         } else {
-            first_seq + all_files.len() as u64 - 1
+            first_seq + fds.len() as u64 - 1
         };
 
         for seq in first_seq..=active_seq {
@@ -164,7 +171,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
             }
         }
 
-        let active_fd = all_files.back().unwrap().clone();
+        let active_fd = fds.back().unwrap().clone();
         let file_id = FileId {
             queue,
             seq: active_seq,
@@ -179,11 +186,11 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
             )?,
         )?;
 
-        let total_files = all_files.len();
+        let total_files = fds.len();
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
-            rotate_size: cfg.target_file_size.0 as usize,
+            target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_builder,
             listeners,
@@ -191,7 +198,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
             files: CachePadded::new(RwLock::new(FileCollection {
                 first_seq,
                 active_seq,
-                all_files,
+                fds,
             })),
             active_file: CachePadded::new(Mutex::new(active_file)),
         };
@@ -213,18 +220,16 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
                 "file seqno out of range",
             )));
         }
-        Ok(files.all_files[(file_seq - files.first_seq) as usize].clone())
+        Ok(files.fds[(file_seq - files.first_seq) as usize].clone())
     }
 
     fn rotate_imp(
         &self,
         active_file: &mut MutexGuard<ActiveFile<B::Writer<LogFile>>>,
     ) -> Result<()> {
+        let _t = StopWatch::new(&LOG_ROTATE_DURATION_HISTOGRAM);
         let seq = active_file.seq + 1;
         debug_assert!(seq > 1);
-        // Necessary to truncate extra zeros from fallocate().
-        active_file.truncate()?;
-        active_file.sync()?;
 
         let file_id = FileId {
             queue: self.queue,
@@ -234,7 +239,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
         let fd = Arc::new(LogFd::create(&path)?);
         self.sync_dir()?;
 
-        **active_file = ActiveFile::new(
+        active_file.rotate(
             seq,
             fd.clone(),
             self.file_builder.build_writer(
@@ -243,17 +248,19 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
                 true, /*create*/
             )?,
         )?;
+
         let len = {
             let mut files = self.files.write();
+            debug_assert!(files.active_seq + 1 == seq);
             files.active_seq = seq;
-            files.all_files.push_back(fd);
+            files.fds.push_back(fd);
             for listener in &self.listeners {
                 listener.post_new_log_file(FileId {
                     queue: self.queue,
                     seq,
                 });
             }
-            files.all_files.len()
+            files.fds.len()
         };
         self.flush_metrics(len);
         Ok(())
@@ -284,7 +291,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
         let offset = active_file.written as u64;
-        if let Err(e) = active_file.write(bytes, self.rotate_size) {
+        if let Err(e) = active_file.write(bytes, self.target_file_size) {
             if let Err(te) = active_file.truncate() {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
@@ -309,7 +316,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
 
     fn maybe_sync(&self, force: bool) -> Result<()> {
         let mut active_file = self.active_file.lock();
-        if active_file.written >= self.rotate_size {
+        if active_file.written >= self.target_file_size {
             if let Err(e) = self.rotate_imp(&mut active_file) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
@@ -335,7 +342,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
 
     fn total_size(&self) -> usize {
         let files = self.files.read();
-        (files.active_seq - files.first_seq + 1) as usize * self.rotate_size
+        (files.active_seq - files.first_seq + 1) as usize * self.target_file_size
     }
 
     fn rotate(&self) -> Result<()> {
@@ -349,9 +356,9 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
                 return Err(box_err!("Purge active or newer files"));
             }
             let end_offset = file_seq.saturating_sub(files.first_seq) as usize;
-            files.all_files.drain(..end_offset);
+            files.fds.drain(..end_offset);
             files.first_seq = file_seq;
-            (end_offset, files.all_files.len())
+            (end_offset, files.fds.len())
         };
         self.flush_metrics(remained);
         for seq in file_seq - purged as u64..file_seq {

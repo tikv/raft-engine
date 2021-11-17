@@ -85,18 +85,21 @@ lazy_static! {
         exponential_buckets(256.0, 2.0, 20).unwrap()
     )
     .unwrap();
-    // pub static ref LOG_APPEND_DURATION_HISTOGRAM_VEC: LogQueueHistogramVec =
-    //     register_static_histogram_vec!(
-    //         LogQueueHistogramVec,
-    //         "raft_engine_append_log_duration_seconds",
-    //         "Bucketed histogram of Raft Engine append log duration",
-    //         &["type"],
-    //         exponential_buckets(0.0005, 2.0, 24).unwrap()
-    //     )
-    //     .unwrap();
+    pub static ref LOG_ALLOCATE_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_allocate_log_duration_seconds",
+        "Bucketed histogram of Raft Engine allocate log duration",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
     pub static ref LOG_SYNC_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_sync_log_duration_seconds",
         "Bucketed histogram of Raft Engine sync log duration",
+        exponential_buckets(0.00001, 2.0, 26).unwrap()
+    )
+    .unwrap();
+    pub static ref LOG_ROTATE_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_rotate_log_duration_seconds",
+        "Bucketed histogram of Raft Engine rotate log duration",
         exponential_buckets(0.00001, 2.0, 26).unwrap()
     )
     .unwrap();
