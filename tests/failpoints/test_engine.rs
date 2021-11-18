@@ -8,15 +8,14 @@ use raft_engine::*;
 
 use crate::util::*;
 
-fn append(engine: &Engine, raft_group_id: u64, entries: &[Entry]) {
+fn append(engine: &Engine, rid: u64, start_index: u64, end_index: u64, data: Option<&[u8]>) {
+    let entries = generate_entries(start_index, end_index, data);
     if !entries.is_empty() {
         let mut batch = LogBatch::default();
-        batch
-            .add_entries::<MessageExtTyped>(raft_group_id, entries)
-            .unwrap();
+        batch.add_entries::<MessageExtTyped>(rid, &entries).unwrap();
         batch
             .put_message(
-                raft_group_id,
+                rid,
                 b"last_index".to_vec(),
                 &RaftLocalState {
                     last_index: entries[entries.len() - 1].index,
@@ -26,10 +25,6 @@ fn append(engine: &Engine, raft_group_id: u64, entries: &[Entry]) {
             .unwrap();
         engine.write(&mut batch, true).unwrap();
     }
-}
-
-fn append_one(engine: &Engine, raft_group_id: u64, entry: &Entry) {
-    append(engine, raft_group_id, &[entry.clone()])
 }
 
 #[test]
@@ -109,14 +104,18 @@ fn test_pipe_log_listeners() {
     assert_eq!(hook.0[&LogQueue::Append].files(), 1);
     assert_eq!(hook.0[&LogQueue::Rewrite].files(), 1);
 
-    let mut entry = Entry::new();
-    entry.set_data(vec![b'x'; 64 * 1024].into());
+    let data = vec![b'x'; 64 * 1024];
 
     // Append 10 logs for region 1, 10 logs for region 2.
     for i in 1..=20 {
         let region_id = (i as u64 - 1) % 2 + 1;
-        entry.set_index((i as u64 + 1) / 2);
-        append_one(&engine, region_id, &entry);
+        append(
+            &engine,
+            region_id,
+            (i as u64 + 1) / 2,
+            (i as u64 + 1) / 2 + 1,
+            Some(&data),
+        );
         assert_eq!(hook.0[&LogQueue::Append].appends(), i);
         assert_eq!(hook.0[&LogQueue::Append].applys(), i);
     }
@@ -133,8 +132,13 @@ fn test_pipe_log_listeners() {
     // Append 5 logs for region 1, 5 logs for region 2.
     for i in 21..=30 {
         let region_id = (i as u64 - 1) % 2 + 1;
-        entry.set_index((i as u64 + 1) / 2);
-        append_one(&engine, region_id, &entry);
+        append(
+            &engine,
+            region_id,
+            (i as u64 + 1) / 2,
+            (i as u64 + 1) / 2 + 1,
+            Some(&data),
+        );
         assert_eq!(hook.0[&LogQueue::Append].appends(), i);
         assert_eq!(hook.0[&LogQueue::Append].applys(), i);
     }
@@ -152,10 +156,9 @@ fn test_pipe_log_listeners() {
     let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";
     fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
     let engine_clone = engine.clone();
-    let mut entry_clone = entry.clone();
+    let data_clone = data.clone();
     let th = std::thread::spawn(move || {
-        entry_clone.set_index(1);
-        append_one(&engine_clone, 3, &entry_clone);
+        append(&engine_clone, 3, 1, 2, Some(&data_clone));
     });
 
     // Sleep a while to wait the log batch `Append(3, [1])` to get written.
@@ -166,8 +169,13 @@ fn test_pipe_log_listeners() {
 
     for i in 31..=40 {
         let region_id = (i as u64 - 1) % 2 + 1;
-        entry.set_index((i as u64 + 1) / 2);
-        append_one(&engine, region_id, &entry);
+        append(
+            &engine,
+            region_id,
+            (i as u64 + 1) / 2,
+            (i as u64 + 1) / 2 + 1,
+            Some(&data),
+        );
         assert_eq!(hook.0[&LogQueue::Append].appends(), i + 3);
         assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
     }
@@ -277,15 +285,13 @@ fn test_consistency_tools() {
         ..Default::default()
     };
     let engine = Arc::new(Engine::open(cfg.clone()).unwrap());
-    let mut entry = Entry::new();
-    entry.set_data(vec![b'x'; 128].into());
+    let data = vec![b'x'; 128];
     for index in 1..=100 {
-        entry.set_index(index);
         for rid in 1..=10 {
             if index == rid * rid {
                 fail::cfg("log_batch::corrupted_items", "return").unwrap();
             }
-            append_one(&engine, rid, &entry);
+            append(&engine, rid, index, index + 1, Some(&data));
             if index == rid * rid {
                 fail::remove("log_batch::corrupted_items");
             }
@@ -299,4 +305,47 @@ fn test_consistency_tools() {
     }
 
     assert!(catch_unwind_silent(|| Engine::open(cfg.clone())).is_err());
+}
+
+#[test]
+fn test_incomplete_purge() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_incomplete_purge")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        purge_threshold: ReadableSize(1),
+        ..Default::default()
+    };
+    let rid = 1;
+    let data = vec![b'7'; 1024];
+
+    let engine = Engine::open(cfg.clone()).unwrap();
+
+    {
+        let _f = FailGuard::new("file_pipe_log::remove_file_failure", "return");
+        append(&engine, rid, 0, 20, Some(&data));
+        let append_first = engine.file_span(LogQueue::Append).0;
+        engine.compact_to(rid, 18);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    }
+
+    // Create a hole.
+    append(&engine, rid, 20, 40, Some(&data));
+    let append_first = engine.file_span(LogQueue::Append).0;
+    engine.compact_to(rid, 38);
+    engine.purge_expired_files().unwrap();
+    assert!(engine.file_span(LogQueue::Append).0 > append_first);
+
+    append(&engine, rid, 40, 60, Some(&data));
+    let append_first = engine.file_span(LogQueue::Append).0;
+    drop(engine);
+
+    let engine = Engine::open(cfg).unwrap();
+    assert_eq!(engine.file_span(LogQueue::Append).0, append_first);
+    assert_eq!(engine.first_index(rid).unwrap(), 38);
+    assert_eq!(engine.last_index(rid).unwrap(), 59);
 }

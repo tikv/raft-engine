@@ -1,9 +1,8 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
-use std::fs;
-use std::fs::File;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, Write};
+use std::fs::{self, File};
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -96,23 +95,21 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
-        if self.written + buf.len() > self.capacity {
-            // Use fallocate to pre-allocate disk space for active file.
+        let new_written = self.written + buf.len();
+        if self.capacity < new_written {
+            let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
             let alloc = std::cmp::max(
-                self.written + buf.len() - self.capacity,
+                new_written - self.capacity,
                 std::cmp::min(
                     FILE_ALLOCATE_SIZE,
                     target_file_size.saturating_sub(self.capacity),
                 ),
             );
-            if alloc > 0 {
-                let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
-                self.fd.allocate(self.capacity, alloc)?;
-                self.capacity += alloc;
-            }
+            self.fd.allocate(self.capacity, alloc)?;
+            self.capacity += alloc;
         }
         self.writer.write_all(buf)?;
-        self.written += buf.len();
+        self.written = new_written;
         Ok(())
     }
 
@@ -130,7 +127,7 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 }
 
-pub struct FilePipeLogImp<B: FileBuilder> {
+pub struct SinglePipe<B: FileBuilder> {
     queue: LogQueue,
     dir: String,
     target_file_size: usize,
@@ -142,7 +139,7 @@ pub struct FilePipeLogImp<B: FileBuilder> {
     active_file: CachePadded<Mutex<ActiveFile<B::Writer<LogFile>>>>,
 }
 
-impl<B: FileBuilder> FilePipeLogImp<B> {
+impl<B: FileBuilder> SinglePipe<B> {
     pub fn open(
         cfg: &Config,
         file_builder: Arc<B>,
@@ -215,10 +212,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<LogFd>> {
         let files = self.files.read();
         if file_seq < files.first_seq || file_seq > files.active_seq {
-            return Err(Error::Io(IoError::new(
-                IoErrorKind::NotFound,
-                "file seqno out of range",
-            )));
+            return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
         Ok(files.fds[(file_seq - files.first_seq) as usize].clone())
     }
@@ -274,7 +268,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
     }
 }
 
-impl<B: FileBuilder> FilePipeLogImp<B> {
+impl<B: FileBuilder> SinglePipe<B> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_fd(handle.id.seq)?;
         let mut reader = self
@@ -367,8 +361,17 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
                 seq,
             };
             let path = file_id.build_file_path(&self.dir);
+            #[cfg(feature = "failpoints")]
+            {
+                let remove_failure = || {
+                    fail::fail_point!("file_pipe_log::remove_file_failure", |_| true);
+                    false
+                };
+                if remove_failure() {
+                    continue;
+                }
+            }
             if let Err(e) = fs::remove_file(&path) {
-                // TODO: handle this case in recovery.
                 warn!("Remove purged log file {:?} failed: {}", path, e);
             }
         }
@@ -376,18 +379,14 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
     }
 }
 
-pub struct FilePipeLog<B: FileBuilder> {
-    pipes: [FilePipeLogImp<B>; 2],
+pub struct DualPipes<B: FileBuilder> {
+    pipes: [SinglePipe<B>; 2],
 
     _lock_file: File,
 }
 
-impl<B: FileBuilder> FilePipeLog<B> {
-    pub fn open(
-        dir: &str,
-        appender: FilePipeLogImp<B>,
-        rewriter: FilePipeLogImp<B>,
-    ) -> Result<Self> {
+impl<B: FileBuilder> DualPipes<B> {
+    pub fn open(dir: &str, appender: SinglePipe<B>, rewriter: SinglePipe<B>) -> Result<Self> {
         let lock_file = File::create(lock_file_path(dir))?;
         lock_file.try_lock_exclusive().map_err(|e| {
             Error::Other(box_err!(
@@ -411,7 +410,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
     }
 }
 
-impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
+impl<B: FileBuilder> PipeLog for DualPipes<B> {
     #[inline]
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         self.pipes[handle.id.queue as usize].read_bytes(handle)
@@ -456,10 +455,10 @@ mod tests {
     use crate::file_builder::DefaultFileBuilder;
     use crate::util::ReadableSize;
 
-    fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<FilePipeLogImp<DefaultFileBuilder>> {
-        FilePipeLogImp::open(
+    fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileBuilder>> {
+        SinglePipe::open(
             cfg,
-            Arc::new(DefaultFileBuilder {}),
+            Arc::new(DefaultFileBuilder),
             Vec::new(),
             queue,
             0,
@@ -467,8 +466,8 @@ mod tests {
         )
     }
 
-    fn new_test_pipe_log(cfg: &Config) -> Result<FilePipeLog<DefaultFileBuilder>> {
-        FilePipeLog::open(
+    fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileBuilder>> {
+        DualPipes::open(
             &cfg.dir,
             new_test_pipe(cfg, LogQueue::Append)?,
             new_test_pipe(cfg, LogQueue::Rewrite)?,
@@ -484,10 +483,10 @@ mod tests {
             ..Default::default()
         };
 
-        let _r1 = new_test_pipe_log(&cfg).unwrap();
+        let _r1 = new_test_pipes(&cfg).unwrap();
 
         // Only one thread can hold file lock
-        let r2 = new_test_pipe_log(&cfg);
+        let r2 = new_test_pipes(&cfg);
 
         assert!(format!("{}", r2.err().unwrap())
             .contains("maybe another instance is using this directory"));
@@ -505,7 +504,7 @@ mod tests {
         };
         let queue = LogQueue::Append;
 
-        let pipe_log = new_test_pipe_log(&cfg).unwrap();
+        let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
         let header_size = LogFileHeader::len() as u64;

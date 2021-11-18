@@ -6,5 +6,5 @@ mod log_file;
 mod pipe_log;
 mod reader;
 
-pub use builder::{FilePipeLogBuilder, ReplayMachine};
-pub use pipe_log::FilePipeLog;
+pub use builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
+pub use pipe_log::DualPipes as FilePipeLog;
