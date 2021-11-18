@@ -657,7 +657,6 @@ impl MemTableAccessor {
                         .write()
                         .merge_append_table(&mut *memtable.write());
                 } else {
-                    // TODO: Test case for recreate a region in append queue.
                     self.insert(id, memtable);
                 }
             }
@@ -1460,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memtable_merge_rewrite() {
+    fn test_memtable_merge_append() {
         let region_id = 7;
         fn empty_table(id: u64) -> MemTable {
             MemTable::new(id, Arc::new(GlobalStats::default()))
@@ -1591,40 +1590,33 @@ mod tests {
     }
 
     #[test]
-    fn test_memtable_merge_neighbor() {
+    fn test_memtables_merge_neighbor() {
         let file_id = FileId::new(LogQueue::Append, 10);
-
-        // ops:
-        //
-        // case 1:
-        //      region 10: put (key1, v1) => del (key1) => put (key1, v2)
-        // expect 1:
-        //      get (key1) == v2
-        //
-        // case 2:
-        //      region 11: put (k, _) => cleanup
-        // expect 2:
-        //      memtable 11 is none
-        //
-        // case 3:
-        //      region 12: entries [1, 10) => compact 5 => entries [11, 20)
-        // expect 3:
-        //      [1, 5) is compacted, [5, 20) remains
-        //
+        let first_rid = 17;
+        let mut last_rid = first_rid;
 
         let mut batches = vec![
             LogItemBatch::with_capacity(0),
             LogItemBatch::with_capacity(0),
             LogItemBatch::with_capacity(0),
         ];
-        batches[0].put(10, b"key1".to_vec(), b"val1".to_vec());
-        batches[1].delete(10, b"key1".to_vec());
-        batches[2].put(10, b"key1".to_vec(), b"val2".to_vec());
-        batches[0].put(11, b"key".to_vec(), b"ANYTHING".to_vec());
-        batches[1].add_command(11, Command::Clean);
-        batches[0].add_entry_indexes(12, generate_entry_indexes(1, 11, file_id));
-        batches[1].add_command(12, Command::Compact { index: 5 });
-        batches[2].add_entry_indexes(12, generate_entry_indexes(11, 21, file_id));
+
+        // put (key1, v1) => del (key1) => put (key1, v2)
+        batches[0].put(last_rid, b"key1".to_vec(), b"val1".to_vec());
+        batches[1].delete(last_rid, b"key1".to_vec());
+        batches[2].put(last_rid, b"key1".to_vec(), b"val2".to_vec());
+
+        // put (k, _) => cleanup
+        last_rid += 1;
+        batches[0].put(last_rid, b"key".to_vec(), b"ANYTHING".to_vec());
+        batches[1].add_command(last_rid, Command::Clean);
+
+        // entries [1, 10) => compact 5 => entries [11, 20)
+        last_rid += 1;
+        batches[0].add_entry_indexes(last_rid, generate_entry_indexes(1, 11, file_id));
+        batches[1].add_command(last_rid, Command::Compact { index: 5 });
+        batches[2].add_entry_indexes(last_rid, generate_entry_indexes(11, 21, file_id));
+
         for b in batches.iter_mut() {
             b.finish_write(FileBlockHandle::dummy(LogQueue::Append));
         }
@@ -1642,43 +1634,63 @@ mod tests {
             ctxs.push_back(x);
         }
         let (merged_memtables, merged_global_stats) = ctxs.pop_front().unwrap().finish();
+
         // sequential apply
-        let global_stats = Arc::new(GlobalStats::default());
-        let memtables = MemTableAccessor::new(global_stats.clone());
+        let sequential_global_stats = Arc::new(GlobalStats::default());
+        let sequential_memtables = MemTableAccessor::new(sequential_global_stats.clone());
         for mut batch in batches.clone() {
-            memtables.apply(batch.drain(), LogQueue::Append);
+            sequential_memtables.apply(batch.drain(), LogQueue::Append);
         }
 
-        // asserts
-        assert_eq!(
-            merged_memtables
-                .get(10)
-                .unwrap()
-                .read()
-                .get(b"key1")
-                .unwrap(),
-            b"val2".to_vec(),
-        );
-        assert!(merged_memtables.get(11).is_none());
-        for i in 1..21 {
-            let opt = merged_memtables.get(12).unwrap().read().get_entry(i);
-            if i < 5 {
-                assert!(opt.is_none());
-            } else {
-                assert!(opt.is_some());
+        for rid in first_rid..=last_rid {
+            let m = merged_memtables.get(rid);
+            let s = sequential_memtables.get(rid);
+            if m.is_none() {
+                assert!(s.is_none());
+                continue;
             }
+            let merged = m.as_ref().unwrap().read();
+            let sequential = s.as_ref().unwrap().read();
+            let mut merged_vec = Vec::new();
+            let mut sequential_vec = Vec::new();
+            merged
+                .fetch_entry_indexes_before(u64::MAX, &mut merged_vec)
+                .unwrap();
+            sequential
+                .fetch_entry_indexes_before(u64::MAX, &mut sequential_vec)
+                .unwrap();
+            assert_eq!(merged_vec, sequential_vec);
+            merged_vec.clear();
+            sequential_vec.clear();
+            merged
+                .fetch_rewritten_entry_indexes(&mut merged_vec)
+                .unwrap();
+            sequential
+                .fetch_rewritten_entry_indexes(&mut sequential_vec)
+                .unwrap();
+            assert_eq!(merged_vec, sequential_vec);
+            let mut merged_vec = Vec::new();
+            let mut sequential_vec = Vec::new();
+            merged.fetch_kvs_before(u64::MAX, &mut merged_vec);
+            sequential.fetch_kvs_before(u64::MAX, &mut sequential_vec);
+            assert_eq!(merged_vec, sequential_vec);
+            merged_vec.clear();
+            sequential_vec.clear();
+            merged.fetch_rewritten_kvs(&mut merged_vec);
+            sequential.fetch_rewritten_kvs(&mut sequential_vec);
+            assert_eq!(merged_vec, sequential_vec);
         }
         assert_eq!(
-            global_stats.rewrite_entries(),
-            merged_global_stats.rewrite_entries()
+            merged_global_stats.live_entries(LogQueue::Append),
+            sequential_global_stats.live_entries(LogQueue::Append),
         );
         assert_eq!(
-            global_stats.deleted_rewrite_entries(),
-            merged_global_stats.deleted_rewrite_entries()
+            merged_global_stats.rewrite_entries(),
+            sequential_global_stats.rewrite_entries(),
         );
         assert_eq!(
-            global_stats.live_entries(LogQueue::Append),
-            merged_global_stats.live_entries(LogQueue::Append)
+            merged_global_stats.deleted_rewrite_entries(),
+            sequential_global_stats.deleted_rewrite_entries(),
         );
     }
 }
