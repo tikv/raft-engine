@@ -1,9 +1,8 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
-use std::fs;
-use std::fs::File;
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Seek, Write};
+use std::fs::{self, File};
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -96,23 +95,21 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 
     fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
-        if self.written + buf.len() > self.capacity {
-            // Use fallocate to pre-allocate disk space for active file.
+        let new_written = self.written + buf.len();
+        if self.capacity < new_written {
+            let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
             let alloc = std::cmp::max(
-                self.written + buf.len() - self.capacity,
+                new_written - self.capacity,
                 std::cmp::min(
                     FILE_ALLOCATE_SIZE,
                     target_file_size.saturating_sub(self.capacity),
                 ),
             );
-            if alloc > 0 {
-                let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
-                self.fd.allocate(self.capacity, alloc)?;
-                self.capacity += alloc;
-            }
+            self.fd.allocate(self.capacity, alloc)?;
+            self.capacity += alloc;
         }
         self.writer.write_all(buf)?;
-        self.written += buf.len();
+        self.written = new_written;
         Ok(())
     }
 
@@ -215,10 +212,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<LogFd>> {
         let files = self.files.read();
         if file_seq < files.first_seq || file_seq > files.active_seq {
-            return Err(Error::Io(IoError::new(
-                IoErrorKind::NotFound,
-                "file seqno out of range",
-            )));
+            return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
         Ok(files.fds[(file_seq - files.first_seq) as usize].clone())
     }

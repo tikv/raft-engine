@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use raft::eraftpb::Entry;
@@ -32,9 +31,9 @@ fn test_file_open_error() {
 }
 
 #[test]
-fn test_read_error() {
+fn test_file_read_error() {
     let dir = tempfile::Builder::new()
-        .prefix("test_read_error")
+        .prefix("test_file_read_error")
         .tempdir()
         .unwrap();
     let cfg = Config {
@@ -74,9 +73,56 @@ fn test_read_error() {
 }
 
 #[test]
-fn test_rotate_error() {
+fn test_file_write_error() {
     let dir = tempfile::Builder::new()
-        .prefix("test_rotate_error")
+        .prefix("test_file_write_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        bytes_per_sync: ReadableSize::kb(1024),
+        target_file_size: ReadableSize::kb(1024),
+        ..Default::default()
+    };
+    let entry = vec![b'x'; 1024];
+
+    let engine = Engine::open(cfg.clone()).unwrap();
+    engine
+        .write(&mut generate_batch(1, 1, 2, Some(&entry)), false)
+        .unwrap();
+    {
+        let _f = FailGuard::new("log_fd::write::err", "return");
+        engine
+            .write(&mut generate_batch(1, 2, 3, Some(&entry)), false)
+            .unwrap_err();
+    }
+    {
+        let _f = FailGuard::new("log_fd::sync::err", "return");
+        engine
+            .write(&mut generate_batch(1, 2, 3, Some(&entry)), false)
+            .unwrap();
+        assert!(catch_unwind_silent(|| {
+            let _ = engine.write(&mut generate_batch(1, 3, 4, Some(&entry)), true);
+        })
+        .is_err());
+    }
+
+    // Internal states are consistent after panics. But outstanding writes are not reverted.
+    engine
+        .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
+        .unwrap();
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    assert_eq!(engine.first_index(1).unwrap(), 1);
+    assert_eq!(engine.last_index(1).unwrap(), 3);
+    assert_eq!(engine.first_index(2).unwrap(), 1);
+    assert_eq!(engine.last_index(2).unwrap(), 1);
+}
+
+#[test]
+fn test_file_rotate_error() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_file_rotate_error")
         .tempdir()
         .unwrap();
     let cfg = Config {
@@ -97,7 +143,6 @@ fn test_rotate_error() {
     engine
         .write(&mut generate_batch(1, 3, 4, Some(&entry)), false)
         .unwrap();
-
     {
         let _f = FailGuard::new("log_fd::create::err", "return");
         assert!(catch_unwind_silent(|| {
@@ -106,7 +151,8 @@ fn test_rotate_error() {
         .is_err());
     }
     {
-        let _f = FailGuard::new("log_fd::write::err", "return");
+        // Fail the second header write.
+        let _f = FailGuard::new("log_fd::write::err", "1*off->return");
         assert!(catch_unwind_silent(|| {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
@@ -120,17 +166,16 @@ fn test_rotate_error() {
         .is_err());
     }
 
-    // Internal states are still consistent after panics.
+    // Internal states are consistent after panics. But outstanding writes are not reverted.
     engine
-        .write(&mut generate_batch(1, 4, 5, Some(&entry)), true)
+        .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
     drop(engine);
     let engine = Engine::open(cfg).unwrap();
-    let mut entries = Vec::new();
-    engine
-        .fetch_entries_to::<MessageExtTyped>(1, 1, 5, None, &mut entries)
-        .unwrap();
-    assert_eq!(entries.len(), 4);
+    assert_eq!(engine.first_index(1).unwrap(), 1);
+    assert_eq!(engine.last_index(1).unwrap(), 4);
+    assert_eq!(engine.first_index(2).unwrap(), 1);
+    assert_eq!(engine.last_index(2).unwrap(), 1);
 }
 
 #[test]
@@ -151,15 +196,7 @@ fn test_concurrent_write_error() {
     let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
     // The second of three writes will fail.
-    let seq = AtomicU64::new(0);
-    fail::cfg_callback("file_pipe_log::append", move || {
-        match seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) {
-            1 => fail::cfg("log_fd::write::err", "return").unwrap(),
-            2 => fail::remove("log_fd::write::err"),
-            _ => {}
-        }
-    })
-    .unwrap();
+    fail::cfg("log_fd::write::err", "1*off->1*return->off").unwrap();
     let entry_clone = entry.clone();
     ctx.write_ext(move |e| {
         e.write(&mut generate_batch(1, 1, 11, Some(&entry_clone)), false)
@@ -176,7 +213,6 @@ fn test_concurrent_write_error() {
             .unwrap();
     });
     ctx.join();
-    fail::remove("file_pipe_log::append");
 
     assert_eq!(
         10,
@@ -211,11 +247,10 @@ fn test_concurrent_write_error() {
         ctx.join();
     }
 
-    // Internal states are consistent, we can still override write.
+    // Internal states are consistent after panics.
     engine
         .write(&mut generate_batch(1, 11, 21, Some(&entry)), true)
         .unwrap();
-
     drop(ctx);
     drop(engine);
 

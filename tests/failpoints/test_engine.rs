@@ -321,16 +321,17 @@ fn test_incomplete_purge() {
     };
     let rid = 1;
     let data = vec![b'7'; 1024];
-    let fp = "file_pipe_log::remove_file_failure";
 
     let engine = Engine::open(cfg.clone()).unwrap();
-    fail::cfg(fp, "return").unwrap();
-    append(&engine, rid, 0, 20, Some(&data));
-    let append_first = engine.file_span(LogQueue::Append).0;
-    engine.compact_to(rid, 18);
-    engine.purge_expired_files().unwrap();
-    assert!(engine.file_span(LogQueue::Append).0 > append_first);
-    fail::remove(fp);
+
+    {
+        let _f = FailGuard::new("file_pipe_log::remove_file_failure", "return");
+        append(&engine, rid, 0, 20, Some(&data));
+        let append_first = engine.file_span(LogQueue::Append).0;
+        engine.compact_to(rid, 18);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    }
 
     // Create a hole.
     append(&engine, rid, 20, 40, Some(&data));
