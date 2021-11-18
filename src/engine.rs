@@ -50,7 +50,7 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         cfg: Config,
         listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>>> {
-        Self::open_with(cfg, Arc::new(DefaultFileBuilder {}), listeners)
+        Self::open_with(cfg, Arc::new(DefaultFileBuilder), listeners)
     }
 }
 
@@ -280,6 +280,7 @@ where
         })
     }
 
+    // For testing.
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
     }
@@ -287,7 +288,7 @@ where
 
 impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
     pub fn consistency_check(path: &std::path::Path) -> Result<Vec<(u64, u64)>> {
-        Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder {}))
+        Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 
     // Repair log entry holes by fill in empty message
@@ -518,13 +519,7 @@ mod tests {
         for n_step in 2..=steps.len() {
             // Rewrite after step N.
             for rewrite_step in 1..=n_step {
-                let exit_purge_after_steps = if rewrite_step == n_step {
-                    // Simulate a hard failure during purge.
-                    vec![None, Some(1), Some(2)]
-                } else {
-                    vec![None]
-                };
-                for exit_purge in exit_purge_after_steps {
+                for exit_purge in [None, Some(1), Some(2)] {
                     let _guard = PanicGuard::with_prompt(format!(
                         "case: [{}, {}, {:?}]",
                         n_step, rewrite_step, exit_purge
@@ -573,6 +568,7 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
             ..Default::default()
         };
         let rid = 1;
@@ -590,6 +586,14 @@ mod tests {
         let engine = RaftLogEngine::open(cfg).unwrap();
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key), None);
+        // Incomplete purge.
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
         engine.write(&mut delete_batch.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key), None);
@@ -613,6 +617,15 @@ mod tests {
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
+        // Incomplete purge.
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
 
         // put | delete | put
         //              ^ rewrite
@@ -620,6 +633,15 @@ mod tests {
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.write(&mut delete_batch.clone(), true).unwrap();
         engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.write(&mut batch_2.clone(), true).unwrap();
+        let engine = engine.reopen();
+        assert_eq!(engine.get(rid, &key).unwrap(), v2);
+        // Incomplete purge.
+        engine.write(&mut batch_1.clone(), true).unwrap();
+        engine.write(&mut delete_batch.clone(), true).unwrap();
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(None, Some(2));
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
@@ -633,17 +655,7 @@ mod tests {
         engine.purge_manager.must_rewrite_append_queue(None, None);
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
-        //
-        let engine = engine.reopen();
-        engine.write(&mut batch_1.clone(), true).unwrap();
-        engine.write(&mut delete_batch.clone(), true).unwrap();
-        engine.write(&mut batch_2.clone(), true).unwrap();
-        engine
-            .purge_manager
-            .must_rewrite_append_queue(None, Some(1));
-        let engine = engine.reopen();
-        assert_eq!(engine.get(rid, &key).unwrap(), v2);
-        //
+        // Incomplete purge.
         let engine = engine.reopen();
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.write(&mut delete_batch.clone(), true).unwrap();

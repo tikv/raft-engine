@@ -106,8 +106,16 @@ impl<B: FileBuilder> FilePipeLogBuilder<B> {
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };
                     let path = file_id.build_file_path(dir);
-                    let fd = Arc::new(LogFd::open(&path)?);
-                    files.push(FileToRecover { seq, path, fd })
+                    if !path.exists() {
+                        warn!(
+                            "Detected a hole when scanning directory, discarding files before {:?}.",
+                            file_id,
+                        );
+                        files.clear();
+                    } else {
+                        let fd = Arc::new(LogFd::open(&path)?);
+                        files.push(FileToRecover { seq, path, fd });
+                    }
                 }
             }
         }

@@ -367,8 +367,17 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
                 seq,
             };
             let path = file_id.build_file_path(&self.dir);
+            #[cfg(feature = "failpoints")]
+            {
+                let remove_failure = || {
+                    fail::fail_point!("file_pipe_log::remove_file_failure", |_| true);
+                    false
+                };
+                if remove_failure() {
+                    continue;
+                }
+            }
             if let Err(e) = fs::remove_file(&path) {
-                // TODO: handle this case in recovery.
                 warn!("Remove purged log file {:?} failed: {}", path, e);
             }
         }
@@ -459,7 +468,7 @@ mod tests {
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<FilePipeLogImp<DefaultFileBuilder>> {
         FilePipeLogImp::open(
             cfg,
-            Arc::new(DefaultFileBuilder {}),
+            Arc::new(DefaultFileBuilder),
             Vec::new(),
             queue,
             0,
