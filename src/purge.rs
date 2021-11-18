@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use log::{debug, info};
+use log::info;
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -321,33 +321,18 @@ where
             match item.content {
                 LogItemContent::EntryIndexes(entries_to_add) => {
                     let entry_indexes = entries_to_add.0;
-                    debug!(
-                        "{} append to {:?}, Entries[{:?}:{:?})",
-                        raft,
-                        file_handle,
-                        entry_indexes.first().map(|x| x.index),
-                        entry_indexes.last().map(|x| x.index + 1),
-                    );
                     memtable.write().rewrite(entry_indexes, rewrite_watermark);
                 }
                 LogItemContent::Kv(kv) => match kv.op_type {
                     OpType::Put => {
                         let key = kv.key;
-                        debug!(
-                            "{} append to {:?}, Put({})",
-                            raft,
-                            file_handle,
-                            hex::encode(&key),
-                        );
                         memtable
                             .write()
                             .rewrite_key(key, rewrite_watermark, file_handle.id.seq);
                     }
                     _ => unreachable!(),
                 },
-                LogItemContent::Command(Command::Clean) => {
-                    debug!("{} append to {:?}, Clean", raft, file_handle);
-                }
+                LogItemContent::Command(Command::Clean) => {}
                 _ => unreachable!(),
             }
         }

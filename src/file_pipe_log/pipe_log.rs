@@ -127,7 +127,7 @@ impl<W: Seek + Write> ActiveFile<W> {
     }
 }
 
-pub struct FilePipeLogImp<B: FileBuilder> {
+pub struct SinglePipe<B: FileBuilder> {
     queue: LogQueue,
     dir: String,
     target_file_size: usize,
@@ -139,7 +139,7 @@ pub struct FilePipeLogImp<B: FileBuilder> {
     active_file: CachePadded<Mutex<ActiveFile<B::Writer<LogFile>>>>,
 }
 
-impl<B: FileBuilder> FilePipeLogImp<B> {
+impl<B: FileBuilder> SinglePipe<B> {
     pub fn open(
         cfg: &Config,
         file_builder: Arc<B>,
@@ -268,7 +268,7 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
     }
 }
 
-impl<B: FileBuilder> FilePipeLogImp<B> {
+impl<B: FileBuilder> SinglePipe<B> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_fd(handle.id.seq)?;
         let mut reader = self
@@ -379,18 +379,14 @@ impl<B: FileBuilder> FilePipeLogImp<B> {
     }
 }
 
-pub struct FilePipeLog<B: FileBuilder> {
-    pipes: [FilePipeLogImp<B>; 2],
+pub struct DualPipes<B: FileBuilder> {
+    pipes: [SinglePipe<B>; 2],
 
     _lock_file: File,
 }
 
-impl<B: FileBuilder> FilePipeLog<B> {
-    pub fn open(
-        dir: &str,
-        appender: FilePipeLogImp<B>,
-        rewriter: FilePipeLogImp<B>,
-    ) -> Result<Self> {
+impl<B: FileBuilder> DualPipes<B> {
+    pub fn open(dir: &str, appender: SinglePipe<B>, rewriter: SinglePipe<B>) -> Result<Self> {
         let lock_file = File::create(lock_file_path(dir))?;
         lock_file.try_lock_exclusive().map_err(|e| {
             Error::Other(box_err!(
@@ -414,7 +410,7 @@ impl<B: FileBuilder> FilePipeLog<B> {
     }
 }
 
-impl<B: FileBuilder> PipeLog for FilePipeLog<B> {
+impl<B: FileBuilder> PipeLog for DualPipes<B> {
     #[inline]
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         self.pipes[handle.id.queue as usize].read_bytes(handle)
@@ -459,8 +455,8 @@ mod tests {
     use crate::file_builder::DefaultFileBuilder;
     use crate::util::ReadableSize;
 
-    fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<FilePipeLogImp<DefaultFileBuilder>> {
-        FilePipeLogImp::open(
+    fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileBuilder>> {
+        SinglePipe::open(
             cfg,
             Arc::new(DefaultFileBuilder),
             Vec::new(),
@@ -470,8 +466,8 @@ mod tests {
         )
     }
 
-    fn new_test_pipe_log(cfg: &Config) -> Result<FilePipeLog<DefaultFileBuilder>> {
-        FilePipeLog::open(
+    fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileBuilder>> {
+        DualPipes::open(
             &cfg.dir,
             new_test_pipe(cfg, LogQueue::Append)?,
             new_test_pipe(cfg, LogQueue::Rewrite)?,
@@ -487,10 +483,10 @@ mod tests {
             ..Default::default()
         };
 
-        let _r1 = new_test_pipe_log(&cfg).unwrap();
+        let _r1 = new_test_pipes(&cfg).unwrap();
 
         // Only one thread can hold file lock
-        let r2 = new_test_pipe_log(&cfg);
+        let r2 = new_test_pipes(&cfg);
 
         assert!(format!("{}", r2.err().unwrap())
             .contains("maybe another instance is using this directory"));
@@ -508,7 +504,7 @@ mod tests {
         };
         let queue = LogQueue::Append;
 
-        let pipe_log = new_test_pipe_log(&cfg).unwrap();
+        let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
         let header_size = LogFileHeader::len() as u64;
