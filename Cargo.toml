@@ -38,12 +38,12 @@ parking_lot = "0.11"
 prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "2"
-rayon = "1.5.0"
+rayon = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 
 [dev-dependencies]
-criterion = "0.3.5"
+criterion = "0.3"
 ctor = "0.1"
 env_logger = "0.7"
 kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
