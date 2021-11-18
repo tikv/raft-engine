@@ -29,10 +29,9 @@ jobs:
       - uses: Swatinem/rust-cache@v1
         with:
           sharedKey: ${{ matrix.os }}
-      # TODO(tabokie): add this step to refresh cache when we upgrade toolchain.
-      # - name: Cache dependencies
-      #   if: ${{ matrix.os == 'ubuntu-latest' }}
-      #   run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
+      - name: Cache dependencies
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
