@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,10 +19,8 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileHeader};
-use super::log_file::{LogFd, LogFile};
-
-const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
+use super::format::{lock_file_path, FileNameExt};
+use super::log_file::{build_file_writer, LogFd, LogFile, LogFileWriter};
 
 struct FileCollection {
     first_seq: FileSeq,
@@ -30,101 +28,9 @@ struct FileCollection {
     fds: VecDeque<Arc<LogFd>>,
 }
 
-struct ActiveFile<W: Seek + Write> {
+struct ActiveFile<B: FileBuilder> {
     seq: FileSeq,
-    fd: Arc<LogFd>,
-    writer: W,
-
-    written: usize,
-    capacity: usize,
-    last_sync: usize,
-}
-
-impl<W: Seek + Write> ActiveFile<W> {
-    fn open(seq: FileSeq, fd: Arc<LogFd>, writer: W) -> Result<Self> {
-        let file_size = fd.file_size()?;
-        let mut f = Self {
-            seq,
-            fd,
-            writer,
-            written: file_size,
-            capacity: file_size,
-            last_sync: file_size,
-        };
-        if file_size < LogFileHeader::len() {
-            f.write_header()?;
-        } else {
-            f.writer.seek(std::io::SeekFrom::Start(file_size as u64))?;
-        }
-        Ok(f)
-    }
-
-    fn rotate(&mut self, seq: FileSeq, fd: Arc<LogFd>, writer: W) -> Result<()> {
-        // Necessary to truncate extra zeros from fallocate().
-        self.truncate()?;
-        self.sync()?;
-
-        let mut f = Self {
-            seq,
-            fd,
-            writer,
-            written: 0,
-            capacity: 0,
-            last_sync: 0,
-        };
-        f.write_header()?;
-
-        *self = f;
-        Ok(())
-    }
-
-    fn truncate(&mut self) -> Result<()> {
-        if self.written < self.capacity {
-            self.fd.truncate(self.written)?;
-            self.capacity = self.written;
-        }
-        Ok(())
-    }
-
-    fn write_header(&mut self) -> Result<()> {
-        self.writer.seek(std::io::SeekFrom::Start(0))?;
-        self.written = 0;
-        let mut buf = Vec::with_capacity(LogFileHeader::len());
-        LogFileHeader::default().encode(&mut buf)?;
-        self.write(&buf, 0)
-    }
-
-    fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
-        let new_written = self.written + buf.len();
-        if self.capacity < new_written {
-            let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
-            let alloc = std::cmp::max(
-                new_written - self.capacity,
-                std::cmp::min(
-                    FILE_ALLOCATE_SIZE,
-                    target_file_size.saturating_sub(self.capacity),
-                ),
-            );
-            self.fd.allocate(self.capacity, alloc)?;
-            self.capacity += alloc;
-        }
-        self.writer.write_all(buf)?;
-        self.written = new_written;
-        Ok(())
-    }
-
-    fn sync(&mut self) -> Result<()> {
-        if self.last_sync < self.written {
-            let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
-            self.fd.sync()?;
-            self.last_sync = self.written;
-        }
-        Ok(())
-    }
-
-    fn since_last_sync(&self) -> usize {
-        self.written - self.last_sync
-    }
+    writer: LogFileWriter<B>,
 }
 
 pub struct SinglePipe<B: FileBuilder> {
@@ -136,7 +42,7 @@ pub struct SinglePipe<B: FileBuilder> {
     listeners: Vec<Arc<dyn EventListener>>,
 
     files: CachePadded<RwLock<FileCollection>>,
-    active_file: CachePadded<Mutex<ActiveFile<B::Writer<LogFile>>>>,
+    active_file: CachePadded<Mutex<ActiveFile<B>>>,
 }
 
 impl<B: FileBuilder> SinglePipe<B> {
@@ -173,15 +79,15 @@ impl<B: FileBuilder> SinglePipe<B> {
             queue,
             seq: active_seq,
         };
-        let active_file = ActiveFile::open(
-            active_seq,
-            active_fd.clone(),
-            file_builder.build_writer(
+        let active_file = ActiveFile {
+            seq: active_seq,
+            writer: build_file_writer(
+                file_builder.as_ref(),
                 &file_id.build_file_path(&cfg.dir),
-                LogFile::new(active_fd),
+                active_fd,
                 create_file,
             )?,
-        )?;
+        };
 
         let total_files = fds.len();
         let pipe = Self {
@@ -217,10 +123,7 @@ impl<B: FileBuilder> SinglePipe<B> {
         Ok(files.fds[(file_seq - files.first_seq) as usize].clone())
     }
 
-    fn rotate_imp(
-        &self,
-        active_file: &mut MutexGuard<ActiveFile<B::Writer<LogFile>>>,
-    ) -> Result<()> {
+    fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<B>>) -> Result<()> {
         let _t = StopWatch::new(&LOG_ROTATE_DURATION_HISTOGRAM);
         let seq = active_file.seq + 1;
         debug_assert!(seq > 1);
@@ -232,16 +135,18 @@ impl<B: FileBuilder> SinglePipe<B> {
         let path = file_id.build_file_path(&self.dir);
         let fd = Arc::new(LogFd::create(&path)?);
         self.sync_dir()?;
-
-        active_file.rotate(
+        let new_file = ActiveFile {
             seq,
-            fd.clone(),
-            self.file_builder.build_writer(
+            writer: build_file_writer(
+                self.file_builder.as_ref(),
                 &path,
-                LogFile::new(fd.clone()),
+                fd.clone(),
                 true, /*create*/
             )?,
-        )?;
+        };
+
+        active_file.writer.close()?;
+        **active_file = new_file;
 
         let len = {
             let mut files = self.files.write();
@@ -284,12 +189,15 @@ impl<B: FileBuilder> SinglePipe<B> {
     fn append(&self, bytes: &[u8]) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
-        let offset = active_file.written as u64;
-        if let Err(e) = active_file.write(bytes, self.target_file_size) {
-            if let Err(te) = active_file.truncate() {
+        let seq = active_file.seq;
+        let writer = &mut active_file.writer;
+
+        let start_offset = writer.offset();
+        if let Err(e) = writer.write(bytes, self.target_file_size) {
+            if let Err(te) = writer.truncate() {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
-                    active_file.seq, e, te
+                    seq, e, te
                 );
             }
             return Err(e);
@@ -297,10 +205,10 @@ impl<B: FileBuilder> SinglePipe<B> {
         let handle = FileBlockHandle {
             id: FileId {
                 queue: self.queue,
-                seq: active_file.seq,
+                seq,
             },
-            offset,
-            len: active_file.written - offset as usize,
+            offset: start_offset as u64,
+            len: writer.offset() - start_offset,
         };
         for listener in &self.listeners {
             listener.on_append_log_file(handle);
@@ -310,19 +218,15 @@ impl<B: FileBuilder> SinglePipe<B> {
 
     fn maybe_sync(&self, force: bool) -> Result<()> {
         let mut active_file = self.active_file.lock();
-        if active_file.written >= self.target_file_size {
+        let seq = active_file.seq;
+        let writer = &mut active_file.writer;
+        if writer.offset() >= self.target_file_size {
             if let Err(e) = self.rotate_imp(&mut active_file) {
-                panic!(
-                    "error when rotate [{:?}:{}]: {}",
-                    self.queue, active_file.seq, e
-                );
+                panic!("error when rotate [{:?}:{}]: {}", self.queue, seq, e);
             }
-        } else if active_file.since_last_sync() >= self.bytes_per_sync || force {
-            if let Err(e) = active_file.sync() {
-                panic!(
-                    "error when sync [{:?}:{}]: {}",
-                    self.queue, active_file.seq, e,
-                );
+        } else if writer.since_last_sync() >= self.bytes_per_sync || force {
+            if let Err(e) = writer.sync() {
+                panic!("error when sync [{:?}:{}]: {}", self.queue, seq, e,);
             }
         }
 
@@ -451,6 +355,7 @@ impl<B: FileBuilder> PipeLog for DualPipes<B> {
 mod tests {
     use tempfile::Builder;
 
+    use super::super::format::LogFileHeader;
     use super::*;
     use crate::file_builder::DefaultFileBuilder;
     use crate::util::ReadableSize;

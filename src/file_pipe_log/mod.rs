@@ -1,10 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-mod builder;
 mod format;
 mod log_file;
-mod pipe_log;
+mod pipe;
+mod pipe_builder;
 mod reader;
 
-pub use builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
-pub use pipe_log::DualPipes as FilePipeLog;
+pub use pipe::DualPipes as FilePipeLog;
+pub use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};

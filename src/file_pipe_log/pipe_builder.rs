@@ -17,7 +17,7 @@ use crate::Result;
 
 use super::format::FileNameExt;
 use super::log_file::{LogFd, LogFile};
-use super::pipe_log::{DualPipes, SinglePipe};
+use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
 pub trait ReplayMachine: Send + Default {
