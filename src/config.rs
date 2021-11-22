@@ -11,32 +11,52 @@ const MIN_RECOVERY_THREADS: usize = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecoveryMode {
-    AbsoluteConsistency = 0,
-    TolerateTailCorruption = 1,
-    TolerateAnyCorruption = 2,
+    AbsoluteConsistency,
+    TolerateTailCorruption,
+    TolerateAnyCorruption,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
+    /// Directory to store log files. Will create on startup if not exists.
+    ///
+    /// Default: ""
     pub dir: String,
+
+    /// How to deal with file corruption during recovery.
+    ///
+    /// Default: "tolerate-tail-corruption".
     pub recovery_mode: RecoveryMode,
+    /// Minimum I/O size for reading log files during recovery.
+    ///
+    /// Default: "4KB". Minimum: "512B".
+    pub recovery_read_block_size: ReadableSize,
+    /// The number of threads used to scan and recovery log files.
+    ///
+    /// Default: 4. Minimum: 1.
+    pub recovery_threads: usize,
+
+    /// Compress a log batch if its size exceeds this value. Setting it to zero
+    /// disables compression.
+    ///
+    /// Default: "8KB"
+    pub batch_compression_threshold: ReadableSize,
+    /// Incrementally sync log files after specified bytes have been written.
+    /// Setting it to zero disables incremental sync.
+    ///
+    /// Default: "4MB"
     pub bytes_per_sync: ReadableSize,
+    /// Target file size for rotating log files.
+    ///
+    /// Default: "128MB"
     pub target_file_size: ReadableSize,
 
-    /// Only purge if disk file size is greater than `purge_threshold`.
-    pub purge_threshold: ReadableSize,
-
-    /// Compress a log batch if its size is greater than `batch_compression_threshold`.
+    /// Purge main log queue if its file size exceeds this value.
     ///
-    /// Set to `0` will disable compression.
-    pub batch_compression_threshold: ReadableSize,
-
-    /// Read block size for recovery. Default value: "4KB". Min value: "512B".
-    pub recovery_read_block_size: ReadableSize,
-    /// Parallel recovery concurrency. Default value: 4. Min value: 1.
-    pub recovery_threads: usize,
+    /// Default: "10GB"
+    pub purge_threshold: ReadableSize,
 }
 
 impl Default for Config {
@@ -44,12 +64,12 @@ impl Default for Config {
         Config {
             dir: "".to_owned(),
             recovery_mode: RecoveryMode::TolerateTailCorruption,
-            bytes_per_sync: ReadableSize::kb(256),
-            target_file_size: ReadableSize::mb(128),
-            purge_threshold: ReadableSize::gb(10),
-            batch_compression_threshold: ReadableSize::kb(8),
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
+            batch_compression_threshold: ReadableSize::kb(8),
+            bytes_per_sync: ReadableSize::mb(4),
+            target_file_size: ReadableSize::mb(128),
+            purge_threshold: ReadableSize::gb(10),
         }
     }
 }
@@ -58,6 +78,9 @@ impl Config {
     pub fn sanitize(&mut self) -> Result<()> {
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
+        }
+        if self.bytes_per_sync.0 == 0 {
+            self.bytes_per_sync = ReadableSize(u64::MAX);
         }
         let min_recovery_read_block_size = ReadableSize(MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         if self.recovery_read_block_size < min_recovery_read_block_size {
