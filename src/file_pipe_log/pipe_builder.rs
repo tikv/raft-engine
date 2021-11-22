@@ -16,7 +16,7 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::Result;
 
 use super::format::FileNameExt;
-use super::log_file::{LogFd, LogFile};
+use super::log_file::{build_file_reader, LogFd};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
@@ -195,8 +195,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     reader.open(
                         FileId { queue, seq: f.seq },
-                        file_builder.build_reader(&f.path, LogFile::new(f.fd.clone()))?,
-                        f.fd.file_size()?,
+                        build_file_reader(file_builder.as_ref(), &f.path, f.fd.clone())?,
                     )?;
                     loop {
                         match reader.next() {

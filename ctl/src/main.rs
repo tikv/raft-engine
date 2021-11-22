@@ -66,21 +66,6 @@ pub enum Cmd {
         #[structopt(short, long, use_delimiter = true)]
         raft_groups: Vec<u64>,
     },
-
-    /// repair log entry holes by fill in empty message
-    Autofill {
-        /// Path of raft-engine storage directory
-        #[structopt(short, long)]
-        path: String,
-
-        /// queue name
-        #[structopt(short, long, possible_values = &["append", "rewrite", "all"])]
-        queue: String,
-
-        /// raft_group ids(optional), format: raft_groups_id1,raft_group_id2....
-        #[structopt(short, long, use_delimiter = true)]
-        raft_groups: Vec<u64>,
-    },
 }
 
 fn convert_queue(queue: &str) -> Option<LogQueue> {
@@ -100,11 +85,6 @@ impl ControlOpt {
 
         let cmd = self.cmd.as_ref().unwrap();
         match cmd {
-            Cmd::Autofill {
-                path,
-                queue,
-                raft_groups,
-            } => self.auto_fill(path, queue, raft_groups),
             Cmd::Dump {
                 file,
                 path,
@@ -125,11 +105,6 @@ impl ControlOpt {
             } => self.truncate(path, mode, queue, raft_groups),
             Cmd::Check { path } => self.check(path),
         }
-    }
-
-    fn auto_fill(&self, path: &str, queue: &str, raft_groups: &[u64]) -> Result<()> {
-        let p = PathBuf::from(path);
-        Engine::auto_fill(p.as_path(), convert_queue(queue), &raft_groups.to_vec())
     }
 
     fn help() {

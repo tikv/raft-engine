@@ -16,6 +16,7 @@ use nix::NixPath;
 
 use crate::file_builder::FileBuilder;
 use crate::metrics::*;
+use crate::FileBlockHandle;
 use crate::Result;
 
 use super::format::LogFileHeader;
@@ -260,13 +261,13 @@ impl<B: FileBuilder> LogFileWriter<B> {
         if file_size < LogFileHeader::len() {
             f.write_header()?;
         } else {
-            f.writer.seek(std::io::SeekFrom::Start(file_size as u64))?;
+            f.writer.seek(SeekFrom::Start(file_size as u64))?;
         }
         Ok(f)
     }
 
     fn write_header(&mut self) -> Result<()> {
-        self.writer.seek(std::io::SeekFrom::Start(0))?;
+        self.writer.seek(SeekFrom::Start(0))?;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileHeader::len());
         LogFileHeader::default().encode(&mut buf)?;
@@ -323,5 +324,61 @@ impl<B: FileBuilder> LogFileWriter<B> {
     #[inline]
     pub fn offset(&self) -> usize {
         self.written
+    }
+}
+
+pub fn build_file_reader<B: FileBuilder>(
+    builder: &B,
+    path: &Path,
+    fd: Arc<LogFd>,
+) -> Result<LogFileReader<B>> {
+    let raw_reader = LogFile::new(fd.clone());
+    let reader = builder.build_reader(path, raw_reader)?;
+    LogFileReader::open(fd, reader)
+}
+
+/// Random-access reader for log file.
+pub struct LogFileReader<B: FileBuilder> {
+    fd: Arc<LogFd>,
+    reader: B::Reader<LogFile>,
+
+    offset: usize,
+}
+
+impl<B: FileBuilder> LogFileReader<B> {
+    fn open(fd: Arc<LogFd>, reader: B::Reader<LogFile>) -> Result<Self> {
+        Ok(Self {
+            fd,
+            reader,
+            // Set to an invalid offset to force a reseek at first read.
+            offset: usize::MAX,
+        })
+    }
+
+    pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
+        if handle.offset != self.offset as u64 {
+            self.reader.seek(SeekFrom::Start(handle.offset))?;
+            self.offset = handle.offset as usize;
+        }
+        let mut buf = vec![0; handle.len];
+        let size = self.reader.read(&mut buf)?;
+        self.offset += size;
+        buf.truncate(size);
+        Ok(buf)
+    }
+
+    pub fn read_to(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize> {
+        if offset != self.offset as u64 {
+            self.reader.seek(SeekFrom::Start(offset))?;
+            self.offset = offset as usize;
+        }
+        let size = self.reader.read(buffer)?;
+        self.offset += size;
+        Ok(size)
+    }
+
+    #[inline]
+    pub fn file_size(&self) -> Result<usize> {
+        Ok(self.fd.file_size()?)
     }
 }

@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,7 +19,7 @@ use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
 use super::format::{lock_file_path, FileNameExt};
-use super::log_file::{build_file_writer, LogFd, LogFile, LogFileWriter};
+use super::log_file::{build_file_reader, build_file_writer, LogFd, LogFileWriter};
 
 struct FileCollection {
     first_seq: FileSeq,
@@ -176,14 +175,12 @@ impl<B: FileBuilder> SinglePipe<B> {
 impl<B: FileBuilder> SinglePipe<B> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_fd(handle.id.seq)?;
-        let mut reader = self
-            .file_builder
-            .build_reader(&handle.id.build_file_path(&self.dir), LogFile::new(fd))?;
-        reader.seek(std::io::SeekFrom::Start(handle.offset))?;
-        let mut buf = vec![0; handle.len];
-        let size = reader.read(&mut buf)?;
-        buf.truncate(size);
-        Ok(buf)
+        let mut reader = build_file_reader(
+            self.file_builder.as_ref(),
+            &handle.id.build_file_path(&self.dir),
+            fd,
+        )?;
+        reader.read(handle)
     }
 
     fn append(&self, bytes: &[u8]) -> Result<FileBlockHandle> {

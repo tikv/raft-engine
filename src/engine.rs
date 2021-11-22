@@ -1,6 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::marker::PhantomData;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use std::u64;
@@ -287,20 +288,12 @@ where
 }
 
 impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
-    pub fn consistency_check(path: &std::path::Path) -> Result<Vec<(u64, u64)>> {
+    pub fn consistency_check(path: &Path) -> Result<Vec<(u64, u64)>> {
         Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 
-    pub fn auto_fill(
-        path: &std::path::Path,
-        queue: Option<LogQueue>,
-        raft_groups: &[u64],
-    ) -> Result<()> {
-        Self::auto_fill_with_file_builder(path, queue, raft_groups, Arc::new(DefaultFileBuilder))
-    }
-
     pub fn unsafe_truncate(
-        path: &std::path::Path,
+        path: &Path,
         mode: &str,
         queue: Option<LogQueue>,
         raft_groups: &[u64],
@@ -314,7 +307,7 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump(path: &std::path::Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
+    pub fn dump(path: &Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
         Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
     }
 }
@@ -323,10 +316,10 @@ impl<B> Engine<B, FilePipeLog<B>>
 where
     B: FileBuilder,
 {
-    /// Returns a list of corrupted Raft groups, including their id and last unaffected
+    /// Returns a list of corrupted Raft groups, including their ids and last valid
     /// log index. Head or tail corruption might not be detected.
     pub fn consistency_check_with_file_builder(
-        path: &std::path::Path,
+        path: &Path,
         file_builder: Arc<B>,
     ) -> Result<Vec<(u64, u64)>> {
         if !path.exists() {
@@ -353,21 +346,10 @@ where
         Ok(list)
     }
 
-    /// Repairs log entry holes by filling in empty messages.
-    #[allow(unused_variables)]
-    pub fn auto_fill_with_file_builder(
-        path: &std::path::Path,
-        queue: Option<LogQueue>,
-        raft_groups: &[u64],
-        file_builder: Arc<B>,
-    ) -> Result<()> {
-        todo!();
-    }
-
     /// Truncates Raft groups to remove possible corruptions.
     #[allow(unused_variables)]
     pub fn unsafe_truncate_with_file_builder(
-        path: &std::path::Path,
+        path: &Path,
         mode: &str,
         queue: Option<LogQueue>,
         raft_groups: &[u64],
@@ -379,7 +361,7 @@ where
     /// Dumps all operations.
     #[allow(unused_variables)]
     pub fn dump_with_file_builder(
-        path: &std::path::Path,
+        path: &Path,
         raft_groups: &[u64],
         file_builder: Arc<B>,
     ) -> Result<Vec<LogItem>> {
@@ -1040,7 +1022,7 @@ mod tests {
             type Reader<R: Seek + Read + Send> = TestFile<R>;
             type Writer<W: Seek + Write + Send> = TestFile<W>;
 
-            fn build_reader<R>(&self, _path: &std::path::Path, inner: R) -> Result<Self::Reader<R>>
+            fn build_reader<R>(&self, _path: &Path, inner: R) -> Result<Self::Reader<R>>
             where
                 R: Seek + Read + Send,
             {
@@ -1049,7 +1031,7 @@ mod tests {
 
             fn build_writer<W>(
                 &self,
-                _path: &std::path::Path,
+                _path: &Path,
                 inner: W,
                 _create: bool,
             ) -> Result<Self::Writer<W>>
