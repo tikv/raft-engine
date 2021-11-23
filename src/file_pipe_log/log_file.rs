@@ -288,7 +288,7 @@ impl<B: FileBuilder> LogFileWriter<B> {
         Ok(())
     }
 
-    pub fn write(&mut self, buf: &[u8], target_file_size: usize) -> Result<()> {
+    pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> Result<()> {
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
             let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
@@ -296,7 +296,7 @@ impl<B: FileBuilder> LogFileWriter<B> {
                 new_written - self.capacity,
                 std::cmp::min(
                     FILE_ALLOCATE_SIZE,
-                    target_file_size.saturating_sub(self.capacity),
+                    target_size_hint.saturating_sub(self.capacity),
                 ),
             );
             self.fd.allocate(self.capacity, alloc)?;

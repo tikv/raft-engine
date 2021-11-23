@@ -50,6 +50,7 @@ impl<B: FileBuilder> LogItemBatchFileReader<B> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.file_id = None;
         self.reader = None;
@@ -60,12 +61,12 @@ impl<B: FileBuilder> LogItemBatchFileReader<B> {
     }
 
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
-        if self.valid_offset < LOG_BATCH_HEADER_LEN {
-            return Err(Error::Corruption(
-                "attempt to read file with broken header".to_owned(),
-            ));
-        }
         if self.valid_offset < self.size {
+            if self.valid_offset < LOG_BATCH_HEADER_LEN {
+                return Err(Error::Corruption(
+                    "attempt to read file with broken header".to_owned(),
+                ));
+            }
             let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
                 self.valid_offset,
                 LOG_BATCH_HEADER_LEN,

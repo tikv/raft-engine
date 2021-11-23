@@ -68,7 +68,6 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
-                // TODO: test case
                 let p = e.path();
                 if p.is_file() {
                     match FileId::parse_file_name(p.file_name().unwrap().to_str().unwrap()) {

@@ -1,5 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::cmp::Ordering;
+
 use crate::Result;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -10,7 +12,7 @@ pub enum LogQueue {
 
 pub type FileSeq = u64;
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct FileId {
     pub queue: LogQueue,
     pub seq: FileSeq,
@@ -24,6 +26,23 @@ impl FileId {
     #[cfg(test)]
     pub fn dummy(queue: LogQueue) -> Self {
         Self { queue, seq: 0 }
+    }
+}
+
+// Order by freshness.
+impl std::cmp::Ord for FileId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.queue, other.queue) {
+            (LogQueue::Append, LogQueue::Rewrite) => Ordering::Greater,
+            (LogQueue::Rewrite, LogQueue::Append) => Ordering::Less,
+            _ => self.seq.cmp(&other.seq),
+        }
+    }
+}
+
+impl std::cmp::PartialOrd for FileId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 

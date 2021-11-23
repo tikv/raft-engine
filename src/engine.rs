@@ -1073,4 +1073,34 @@ mod tests {
             });
         }
     }
+
+    #[test]
+    fn test_dirty_recovery() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_dirty_recovery")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 1024];
+
+        for rid in 1..21 {
+            engine.append(rid, 1, 21, Some(&data));
+        }
+
+        // Create an unrelated sub-directory.
+        std::fs::create_dir(dir.path().join(Path::new("random_dir"))).unwrap();
+        // Create an unrelated file.
+        let _f = std::fs::File::create(dir.path().join(Path::new("random_file"))).unwrap();
+
+        let engine = engine.reopen();
+        for rid in 1..21 {
+            engine.scan(rid, 1, 21, |_, _, d| {
+                assert_eq!(d, &data);
+            });
+        }
+    }
 }
