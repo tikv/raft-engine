@@ -18,11 +18,12 @@ struct ControlOpt {
 pub enum Cmd {
     /// dump out all operations in log files
     Dump {
-        #[structopt(short, long = "path", help = "Path of raft-engine storage directory")]
+        #[structopt(
+            short,
+            long = "path",
+            help = "Path of log file directory or specific log file"
+        )]
         path: String,
-
-        #[structopt(short = "seq", long, help = "The sequence number of file to dump")]
-        seq: Option<u64>,
 
         /// raft_group ids(optional), format: raft_groups_id1,raft_group_id2....
         #[structopt(short, long, use_delimiter = true)]
@@ -73,11 +74,7 @@ impl ControlOpt {
 
         let cmd = self.cmd.as_ref().unwrap();
         match cmd {
-            Cmd::Dump {
-                path,
-                seq,
-                raft_groups,
-            } => self.dump(path, *seq, raft_groups),
+            Cmd::Dump { path, raft_groups } => self.dump(path, raft_groups),
             Cmd::Truncate {
                 path,
                 mode,
@@ -92,8 +89,8 @@ impl ControlOpt {
         Self::clap().print_help().ok();
     }
 
-    fn dump(&self, path: &str, seq: Option<u64>, raft_groups: &[u64]) -> Result<()> {
-        let r = Engine::dump(Path::new(path), seq, &raft_groups.to_vec())?;
+    fn dump(&self, path: &str, raft_groups: &[u64]) -> Result<()> {
+        let r = Engine::dump(Path::new(path), &raft_groups.to_vec())?;
 
         if r.is_empty() {
             println!("No data");

@@ -17,7 +17,7 @@ use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
@@ -307,8 +307,8 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump(path: &Path, seq: Option<FileSeq>, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
-        Self::dump_with_file_builder(path, seq, raft_groups, Arc::new(DefaultFileBuilder))
+    pub fn dump(path: &Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
+        Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
     }
 }
 
@@ -362,7 +362,6 @@ where
     #[allow(unused_variables)]
     pub fn dump_with_file_builder(
         path: &Path,
-        seq: Option<FileSeq>,
         raft_groups: &[u64],
         file_builder: Arc<B>,
     ) -> Result<Vec<LogItem>> {

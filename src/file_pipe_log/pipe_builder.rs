@@ -68,22 +68,26 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
-                match FileId::parse_file_name(e.file_name().to_str().unwrap()) {
-                    Some(FileId {
-                        queue: LogQueue::Append,
-                        seq,
-                    }) => {
-                        min_append_id = std::cmp::min(min_append_id, seq);
-                        max_append_id = std::cmp::max(max_append_id, seq);
+                // TODO: test case
+                let p = e.path();
+                if p.is_file() {
+                    match FileId::parse_file_name(p.file_name().unwrap().to_str().unwrap()) {
+                        Some(FileId {
+                            queue: LogQueue::Append,
+                            seq,
+                        }) => {
+                            min_append_id = std::cmp::min(min_append_id, seq);
+                            max_append_id = std::cmp::max(max_append_id, seq);
+                        }
+                        Some(FileId {
+                            queue: LogQueue::Rewrite,
+                            seq,
+                        }) => {
+                            min_rewrite_id = std::cmp::min(min_rewrite_id, seq);
+                            max_rewrite_id = std::cmp::max(max_rewrite_id, seq);
+                        }
+                        _ => {}
                     }
-                    Some(FileId {
-                        queue: LogQueue::Rewrite,
-                        seq,
-                    }) => {
-                        min_rewrite_id = std::cmp::min(min_rewrite_id, seq);
-                        max_rewrite_id = std::cmp::max(max_rewrite_id, seq);
-                    }
-                    _ => {}
                 }
             }
         });

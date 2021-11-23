@@ -50,6 +50,15 @@ impl<B: FileBuilder> LogItemBatchFileReader<B> {
         Ok(())
     }
 
+    pub fn reset(&mut self) {
+        self.file_id = None;
+        self.reader = None;
+        self.size = 0;
+        self.buffer.clear();
+        self.buffer_offset = 0;
+        self.valid_offset = 0;
+    }
+
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
         if self.valid_offset < LOG_BATCH_HEADER_LEN {
             return Err(Error::Corruption(
