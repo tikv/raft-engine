@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use structopt::StructOpt;
 
@@ -18,23 +18,11 @@ struct ControlOpt {
 pub enum Cmd {
     /// dump out all operations in log files
     Dump {
-        /// Path of a specific raft-engine file
-        #[structopt(
-            short = "file",
-            long,
-            required_unless = "path",
-            conflicts_with = "path"
-        )]
-        file: Option<String>,
+        #[structopt(short, long = "path", help = "Path of raft-engine storage directory")]
+        path: String,
 
-        /// Path of raft-engine storage directory
-        #[structopt(
-            short,
-            long = "path",
-            required_unless = "file",
-            conflicts_with = "file"
-        )]
-        path: Option<String>,
+        #[structopt(short = "seq", long, help = "The sequence number of file to dump")]
+        seq: Option<u64>,
 
         /// raft_group ids(optional), format: raft_groups_id1,raft_group_id2....
         #[structopt(short, long, use_delimiter = true)]
@@ -86,17 +74,10 @@ impl ControlOpt {
         let cmd = self.cmd.as_ref().unwrap();
         match cmd {
             Cmd::Dump {
-                file,
                 path,
+                seq,
                 raft_groups,
-            } => {
-                let p = if file.is_some() {
-                    file.as_ref().unwrap()
-                } else {
-                    path.as_ref().unwrap()
-                };
-                self.dump(p, raft_groups)
-            }
+            } => self.dump(path, *seq, raft_groups),
             Cmd::Truncate {
                 path,
                 mode,
@@ -111,9 +92,8 @@ impl ControlOpt {
         Self::clap().print_help().ok();
     }
 
-    fn dump(&self, path: &str, raft_groups: &[u64]) -> Result<()> {
-        let p = PathBuf::from(path);
-        let r = Engine::dump(p.as_path(), &raft_groups.to_vec())?;
+    fn dump(&self, path: &str, seq: Option<u64>, raft_groups: &[u64]) -> Result<()> {
+        let r = Engine::dump(Path::new(path), seq, &raft_groups.to_vec())?;
 
         if r.is_empty() {
             println!("No data");
@@ -126,13 +106,11 @@ impl ControlOpt {
     }
 
     fn truncate(&self, path: &str, mode: &str, queue: &str, raft_groups: &[u64]) -> Result<()> {
-        let p = PathBuf::from(path);
-        Engine::unsafe_truncate(p.as_path(), mode, convert_queue(queue), raft_groups)
+        Engine::unsafe_truncate(Path::new(path), mode, convert_queue(queue), raft_groups)
     }
 
     fn check(&self, path: &str) -> Result<()> {
-        let p = PathBuf::from(path);
-        let r = Engine::consistency_check(p.as_path())?;
+        let r = Engine::consistency_check(Path::new(path))?;
 
         if r.is_empty() {
             println!("All data is Ok")
