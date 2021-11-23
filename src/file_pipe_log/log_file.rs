@@ -356,13 +356,8 @@ impl<B: FileBuilder> LogFileReader<B> {
     }
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        if handle.offset != self.offset as u64 {
-            self.reader.seek(SeekFrom::Start(handle.offset))?;
-            self.offset = handle.offset as usize;
-        }
         let mut buf = vec![0; handle.len];
-        let size = self.reader.read(&mut buf)?;
-        self.offset += size;
+        let size = self.read_to(handle.offset, &mut buf)?;
         buf.truncate(size);
         Ok(buf)
     }
