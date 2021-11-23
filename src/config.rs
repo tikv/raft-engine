@@ -142,10 +142,13 @@ mod tests {
         let soft_error = r#"
             recovery-read-block-size = "1KB"
             recovery-threads = 0
+            bytes-per-sync = "0KB"
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
-        let mut soft_sanitized = soft_load.clone();
+        let mut soft_sanitized = soft_load;
         soft_sanitized.sanitize().unwrap();
-        assert_ne!(soft_load, soft_sanitized);
+        assert!(soft_sanitized.recovery_read_block_size.0 >= MIN_RECOVERY_READ_BLOCK_SIZE as u64);
+        assert!(soft_sanitized.recovery_threads >= MIN_RECOVERY_THREADS);
+        assert_eq!(soft_sanitized.bytes_per_sync.0, u64::MAX);
     }
 }

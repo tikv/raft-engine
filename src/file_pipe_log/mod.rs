@@ -223,5 +223,38 @@ pub mod debug {
             }
             assert!(reader.next().is_none())
         }
+
+        #[test]
+        fn test_debug_file_error() {
+            let dir = tempfile::Builder::new()
+                .prefix("test_debug_file_error")
+                .tempdir()
+                .unwrap();
+            let builder = Arc::new(DefaultFileBuilder);
+            // An unrelated sub-directory.
+            let unrelated_dir = dir.path().join(Path::new("random_dir"));
+            std::fs::create_dir(&unrelated_dir).unwrap();
+            // An unrelated file.
+            let unrelated_file_path = dir.path().join(Path::new("random_file"));
+            let _unrelated_file = std::fs::File::create(&unrelated_file_path).unwrap();
+            // A corrupted log file.
+            let corrupted_file_path = FileId::dummy(LogQueue::Append).build_file_path(dir.path());
+            let _corrupted_file = std::fs::File::create(&corrupted_file_path).unwrap();
+            // An empty log file.
+            let empty_file_path = FileId::dummy(LogQueue::Rewrite).build_file_path(dir.path());
+            let mut writer =
+                build_file_writer(builder.as_ref(), &empty_file_path, true /*create*/).unwrap();
+            writer.close().unwrap();
+
+            assert!(LogItemReader::new_file_reader(builder.clone(), dir.path()).is_err());
+            assert!(LogItemReader::new_file_reader(builder.clone(), &unrelated_file_path).is_err());
+            assert!(
+                LogItemReader::new_directory_reader(builder.clone(), &empty_file_path).is_err()
+            );
+
+            let mut reader = LogItemReader::new_directory_reader(builder, dir.path()).unwrap();
+            assert!(reader.next().unwrap().is_err());
+            assert!(reader.next().is_none());
+        }
     }
 }
