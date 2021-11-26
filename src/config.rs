@@ -12,6 +12,8 @@ const MIN_RECOVERY_THREADS: usize = 1;
 #[serde(rename_all = "kebab-case")]
 pub enum RecoveryMode {
     AbsoluteConsistency,
+    // For backward compatibility.
+    #[serde(alias = "tolerate-corrupted-tail-records")]
     TolerateTailCorruption,
     TolerateAnyCorruption,
 }
@@ -150,5 +152,14 @@ mod tests {
         assert!(soft_sanitized.recovery_read_block_size.0 >= MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         assert!(soft_sanitized.recovery_threads >= MIN_RECOVERY_THREADS);
         assert_eq!(soft_sanitized.bytes_per_sync.0, u64::MAX);
+    }
+
+    #[test]
+    fn test_backward_compactibility() {
+        let old = r#"
+            recovery-mode = "tolerate-corrupted-tail-records"
+        "#;
+        let mut load: Config = toml::from_str(old).unwrap();
+        load.sanitize().unwrap();
     }
 }
