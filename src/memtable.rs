@@ -89,7 +89,11 @@ impl MemTable {
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
         if let Some((rhs_first, _)) = rhs.span() {
-            self.prepare_append(rhs_first, false, true);
+            self.prepare_append(
+                rhs_first,
+                rhs.rewrite_count > 0, /*allow_hole*/
+                true,                  /*allow_overwrite*/
+            );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
                 rhs.entry_indexes.len(),
@@ -151,26 +155,22 @@ impl MemTable {
         self.global_stats.add(LogQueue::Rewrite, 1);
         if let Some(origin) = self.kvs.get_mut(&key) {
             if origin.1.queue == LogQueue::Append {
-                // Always provide a gate to rewrite a normal entry.
-                if origin.1.seq <= gate.unwrap() {
-                    origin.1 = FileId {
-                        queue: LogQueue::Rewrite,
-                        seq,
-                    };
-                    self.global_stats.delete(LogQueue::Append, 1);
-                } else {
-                    // The rewritten key/value pair has been overwritten.
-                    self.global_stats.delete(LogQueue::Rewrite, 1);
+                if let Some(gate) = gate {
+                    if origin.1.seq <= gate {
+                        origin.1 = FileId {
+                            queue: LogQueue::Rewrite,
+                            seq,
+                        };
+                        self.global_stats.delete(LogQueue::Append, 1);
+                        return;
+                    }
                 }
             } else {
                 assert!(origin.1.seq <= seq);
                 origin.1.seq = seq;
-                self.global_stats.delete(LogQueue::Rewrite, 1);
             }
-        } else {
-            // The rewritten key/value pair has been compacted.
-            self.global_stats.delete(LogQueue::Rewrite, 1);
         }
+        self.global_stats.delete(LogQueue::Rewrite, 1);
     }
 
     pub fn get_entry(&self, index: u64) -> Option<EntryIndex> {
