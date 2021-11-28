@@ -61,6 +61,7 @@ where
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_PURGE_DURATION_HISTOGRAM);
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
@@ -179,6 +180,7 @@ where
         rewrite_watermark: FileSeq,
         compact_watermark: FileSeq,
     ) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::with_capacity(16);
 
@@ -207,6 +209,7 @@ where
 
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<()> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let memtables = self
@@ -219,6 +222,7 @@ where
     }
 
     fn rewrite_append_queue_tombstones(&self) -> Result<()> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_TOMBSTONES_DURATION_HISTOGRAM);
         let mut log_batch = self.memtables.take_cleaned_region_logs();
         self.rewrite_impl(
             &mut log_batch,
@@ -229,6 +233,7 @@ where
 
     // Exclusive.
     fn purge_to(&self, append_seq: FileSeq, rewrite_seq: FileSeq) -> Result<()> {
+        let _t = StopWatch::new(&ENGINE_PURGE_FILES_DURATION_HISTOGRAM);
         let (min_file_1, min_file_2) =
             self.memtables
                 .fold((append_seq, rewrite_seq), |(min1, min2), t| {
@@ -290,6 +295,15 @@ where
                 total_size += entry.len();
                 entries.push(entry);
             }
+            if rewrite.is_none() {
+                BACKGROUND_REWRITE_READ_ENTRY_COUNT
+                    .rewrite
+                    .inc_by(entries.len() as u64);
+            } else {
+                BACKGROUND_REWRITE_READ_ENTRY_COUNT
+                    .append
+                    .inc_by(entries.len() as u64);
+            }
             log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
@@ -347,10 +361,12 @@ where
             BACKGROUND_REWRITE_BYTES
                 .rewrite
                 .inc_by(file_handle.len as u64);
+            BACKGROUND_REWRITE_WRITE_COUNT.rewrite.inc_by(1);
         } else {
             BACKGROUND_REWRITE_BYTES
                 .append
                 .inc_by(file_handle.len as u64);
+            BACKGROUND_REWRITE_WRITE_COUNT.append.inc_by(1);
         }
         Ok(())
     }
