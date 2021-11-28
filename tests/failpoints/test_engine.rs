@@ -124,10 +124,7 @@ fn test_pipe_log_listeners() {
     engine.purge_expired_files().unwrap();
     assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
 
-    // All things in a region will in one write batch.
-    assert_eq!(hook.0[&LogQueue::Rewrite].files(), 3);
-    assert_eq!(hook.0[&LogQueue::Rewrite].appends(), 2);
-    assert_eq!(hook.0[&LogQueue::Rewrite].applys(), 2);
+    let rewrite_files = hook.0[&LogQueue::Rewrite].files();
 
     // Append 5 logs for region 1, 5 logs for region 2.
     for i in 21..=30 {
@@ -150,7 +147,7 @@ fn test_pipe_log_listeners() {
 
     engine.purge_expired_files().unwrap();
     assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
-    assert_eq!(hook.0[&LogQueue::Rewrite].purged(), 3);
+    assert_eq!(hook.0[&LogQueue::Rewrite].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
     let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";

@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::cmp;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -222,7 +221,6 @@ where
     }
 
     fn rewrite_append_queue_tombstones(&self) -> Result<()> {
-        let _t = StopWatch::new(&ENGINE_REWRITE_TOMBSTONES_DURATION_HISTOGRAM);
         let mut log_batch = self.memtables.take_cleaned_region_logs();
         self.rewrite_impl(
             &mut log_batch,
@@ -233,7 +231,6 @@ where
 
     // Exclusive.
     fn purge_to(&self, append_seq: FileSeq, rewrite_seq: FileSeq) -> Result<()> {
-        let _t = StopWatch::new(&ENGINE_PURGE_FILES_DURATION_HISTOGRAM);
         let (min_file_1, min_file_2) =
             self.memtables
                 .fold((append_seq, rewrite_seq), |(min1, min2), t| {
@@ -276,7 +273,7 @@ where
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
+            let mut entries = vec![Vec::with_capacity(expect_rewrites_per_memtable)];
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.read();
@@ -293,26 +290,25 @@ where
             for i in &entry_indexes {
                 let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), i)?;
                 total_size += entry.len();
-                entries.push(entry);
+                entries.last_mut().unwrap().push(entry);
+                if total_size > MAX_REWRITE_BATCH_BYTES {
+                    entries.push(Vec::with_capacity(expect_rewrites_per_memtable));
+                    total_size = 0;
+                }
             }
-            if rewrite.is_none() {
-                BACKGROUND_REWRITE_READ_ENTRY_COUNT
-                    .rewrite
-                    .inc_by(entries.len() as u64);
-            } else {
-                BACKGROUND_REWRITE_READ_ENTRY_COUNT
-                    .append
-                    .inc_by(entries.len() as u64);
-            }
-            log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }
-
-            let target_file_size = self.cfg.target_file_size.0 as usize;
-            if total_size as usize > cmp::min(MAX_REWRITE_BATCH_BYTES, target_file_size) {
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                total_size = 0;
+            for entries in entries.drain(..) {
+                let mut part = entry_indexes.split_off(entries.len());
+                std::mem::swap(&mut part, &mut entry_indexes);
+                log_batch.add_raw_entries(region_id, part, entries)?;
+                if !entry_indexes.is_empty() {
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                } else if total_size > MAX_REWRITE_BATCH_BYTES {
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                    total_size = 0;
+                }
             }
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
@@ -360,13 +356,11 @@ where
         if rewrite_watermark.is_none() {
             BACKGROUND_REWRITE_BYTES
                 .rewrite
-                .inc_by(file_handle.len as u64);
-            BACKGROUND_REWRITE_WRITE_COUNT.rewrite.inc_by(1);
+                .observe(file_handle.len as f64);
         } else {
             BACKGROUND_REWRITE_BYTES
                 .append
-                .inc_by(file_handle.len as u64);
-            BACKGROUND_REWRITE_WRITE_COUNT.append.inc_by(1);
+                .observe(file_handle.len as f64);
         }
         Ok(())
     }
