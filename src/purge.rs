@@ -22,7 +22,7 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 // Only rewrite region with oldest 70% logs.
 const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
-const MAX_REWRITE_ENTRIES_PER_REGION: usize = 64;
+const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 1024 * 1024;
 
 pub struct PurgeManager<P>
@@ -184,7 +184,9 @@ where
 
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_seq(LogQueue::Append) {
-                let sparse = t.entries_count() < MAX_REWRITE_ENTRIES_PER_REGION;
+                let sparse = t
+                    .entries_count_before(FileId::new(LogQueue::Append, rewrite_watermark))
+                    < MAX_REWRITE_ENTRIES_PER_REGION;
                 if f < compact_watermark && !sparse {
                     should_compact.push(t.region_id());
                 } else if f < rewrite_watermark {

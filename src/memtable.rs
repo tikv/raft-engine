@@ -476,8 +476,15 @@ impl MemTable {
         }
     }
 
-    pub fn entries_count(&self) -> usize {
-        self.entry_indexes.len()
+    pub fn entries_count_before(&self, mut gate: FileId) -> usize {
+        gate.seq += 1;
+        let idx = self
+            .entry_indexes
+            .binary_search_by_key(&gate, |ei| ei.entries.unwrap().id);
+        match idx {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        }
     }
 
     pub fn region_id(&self) -> u64 {
