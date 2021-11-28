@@ -1,11 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::cmp;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use log::info;
+use log::{error, info};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -61,9 +60,11 @@ where
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_PURGE_DURATION_HISTOGRAM);
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
+            error!("Failed to purge expired files: locked");
             return Ok(should_compact);
         }
 
@@ -80,13 +81,14 @@ where
             self.rewrite_rewrite_queue()?;
         }
 
-        let append_queue_barrier = self.listeners.iter().fold(
-            self.pipe_log.file_span(LogQueue::Append).1,
-            |barrier, l| {
-                l.first_file_not_ready_for_purge(LogQueue::Append)
-                    .map_or(barrier, |f| std::cmp::min(f, barrier))
-            },
-        );
+        let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
+        let append_queue_barrier = self.listeners.iter().fold(latest_append, |barrier, l| {
+            l.first_file_not_ready_for_purge(LogQueue::Append)
+                .map_or(barrier, |f| std::cmp::min(f, barrier))
+        });
+        if append_queue_barrier == first_append && first_append < latest_append {
+            error!("Failed to purge expired files: blocked by barrier");
+        }
 
         // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
         self.rewrite_append_queue_tombstones()?;
@@ -177,12 +179,15 @@ where
         rewrite_watermark: FileSeq,
         compact_watermark: FileSeq,
     ) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
-        let mut should_compact = Vec::new();
+        let mut should_compact = Vec::with_capacity(16);
 
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_seq(LogQueue::Append) {
-                let sparse = t.entries_count() < MAX_REWRITE_ENTRIES_PER_REGION;
+                let sparse = t
+                    .entries_count_before(FileId::new(LogQueue::Append, rewrite_watermark))
+                    < MAX_REWRITE_ENTRIES_PER_REGION;
                 if f < compact_watermark && !sparse {
                     should_compact.push(t.region_id());
                 } else if f < rewrite_watermark {
@@ -203,6 +208,7 @@ where
 
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<()> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let memtables = self
@@ -267,7 +273,7 @@ where
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
+            let mut entries = vec![Vec::with_capacity(expect_rewrites_per_memtable)];
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.read();
@@ -284,17 +290,25 @@ where
             for i in &entry_indexes {
                 let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), i)?;
                 total_size += entry.len();
-                entries.push(entry);
+                entries.last_mut().unwrap().push(entry);
+                if total_size > MAX_REWRITE_BATCH_BYTES {
+                    entries.push(Vec::with_capacity(expect_rewrites_per_memtable));
+                    total_size = 0;
+                }
             }
-            log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }
-
-            let target_file_size = self.cfg.target_file_size.0 as usize;
-            if total_size as usize > cmp::min(MAX_REWRITE_BATCH_BYTES, target_file_size) {
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                total_size = 0;
+            for entries in entries.drain(..) {
+                let mut part = entry_indexes.split_off(entries.len());
+                std::mem::swap(&mut part, &mut entry_indexes);
+                log_batch.add_raw_entries(region_id, part, entries)?;
+                if !entry_indexes.is_empty() {
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                } else if total_size > MAX_REWRITE_BATCH_BYTES {
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                    total_size = 0;
+                }
             }
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
@@ -342,11 +356,11 @@ where
         if rewrite_watermark.is_none() {
             BACKGROUND_REWRITE_BYTES
                 .rewrite
-                .inc_by(file_handle.len as u64);
+                .observe(file_handle.len as f64);
         } else {
             BACKGROUND_REWRITE_BYTES
                 .append
-                .inc_by(file_handle.len as u64);
+                .observe(file_handle.len as f64);
         }
         Ok(())
     }

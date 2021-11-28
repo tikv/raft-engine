@@ -210,8 +210,6 @@ where
     /// Purges expired logs files and returns a set of Raft group ids that need
     /// to be compacted.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let _t = StopWatch::new(&ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM);
-
         // TODO: Move this to a dedicated thread.
         self.stats.flush_metrics();
 
@@ -259,7 +257,6 @@ where
     /// Deletes log entries before `index` in the specified Raft group. Returns
     /// the number of deleted entries.
     pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
-        let _t = StopWatch::new(&ENGINE_COMPACT_DURATION_HISTOGRAM);
         let first_index = match self.first_index(region_id) {
             Some(index) => index,
             None => return 0,
@@ -842,11 +839,7 @@ mod tests {
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
-        let old_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
-        // No entries are rewritten.
-        assert_eq!(new_min_file_seq, old_min_file_seq);
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);

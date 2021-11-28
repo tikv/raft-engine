@@ -82,7 +82,7 @@ lazy_static! {
     pub static ref ENGINE_WRITE_SIZE_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_write_size",
         "Bucketed histogram of Raft Engine write size",
-        exponential_buckets(256.0, 1.8, 20).unwrap()
+        exponential_buckets(256.0, 1.8, 22).unwrap()
     )
     .unwrap();
     pub static ref LOG_ALLOCATE_DURATION_HISTOGRAM: Histogram = register_histogram!(
@@ -113,7 +113,7 @@ lazy_static! {
     pub static ref ENGINE_READ_ENTRY_COUNT_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_read_entry_count",
         "Bucketed histogram of Raft Engine read entry count",
-        exponential_buckets(1.0, 1.8, 20).unwrap()
+        exponential_buckets(1.0, 1.8, 22).unwrap()
     )
     .unwrap();
     pub static ref ENGINE_READ_MESSAGE_DURATION_HISTOGRAM: Histogram = register_histogram!(
@@ -123,22 +123,28 @@ lazy_static! {
     )
     .unwrap();
     // Misc.
-    pub static ref ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM: Histogram = register_histogram!(
-        "raft_engine_purge_expired_files_duration_seconds",
+    pub static ref ENGINE_PURGE_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_purge_duration_seconds",
         "Bucketed histogram of Raft Engine purge expired files duration",
-        exponential_buckets(0.0001, 1.8, 20).unwrap()
+        exponential_buckets(0.001, 1.8, 22).unwrap()
     )
     .unwrap();
-    pub static ref ENGINE_COMPACT_DURATION_HISTOGRAM: Histogram = register_histogram!(
-        "raft_engine_compact_duration_seconds",
-        "Bucketed histogram of Raft Engine compact duration",
-        exponential_buckets(0.00005, 1.8, 26).unwrap()
+    pub static ref ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_rewrite_append_duration_seconds",
+        "Bucketed histogram of Raft Engine rewrite append queue duration",
+        exponential_buckets(0.001, 1.8, 22).unwrap()
     )
     .unwrap();
-    pub static ref BACKGROUND_REWRITE_BYTES: LogQueueCounterVec = register_static_int_counter_vec!(
-        LogQueueCounterVec,
+    pub static ref ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_rewrite_rewrite_duration_seconds",
+        "Bucketed histogram of Raft Engine rewrite rewrite queue duration",
+        exponential_buckets(0.001, 1.8, 22).unwrap()
+    )
+    .unwrap();
+    pub static ref BACKGROUND_REWRITE_BYTES: LogQueueHistogramVec = register_static_histogram_vec!(
+        LogQueueHistogramVec,
         "raft_engine_background_rewrite_bytes",
-        "Total bytes written during background rewrite",
+        "Bucketed histogram of bytes written during background rewrite",
         &["type"]
     )
     .unwrap();
