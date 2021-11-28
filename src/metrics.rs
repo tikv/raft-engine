@@ -82,7 +82,7 @@ lazy_static! {
     pub static ref ENGINE_WRITE_SIZE_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_write_size",
         "Bucketed histogram of Raft Engine write size",
-        exponential_buckets(256.0, 1.8, 20).unwrap()
+        exponential_buckets(256.0, 1.8, 22).unwrap()
     )
     .unwrap();
     pub static ref LOG_ALLOCATE_DURATION_HISTOGRAM: Histogram = register_histogram!(
@@ -113,7 +113,7 @@ lazy_static! {
     pub static ref ENGINE_READ_ENTRY_COUNT_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_read_entry_count",
         "Bucketed histogram of Raft Engine read entry count",
-        exponential_buckets(1.0, 1.8, 20).unwrap()
+        exponential_buckets(1.0, 1.8, 22).unwrap()
     )
     .unwrap();
     pub static ref ENGINE_READ_MESSAGE_DURATION_HISTOGRAM: Histogram = register_histogram!(
@@ -126,7 +126,7 @@ lazy_static! {
     pub static ref ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_purge_expired_files_duration_seconds",
         "Bucketed histogram of Raft Engine purge expired files duration",
-        exponential_buckets(0.0001, 1.8, 20).unwrap()
+        exponential_buckets(0.001, 1.8, 22).unwrap()
     )
     .unwrap();
     pub static ref ENGINE_COMPACT_DURATION_HISTOGRAM: Histogram = register_histogram!(

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use log::info;
+use log::{error, info};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -64,6 +64,7 @@ where
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
+            error!("Failed to purge expired files: locked");
             return Ok(should_compact);
         }
 
@@ -80,13 +81,14 @@ where
             self.rewrite_rewrite_queue()?;
         }
 
-        let append_queue_barrier = self.listeners.iter().fold(
-            self.pipe_log.file_span(LogQueue::Append).1,
-            |barrier, l| {
-                l.first_file_not_ready_for_purge(LogQueue::Append)
-                    .map_or(barrier, |f| std::cmp::min(f, barrier))
-            },
-        );
+        let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
+        let append_queue_barrier = self.listeners.iter().fold(latest_append, |barrier, l| {
+            l.first_file_not_ready_for_purge(LogQueue::Append)
+                .map_or(barrier, |f| std::cmp::min(f, barrier))
+        });
+        if append_queue_barrier == first_append && first_append < latest_append {
+            error!("Failed to purge expired files: blocked by barrier");
+        }
 
         // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
         self.rewrite_append_queue_tombstones()?;
@@ -178,13 +180,14 @@ where
         compact_watermark: FileSeq,
     ) -> Result<Vec<u64>> {
         debug_assert!(compact_watermark <= rewrite_watermark);
-        let mut should_compact = Vec::new();
+        let mut should_compact = Vec::with_capacity(16);
 
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_seq(LogQueue::Append) {
                 let sparse = t.entries_count() < MAX_REWRITE_ENTRIES_PER_REGION;
                 if f < compact_watermark && !sparse {
                     should_compact.push(t.region_id());
+                    return true;
                 } else if f < rewrite_watermark {
                     return sparse;
                 }
