@@ -843,7 +843,6 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         let will_force_compact = engine.purge_expired_files().unwrap();
-        engine.pipe_log.file_span(LogQueue::Append).0;
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
