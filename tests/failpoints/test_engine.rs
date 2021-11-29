@@ -94,7 +94,7 @@ fn test_pipe_log_listeners() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(128),
-        purge_append_threshold: ReadableSize::kb(512),
+        purge_threshold: ReadableSize::kb(512),
         batch_compression_threshold: ReadableSize::kb(0),
         ..Default::default()
     };
@@ -313,7 +313,7 @@ fn test_incomplete_purge() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize(1),
-        purge_append_threshold: ReadableSize(1),
+        purge_threshold: ReadableSize(1),
         ..Default::default()
     };
     let rid = 1;

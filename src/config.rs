@@ -58,11 +58,11 @@ pub struct Config {
     /// Purge append log queue if its size exceeds this value.
     ///
     /// Default: "10GB"
-    pub purge_append_threshold: ReadableSize,
+    pub purge_threshold: ReadableSize,
     /// Purge rewrite log queue if its size exceeds this value.
     ///
-    /// Default: "1GB"
-    pub purge_rewrite_threshold: ReadableSize,
+    /// Default: MAX(`purge_threshold` / 10, `target_file_size`)
+    pub purge_rewrite_threshold: Option<ReadableSize>,
     /// Purge rewrite log queue if its garbage ratio exceeds this value.
     ///
     /// Default: "0.6"
@@ -79,8 +79,8 @@ impl Default for Config {
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
             target_file_size: ReadableSize::mb(128),
-            purge_append_threshold: ReadableSize::gb(10),
-            purge_rewrite_threshold: ReadableSize::gb(1),
+            purge_threshold: ReadableSize::gb(10),
+            purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
         }
     }
@@ -88,8 +88,14 @@ impl Default for Config {
 
 impl Config {
     pub fn sanitize(&mut self) -> Result<()> {
-        if self.purge_append_threshold.0 < self.target_file_size.0 {
+        if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
+        }
+        if self.purge_rewrite_threshold.is_none() {
+            self.purge_rewrite_threshold = Some(ReadableSize(std::cmp::max(
+                self.purge_threshold.0 / 10,
+                self.target_file_size.0,
+            )));
         }
         if self.bytes_per_sync.0 == 0 {
             self.bytes_per_sync = ReadableSize(u64::MAX);
@@ -139,7 +145,7 @@ mod tests {
         assert_eq!(load.recovery_mode, RecoveryMode::AbsoluteConsistency);
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
-        assert_eq!(load.purge_append_threshold, ReadableSize::mb(3));
+        assert_eq!(load.purge_threshold, ReadableSize::mb(3));
     }
 
     #[test]
@@ -155,6 +161,7 @@ mod tests {
             recovery-read-block-size = "1KB"
             recovery-threads = 0
             bytes-per-sync = "0KB"
+            target-file-size = "5000MB"
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
         let mut soft_sanitized = soft_load;
@@ -162,6 +169,10 @@ mod tests {
         assert!(soft_sanitized.recovery_read_block_size.0 >= MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         assert!(soft_sanitized.recovery_threads >= MIN_RECOVERY_THREADS);
         assert_eq!(soft_sanitized.bytes_per_sync.0, u64::MAX);
+        assert_eq!(
+            soft_sanitized.purge_rewrite_threshold.unwrap(),
+            soft_sanitized.target_file_size
+        );
     }
 
     #[test]

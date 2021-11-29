@@ -528,11 +528,11 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("purge_append_threshold")
-                .long("purge-append-threshold")
+            Arg::with_name("purge_threshold")
+                .long("purge-threshold")
                 .value_name("size")
                 .default_value("10GB")
-                .help("Purge if append log files are greater than this threshold")
+                .help("Purge if main log files are greater than this threshold")
                 .takes_value(true),
         )
         .arg(
@@ -567,11 +567,11 @@ fn main() {
     if let Some(s) = matches.value_of("target_file_size") {
         config.target_file_size = ReadableSize::from_str(s).unwrap();
     }
-    if let Some(s) = matches.value_of("purge_append_threshold") {
-        config.purge_append_threshold = ReadableSize::from_str(s).unwrap();
+    if let Some(s) = matches.value_of("purge_threshold") {
+        config.purge_threshold = ReadableSize::from_str(s).unwrap();
     }
     if let Some(s) = matches.value_of("purge_rewrite_threshold") {
-        config.purge_rewrite_threshold = ReadableSize::from_str(s).unwrap();
+        config.purge_rewrite_threshold = Some(ReadableSize::from_str(s).unwrap());
     }
     if let Some(s) = matches.value_of("purge_rewrite_garbage_ratio") {
         config.purge_rewrite_garbage_ratio = s.parse::<f64>().unwrap();
