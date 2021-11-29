@@ -147,13 +147,13 @@ where
         }
 
         let total_size = self.pipe_log.total_size(queue);
-        let purge_threshold = self.cfg.purge_threshold.0 as usize;
         match queue {
-            LogQueue::Append => total_size > purge_threshold,
+            LogQueue::Append => total_size > self.cfg.purge_append_threshold.0 as usize,
             LogQueue::Rewrite => {
                 let compacted_rewrites_ratio = self.global_stats.deleted_rewrite_entries() as f64
                     / self.global_stats.rewrite_entries() as f64;
-                total_size * 10 > purge_threshold && compacted_rewrites_ratio > 0.5
+                total_size > self.cfg.purge_rewrite_threshold.0 as usize
+                    && compacted_rewrites_ratio > self.cfg.purge_rewrite_garbage_ratio
             }
         }
     }

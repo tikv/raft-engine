@@ -798,7 +798,7 @@ mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
-            purge_threshold: ReadableSize::kb(150),
+            purge_append_threshold: ReadableSize::kb(150),
             ..Default::default()
         };
 
@@ -815,14 +815,14 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
 
-        // Append more logs to make total size greater than `purge_threshold`.
+        // Append more logs to make total size greater than `purge_append_threshold`.
         for index in 100..250 {
             engine.append(1, index, index + 1, Some(&data));
         }
 
         // GC first 101 log entries.
         assert_eq!(engine.compact_to(1, 101), 1);
-        // Needs to purge because the total size is greater than `purge_threshold`.
+        // Needs to purge because the total size is greater than `purge_append_threshold`.
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
@@ -838,7 +838,7 @@ mod tests {
         assert!(engine.get_entry::<Entry>(1, 101).unwrap().is_some());
 
         assert_eq!(engine.compact_to(1, 102), 1);
-        // Needs to purge because the total size is greater than `purge_threshold`.
+        // Needs to purge because the total size is greater than `purge_append_threshold`.
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
@@ -857,7 +857,7 @@ mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
-            purge_threshold: ReadableSize::kb(80),
+            purge_append_threshold: ReadableSize::kb(80),
             ..Default::default()
         };
         let engine = RaftLogEngine::open(cfg).unwrap();

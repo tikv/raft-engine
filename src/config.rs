@@ -55,10 +55,18 @@ pub struct Config {
     /// Default: "128MB"
     pub target_file_size: ReadableSize,
 
-    /// Purge main log queue if its file size exceeds this value.
+    /// Purge append log queue if its size exceeds this value.
     ///
     /// Default: "10GB"
-    pub purge_threshold: ReadableSize,
+    pub purge_append_threshold: ReadableSize,
+    /// Purge rewrite log queue if its size exceeds this value.
+    ///
+    /// Default: "1GB"
+    pub purge_rewrite_threshold: ReadableSize,
+    /// Purge rewrite log queue if its garbage ratio exceeds this value.
+    ///
+    /// Default: "0.6"
+    pub purge_rewrite_garbage_ratio: f64,
 }
 
 impl Default for Config {
@@ -71,14 +79,16 @@ impl Default for Config {
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
             target_file_size: ReadableSize::mb(128),
-            purge_threshold: ReadableSize::gb(10),
+            purge_append_threshold: ReadableSize::gb(10),
+            purge_rewrite_threshold: ReadableSize::gb(1),
+            purge_rewrite_garbage_ratio: 0.6,
         }
     }
 }
 
 impl Config {
     pub fn sanitize(&mut self) -> Result<()> {
-        if self.purge_threshold.0 < self.target_file_size.0 {
+        if self.purge_append_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
         }
         if self.bytes_per_sync.0 == 0 {
@@ -129,7 +139,7 @@ mod tests {
         assert_eq!(load.recovery_mode, RecoveryMode::AbsoluteConsistency);
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
-        assert_eq!(load.purge_threshold, ReadableSize::mb(3));
+        assert_eq!(load.purge_append_threshold, ReadableSize::mb(3));
     }
 
     #[test]

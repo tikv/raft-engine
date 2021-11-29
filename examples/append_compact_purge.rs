@@ -24,7 +24,7 @@ fn main() {
 
     let config = Config {
         dir: "append-compact-purge-data".to_owned(),
-        purge_threshold: ReadableSize::gb(2),
+        purge_append_threshold: ReadableSize::gb(2),
         batch_compression_threshold: ReadableSize::kb(0),
         ..Default::default()
     };
