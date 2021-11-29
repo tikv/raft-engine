@@ -489,6 +489,7 @@ mod tests {
                 .unwrap();
             let cfg = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
                 ..Default::default()
             };
 
@@ -543,6 +544,7 @@ mod tests {
                         .unwrap();
                     let cfg = Config {
                         dir: dir.path().to_str().unwrap().to_owned(),
+                        target_file_size: ReadableSize(1),
                         ..Default::default()
                     };
                     let engine = RaftLogEngine::open(cfg.clone()).unwrap();
@@ -688,6 +690,7 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
             ..Default::default()
         };
         let engine = RaftLogEngine::open(cfg).unwrap();
@@ -824,9 +827,9 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
 
-        let old_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
+        let old_min_file_seq = engine.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
+        let new_min_file_seq = engine.file_span(LogQueue::Append).0;
         // Some entries are rewritten.
         assert!(new_min_file_seq > old_min_file_seq);
         // No regions need to be force compacted because the threshold is not reached.
@@ -872,7 +875,7 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1);
+        assert!(engine.file_span(LogQueue::Append).0 > 1);
 
         let rewrite_file_size = engine.pipe_log.total_size(LogQueue::Rewrite);
         assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
@@ -1092,6 +1095,39 @@ mod tests {
         let engine = engine.reopen();
         for rid in 1..21 {
             engine.scan(rid, 1, 21, |_, _, d| {
+                assert_eq!(d, &data);
+            });
+        }
+    }
+
+    #[test]
+    fn test_large_rewrite_batch() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_large_rewrite_batch")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 2 * 1024 * 1024];
+
+        for rid in 1..=3 {
+            engine.append(rid, 1, 11, Some(&data));
+        }
+
+        let old_active_file = engine.file_span(LogQueue::Append).1;
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+        let old_active_file = engine.file_span(LogQueue::Rewrite).1;
+        engine.purge_manager.must_rewrite_rewrite_queue();
+        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+
+        let engine = engine.reopen();
+        for rid in 1..=3 {
+            engine.scan(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &data);
             });
         }
