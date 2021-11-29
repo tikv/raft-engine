@@ -89,7 +89,6 @@ impl MemTable {
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
         if let Some((rhs_first, _)) = rhs.span() {
-            // TODO: test case for rewrite holes.
             self.prepare_append(
                 rhs_first,
                 rhs.rewrite_count > 0, /*allow_hole*/
@@ -1600,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memtables_merge_neighbor() {
+    fn test_memtables_merge_append_neighbor() {
         let first_rid = 17;
         let mut last_rid = first_rid;
 

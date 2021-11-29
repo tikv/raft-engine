@@ -273,7 +273,7 @@ where
         let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut entries = vec![Vec::with_capacity(expect_rewrites_per_memtable)];
+            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.read();
@@ -287,28 +287,30 @@ where
                 m.region_id()
             };
 
-            for i in &entry_indexes {
-                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), i)?;
+            let mut cursor = 0;
+            while cursor < entry_indexes.len() {
+                let entry =
+                    read_entry_bytes_from_file(self.pipe_log.as_ref(), &entry_indexes[cursor])?;
                 total_size += entry.len();
-                entries.last_mut().unwrap().push(entry);
+                entries.push(entry);
                 if total_size > MAX_REWRITE_BATCH_BYTES {
-                    entries.push(Vec::with_capacity(expect_rewrites_per_memtable));
+                    let mut take_entries = Vec::with_capacity(expect_rewrites_per_memtable);
+                    std::mem::swap(&mut take_entries, &mut entries);
+                    let mut take_entry_indexes = entry_indexes.split_off(cursor + 1);
+                    std::mem::swap(&mut take_entry_indexes, &mut entry_indexes);
+                    log_batch.add_raw_entries(region_id, take_entry_indexes, take_entries)?;
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
                     total_size = 0;
+                    cursor = 0;
+                } else {
+                    cursor += 1;
                 }
+            }
+            if !entries.is_empty() {
+                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
             }
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
-            }
-            for entries in entries.drain(..) {
-                let mut part = entry_indexes.split_off(entries.len());
-                std::mem::swap(&mut part, &mut entry_indexes);
-                log_batch.add_raw_entries(region_id, part, entries)?;
-                if !entry_indexes.is_empty() {
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                } else if total_size > MAX_REWRITE_BATCH_BYTES {
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                    total_size = 0;
-                }
             }
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
