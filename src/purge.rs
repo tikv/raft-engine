@@ -68,35 +68,34 @@ where
             return Ok(should_compact);
         }
 
+        if self.needs_rewrite_log_files(LogQueue::Rewrite) {
+            self.rewrite_rewrite_queue()?;
+            self.purge_to(
+                LogQueue::Rewrite,
+                self.pipe_log.file_span(LogQueue::Rewrite).1,
+            )?;
+        }
+
         if self.needs_rewrite_log_files(LogQueue::Append) {
             if let (Some(rewrite_watermark), Some(compact_watermark)) =
                 self.append_queue_watermarks()
             {
                 should_compact =
                     self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
+                let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
+                let append_queue_barrier =
+                    self.listeners.iter().fold(latest_append, |barrier, l| {
+                        l.first_file_not_ready_for_purge(LogQueue::Append)
+                            .map_or(barrier, |f| std::cmp::min(f, barrier))
+                    });
+                if append_queue_barrier == first_append && first_append < latest_append {
+                    error!("Failed to purge expired files: blocked by barrier");
+                }
+                // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
+                self.rewrite_append_queue_tombstones()?;
+                self.purge_to(LogQueue::Append, append_queue_barrier)?;
             }
         }
-
-        if self.needs_rewrite_log_files(LogQueue::Rewrite) {
-            self.rewrite_rewrite_queue()?;
-        }
-
-        let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
-        let append_queue_barrier = self.listeners.iter().fold(latest_append, |barrier, l| {
-            l.first_file_not_ready_for_purge(LogQueue::Append)
-                .map_or(barrier, |f| std::cmp::min(f, barrier))
-        });
-        if append_queue_barrier == first_append && first_append < latest_append {
-            error!("Failed to purge expired files: blocked by barrier");
-        }
-
-        // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
-        self.rewrite_append_queue_tombstones()?;
-
-        self.purge_to(
-            append_queue_barrier,
-            self.pipe_log.file_span(LogQueue::Rewrite).1,
-        )?;
         Ok(should_compact)
     }
 
@@ -123,16 +122,22 @@ where
         if exit_after_step == Some(2) {
             return;
         }
-        self.purge_to(self.pipe_log.file_span(LogQueue::Append).1, 1)
-            .unwrap();
+        self.purge_to(
+            LogQueue::Append,
+            self.pipe_log.file_span(LogQueue::Append).1,
+        )
+        .unwrap();
     }
 
     #[cfg(test)]
     pub fn must_rewrite_rewrite_queue(&self) {
         let _lk = self.purge_mutex.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
-        self.purge_to(1, self.pipe_log.file_span(LogQueue::Rewrite).1)
-            .unwrap();
+        self.purge_to(
+            LogQueue::Rewrite,
+            self.pipe_log.file_span(LogQueue::Rewrite).1,
+        )
+        .unwrap();
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
@@ -230,33 +235,21 @@ where
     }
 
     // Exclusive.
-    fn purge_to(&self, append_seq: FileSeq, rewrite_seq: FileSeq) -> Result<()> {
-        let (min_file_1, min_file_2) =
-            self.memtables
-                .fold((append_seq, rewrite_seq), |(min1, min2), t| {
-                    (
-                        t.min_file_seq(LogQueue::Append)
-                            .map_or(min1, |m| std::cmp::min(min1, m)),
-                        t.min_file_seq(LogQueue::Rewrite)
-                            .map_or(min2, |m| std::cmp::min(min2, m)),
-                    )
-                });
+    fn purge_to(&self, queue: LogQueue, seq: FileSeq) -> Result<()> {
+        let min_seq = self.memtables.fold(seq, |min, t| {
+            t.min_file_seq(queue).map_or(min, |m| std::cmp::min(min, m))
+        });
 
-        for (purge_to, queue) in &[
-            (min_file_1, LogQueue::Append),
-            (min_file_2, LogQueue::Rewrite),
-        ] {
-            let purged = self.pipe_log.purge_to(FileId {
-                queue: *queue,
-                seq: *purge_to,
-            })?;
-            if purged > 0 {
-                info!("purged {} expired log files for queue {:?}", purged, *queue);
-            }
+        let purged = self.pipe_log.purge_to(FileId {
+            queue,
+            seq: min_seq,
+        })?;
+        if purged > 0 {
+            info!("purged {} expired log files for queue {:?}", purged, queue);
             for listener in &self.listeners {
                 listener.post_purge(FileId {
-                    queue: *queue,
-                    seq: purge_to - 1,
+                    queue,
+                    seq: min_seq - 1,
                 });
             }
         }
