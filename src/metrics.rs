@@ -145,7 +145,8 @@ lazy_static! {
         LogQueueHistogramVec,
         "raft_engine_background_rewrite_bytes",
         "Bucketed histogram of bytes written during background rewrite",
-        &["type"]
+        &["type"],
+        exponential_buckets(256.0, 1.8, 22).unwrap()
     )
     .unwrap();
     pub static ref LOG_FILE_COUNT: LogQueueGaugeVec = register_static_int_gauge_vec!(

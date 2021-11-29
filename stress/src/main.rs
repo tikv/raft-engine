@@ -532,7 +532,23 @@ fn main() {
                 .long("purge-threshold")
                 .value_name("size")
                 .default_value("10GB")
-                .help("Purge if log files are greater than this threshold")
+                .help("Purge if main log files are greater than this threshold")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("purge_rewrite_threshold")
+                .long("purge-rewrite-threshold")
+                .value_name("size")
+                .default_value("1GB")
+                .help("Purge if rewrite log files are greater than this threshold")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("purge_rewrite_garbage_ratio")
+                .long("purge-rewrite-garbage-ratio")
+                .value_name("ratio")
+                .default_value("0.6")
+                .help("Purge if rewrite log files garbage ratio is greater than this threshold")
                 .takes_value(true),
         )
         .arg(
@@ -553,6 +569,12 @@ fn main() {
     }
     if let Some(s) = matches.value_of("purge_threshold") {
         config.purge_threshold = ReadableSize::from_str(s).unwrap();
+    }
+    if let Some(s) = matches.value_of("purge_rewrite_threshold") {
+        config.purge_rewrite_threshold = Some(ReadableSize::from_str(s).unwrap());
+    }
+    if let Some(s) = matches.value_of("purge_rewrite_garbage_ratio") {
+        config.purge_rewrite_garbage_ratio = s.parse::<f64>().unwrap();
     }
     if let Some(s) = matches.value_of("batch_compression_threshold") {
         config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();

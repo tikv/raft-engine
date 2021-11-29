@@ -301,13 +301,17 @@ impl MemTable {
     // Returns the truncated amount.
     // Assumes index <= last.
     fn unsafe_truncate_back(&mut self, first: u64, index: u64, last: u64) -> usize {
+        debug_assert!(index <= last);
+        let len = self.entry_indexes.len();
+        debug_assert_eq!(len as u64, last - first + 1);
         self.entry_indexes
             .truncate(index.saturating_sub(first) as usize);
-        let truncated = (last - index + 1) as usize;
+        let new_len = self.entry_indexes.len();
+        let truncated = len - new_len;
 
-        if self.rewrite_count > self.entry_indexes.len() {
-            let truncated_rewrite = self.rewrite_count - self.entry_indexes.len();
-            self.rewrite_count = self.entry_indexes.len();
+        if self.rewrite_count > new_len {
+            let truncated_rewrite = self.rewrite_count - new_len;
+            self.rewrite_count = new_len;
             self.global_stats
                 .delete(LogQueue::Rewrite, truncated_rewrite);
             self.global_stats
