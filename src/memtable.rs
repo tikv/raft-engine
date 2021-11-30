@@ -89,7 +89,11 @@ impl MemTable {
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
         if let Some((rhs_first, _)) = rhs.span() {
-            self.prepare_append(rhs_first, false, true);
+            self.prepare_append(
+                rhs_first,
+                rhs.rewrite_count > 0, /*allow_hole*/
+                true,                  /*allow_overwrite*/
+            );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
                 rhs.entry_indexes.len(),
@@ -151,26 +155,22 @@ impl MemTable {
         self.global_stats.add(LogQueue::Rewrite, 1);
         if let Some(origin) = self.kvs.get_mut(&key) {
             if origin.1.queue == LogQueue::Append {
-                // Always provide a gate to rewrite a normal entry.
-                if origin.1.seq <= gate.unwrap() {
-                    origin.1 = FileId {
-                        queue: LogQueue::Rewrite,
-                        seq,
-                    };
-                    self.global_stats.delete(LogQueue::Append, 1);
-                } else {
-                    // The rewritten key/value pair has been overwritten.
-                    self.global_stats.delete(LogQueue::Rewrite, 1);
+                if let Some(gate) = gate {
+                    if origin.1.seq <= gate {
+                        origin.1 = FileId {
+                            queue: LogQueue::Rewrite,
+                            seq,
+                        };
+                        self.global_stats.delete(LogQueue::Append, 1);
+                        return;
+                    }
                 }
             } else {
                 assert!(origin.1.seq <= seq);
                 origin.1.seq = seq;
-                self.global_stats.delete(LogQueue::Rewrite, 1);
             }
-        } else {
-            // The rewritten key/value pair has been compacted.
-            self.global_stats.delete(LogQueue::Rewrite, 1);
         }
+        self.global_stats.delete(LogQueue::Rewrite, 1);
     }
 
     pub fn get_entry(&self, index: u64) -> Option<EntryIndex> {
@@ -301,13 +301,17 @@ impl MemTable {
     // Returns the truncated amount.
     // Assumes index <= last.
     fn unsafe_truncate_back(&mut self, first: u64, index: u64, last: u64) -> usize {
+        debug_assert!(index <= last);
+        let len = self.entry_indexes.len();
+        debug_assert_eq!(len as u64, last - first + 1);
         self.entry_indexes
             .truncate(index.saturating_sub(first) as usize);
-        let truncated = (last - index + 1) as usize;
+        let new_len = self.entry_indexes.len();
+        let truncated = len - new_len;
 
-        if self.rewrite_count > self.entry_indexes.len() {
-            let truncated_rewrite = self.rewrite_count - self.entry_indexes.len();
-            self.rewrite_count = self.entry_indexes.len();
+        if self.rewrite_count > new_len {
+            let truncated_rewrite = self.rewrite_count - new_len;
+            self.rewrite_count = new_len;
             self.global_stats
                 .delete(LogQueue::Rewrite, truncated_rewrite);
             self.global_stats
@@ -475,8 +479,15 @@ impl MemTable {
         }
     }
 
-    pub fn entries_count(&self) -> usize {
-        self.entry_indexes.len()
+    pub fn entries_count_before(&self, mut gate: FileId) -> usize {
+        gate.seq += 1;
+        let idx = self
+            .entry_indexes
+            .binary_search_by_key(&gate, |ei| ei.entries.unwrap().id);
+        match idx {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        }
     }
 
     pub fn region_id(&self) -> u64 {
@@ -1105,7 +1116,7 @@ mod tests {
         memtable.put(k3.to_vec(), v3.to_vec(), FileId::new(LogQueue::Append, 3));
         memtable.consistency_check();
 
-        // Rewrite keys:
+        // Rewrite k1.
         memtable.rewrite_key(k1.to_vec(), Some(1), 50);
         let mut kvs = Vec::new();
         memtable.fetch_kvs_before(1, &mut kvs);
@@ -1113,7 +1124,7 @@ mod tests {
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert_eq!(kvs.len(), 1);
         assert_eq!(kvs.pop().unwrap(), (k1.to_vec(), v1.to_vec()));
-        // 1. Key is deleted
+        // Rewrite deleted k1.
         memtable.delete(k1.as_ref());
         assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 1);
         memtable.rewrite_key(k1.to_vec(), Some(1), 50);
@@ -1121,13 +1132,15 @@ mod tests {
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert!(kvs.is_empty());
         assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 2);
-        // 2. Key is newer
+        // Rewrite newer append k2/k3.
         memtable.rewrite_key(k2.to_vec(), Some(1), 50);
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert!(kvs.is_empty());
-        assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 3);
-        // 3. Multiple rewrites
-        assert!(catch_unwind_silent(|| memtable.rewrite_key(k3.to_vec(), None, 50)).is_err());
+        memtable.rewrite_key(k3.to_vec(), None, 50); // Rewrite encounters newer append.
+        memtable.fetch_rewritten_kvs(&mut kvs);
+        assert!(kvs.is_empty());
+        assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 4);
+        // Rewrite k3 multiple times.
         memtable.rewrite_key(k3.to_vec(), Some(10), 50);
         memtable.rewrite_key(k3.to_vec(), None, 51);
         memtable.rewrite_key(k3.to_vec(), Some(11), 52);
@@ -1590,8 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn test_memtables_merge_neighbor() {
-        let file_id = FileId::new(LogQueue::Append, 10);
+    fn test_memtables_merge_append_neighbor() {
         let first_rid = 17;
         let mut last_rid = first_rid;
 
@@ -1600,6 +1612,9 @@ mod tests {
             LogItemBatch::with_capacity(0),
             LogItemBatch::with_capacity(0),
         ];
+        let files: Vec<_> = (0..batches.len())
+            .map(|i| FileId::new(LogQueue::Append, 10 + i as u64))
+            .collect();
 
         // put (key1, v1) => del (key1) => put (key1, v2)
         batches[0].put(last_rid, b"key1".to_vec(), b"val1".to_vec());
@@ -1613,9 +1628,9 @@ mod tests {
 
         // entries [1, 10) => compact 5 => entries [11, 20)
         last_rid += 1;
-        batches[0].add_entry_indexes(last_rid, generate_entry_indexes(1, 11, file_id));
+        batches[0].add_entry_indexes(last_rid, generate_entry_indexes(1, 11, files[0]));
         batches[1].add_command(last_rid, Command::Compact { index: 5 });
-        batches[2].add_entry_indexes(last_rid, generate_entry_indexes(11, 21, file_id));
+        batches[2].add_entry_indexes(last_rid, generate_entry_indexes(11, 21, files[2]));
 
         for b in batches.iter_mut() {
             b.finish_write(FileBlockHandle::dummy(LogQueue::Append));
@@ -1623,7 +1638,7 @@ mod tests {
 
         // reverse merge
         let mut ctxs = VecDeque::default();
-        for batch in batches.clone() {
+        for (batch, file_id) in batches.clone().into_iter().zip(files) {
             let mut ctx = MemTableRecoverContext::default();
             ctx.replay(batch, file_id).unwrap();
             ctxs.push_back(ctx);

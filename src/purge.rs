@@ -1,11 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::cmp;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use log::info;
+use log::{error, info};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -23,7 +22,7 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
-const MAX_REWRITE_BATCH_BYTES: usize = 1024 * 1024;
+const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
 
 pub struct PurgeManager<P>
 where
@@ -61,10 +60,20 @@ where
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_PURGE_DURATION_HISTOGRAM);
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
+            error!("Failed to purge expired files: locked");
             return Ok(should_compact);
+        }
+
+        if self.needs_rewrite_log_files(LogQueue::Rewrite) {
+            self.rewrite_rewrite_queue()?;
+            self.purge_to(
+                LogQueue::Rewrite,
+                self.pipe_log.file_span(LogQueue::Rewrite).1,
+            )?;
         }
 
         if self.needs_rewrite_log_files(LogQueue::Append) {
@@ -73,28 +82,20 @@ where
             {
                 should_compact =
                     self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
+                let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
+                let append_queue_barrier =
+                    self.listeners.iter().fold(latest_append, |barrier, l| {
+                        l.first_file_not_ready_for_purge(LogQueue::Append)
+                            .map_or(barrier, |f| std::cmp::min(f, barrier))
+                    });
+                if append_queue_barrier == first_append && first_append < latest_append {
+                    error!("Failed to purge expired files: blocked by barrier");
+                }
+                // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
+                self.rewrite_append_queue_tombstones()?;
+                self.purge_to(LogQueue::Append, append_queue_barrier)?;
             }
         }
-
-        if self.needs_rewrite_log_files(LogQueue::Rewrite) {
-            self.rewrite_rewrite_queue()?;
-        }
-
-        let append_queue_barrier = self.listeners.iter().fold(
-            self.pipe_log.file_span(LogQueue::Append).1,
-            |barrier, l| {
-                l.first_file_not_ready_for_purge(LogQueue::Append)
-                    .map_or(barrier, |f| std::cmp::min(f, barrier))
-            },
-        );
-
-        // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
-        self.rewrite_append_queue_tombstones()?;
-
-        self.purge_to(
-            append_queue_barrier,
-            self.pipe_log.file_span(LogQueue::Rewrite).1,
-        )?;
         Ok(should_compact)
     }
 
@@ -121,16 +122,22 @@ where
         if exit_after_step == Some(2) {
             return;
         }
-        self.purge_to(self.pipe_log.file_span(LogQueue::Append).1, 1)
-            .unwrap();
+        self.purge_to(
+            LogQueue::Append,
+            self.pipe_log.file_span(LogQueue::Append).1,
+        )
+        .unwrap();
     }
 
     #[cfg(test)]
     pub fn must_rewrite_rewrite_queue(&self) {
         let _lk = self.purge_mutex.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
-        self.purge_to(1, self.pipe_log.file_span(LogQueue::Rewrite).1)
-            .unwrap();
+        self.purge_to(
+            LogQueue::Rewrite,
+            self.pipe_log.file_span(LogQueue::Rewrite).1,
+        )
+        .unwrap();
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
@@ -140,13 +147,13 @@ where
         }
 
         let total_size = self.pipe_log.total_size(queue);
-        let purge_threshold = self.cfg.purge_threshold.0 as usize;
         match queue {
-            LogQueue::Append => total_size > purge_threshold,
+            LogQueue::Append => total_size > self.cfg.purge_threshold.0 as usize,
             LogQueue::Rewrite => {
                 let compacted_rewrites_ratio = self.global_stats.deleted_rewrite_entries() as f64
                     / self.global_stats.rewrite_entries() as f64;
-                total_size * 10 > purge_threshold && compacted_rewrites_ratio > 0.5
+                total_size > self.cfg.purge_rewrite_threshold.unwrap().0 as usize
+                    && compacted_rewrites_ratio > self.cfg.purge_rewrite_garbage_ratio
             }
         }
     }
@@ -177,12 +184,15 @@ where
         rewrite_watermark: FileSeq,
         compact_watermark: FileSeq,
     ) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
-        let mut should_compact = Vec::new();
+        let mut should_compact = Vec::with_capacity(16);
 
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_seq(LogQueue::Append) {
-                let sparse = t.entries_count() < MAX_REWRITE_ENTRIES_PER_REGION;
+                let sparse = t
+                    .entries_count_before(FileId::new(LogQueue::Append, rewrite_watermark))
+                    < MAX_REWRITE_ENTRIES_PER_REGION;
                 if f < compact_watermark && !sparse {
                     should_compact.push(t.region_id());
                 } else if f < rewrite_watermark {
@@ -203,6 +213,7 @@ where
 
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<()> {
+        let _t = StopWatch::new(&ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let memtables = self
@@ -224,33 +235,21 @@ where
     }
 
     // Exclusive.
-    fn purge_to(&self, append_seq: FileSeq, rewrite_seq: FileSeq) -> Result<()> {
-        let (min_file_1, min_file_2) =
-            self.memtables
-                .fold((append_seq, rewrite_seq), |(min1, min2), t| {
-                    (
-                        t.min_file_seq(LogQueue::Append)
-                            .map_or(min1, |m| std::cmp::min(min1, m)),
-                        t.min_file_seq(LogQueue::Rewrite)
-                            .map_or(min2, |m| std::cmp::min(min2, m)),
-                    )
-                });
+    fn purge_to(&self, queue: LogQueue, seq: FileSeq) -> Result<()> {
+        let min_seq = self.memtables.fold(seq, |min, t| {
+            t.min_file_seq(queue).map_or(min, |m| std::cmp::min(min, m))
+        });
 
-        for (purge_to, queue) in &[
-            (min_file_1, LogQueue::Append),
-            (min_file_2, LogQueue::Rewrite),
-        ] {
-            let purged = self.pipe_log.purge_to(FileId {
-                queue: *queue,
-                seq: *purge_to,
-            })?;
-            if purged > 0 {
-                info!("purged {} expired log files for queue {:?}", purged, *queue);
-            }
+        let purged = self.pipe_log.purge_to(FileId {
+            queue,
+            seq: min_seq,
+        })?;
+        if purged > 0 {
+            info!("purged {} expired log files for queue {:?}", purged, queue);
             for listener in &self.listeners {
                 listener.post_purge(FileId {
-                    queue: *queue,
-                    seq: purge_to - 1,
+                    queue,
+                    seq: min_seq - 1,
                 });
             }
         }
@@ -281,20 +280,30 @@ where
                 m.region_id()
             };
 
-            for i in &entry_indexes {
-                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), i)?;
+            let mut cursor = 0;
+            while cursor < entry_indexes.len() {
+                let entry =
+                    read_entry_bytes_from_file(self.pipe_log.as_ref(), &entry_indexes[cursor])?;
                 total_size += entry.len();
                 entries.push(entry);
+                if total_size > MAX_REWRITE_BATCH_BYTES {
+                    let mut take_entries = Vec::with_capacity(expect_rewrites_per_memtable);
+                    std::mem::swap(&mut take_entries, &mut entries);
+                    let mut take_entry_indexes = entry_indexes.split_off(cursor + 1);
+                    std::mem::swap(&mut take_entry_indexes, &mut entry_indexes);
+                    log_batch.add_raw_entries(region_id, take_entry_indexes, take_entries)?;
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                    total_size = 0;
+                    cursor = 0;
+                } else {
+                    cursor += 1;
+                }
             }
-            log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
+            if !entries.is_empty() {
+                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
+            }
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
-            }
-
-            let target_file_size = self.cfg.target_file_size.0 as usize;
-            if total_size as usize > cmp::min(MAX_REWRITE_BATCH_BYTES, target_file_size) {
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                total_size = 0;
             }
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
@@ -342,11 +351,11 @@ where
         if rewrite_watermark.is_none() {
             BACKGROUND_REWRITE_BYTES
                 .rewrite
-                .inc_by(file_handle.len as u64);
+                .observe(file_handle.len as f64);
         } else {
             BACKGROUND_REWRITE_BYTES
                 .append
-                .inc_by(file_handle.len as u64);
+                .observe(file_handle.len as f64);
         }
         Ok(())
     }

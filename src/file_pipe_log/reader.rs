@@ -1,16 +1,16 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::io::{Read, Seek};
-
+use crate::file_builder::FileBuilder;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
 
 use super::format::LogFileHeader;
+use super::log_file::LogFileReader;
 
-pub struct LogItemBatchFileReader<R: Read + Seek> {
+pub struct LogItemBatchFileReader<B: FileBuilder> {
     file_id: Option<FileId>,
-    file: Option<R>,
+    reader: Option<LogFileReader<B>>,
     size: usize,
 
     buffer: Vec<u8>,
@@ -22,11 +22,11 @@ pub struct LogItemBatchFileReader<R: Read + Seek> {
     read_block_size: usize,
 }
 
-impl<R: Read + Seek> LogItemBatchFileReader<R> {
+impl<B: FileBuilder> LogItemBatchFileReader<B> {
     pub fn new(read_block_size: usize) -> Self {
         Self {
             file_id: None,
-            file: None,
+            reader: None,
             size: 0,
 
             buffer: Vec::new(),
@@ -37,10 +37,10 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
         }
     }
 
-    pub fn open(&mut self, file_id: FileId, file: R, size: usize) -> Result<()> {
+    pub fn open(&mut self, file_id: FileId, reader: LogFileReader<B>) -> Result<()> {
         self.file_id = Some(file_id);
-        self.file = Some(file);
-        self.size = size;
+        self.size = reader.file_size()?;
+        self.reader = Some(reader);
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
@@ -50,13 +50,23 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.file_id = None;
+        self.reader = None;
+        self.size = 0;
+        self.buffer.clear();
+        self.buffer_offset = 0;
+        self.valid_offset = 0;
+    }
+
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
-        if self.valid_offset < LOG_BATCH_HEADER_LEN {
-            return Err(Error::Corruption(
-                "attempt to read file with broken header".to_owned(),
-            ));
-        }
         if self.valid_offset < self.size {
+            if self.valid_offset < LOG_BATCH_HEADER_LEN {
+                return Err(Error::Corruption(
+                    "attempt to read file with broken header".to_owned(),
+                ));
+            }
             let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
                 self.valid_offset,
                 LOG_BATCH_HEADER_LEN,
@@ -88,17 +98,16 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
 
     fn peek(&mut self, offset: usize, size: usize, prefetch: usize) -> Result<&[u8]> {
         debug_assert!(offset >= self.buffer_offset);
-        let f = self.file.as_mut().unwrap();
+        let reader = self.reader.as_mut().unwrap();
         let end = self.buffer_offset + self.buffer.len();
         if offset > end {
             self.buffer_offset = offset;
             self.buffer
                 .resize(std::cmp::max(size + prefetch, self.read_block_size), 0);
-            f.seek(std::io::SeekFrom::Start(self.buffer_offset as u64))?;
-            let read = f.read(&mut self.buffer)?;
+            let read = reader.read_to(self.buffer_offset as u64, &mut self.buffer)?;
             if read < size {
                 return Err(Error::Corruption(format!(
-                    "unexpected eof at {}",
+                    "Unexpected eof at {}",
                     self.buffer_offset + read
                 )));
             }
@@ -113,10 +122,10 @@ impl<R: Read + Seek> LogItemBatchFileReader<R> {
                     prev_len + std::cmp::max(should_read, self.read_block_size),
                     0,
                 );
-                let read = f.read(&mut self.buffer[prev_len..])?;
+                let read = reader.read_to(read_offset as u64, &mut self.buffer[prev_len..])?;
                 if read + prefetch < should_read {
                     return Err(Error::Corruption(format!(
-                        "unexpected eof at {}",
+                        "Unexpected eof at {}",
                         read_offset + read,
                     )));
                 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use clap::{AppSettings, Parser, crate_authors, crate_version};
+use clap::{crate_authors, crate_version, AppSettings, Parser};
 
 use const_format::formatcp;
 use hdrhistogram::Histogram;
@@ -64,7 +64,7 @@ struct ControlOpt {
         long = "path",
         required = true,
         takes_value = true,
-        help = "Set the data path for Raft Engine"
+        about = "Set the data path for Raft Engine"
     )]
     path: String,
 
@@ -75,7 +75,7 @@ struct ControlOpt {
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_TIME.as_secs()),
         value_name = "time[s]",
-        help = "Set the stress test time"
+        about = "Set the stress test time"
     )]
     time: String,
 
@@ -85,7 +85,7 @@ struct ControlOpt {
         required = true,
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_REGIONS),
-        help = "Set the region count"
+        about = "Set the region count"
     )]
     regions: String,
 
@@ -95,7 +95,7 @@ struct ControlOpt {
         value_name = "interval[s]",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()),
-        help = "Set the interval to purge obsolete log files"
+        about = "Set the interval to purge obsolete log files"
     )]
     purge_interval: String,
 
@@ -105,7 +105,7 @@ struct ControlOpt {
         value_name = "ttl[s]",
         conflicts_with = "compact_count",
         takes_value = true,
-        help = "Compact log entries older than TTL"
+        about = "Compact log entries older than TTL"
     )]
     compact_ttl: String,
 
@@ -116,7 +116,7 @@ struct ControlOpt {
         value_name = "n",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_COMPACT_COUNT),
-        help = "Compact log entries exceeding this threshold"
+        about = "Compact log entries exceeding this threshold"
     )]
     compact_count: String,
 
@@ -136,7 +136,7 @@ struct ControlOpt {
                 Ok(())
             }
         },
-        help = "Factor to shrink raft log during force compact"
+        about = "Factor to shrink raft log during force compact"
     )]
     force_compact_factor: String,
 
@@ -145,7 +145,7 @@ struct ControlOpt {
         long = "write-threads",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_THREADS),
-        help = "Set the thread count for writing logs"
+        about = "Set the thread count for writing logs"
     )]
     write_threads: String,
 
@@ -155,7 +155,7 @@ struct ControlOpt {
         value_name = "ops",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
-        help = "Set the per-thread OPS for read entry requests"
+        about = "Set the per-thread OPS for read entry requests"
     )]
     write_ops_per_thread: String,
 
@@ -165,7 +165,7 @@ struct ControlOpt {
         value_name = "threads",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_THREADS),
-        help = "Set the thread count for reading logs"
+        about = "Set the thread count for reading logs"
     )]
     read_threads: String,
 
@@ -175,7 +175,7 @@ struct ControlOpt {
         value_name = "ops",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
-        help = "Set the per-thread OPS for read entry requests"
+        about = "Set the per-thread OPS for read entry requests"
     )]
     read_ops_per_thread: String,
 
@@ -185,7 +185,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_ENTRY_SIZE),
-        help = "Set the average size of log entry"
+        about = "Set the average size of log entry"
     )]
     entry_size: String,
 
@@ -195,7 +195,7 @@ struct ControlOpt {
         value_name = "count",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT),
-        help = "Set the average number of written entries of a region in a log batch"
+        about = "Set the average number of written entries of a region in a log batch"
     )]
     write_entry_count: String,
 
@@ -205,7 +205,7 @@ struct ControlOpt {
         value_name = "count",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_REGION_COUNT),
-        help = "Set the average number of written regions in a log batch"
+        about = "Set the average number of written regions in a log batch"
     )]
     write_region_count: String,
 
@@ -215,7 +215,7 @@ struct ControlOpt {
         value_name = "sync",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_SYNC),
-        help = "Whether to sync write raft logs"
+        about = "Whether to sync write raft logs"
     )]
     write_sync: String,
 
@@ -225,7 +225,7 @@ struct ControlOpt {
         value_name = "reuse",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_REUSE_DATA),
-        help = "Whether to reuse existing data in specified path"
+        about = "Whether to reuse existing data in specified path"
     )]
     reuse_data: String,
 
@@ -235,7 +235,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "128MB",
-        help = "Target log file size for Raft Engine"
+        about = "Target log file size for Raft Engine"
     )]
     target_file_size: String,
 
@@ -245,7 +245,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "10GB",
-        help = "Purge if log files are greater than this threshold"
+        about = "Purge if log files are greater than this threshold"
     )]
     purge_threshold: String,
 
@@ -255,7 +255,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "1GB",
-        help = "Purge if rewrite log files are greater than this threshold"
+        about = "Purge if rewrite log files are greater than this threshold"
     )]
     purge_rewrite_threshold: String,
 
@@ -265,7 +265,7 @@ struct ControlOpt {
         value_name = "ratio",
         takes_value = true,
         default_value = "0.6",
-        help = "Purge if rewrite log files garbage ratio is greater than this threshold"
+        about = "Purge if rewrite log files garbage ratio is greater than this threshold"
     )]
     purge_rewrite_garbage_ratio: String,
 
@@ -275,7 +275,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "10GB",
-        help = "Compress log batch bigger than this threshold"
+        about = "Compress log batch bigger than this threshold"
     )]
     batch_compression_threshold: String,
 }
@@ -620,9 +620,11 @@ fn main() {
     config.dir = opts.path;
     config.target_file_size = ReadableSize::from_str(&opts.target_file_size).unwrap();
     config.purge_threshold = ReadableSize::from_str(&opts.purge_threshold).unwrap();
-    config.purge_rewrite_threshold = Some(ReadableSize::from_str(&opts.purge_rewrite_threshold).unwrap());
+    config.purge_rewrite_threshold =
+        Some(ReadableSize::from_str(&opts.purge_rewrite_threshold).unwrap());
     config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio.parse::<f64>().unwrap();
-    config.batch_compression_threshold = ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
+    config.batch_compression_threshold =
+        ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     args.time = Duration::from_secs(opts.time.parse::<u64>().unwrap());
     args.regions = opts.regions.parse::<u64>().unwrap();
     args.purge_interval = Duration::from_secs(opts.purge_interval.parse::<u64>().unwrap());
@@ -642,18 +644,6 @@ fn main() {
     args.write_region_count = opts.write_region_count.parse::<u64>().unwrap();
     args.write_sync = opts.write_sync.parse::<bool>().unwrap();
     if !opts.reuse_data.parse::<bool>().unwrap() {
-        // clean up existing log files
-        let _ = std::fs::remove_dir_all(&config.dir);
-    }
-
-    // Raft Engine configurations
-    config.dir = args.path;
-    config.target_file_size = ReadableSize::from_str(&args.target_file_size).unwrap();
-    config.purge_threshold = ReadableSize::from_str(&args.purge_threshold).unwrap();
-    config.batch_compression_threshold =
-        ReadableSize::from_str(&args.batch_compression_threshold).unwrap();
-
-    if !args.reuse_data {
         // clean up existing log files
         let _ = std::fs::remove_dir_all(&config.dir);
     }

@@ -358,6 +358,11 @@ impl LogItemBatch {
         }
     }
 
+    // TODO: Clean up these interfaces.
+    pub fn into_items(self) -> Vec<LogItem> {
+        self.items
+    }
+
     pub fn iter(&self) -> std::slice::Iter<LogItem> {
         self.items.iter()
     }

@@ -1,6 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::marker::PhantomData;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use std::u64;
@@ -110,7 +111,7 @@ where
     B: FileBuilder,
     P: PipeLog,
 {
-    /// Write the content of LogBatch into the engine and return written bytes.
+    /// Write the content of `log_batch` into the engine and return written bytes.
     /// If `sync` is true, the write will be followed by a call to `fdatasync` on
     /// the log file.
     pub fn write(&self, log_batch: &mut LogBatch, mut sync: bool) -> Result<usize> {
@@ -206,18 +207,16 @@ where
         Ok(None)
     }
 
-    /// Purge expired logs files and return a set of Raft group ids
-    /// which needs to be compacted ASAP.
+    /// Purges expired logs files and returns a set of Raft group ids that need
+    /// to be compacted.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let _t = StopWatch::new(&ENGINE_PURGE_EXPIRED_FILES_DURATION_HISTOGRAM);
-
         // TODO: Move this to a dedicated thread.
         self.stats.flush_metrics();
 
         self.purge_manager.purge_expired_files()
     }
 
-    /// Return count of fetched entries.
+    /// Returns count of fetched entries.
     pub fn fetch_entries_to<M: MessageExt>(
         &self,
         region_id: u64,
@@ -255,10 +254,9 @@ where
         None
     }
 
-    /// Like `cut_logs` but the range could be very large. Return the deleted count.
-    /// Generally, `from` can be passed in `0`.
+    /// Deletes log entries before `index` in the specified Raft group. Returns
+    /// the number of deleted entries.
     pub fn compact_to(&self, region_id: u64, index: u64) -> u64 {
-        let _t = StopWatch::new(&ENGINE_COMPACT_DURATION_HISTOGRAM);
         let first_index = match self.first_index(region_id) {
             Some(index) => index,
             None => return 0,
@@ -287,34 +285,27 @@ where
 }
 
 impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
-    pub fn consistency_check(path: &std::path::Path) -> Result<Vec<(u64, u64)>> {
+    pub fn consistency_check(path: &Path) -> Result<Vec<(u64, u64)>> {
         Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 
-    // Repair log entry holes by fill in empty message
-    /// queue: accept "append", "rewrite", "all"
-    #[allow(unused_variables)]
-    pub fn auto_fill(path: &std::path::Path, queue: &str, raft_groups: &[u64]) -> Result<()> {
-        todo!()
-    }
-
-    // Trunate all files unsafely
-    /// mode: accept "front", "back", "all"
-    /// queue: accept "append", "rewrite", "all"
-    #[allow(unused_variables)]
-    pub fn truncate(
-        path: &std::path::Path,
+    pub fn unsafe_truncate(
+        path: &Path,
         mode: &str,
-        queue: &str,
+        queue: Option<LogQueue>,
         raft_groups: &[u64],
     ) -> Result<()> {
-        todo!()
+        Self::unsafe_truncate_with_file_builder(
+            path,
+            mode,
+            queue,
+            raft_groups,
+            Arc::new(DefaultFileBuilder),
+        )
     }
 
-    // Dump all all operations in log files
-    #[allow(unused_variables)]
-    pub fn dump(path: &std::path::Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
-        todo!()
+    pub fn dump(path: &Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
+        Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
     }
 }
 
@@ -322,10 +313,10 @@ impl<B> Engine<B, FilePipeLog<B>>
 where
     B: FileBuilder,
 {
-    /// Returns a list of corrupted Raft groups, including their id and last unaffected
+    /// Returns a list of corrupted Raft groups, including their ids and last valid
     /// log index. Head or tail corruption might not be detected.
     pub fn consistency_check_with_file_builder(
-        path: &std::path::Path,
+        path: &Path,
         file_builder: Arc<B>,
     ) -> Result<Vec<(u64, u64)>> {
         if !path.exists() {
@@ -351,9 +342,31 @@ where
         list.sort_unstable();
         Ok(list)
     }
+
+    /// Truncates Raft groups to remove possible corruptions.
+    #[allow(unused_variables)]
+    pub fn unsafe_truncate_with_file_builder(
+        path: &Path,
+        mode: &str,
+        queue: Option<LogQueue>,
+        raft_groups: &[u64],
+        file_builder: Arc<B>,
+    ) -> Result<()> {
+        todo!();
+    }
+
+    /// Dumps all operations.
+    #[allow(unused_variables)]
+    pub fn dump_with_file_builder(
+        path: &Path,
+        raft_groups: &[u64],
+        file_builder: Arc<B>,
+    ) -> Result<Vec<LogItem>> {
+        todo!()
+    }
 }
 
-pub fn read_entry_from_file<M, P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<M::Entry>
+pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<M::Entry>
 where
     M: MessageExt,
     P: PipeLog,
@@ -364,7 +377,7 @@ where
     Ok(e)
 }
 
-pub fn read_entry_bytes_from_file<P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<Vec<u8>>
+pub(crate) fn read_entry_bytes_from_file<P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<Vec<u8>>
 where
     P: PipeLog,
 {
@@ -476,6 +489,7 @@ mod tests {
                 .unwrap();
             let cfg = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
                 ..Default::default()
             };
 
@@ -530,6 +544,7 @@ mod tests {
                         .unwrap();
                     let cfg = Config {
                         dir: dir.path().to_str().unwrap().to_owned(),
+                        target_file_size: ReadableSize(1),
                         ..Default::default()
                     };
                     let engine = RaftLogEngine::open(cfg.clone()).unwrap();
@@ -675,6 +690,7 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
             ..Default::default()
         };
         let engine = RaftLogEngine::open(cfg).unwrap();
@@ -811,9 +827,9 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
 
-        let old_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
+        let old_min_file_seq = engine.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
+        let new_min_file_seq = engine.file_span(LogQueue::Append).0;
         // Some entries are rewritten.
         assert!(new_min_file_seq > old_min_file_seq);
         // No regions need to be force compacted because the threshold is not reached.
@@ -826,11 +842,7 @@ mod tests {
         assert!(engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
-        let old_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_seq = engine.pipe_log.file_span(LogQueue::Append).0;
-        // No entries are rewritten.
-        assert_eq!(new_min_file_seq, old_min_file_seq);
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
@@ -863,7 +875,7 @@ mod tests {
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.pipe_log.file_span(LogQueue::Append).0 > 1);
+        assert!(engine.file_span(LogQueue::Append).0 > 1);
 
         let rewrite_file_size = engine.pipe_log.total_size(LogQueue::Rewrite);
         assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
@@ -1006,7 +1018,7 @@ mod tests {
             type Reader<R: Seek + Read + Send> = TestFile<R>;
             type Writer<W: Seek + Write + Send> = TestFile<W>;
 
-            fn build_reader<R>(&self, _path: &std::path::Path, inner: R) -> Result<Self::Reader<R>>
+            fn build_reader<R>(&self, _path: &Path, inner: R) -> Result<Self::Reader<R>>
             where
                 R: Seek + Read + Send,
             {
@@ -1015,7 +1027,7 @@ mod tests {
 
             fn build_writer<W>(
                 &self,
-                _path: &std::path::Path,
+                _path: &Path,
                 inner: W,
                 _create: bool,
             ) -> Result<Self::Writer<W>>
@@ -1053,6 +1065,69 @@ mod tests {
             let index = rid * 2;
             engine.scan(rid, index, index + rid, |_, q, d| {
                 assert_eq!(q, LogQueue::Append);
+                assert_eq!(d, &data);
+            });
+        }
+    }
+
+    #[test]
+    fn test_dirty_recovery() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_dirty_recovery")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 1024];
+
+        for rid in 1..21 {
+            engine.append(rid, 1, 21, Some(&data));
+        }
+
+        // Create an unrelated sub-directory.
+        std::fs::create_dir(dir.path().join(Path::new("random_dir"))).unwrap();
+        // Create an unrelated file.
+        let _f = std::fs::File::create(dir.path().join(Path::new("random_file"))).unwrap();
+
+        let engine = engine.reopen();
+        for rid in 1..21 {
+            engine.scan(rid, 1, 21, |_, _, d| {
+                assert_eq!(d, &data);
+            });
+        }
+    }
+
+    #[test]
+    fn test_large_rewrite_batch() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_large_rewrite_batch")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 2 * 1024 * 1024];
+
+        for rid in 1..=3 {
+            engine.append(rid, 1, 11, Some(&data));
+        }
+
+        let old_active_file = engine.file_span(LogQueue::Append).1;
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+        let old_active_file = engine.file_span(LogQueue::Rewrite).1;
+        engine.purge_manager.must_rewrite_rewrite_queue();
+        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+
+        let engine = engine.reopen();
+        for rid in 1..=3 {
+            engine.scan(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &data);
             });
         }
