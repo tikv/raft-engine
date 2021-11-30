@@ -6,4 +6,5 @@ authors = ["The TiKV Authors"]
 
 [dependencies]
 structopt = "0.3"
+clap = "3.0.0-beta.5"
 raft-engine = { path = ".." }

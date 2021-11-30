@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use clap::{App, Arg};
+use clap::{Parser, crate_authors};
+
 use const_format::formatcp;
 use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
@@ -22,6 +23,7 @@ type WriteBatch = LogBatch;
 
 #[derive(Clone)]
 struct MessageExtTyped;
+
 impl MessageExt for MessageExtTyped {
     type Entry = Entry;
 
@@ -47,44 +49,238 @@ const DEFAULT_WRITE_REGION_COUNT: u64 = 5;
 const DEFAULT_WRITE_SYNC: bool = true;
 const DEFAULT_REUSE_DATA: bool = false;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Parser)]
+#[clap(
+    name = "Engine Stress (stress)",
+    about = "A stress test tool for Raft Engine",
+    author = crate_authors!(),
+    version = &**VERSION_INFO,
+    long_version = &**VERSION_INFO,
+    setting = AppSettings::DontCollapseArgsInUsage,
+)]
 struct TestArgs {
+    /// Path of raft-engine storage directory
+    #[clap(
+        short,
+        long = "path",
+        required = true,
+        takes_value = true,
+        help = "Set the data path for Raft Engine"
+    )]
+    path: String,
+
+    #[clap(
+        short,
+        long = "time",
+        required = true,
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_TIME.as_secs()),
+        value_name = "time[s]",
+        help = "Set the stress test time"
+    )]
     time: Duration,
+
+    #[clap(
+        short,
+        long = "regions",
+        required = true,
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_REGIONS),
+        help = "Set the region count"
+    )]
     regions: u64,
+
+    #[clap(
+        short,
+        long = "purge-interval",
+        value_name = "interval[s]",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()),
+        help = "Set the interval to purge obsolete log files"
+    )]
     purge_interval: Duration,
+
+    #[clap(
+        short,
+        long = "compact-ttl",
+        value_name = "ttl[s]",
+        conflicts_with = "compact_count",
+        takes_value = true,
+        help = "Compact log entries older than TTL"
+    )]
     compact_ttl: Duration,
+
+    #[clap(
+        short,
+        long = "compact-count",
+        conflicts_with = "compact_ttl",
+        value_name = "n",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_COMPACT_COUNT),
+        help = "Compact log entries exceeding this threshold"
+    )]
     compact_count: u64,
+
+    #[clap(
+        short,
+        long = "force-compact-factor",
+        value_name = "factor",
+        takes_value = true,
+        default_value = 0.5,
+        validator = |s| {
+            let factor = s.parse::<f32>().unwrap();
+            if factor >= 1.0 {
+                Err(String::from("Factor must be smaller than 1.0"))
+            } else if factor <= 0.0 {
+                Err(String::from("Factor must be positive"))
+            } else {
+                Ok(())
+            }
+        },
+        help = "Factor to shrink raft log during force compact"
+    )]
     force_compact_factor: f32,
+
+    #[clap(
+        short,
+        long = "write-threads",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_WRITE_THREADS),
+        help = "Set the thread count for writing logs"
+    )]
     write_threads: u64,
+
+    #[clap(
+        short,
+        long = "write-ops-per-thread",
+        value_name = "ops",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
+        help = "Set the per-thread OPS for read entry requests"
+    )]
     write_ops_per_thread: u64,
+
+    #[clap(
+        short,
+        long = "read-thread",
+        value_name = "threads",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_READ_THREADS),
+        help = "Set the thread count for reading logs"
+    )]
     read_threads: u64,
+
+    #[clap(
+        short,
+        long = "read-ops-per-thread",
+        value_name = "ops",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
+        help = "Set the per-thread OPS for read entry requests"
+    )]
     read_ops_per_thread: u64,
+
+    #[clap(
+        short,
+        long = "entry-size",
+        value_name = "size",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_ENTRY_SIZE),
+        help = "Set the average size of log entry"
+    )]
     entry_size: usize,
+
+    #[clap(
+        short,
+        long = "write-entry-count",
+        value_name = "count",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT),
+        help = "Set the average number of written entries of a region in a log batch"
+    )]
     write_entry_count: u64,
+
+    #[clap(
+        short,
+        long = "write-region-count",
+        value_name = "count",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_WRITE_REGION_COUNT),
+        help = "Set the average number of written regions in a log batch"
+    )]
     write_region_count: u64,
+
+    #[clap(
+        short,
+        long = "write-sync",
+        value_name = "sync",
+        takes_value = true,
+        // default_value = formatcp!("{}", DEFAULT_WRITE_SYNC),
+        help = "Whether to sync write raft logs"
+    )]
     write_sync: bool,
+
+    #[clap(
+        short,
+        long = "reuse-data",
+        value_name = "reuse",
+        takes_value = true,
+        default_value = formatcp!("{}", DEFAULT_REUSE_DATA),
+        help = "Whether to reuse existing data in specified path"
+    )]
+    reuse_data: bool,
+
+    #[clap(
+        short,
+        long = "target-file-size",
+        value_name = "size",
+        takes_value = true,
+        default_value = "128MB",
+        help = "Target log file size for Raft Engine"
+    )]
+    target_file_size: String,
+
+    #[clap(
+        short,
+        long = "purge-threshold",
+        value_name = "size",
+        takes_value = true,
+        default_value = "10GB",
+        help = "Purge if log files are greater than this threshold"
+    )]
+    purge_threshold: String,
+
+    #[clap(
+        short,
+        long = "compression-threshold",
+        value_name = "size",
+        takes_value = true,
+        default_value = "10GB",
+        help = "Compress log batch bigger than this threshold"
+    )]
+    batch_compression_threshold: String,
 }
 
-impl Default for TestArgs {
-    fn default() -> Self {
-        TestArgs {
-            time: DEFAULT_TIME,
-            regions: DEFAULT_REGIONS,
-            purge_interval: DEFAULT_PURGE_INTERVAL,
-            compact_ttl: DEFAULT_COMPACT_TTL,
-            compact_count: DEFAULT_COMPACT_COUNT,
-            force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR_STR.parse::<f32>().unwrap(),
-            write_threads: DEFAULT_WRITE_THREADS,
-            write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
-            read_threads: DEFAULT_READ_THREADS,
-            read_ops_per_thread: DEFAULT_READ_OPS_PER_THREAD,
-            entry_size: DEFAULT_ENTRY_SIZE,
-            write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
-            write_region_count: DEFAULT_WRITE_REGION_COUNT,
-            write_sync: DEFAULT_WRITE_SYNC,
-        }
-    }
-}
+// impl Default for TestArgs {
+//     fn default() -> Self {
+//         TestArgs {
+//             time: DEFAULT_TIME,
+//             regions: DEFAULT_REGIONS,
+//             purge_interval: DEFAULT_PURGE_INTERVAL,
+//             compact_ttl: DEFAULT_COMPACT_TTL,
+//             compact_count: DEFAULT_COMPACT_COUNT,
+//             force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR_STR.parse::<f32>().unwrap(),
+//             write_threads: DEFAULT_WRITE_THREADS,
+//             write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
+//             read_threads: DEFAULT_READ_THREADS,
+//             read_ops_per_thread: DEFAULT_READ_OPS_PER_THREAD,
+//             entry_size: DEFAULT_ENTRY_SIZE,
+//             write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
+//             write_region_count: DEFAULT_WRITE_REGION_COUNT,
+//             write_sync: DEFAULT_WRITE_SYNC,
+//         }
+//     }
+// }
 
 impl TestArgs {
     fn validate(&self) -> Result<(), String> {
@@ -378,238 +574,21 @@ impl EventListener for WrittenBytesHook {
 }
 
 fn main() {
-    let mut args = TestArgs::default();
     let mut config = Config::default();
-    let matches = App::new("Engine Stress (stress)")
-        .about("A stress test tool for Raft Engine")
-        .arg(
-            Arg::with_name("path")
-                .long("path")
-                .required(true)
-                .help("Set the data path for Raft Engine")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("time")
-                .long("time")
-                .value_name("time[s]")
-                .default_value(formatcp!("{}", DEFAULT_TIME.as_secs()))
-                .help("Set the stress test time")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("regions")
-                .long("regions")
-                .default_value(formatcp!("{}", DEFAULT_REGIONS))
-                .help("Set the region count")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("purge_interval")
-                .long("purge-interval")
-                .value_name("interval[s]")
-                .default_value(formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()))
-                .help("Set the interval to purge obsolete log files")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("compact_ttl")
-                .conflicts_with("compact_count")
-                .long("compact-ttl")
-                .value_name("ttl[s]")
-                .help("Compact log entries older than TTL")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("compact_count")
-                .conflicts_with("compact_ttl")
-                .long("compact-count")
-                .value_name("n")
-                .default_value(formatcp!("{}", DEFAULT_COMPACT_COUNT))
-                .help("Compact log entries exceeding this threshold")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("force_compact_factor")
-                .long("force-compact-factor")
-                .value_name("factor")
-                .default_value("0.5")
-                .validator(|s| {
-                    let factor = s.parse::<f32>().unwrap();
-                    if factor >= 1.0 {
-                        Err(String::from("Factor must be smaller than 1.0"))
-                    } else if factor <= 0.0 {
-                        Err(String::from("Factor must be positive"))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .help("Factor to shrink raft log during force compact")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("write_threads")
-                .long("write-threads")
-                .default_value(formatcp!("{}", DEFAULT_WRITE_THREADS))
-                .help("Set the thread count for writing logs")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("write_ops_per_thread")
-                .long("write-ops-per-thread")
-                .value_name("ops")
-                .default_value(formatcp!("{}", DEFAULT_WRITE_OPS_PER_THREAD))
-                .help("Set the per-thread OPS for writing logs")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("read_threads")
-                .long("read-threads")
-                .value_name("threads")
-                .default_value(formatcp!("{}", DEFAULT_READ_THREADS))
-                .help("Set the thread count for reading logs")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("read_ops_per_thread")
-                .long("read-ops-per-thread")
-                .value_name("ops")
-                .default_value(formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD))
-                .help("Set the per-thread OPS for read entry requests")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("entry_size")
-                .long("entry-size")
-                .value_name("size")
-                .default_value(formatcp!("{}", DEFAULT_ENTRY_SIZE))
-                .help("Set the average size of log entry")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("write_entry_count")
-                .long("write-entry-count")
-                .value_name("count")
-                .default_value(formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT))
-                .help("Set the average number of written entries of a region in a log batch")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("write_region_count")
-                .long("write-region-count")
-                .value_name("count")
-                .default_value(formatcp!("{}", DEFAULT_WRITE_REGION_COUNT))
-                .help("Set the average number of written regions in a log batch")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("write_sync")
-                .long("write-sync")
-                .value_name("sync")
-                .default_value(formatcp!("{}", DEFAULT_WRITE_SYNC))
-                .help("Whether to sync write raft logs")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("reuse_data")
-                .long("reuse-data")
-                .value_name("reuse")
-                .default_value(formatcp!("{}", DEFAULT_REUSE_DATA))
-                .help("Whether to reuse existing data in specified path")
-                .takes_value(true),
-        )
-        // Raft Engine configurations
-        .arg(
-            Arg::with_name("target_file_size")
-                .long("target-file-size")
-                .value_name("size")
-                .default_value("128MB")
-                .help("Target log file size for Raft Engine")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("purge_threshold")
-                .long("purge-threshold")
-                .value_name("size")
-                .default_value("10GB")
-                .help("Purge if log files are greater than this threshold")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("batch_compression_threshold")
-                .long("compression-threshold")
-                .value_name("size")
-                .default_value("8KB")
-                .help("Compress log batch bigger than this threshold")
-                .takes_value(true),
-        )
-        .get_matches();
+    let args: TestArgs = TestArgs::parse();
+
     // Raft Engine configurations
-    if let Some(s) = matches.value_of("path") {
-        config.dir = s.to_string();
+    config.dir = args.path;
+    config.target_file_size = ReadableSize::from_str(&args.target_file_size).unwrap();
+    config.purge_threshold = ReadableSize::from_str(&args.purge_threshold).unwrap();
+    config.batch_compression_threshold =
+        ReadableSize::from_str(&args.batch_compression_threshold).unwrap();
+
+    if !args.reuse_data {
+        // clean up existing log files
+        let _ = std::fs::remove_dir_all(&config.dir);
     }
-    if let Some(s) = matches.value_of("target_file_size") {
-        config.target_file_size = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("purge_threshold") {
-        config.purge_threshold = ReadableSize::from_str(s).unwrap();
-    }
-    if let Some(s) = matches.value_of("batch_compression_threshold") {
-        config.batch_compression_threshold = ReadableSize::from_str(s).unwrap();
-    }
-    // Test configurations
-    if let Some(s) = matches.value_of("time") {
-        args.time = Duration::from_secs(s.parse::<u64>().unwrap());
-    }
-    if let Some(s) = matches.value_of("regions") {
-        args.regions = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("purge_interval") {
-        args.purge_interval = Duration::from_secs(s.parse::<u64>().unwrap());
-    }
-    if let Some(s) = matches.value_of("compact_ttl") {
-        args.compact_ttl = Duration::from_secs(s.parse::<u64>().unwrap());
-        if args.compact_ttl.as_millis() > 0 {
-            println!("Not supported");
-            std::process::exit(1);
-        }
-    }
-    if let Some(s) = matches.value_of("compact_count") {
-        args.compact_count = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("force_compact_factor") {
-        args.force_compact_factor = s.parse::<f32>().unwrap();
-    }
-    if let Some(s) = matches.value_of("write_threads") {
-        args.write_threads = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("write_ops_per_thread") {
-        args.write_ops_per_thread = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("read_threads") {
-        args.read_threads = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("read_ops_per_thread") {
-        args.read_ops_per_thread = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("entry_size") {
-        args.entry_size = s.parse::<usize>().unwrap();
-    }
-    if let Some(s) = matches.value_of("write_entry_count") {
-        args.write_entry_count = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("write_region_count") {
-        args.write_region_count = s.parse::<u64>().unwrap();
-    }
-    if let Some(s) = matches.value_of("write_sync") {
-        args.write_sync = s.parse::<bool>().unwrap();
-    }
-    if let Some(s) = matches.value_of("reuse_data") {
-        if !s.parse::<bool>().unwrap() {
-            // clean up existing log files
-            let _ = std::fs::remove_dir_all(&config.dir);
-        }
-    }
+
     args.validate().unwrap();
     config.sanitize().unwrap();
 
