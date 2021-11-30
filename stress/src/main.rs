@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use clap::{Parser, crate_authors};
+use clap::{AppSettings, Parser, crate_authors, crate_version};
 
 use const_format::formatcp;
 use hdrhistogram::Histogram;
@@ -54,11 +54,10 @@ const DEFAULT_REUSE_DATA: bool = false;
     name = "Engine Stress (stress)",
     about = "A stress test tool for Raft Engine",
     author = crate_authors!(),
-    version = &**VERSION_INFO,
-    long_version = &**VERSION_INFO,
+    version = crate_version!(),
     setting = AppSettings::DontCollapseArgsInUsage,
 )]
-struct TestArgs {
+struct ControlOpt {
     /// Path of raft-engine storage directory
     #[clap(
         short,
@@ -78,7 +77,7 @@ struct TestArgs {
         value_name = "time[s]",
         help = "Set the stress test time"
     )]
-    time: Duration,
+    time: String,
 
     #[clap(
         short,
@@ -88,7 +87,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_REGIONS),
         help = "Set the region count"
     )]
-    regions: u64,
+    regions: String,
 
     #[clap(
         short,
@@ -98,7 +97,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()),
         help = "Set the interval to purge obsolete log files"
     )]
-    purge_interval: Duration,
+    purge_interval: String,
 
     #[clap(
         short,
@@ -108,7 +107,7 @@ struct TestArgs {
         takes_value = true,
         help = "Compact log entries older than TTL"
     )]
-    compact_ttl: Duration,
+    compact_ttl: String,
 
     #[clap(
         short,
@@ -119,14 +118,14 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_COMPACT_COUNT),
         help = "Compact log entries exceeding this threshold"
     )]
-    compact_count: u64,
+    compact_count: String,
 
     #[clap(
         short,
         long = "force-compact-factor",
         value_name = "factor",
         takes_value = true,
-        default_value = 0.5,
+        default_value = "0.5",
         validator = |s| {
             let factor = s.parse::<f32>().unwrap();
             if factor >= 1.0 {
@@ -139,7 +138,7 @@ struct TestArgs {
         },
         help = "Factor to shrink raft log during force compact"
     )]
-    force_compact_factor: f32,
+    force_compact_factor: String,
 
     #[clap(
         short,
@@ -148,7 +147,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_WRITE_THREADS),
         help = "Set the thread count for writing logs"
     )]
-    write_threads: u64,
+    write_threads: String,
 
     #[clap(
         short,
@@ -158,7 +157,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
         help = "Set the per-thread OPS for read entry requests"
     )]
-    write_ops_per_thread: u64,
+    write_ops_per_thread: String,
 
     #[clap(
         short,
@@ -168,7 +167,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_READ_THREADS),
         help = "Set the thread count for reading logs"
     )]
-    read_threads: u64,
+    read_threads: String,
 
     #[clap(
         short,
@@ -178,7 +177,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
         help = "Set the per-thread OPS for read entry requests"
     )]
-    read_ops_per_thread: u64,
+    read_ops_per_thread: String,
 
     #[clap(
         short,
@@ -188,7 +187,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_ENTRY_SIZE),
         help = "Set the average size of log entry"
     )]
-    entry_size: usize,
+    entry_size: String,
 
     #[clap(
         short,
@@ -198,7 +197,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT),
         help = "Set the average number of written entries of a region in a log batch"
     )]
-    write_entry_count: u64,
+    write_entry_count: String,
 
     #[clap(
         short,
@@ -208,17 +207,17 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_WRITE_REGION_COUNT),
         help = "Set the average number of written regions in a log batch"
     )]
-    write_region_count: u64,
+    write_region_count: String,
 
     #[clap(
         short,
         long = "write-sync",
         value_name = "sync",
         takes_value = true,
-        // default_value = formatcp!("{}", DEFAULT_WRITE_SYNC),
+        default_value = formatcp!("{}", DEFAULT_WRITE_SYNC),
         help = "Whether to sync write raft logs"
     )]
-    write_sync: bool,
+    write_sync: String,
 
     #[clap(
         short,
@@ -228,7 +227,7 @@ struct TestArgs {
         default_value = formatcp!("{}", DEFAULT_REUSE_DATA),
         help = "Whether to reuse existing data in specified path"
     )]
-    reuse_data: bool,
+    reuse_data: String,
 
     #[clap(
         short,
@@ -252,6 +251,26 @@ struct TestArgs {
 
     #[clap(
         short,
+        long = "purge-rewrite-threshold",
+        value_name = "size",
+        takes_value = true,
+        default_value = "1GB",
+        help = "Purge if rewrite log files are greater than this threshold"
+    )]
+    purge_rewrite_threshold: String,
+
+    #[clap(
+        short,
+        long = "purge-rewrite-garbage-ratio",
+        value_name = "ratio",
+        takes_value = true,
+        default_value = "0.6",
+        help = "Purge if rewrite log files garbage ratio is greater than this threshold"
+    )]
+    purge_rewrite_garbage_ratio: String,
+
+    #[clap(
+        short,
         long = "compression-threshold",
         value_name = "size",
         takes_value = true,
@@ -261,26 +280,44 @@ struct TestArgs {
     batch_compression_threshold: String,
 }
 
-// impl Default for TestArgs {
-//     fn default() -> Self {
-//         TestArgs {
-//             time: DEFAULT_TIME,
-//             regions: DEFAULT_REGIONS,
-//             purge_interval: DEFAULT_PURGE_INTERVAL,
-//             compact_ttl: DEFAULT_COMPACT_TTL,
-//             compact_count: DEFAULT_COMPACT_COUNT,
-//             force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR_STR.parse::<f32>().unwrap(),
-//             write_threads: DEFAULT_WRITE_THREADS,
-//             write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
-//             read_threads: DEFAULT_READ_THREADS,
-//             read_ops_per_thread: DEFAULT_READ_OPS_PER_THREAD,
-//             entry_size: DEFAULT_ENTRY_SIZE,
-//             write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
-//             write_region_count: DEFAULT_WRITE_REGION_COUNT,
-//             write_sync: DEFAULT_WRITE_SYNC,
-//         }
-//     }
-// }
+#[derive(Debug, Clone)]
+struct TestArgs {
+    time: Duration,
+    regions: u64,
+    purge_interval: Duration,
+    compact_ttl: Duration,
+    compact_count: u64,
+    force_compact_factor: f32,
+    write_threads: u64,
+    write_ops_per_thread: u64,
+    read_threads: u64,
+    read_ops_per_thread: u64,
+    entry_size: usize,
+    write_entry_count: u64,
+    write_region_count: u64,
+    write_sync: bool,
+}
+
+impl Default for TestArgs {
+    fn default() -> Self {
+        TestArgs {
+            time: DEFAULT_TIME,
+            regions: DEFAULT_REGIONS,
+            purge_interval: DEFAULT_PURGE_INTERVAL,
+            compact_ttl: DEFAULT_COMPACT_TTL,
+            compact_count: DEFAULT_COMPACT_COUNT,
+            force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR_STR.parse::<f32>().unwrap(),
+            write_threads: DEFAULT_WRITE_THREADS,
+            write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
+            read_threads: DEFAULT_READ_THREADS,
+            read_ops_per_thread: DEFAULT_READ_OPS_PER_THREAD,
+            entry_size: DEFAULT_ENTRY_SIZE,
+            write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
+            write_region_count: DEFAULT_WRITE_REGION_COUNT,
+            write_sync: DEFAULT_WRITE_SYNC,
+        }
+    }
+}
 
 impl TestArgs {
     fn validate(&self) -> Result<(), String> {
@@ -575,7 +612,39 @@ impl EventListener for WrittenBytesHook {
 
 fn main() {
     let mut config = Config::default();
-    let args: TestArgs = TestArgs::parse();
+    let mut args: TestArgs = TestArgs::default();
+
+    let opts: ControlOpt = ControlOpt::parse();
+
+    // Raft Engine configurations
+    config.dir = opts.path;
+    config.target_file_size = ReadableSize::from_str(&opts.target_file_size).unwrap();
+    config.purge_threshold = ReadableSize::from_str(&opts.purge_threshold).unwrap();
+    config.purge_rewrite_threshold = Some(ReadableSize::from_str(&opts.purge_rewrite_threshold).unwrap());
+    config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio.parse::<f64>().unwrap();
+    config.batch_compression_threshold = ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
+    args.time = Duration::from_secs(opts.time.parse::<u64>().unwrap());
+    args.regions = opts.regions.parse::<u64>().unwrap();
+    args.purge_interval = Duration::from_secs(opts.purge_interval.parse::<u64>().unwrap());
+    args.compact_ttl = Duration::from_secs(opts.compact_ttl.parse::<u64>().unwrap());
+    if args.compact_ttl.as_millis() > 0 {
+        println!("Not supported");
+        std::process::exit(1);
+    }
+    args.compact_count = opts.compact_count.parse::<u64>().unwrap();
+    args.force_compact_factor = opts.force_compact_factor.parse::<f32>().unwrap();
+    args.write_threads = opts.write_threads.parse::<u64>().unwrap();
+    args.write_ops_per_thread = opts.write_ops_per_thread.parse::<u64>().unwrap();
+    args.read_threads = opts.read_threads.parse::<u64>().unwrap();
+    args.read_ops_per_thread = opts.read_ops_per_thread.parse::<u64>().unwrap();
+    args.entry_size = opts.entry_size.parse::<usize>().unwrap();
+    args.write_entry_count = opts.write_entry_count.parse::<u64>().unwrap();
+    args.write_region_count = opts.write_region_count.parse::<u64>().unwrap();
+    args.write_sync = opts.write_sync.parse::<bool>().unwrap();
+    if !opts.reuse_data.parse::<bool>().unwrap() {
+        // clean up existing log files
+        let _ = std::fs::remove_dir_all(&config.dir);
+    }
 
     // Raft Engine configurations
     config.dir = args.path;
