@@ -60,18 +60,14 @@ const DEFAULT_REUSE_DATA: bool = false;
 struct ControlOpt {
     /// Path of raft-engine storage directory
     #[clap(
-        short,
         long = "path",
-        required = true,
         takes_value = true,
         about = "Set the data path for Raft Engine"
     )]
     path: String,
 
     #[clap(
-        short,
         long = "time",
-        required = true,
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_TIME.as_secs()),
         value_name = "time[s]",
@@ -80,9 +76,7 @@ struct ControlOpt {
     time: String,
 
     #[clap(
-        short,
         long = "regions",
-        required = true,
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_REGIONS),
         about = "Set the region count"
@@ -90,7 +84,6 @@ struct ControlOpt {
     regions: String,
 
     #[clap(
-        short,
         long = "purge-interval",
         value_name = "interval[s]",
         takes_value = true,
@@ -100,28 +93,26 @@ struct ControlOpt {
     purge_interval: String,
 
     #[clap(
-        short,
         long = "compact-ttl",
         value_name = "ttl[s]",
-        conflicts_with = "compact_count",
+        conflicts_with = "compact-count",
         takes_value = true,
+        required = false,
         about = "Compact log entries older than TTL"
     )]
-    compact_ttl: String,
+    compact_ttl: Option<String>,
 
     #[clap(
-        short,
         long = "compact-count",
-        conflicts_with = "compact_ttl",
         value_name = "n",
+        conflicts_with = "compact-ttl",
         takes_value = true,
-        default_value = formatcp!("{}", DEFAULT_COMPACT_COUNT),
+        required = false,
         about = "Compact log entries exceeding this threshold"
     )]
-    compact_count: String,
+    compact_count: Option<String>,
 
     #[clap(
-        short,
         long = "force-compact-factor",
         value_name = "factor",
         takes_value = true,
@@ -141,7 +132,6 @@ struct ControlOpt {
     force_compact_factor: String,
 
     #[clap(
-        short,
         long = "write-threads",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_THREADS),
@@ -150,7 +140,6 @@ struct ControlOpt {
     write_threads: String,
 
     #[clap(
-        short,
         long = "write-ops-per-thread",
         value_name = "ops",
         takes_value = true,
@@ -160,7 +149,6 @@ struct ControlOpt {
     write_ops_per_thread: String,
 
     #[clap(
-        short,
         long = "read-thread",
         value_name = "threads",
         takes_value = true,
@@ -170,7 +158,6 @@ struct ControlOpt {
     read_threads: String,
 
     #[clap(
-        short,
         long = "read-ops-per-thread",
         value_name = "ops",
         takes_value = true,
@@ -180,7 +167,6 @@ struct ControlOpt {
     read_ops_per_thread: String,
 
     #[clap(
-        short,
         long = "entry-size",
         value_name = "size",
         takes_value = true,
@@ -190,7 +176,6 @@ struct ControlOpt {
     entry_size: String,
 
     #[clap(
-        short,
         long = "write-entry-count",
         value_name = "count",
         takes_value = true,
@@ -200,7 +185,6 @@ struct ControlOpt {
     write_entry_count: String,
 
     #[clap(
-        short,
         long = "write-region-count",
         value_name = "count",
         takes_value = true,
@@ -210,7 +194,6 @@ struct ControlOpt {
     write_region_count: String,
 
     #[clap(
-        short,
         long = "write-sync",
         value_name = "sync",
         takes_value = true,
@@ -220,7 +203,6 @@ struct ControlOpt {
     write_sync: String,
 
     #[clap(
-        short,
         long = "reuse-data",
         value_name = "reuse",
         takes_value = true,
@@ -230,7 +212,6 @@ struct ControlOpt {
     reuse_data: String,
 
     #[clap(
-        short,
         long = "target-file-size",
         value_name = "size",
         takes_value = true,
@@ -240,7 +221,6 @@ struct ControlOpt {
     target_file_size: String,
 
     #[clap(
-        short,
         long = "purge-threshold",
         value_name = "size",
         takes_value = true,
@@ -250,7 +230,6 @@ struct ControlOpt {
     purge_threshold: String,
 
     #[clap(
-        short,
         long = "purge-rewrite-threshold",
         value_name = "size",
         takes_value = true,
@@ -260,7 +239,6 @@ struct ControlOpt {
     purge_rewrite_threshold: String,
 
     #[clap(
-        short,
         long = "purge-rewrite-garbage-ratio",
         value_name = "ratio",
         takes_value = true,
@@ -270,7 +248,6 @@ struct ControlOpt {
     purge_rewrite_garbage_ratio: String,
 
     #[clap(
-        short,
         long = "compression-threshold",
         value_name = "size",
         takes_value = true,
@@ -627,13 +604,21 @@ fn main() {
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     args.time = Duration::from_secs(opts.time.parse::<u64>().unwrap());
     args.regions = opts.regions.parse::<u64>().unwrap();
-    args.purge_interval = Duration::from_secs(opts.purge_interval.parse::<u64>().unwrap());
-    args.compact_ttl = Duration::from_secs(opts.compact_ttl.parse::<u64>().unwrap());
+    args.purge_interval = Duration::from_millis(opts.purge_interval.parse::<u64>().unwrap());
+
+    if let Some(ttl) = opts.compact_ttl {
+        args.compact_ttl = Duration::from_millis(ttl.parse::<u64>().unwrap());
+    }
+
     if args.compact_ttl.as_millis() > 0 {
         println!("Not supported");
         std::process::exit(1);
     }
-    args.compact_count = opts.compact_count.parse::<u64>().unwrap();
+
+    if let Some(count) = opts.compact_count {
+        args.compact_count = count.parse::<u64>().unwrap();
+    }
+
     args.force_compact_factor = opts.force_compact_factor.parse::<f32>().unwrap();
     args.write_threads = opts.write_threads.parse::<u64>().unwrap();
     args.write_ops_per_thread = opts.write_ops_per_thread.parse::<u64>().unwrap();

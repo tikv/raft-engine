@@ -26,8 +26,6 @@ pub enum Cmd {
         #[clap(
             short,
             long = "path",
-            required_unless_present = "file",
-            conflicts_with = "file",
             about = "Path of log file directory or specific log file"
         )]
         path: String,
