@@ -73,7 +73,7 @@ struct ControlOpt {
         value_name = "time[s]",
         about = "Set the stress test time"
     )]
-    time: String,
+    time: u64,
 
     #[clap(
         long = "regions",
@@ -81,7 +81,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_REGIONS),
         about = "Set the region count"
     )]
-    regions: String,
+    regions: u64,
 
     #[clap(
         long = "purge-interval",
@@ -90,7 +90,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()),
         about = "Set the interval to purge obsolete log files"
     )]
-    purge_interval: String,
+    purge_interval: u64,
 
     #[clap(
         long = "compact-ttl",
@@ -100,7 +100,7 @@ struct ControlOpt {
         required = false,
         about = "Compact log entries older than TTL"
     )]
-    compact_ttl: Option<String>,
+    compact_ttl: Option<u64>,
 
     #[clap(
         long = "compact-count",
@@ -110,7 +110,7 @@ struct ControlOpt {
         required = false,
         about = "Compact log entries exceeding this threshold"
     )]
-    compact_count: Option<String>,
+    compact_count: Option<u64>,
 
     #[clap(
         long = "force-compact-factor",
@@ -129,7 +129,7 @@ struct ControlOpt {
         },
         about = "Factor to shrink raft log during force compact"
     )]
-    force_compact_factor: String,
+    force_compact_factor: f32,
 
     #[clap(
         long = "write-threads",
@@ -137,7 +137,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_WRITE_THREADS),
         about = "Set the thread count for writing logs"
     )]
-    write_threads: String,
+    write_threads: u64,
 
     #[clap(
         long = "write-ops-per-thread",
@@ -146,7 +146,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
         about = "Set the per-thread OPS for read entry requests"
     )]
-    write_ops_per_thread: String,
+    write_ops_per_thread: u64,
 
     #[clap(
         long = "read-thread",
@@ -155,7 +155,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_READ_THREADS),
         about = "Set the thread count for reading logs"
     )]
-    read_threads: String,
+    read_threads: u64,
 
     #[clap(
         long = "read-ops-per-thread",
@@ -164,7 +164,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
         about = "Set the per-thread OPS for read entry requests"
     )]
-    read_ops_per_thread: String,
+    read_ops_per_thread: u64,
 
     #[clap(
         long = "entry-size",
@@ -173,7 +173,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_ENTRY_SIZE),
         about = "Set the average size of log entry"
     )]
-    entry_size: String,
+    entry_size: usize,
 
     #[clap(
         long = "write-entry-count",
@@ -182,7 +182,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT),
         about = "Set the average number of written entries of a region in a log batch"
     )]
-    write_entry_count: String,
+    write_entry_count: u64,
 
     #[clap(
         long = "write-region-count",
@@ -191,7 +191,7 @@ struct ControlOpt {
         default_value = formatcp!("{}", DEFAULT_WRITE_REGION_COUNT),
         about = "Set the average number of written regions in a log batch"
     )]
-    write_region_count: String,
+    write_region_count: u64,
 
     #[clap(
         long = "write-sync",
@@ -602,12 +602,12 @@ fn main() {
     config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio.parse::<f64>().unwrap();
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
-    args.time = Duration::from_secs(opts.time.parse::<u64>().unwrap());
-    args.regions = opts.regions.parse::<u64>().unwrap();
-    args.purge_interval = Duration::from_millis(opts.purge_interval.parse::<u64>().unwrap());
+    args.time = Duration::from_secs(opts.time);
+    args.regions = opts.regions;
+    args.purge_interval = Duration::from_millis(opts.purge_interval);
 
     if let Some(ttl) = opts.compact_ttl {
-        args.compact_ttl = Duration::from_millis(ttl.parse::<u64>().unwrap());
+        args.compact_ttl = Duration::from_millis(ttl);
     }
 
     if args.compact_ttl.as_millis() > 0 {
@@ -616,17 +616,17 @@ fn main() {
     }
 
     if let Some(count) = opts.compact_count {
-        args.compact_count = count.parse::<u64>().unwrap();
+        args.compact_count = count;
     }
 
-    args.force_compact_factor = opts.force_compact_factor.parse::<f32>().unwrap();
-    args.write_threads = opts.write_threads.parse::<u64>().unwrap();
-    args.write_ops_per_thread = opts.write_ops_per_thread.parse::<u64>().unwrap();
-    args.read_threads = opts.read_threads.parse::<u64>().unwrap();
-    args.read_ops_per_thread = opts.read_ops_per_thread.parse::<u64>().unwrap();
-    args.entry_size = opts.entry_size.parse::<usize>().unwrap();
-    args.write_entry_count = opts.write_entry_count.parse::<u64>().unwrap();
-    args.write_region_count = opts.write_region_count.parse::<u64>().unwrap();
+    args.force_compact_factor = opts.force_compact_factor;
+    args.write_threads = opts.write_threads;
+    args.write_ops_per_thread = opts.write_ops_per_thread;
+    args.read_threads = opts.read_threads;
+    args.read_ops_per_thread = opts.read_ops_per_thread;
+    args.entry_size = opts.entry_size;
+    args.write_entry_count = opts.write_entry_count;
+    args.write_region_count = opts.write_region_count;
     args.write_sync = opts.write_sync.parse::<bool>().unwrap();
     if !opts.reuse_data.parse::<bool>().unwrap() {
         // clean up existing log files
