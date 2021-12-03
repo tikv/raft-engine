@@ -33,7 +33,7 @@ impl MessageExt for MessageExtTyped {
 }
 
 const DEFAULT_TIME: Duration = Duration::from_secs(60);
-const DEFAULT_REGIONS: u64 = 1;
+const DEFAULT_REGIONS: u64 = 5;
 const DEFAULT_PURGE_INTERVAL: Duration = Duration::from_millis(10 * 1000);
 const DEFAULT_COMPACT_TTL: Duration = Duration::from_millis(0);
 const DEFAULT_COMPACT_COUNT: u64 = 0;
@@ -46,8 +46,7 @@ const DEFAULT_READ_OPS_PER_THREAD: u64 = 0;
 const DEFAULT_ENTRY_SIZE: usize = 1024;
 const DEFAULT_WRITE_ENTRY_COUNT: u64 = 10;
 const DEFAULT_WRITE_REGION_COUNT: u64 = 5;
-const DEFAULT_WRITE_SYNC: bool = true;
-const DEFAULT_REUSE_DATA: bool = false;
+const DEFAULT_WRITE_SYNC: bool = false;
 
 #[derive(Debug, Clone, Parser)]
 #[clap(
@@ -93,19 +92,8 @@ struct ControlOpt {
     purge_interval: u64,
 
     #[clap(
-        long = "compact-ttl",
-        value_name = "ttl[s]",
-        conflicts_with = "compact-count",
-        takes_value = true,
-        required = false,
-        about = "Compact log entries older than TTL"
-    )]
-    compact_ttl: Option<u64>,
-
-    #[clap(
         long = "compact-count",
         value_name = "n",
-        conflicts_with = "compact-ttl",
         takes_value = true,
         required = false,
         about = "Compact log entries exceeding this threshold"
@@ -194,22 +182,20 @@ struct ControlOpt {
     write_region_count: u64,
 
     #[clap(
-        long = "write-sync",
-        value_name = "sync",
+        long = "write-async",
+        value_name = "async",
         takes_value = true,
-        default_value = formatcp!("{}", DEFAULT_WRITE_SYNC),
-        about = "Whether to sync write raft logs"
+        about = "Whether to async write raft logs"
     )]
-    write_sync: String,
+    write_async: bool,
 
     #[clap(
         long = "reuse-data",
         value_name = "reuse",
         takes_value = true,
-        default_value = formatcp!("{}", DEFAULT_REUSE_DATA),
         about = "Whether to reuse existing data in specified path"
     )]
-    reuse_data: String,
+    reuse_data: bool,
 
     #[clap(
         long = "target-file-size",
@@ -272,7 +258,7 @@ struct TestArgs {
     entry_size: usize,
     write_entry_count: u64,
     write_region_count: u64,
-    write_sync: bool,
+    write_async: bool,
 }
 
 impl Default for TestArgs {
@@ -291,7 +277,7 @@ impl Default for TestArgs {
             entry_size: DEFAULT_ENTRY_SIZE,
             write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
             write_region_count: DEFAULT_WRITE_REGION_COUNT,
-            write_sync: DEFAULT_WRITE_SYNC,
+            write_async: DEFAULT_WRITE_SYNC,
         }
     }
 }
@@ -455,7 +441,7 @@ fn spawn_write(
                     // TODO(tabokie): compensate for slow requests
                     wait_til(&mut start, last + i);
                 }
-                if let Err(e) = engine.write(&mut log_batch, args.write_sync) {
+                if let Err(e) = engine.write(&mut log_batch, !args.write_async) {
                     println!("write error {:?} in thread {}", e, index);
                 }
                 let end = Instant::now();
@@ -606,15 +592,6 @@ fn main() {
     args.regions = opts.regions;
     args.purge_interval = Duration::from_millis(opts.purge_interval);
 
-    if let Some(ttl) = opts.compact_ttl {
-        args.compact_ttl = Duration::from_millis(ttl);
-    }
-
-    if args.compact_ttl.as_millis() > 0 {
-        println!("Not supported");
-        std::process::exit(1);
-    }
-
     if let Some(count) = opts.compact_count {
         args.compact_count = count;
     }
@@ -627,8 +604,8 @@ fn main() {
     args.entry_size = opts.entry_size;
     args.write_entry_count = opts.write_entry_count;
     args.write_region_count = opts.write_region_count;
-    args.write_sync = opts.write_sync.parse::<bool>().unwrap();
-    if !opts.reuse_data.parse::<bool>().unwrap() {
+    args.write_async = opts.write_async;
+    if !opts.reuse_data {
         // clean up existing log files
         let _ = std::fs::remove_dir_all(&config.dir);
     }
