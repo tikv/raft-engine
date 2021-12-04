@@ -2,57 +2,62 @@
 
 use std::path::Path;
 
-use structopt::StructOpt;
+use clap::{crate_authors, crate_version, AppSettings, Parser};
 
 use raft_engine::{Engine, Error, LogQueue, Result};
 
-#[derive(Debug, StructOpt)]
-#[structopt[name="basic"]]
+#[derive(Debug, Parser)]
+#[clap(
+    name = "basic",
+    author = crate_authors!(),
+    version = crate_version!(),
+    setting = AppSettings::DontCollapseArgsInUsage,
+)]
 struct ControlOpt {
     // sub command type
-    #[structopt[subcommand]]
+    #[clap(subcommand)]
     cmd: Option<Cmd>,
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Parser)]
 pub enum Cmd {
     /// dump out all operations in log files
     Dump {
-        #[structopt(
+        #[clap(
             short,
             long = "path",
-            help = "Path of log file directory or specific log file"
+            about = "Path of log file directory or specific log file"
         )]
         path: String,
 
         /// raft_group ids(optional), format: raft_groups_id1,raft_group_id2....
-        #[structopt(short, long, use_delimiter = true)]
+        #[clap(short, long, use_delimiter = true)]
         raft_groups: Vec<u64>,
     },
 
     /// check log files for logical errors
     Check {
         /// Path of directory
-        #[structopt(short, long)]
+        #[clap(short, long)]
         path: String,
     },
 
     /// check log files for logical errors
     Truncate {
         /// Path of raft-engine storage directory
-        #[structopt(short, long)]
+        #[clap(short, long)]
         path: String,
 
         /// check mode
-        #[structopt(short, long, possible_values = &["front", "back", "all"])]
+        #[clap(short, long, possible_values = &["front", "back", "all"])]
         mode: String,
 
         /// queue name
-        #[structopt(short, long, possible_values = &["append", "rewrite", "all"])]
+        #[clap(short, long, possible_values = &["append", "rewrite", "all"])]
         queue: String,
 
         /// raft_group ids(optional), format: raft_groups_id1,raft_group_id2....
-        #[structopt(short, long, use_delimiter = true)]
+        #[clap(short, long, use_delimiter = true)]
         raft_groups: Vec<u64>,
     },
 }
@@ -83,10 +88,6 @@ impl ControlOpt {
             } => self.truncate(path, mode, queue, raft_groups),
             Cmd::Check { path } => self.check(path),
         }
-    }
-
-    fn help() {
-        Self::clap().print_help().ok();
     }
 
     fn dump(&self, path: &str, raft_groups: &[u64]) -> Result<()> {
@@ -121,10 +122,9 @@ impl ControlOpt {
 }
 
 fn main() {
-    let opt = ControlOpt::from_args();
+    let opts: ControlOpt = ControlOpt::parse();
 
-    if let Err(e) = opt.validate_and_execute() {
+    if let Err(e) = opts.validate_and_execute() {
         println!("{:?}", e);
-        ControlOpt::help();
     }
 }
