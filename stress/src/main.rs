@@ -416,7 +416,7 @@ fn spawn_write(
             }
             while !shutdown.load(Ordering::Relaxed) {
                 // TODO(tabokie): scattering regions in one batch
-                let mut rid = thread_rng().gen_range(0, args.regions / args.write_threads)
+                let mut rid = thread_rng().gen_range(0..(args.regions / args.write_threads))
                     * args.write_threads
                     + index;
                 for _ in 0..args.write_region_count {
@@ -470,7 +470,7 @@ fn spawn_read(
                 None
             };
             while !shutdown.load(Ordering::Relaxed) {
-                let rid = thread_rng().gen_range(0, args.regions / args.read_threads)
+                let rid = thread_rng().gen_range(0..(args.regions / args.read_threads))
                     * args.read_threads
                     + index;
                 let mut start = Instant::now();
