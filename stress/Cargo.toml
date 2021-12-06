@@ -7,10 +7,10 @@ edition = "2018"
 [dependencies]
 clap = "3.0.0-beta.5"
 const_format = "0.2.13"
-hdrhistogram = "6.0"
+hdrhistogram = "7.4"
 parking_lot_core = "0.8"
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 raft-engine = { path = ".." }
-rand = "0.7"
-rand_distr = "0.3"
+rand = "0.8"
+rand_distr = "0.4"
 statistical = "1.0.0"

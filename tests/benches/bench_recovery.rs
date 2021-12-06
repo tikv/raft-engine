@@ -72,7 +72,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     while dir_size(&path).0 < cfg.total_size.0 {
         let mut batch = LogBatch::default();
         while batch.approximate_size() < cfg.batch_size.0 as usize {
-            let region_id = rng.gen_range(1, cfg.region_count + 1);
+            let region_id = rng.gen_range(1..cfg.region_count + 1);
             let mut item_size = 0;
             let mut entries = vec![];
             while item_size < cfg.item_size.0 {
