@@ -14,6 +14,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
+use crate::log_dumper::LogDumer;
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
@@ -356,7 +357,48 @@ where
         raft_groups: &[u64],
         file_builder: Arc<B>,
     ) -> Result<Vec<LogItem>> {
-        todo!()
+        Self::dump_log(path, raft_groups, file_builder)
+    }
+
+    pub fn dump_log(
+        path: &std::path::Path,
+        raft_groups: &[u64],
+        file_builder: Arc<B>,
+    ) -> Result<Vec<LogItem>> {
+        if !path.exists() {
+            return Err(Error::InvalidArgument(format!(
+                "raft-engine directory '{}' does not exist.",
+                path.to_str().unwrap()
+            )));
+        }
+
+        let cfg = if path.is_dir() {
+            Config {
+                dir: path.to_str().unwrap().to_owned(),
+                recovery_mode: RecoveryMode::TolerateAnyCorruption,
+                ..Default::default()
+            }
+        } else {
+            Config {
+                dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+                file_names: vec![path.file_name().unwrap().to_str().unwrap().to_owned()],
+                recovery_mode: RecoveryMode::TolerateAnyCorruption,
+                ..Default::default()
+            }
+        };
+
+        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
+        builder.scan()?;
+
+        let (mut append, rewrite) = builder.recover::<LogDumer>()?;
+        append.logs.extend(rewrite.logs);
+
+        let mut result = vec![];
+        append.logs.retain(|k, _| raft_groups.contains(k));
+        for (_, v) in append.logs {
+            result.extend(v);
+        }
+        Ok(result)
     }
 }
 

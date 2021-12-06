@@ -27,6 +27,10 @@ pub struct Config {
     /// Default: ""
     pub dir: String,
 
+    /// for tmp use and will not serialize to file
+    #[serde(skip_serializing)]
+    pub file_names: Vec<String>,
+
     /// How to deal with file corruption during recovery.
     ///
     /// Default: "tolerate-tail-corruption".
@@ -82,6 +86,7 @@ impl Default for Config {
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
+            file_names: vec![],
         }
     }
 }
