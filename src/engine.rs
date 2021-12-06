@@ -4,7 +4,6 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-use std::u64;
 
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
@@ -79,10 +78,9 @@ where
         builder.scan()?;
         let (append, rewrite) = builder.recover::<MemTableRecoverContext>()?;
         let pipe_log = Arc::new(builder.finish()?);
-        info!("Recovering raft logs takes {:?}", start.elapsed());
-
         rewrite.merge_append_context(append);
         let (memtables, stats) = rewrite.finish();
+        info!("Recovering raft logs takes {:?}", start.elapsed());
 
         let cfg = Arc::new(cfg);
         let purge_manager = PurgeManager::new(
@@ -111,7 +109,7 @@ where
     B: FileBuilder,
     P: PipeLog,
 {
-    /// Write the content of `log_batch` into the engine and return written bytes.
+    /// Writes the content of `log_batch` into the engine and returns written bytes.
     /// If `sync` is true, the write will be followed by a call to `fdatasync` on
     /// the log file.
     pub fn write(&self, log_batch: &mut LogBatch, mut sync: bool) -> Result<usize> {
@@ -133,7 +131,7 @@ where
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
-                        // TODO(tabokie)
+                        // TODO(tabokie): use Option<FileBlockHandle> instead.
                         Ok(FileBlockHandle {
                             id: FileId::new(LogQueue::Append, 0),
                             offset: 0,
@@ -144,7 +142,7 @@ where
                 }
                 if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                     panic!(
-                        "Cannot sync queue: {:?}, for there is an IO error raised: {}",
+                        "Cannot sync {:?} queue due to IO error: {}",
                         LogQueue::Append,
                         e
                     );
@@ -153,8 +151,8 @@ where
             writer.finish()?
         };
 
-        let end = if len > 0 {
-            let start = Instant::now();
+        let mut now = Instant::now();
+        if len > 0 {
             log_batch.finish_write(block_handle);
             self.memtables.apply(log_batch.drain(), LogQueue::Append);
             for listener in &self.listeners {
@@ -162,18 +160,15 @@ where
             }
             let end = Instant::now();
             ENGINE_WRITE_APPLY_DURATION_HISTOGRAM
-                .observe(end.saturating_duration_since(start).as_secs_f64());
-            end
-        } else {
-            Instant::now()
-        };
-
-        ENGINE_WRITE_DURATION_HISTOGRAM.observe(end.saturating_duration_since(start).as_secs_f64());
+                .observe(end.saturating_duration_since(now).as_secs_f64());
+            now = end;
+        }
+        ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
         ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
         Ok(len)
     }
 
-    /// Synchronize the Raft engine.
+    /// Synchronizes the Raft engine.
     pub fn sync(&self) -> Result<()> {
         // TODO(tabokie): use writer.
         self.pipe_log.maybe_sync(LogQueue::Append, true)
@@ -212,7 +207,6 @@ where
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         // TODO: Move this to a dedicated thread.
         self.stats.flush_metrics();
-
         self.purge_manager.purge_expired_files()
     }
 
@@ -314,7 +308,7 @@ where
     B: FileBuilder,
 {
     /// Returns a list of corrupted Raft groups, including their ids and last valid
-    /// log index. Head or tail corruption might not be detected.
+    /// log index. Head or tail corruption cannot be detected.
     pub fn consistency_check_with_file_builder(
         path: &Path,
         file_builder: Arc<B>,
