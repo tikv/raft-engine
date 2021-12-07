@@ -352,7 +352,6 @@ where
     }
 
     /// Dumps all operations.
-    #[allow(unused_variables)]
     pub fn dump_with_file_builder(
         path: &Path,
         raft_groups: &[u64],
@@ -389,7 +388,7 @@ where
         }
 
         let mut result = vec![];
-        log_map.retain(|k, _| raft_groups.contains(k));
+        log_map.retain(|k, _| raft_groups.is_empty() || raft_groups.contains(k));
         for (_, v) in log_map {
             result.extend(v);
         }
