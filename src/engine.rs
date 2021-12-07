@@ -388,27 +388,6 @@ where
             }
         }
 
-        // let cfg = if path.is_dir() {
-        //     Config {
-        //         dir: path.to_str().unwrap().to_owned(),
-        //         recovery_mode: RecoveryMode::TolerateAnyCorruption,
-        //         ..Default::default()
-        //     }
-        // } else {
-        //     Config {
-        //         dir: path.parent().unwrap().to_str().unwrap().to_owned(),
-        //         file_names: vec![path.file_name().unwrap().to_str().unwrap().to_owned()],
-        //         recovery_mode: RecoveryMode::TolerateAnyCorruption,
-        //         ..Default::default()
-        //     }
-        // };
-        //
-        // let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
-        // builder.scan()?;
-        //
-        // let (mut append, rewrite) = builder.recover::<LogDumer>()?;
-        // append.logs.extend(rewrite.logs);
-        //
         let mut result = vec![];
         log_map.retain(|k, _| raft_groups.contains(k));
         for (_, v) in log_map {
