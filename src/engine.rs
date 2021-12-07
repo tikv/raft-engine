@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
-use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
+use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
@@ -300,8 +299,8 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump(path: &Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
-        Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
+    pub fn dump(path: &Path) -> Result<LogItemReader<DefaultFileBuilder>> {
+        Self::dump_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 }
 
@@ -352,19 +351,7 @@ where
     }
 
     /// Dumps all operations.
-    pub fn dump_with_file_builder(
-        path: &Path,
-        raft_groups: &[u64],
-        file_builder: Arc<B>,
-    ) -> Result<Vec<LogItem>> {
-        Self::dump_log(path, raft_groups, file_builder)
-    }
-
-    pub fn dump_log(
-        path: &std::path::Path,
-        raft_groups: &[u64],
-        file_builder: Arc<B>,
-    ) -> Result<Vec<LogItem>> {
+    pub fn dump_with_file_builder(path: &Path, file_builder: Arc<B>) -> Result<LogItemReader<B>> {
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
                 "raft-engine directory or file '{}' does not exist.",
@@ -372,27 +359,11 @@ where
             )));
         }
 
-        let mut reader = if path.is_dir() {
-            LogItemReader::new_directory_reader(file_builder, path).unwrap()
+        if path.is_dir() {
+            LogItemReader::new_directory_reader(file_builder, path)
         } else {
-            LogItemReader::new_file_reader(file_builder, path).unwrap()
-        };
-
-        let mut log_map = HashMap::<u64, Vec<LogItem>>::default();
-        while let Some(Ok(item)) = reader.next() {
-            if let Some(value) = log_map.get_mut(&item.raft_group_id) {
-                value.push(item.clone());
-            } else {
-                log_map.insert(item.raft_group_id, vec![item.clone()]);
-            }
+            LogItemReader::new_file_reader(file_builder, path)
         }
-
-        let mut result = vec![];
-        log_map.retain(|k, _| raft_groups.is_empty() || raft_groups.contains(k));
-        for (_, v) in log_map {
-            result.extend(v);
-        }
-        Ok(result)
     }
 }
 

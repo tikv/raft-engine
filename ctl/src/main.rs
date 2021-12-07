@@ -91,13 +91,13 @@ impl ControlOpt {
     }
 
     fn dump(&self, path: &str, raft_groups: &[u64]) -> Result<()> {
-        let r = Engine::dump(Path::new(path), &raft_groups.to_vec())?;
+        let mut reader = Engine::dump(Path::new(path))?;
 
-        if r.is_empty() {
-            println!("No data");
-        } else {
-            println!("Raft entrys are as follows:\n");
-            r.iter().for_each(|entry| println!("{:?}", entry));
+        //TODO add parmater limit and offset
+        while let Some(Ok(item)) = reader.next() {
+            if raft_groups.is_empty() || raft_groups.contains(&item.raft_group_id) {
+                println!("{:?}", item)
+            }
         }
 
         Ok(())
