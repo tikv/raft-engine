@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,9 +13,9 @@ use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
+use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
-use crate::log_dumper::LogDumer;
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
@@ -367,35 +368,50 @@ where
     ) -> Result<Vec<LogItem>> {
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
-                "raft-engine directory '{}' does not exist.",
+                "raft-engine directory or file '{}' does not exist.",
                 path.to_str().unwrap()
             )));
         }
 
-        let cfg = if path.is_dir() {
-            Config {
-                dir: path.to_str().unwrap().to_owned(),
-                recovery_mode: RecoveryMode::TolerateAnyCorruption,
-                ..Default::default()
-            }
+        let mut reader = if path.is_dir() {
+            LogItemReader::new_directory_reader(file_builder, path).unwrap()
         } else {
-            Config {
-                dir: path.parent().unwrap().to_str().unwrap().to_owned(),
-                file_names: vec![path.file_name().unwrap().to_str().unwrap().to_owned()],
-                recovery_mode: RecoveryMode::TolerateAnyCorruption,
-                ..Default::default()
-            }
+            LogItemReader::new_file_reader(file_builder, path).unwrap()
         };
 
-        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
-        builder.scan()?;
+        let mut log_map = HashMap::<u64, Vec<LogItem>>::default();
+        while let Some(Ok(item)) = reader.next() {
+            if let Some(value) = log_map.get_mut(&item.raft_group_id) {
+                value.push(item.clone());
+            } else {
+                log_map.insert(item.raft_group_id, vec![item.clone()]);
+            }
+        }
 
-        let (mut append, rewrite) = builder.recover::<LogDumer>()?;
-        append.logs.extend(rewrite.logs);
-
+        // let cfg = if path.is_dir() {
+        //     Config {
+        //         dir: path.to_str().unwrap().to_owned(),
+        //         recovery_mode: RecoveryMode::TolerateAnyCorruption,
+        //         ..Default::default()
+        //     }
+        // } else {
+        //     Config {
+        //         dir: path.parent().unwrap().to_str().unwrap().to_owned(),
+        //         file_names: vec![path.file_name().unwrap().to_str().unwrap().to_owned()],
+        //         recovery_mode: RecoveryMode::TolerateAnyCorruption,
+        //         ..Default::default()
+        //     }
+        // };
+        //
+        // let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
+        // builder.scan()?;
+        //
+        // let (mut append, rewrite) = builder.recover::<LogDumer>()?;
+        // append.logs.extend(rewrite.logs);
+        //
         let mut result = vec![];
-        append.logs.retain(|k, _| raft_groups.contains(k));
-        for (_, v) in append.logs {
+        log_map.retain(|k, _| raft_groups.contains(k));
+        for (_, v) in log_map {
             result.extend(v);
         }
         Ok(result)

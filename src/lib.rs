@@ -43,7 +43,6 @@ mod event_listener;
 mod file_builder;
 mod file_pipe_log;
 mod log_batch;
-mod log_dumper;
 mod memtable;
 mod metrics;
 mod pipe_log;

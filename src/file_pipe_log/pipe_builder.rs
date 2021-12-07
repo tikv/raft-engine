@@ -69,14 +69,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
                 let p = e.path();
-                if p.is_file()
-                    && (self.cfg.file_names.is_empty()
-                        || (!self.cfg.file_names.is_empty()
-                            && self
-                                .cfg
-                                .file_names
-                                .contains(&p.file_name().unwrap().to_str().unwrap().to_owned())))
-                {
+                if p.is_file() {
                     match FileId::parse_file_name(p.file_name().unwrap().to_str().unwrap()) {
                         Some(FileId {
                             queue: LogQueue::Append,
