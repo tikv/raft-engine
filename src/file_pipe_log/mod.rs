@@ -155,9 +155,6 @@ pub mod debug {
         use raft::eraftpb::Entry;
 
         #[test]
-        fn test_dump_file() {}
-
-        #[test]
         fn test_debug_file_basic() {
             let dir = tempfile::Builder::new()
                 .prefix("test_debug_file_basic")
