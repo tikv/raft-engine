@@ -6,9 +6,9 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
+pub use format::FileNameExt;
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
-pub use format::FileNameExt;
 
 /// Public utilities used only for debugging purposes.
 pub mod debug {
@@ -233,6 +233,7 @@ pub mod debug {
                     }
                 }
             }
+            assert!(reader.next().is_none())
         }
 
         #[test]

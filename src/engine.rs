@@ -404,12 +404,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_pipe_log::debug::build_file_writer;
+    use crate::file_pipe_log::FileNameExt;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
-    use crate::file_pipe_log::debug::build_file_writer;
-    use crate::file_pipe_log::FileNameExt;
     use std::path::PathBuf;
 
     type RaftLogEngine<B = DefaultFileBuilder> = Engine<B>;
@@ -1151,7 +1151,6 @@ mod tests {
             });
         }
     }
-
 
     #[test]
     fn test_dump_file_or_directory() {
