@@ -148,6 +148,7 @@ pub mod debug {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::engine::Engine;
         use crate::file_builder::DefaultFileBuilder;
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogQueue};
@@ -221,7 +222,51 @@ pub mod debug {
                     }
                 }
             }
-            assert!(reader.next().is_none())
+
+            //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
+            let raft_groups_ids = &[7u64; 1];
+            let mut dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            let mut total = 0;
+            while let Some(_) = dump_it.next() {
+                total = total + 1;
+            }
+            assert!(total == 8);
+
+            //dump dir with empty raft groups
+            let raft_groups_ids = &[];
+            let mut dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            let mut total = 0;
+            while let Some(_) = dump_it.next() {
+                total = total + 1;
+            }
+            assert!(total == 10);
+
+            //dump raft_groups_ids that does not exists
+            let raft_groups_ids = &[6u64; 1];
+            let mut dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            assert!(dump_it.next().is_none());
+
+            //dump file
+            let file_id = FileId {
+                queue: LogQueue::Rewrite,
+                seq: 7,
+            };
+
+            let raft_groups_ids = &[8u64; 1];
+            let mut dump_it = Engine::dump(
+                file_id.build_file_path(dir.path()).as_path(),
+                raft_groups_ids,
+            )
+            .unwrap();
+            assert!(dump_it.next().is_none());
+
+            //dump dir that does not exists
+            assert!(Engine::dump(Path::new("/not_exists_dir"), raft_groups_ids).is_err());
+
+            //dump file that does not exists
+            let mut not_exists_file = PathBuf::from(dir.as_ref());
+            not_exists_file.push("not_exists_file");
+            assert!(Engine::dump(not_exists_file.as_path(), raft_groups_ids).is_err());
         }
 
         #[test]

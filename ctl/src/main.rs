@@ -90,14 +90,10 @@ impl ControlOpt {
         }
     }
 
-    fn dump(&self, path: &str, raft_groups: &[u64]) -> Result<()> {
-        let mut reader = Engine::dump(Path::new(path))?;
-
-        //TODO add parmater limit and offset
-        while let Some(Ok(item)) = reader.next() {
-            if raft_groups.is_empty() || raft_groups.contains(&item.raft_group_id) {
-                println!("{:?}", item)
-            }
+    fn dump<'a>(&self, path: &str, raft_groups: &'a [u64]) -> Result<()> {
+        let mut it = Engine::dump(Path::new(path), raft_groups)?;
+        while let Some(item) = it.next() {
+            println!("{:?}", item)
         }
 
         Ok(())

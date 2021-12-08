@@ -14,7 +14,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
-use crate::log_batch::{Command, LogBatch, MessageExt};
+use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
@@ -299,8 +299,11 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump(path: &Path) -> Result<LogItemReader<DefaultFileBuilder>> {
-        Self::dump_with_file_builder(path, Arc::new(DefaultFileBuilder))
+    pub fn dump<'a>(
+        path: &Path,
+        raft_groups: &'a [u64],
+    ) -> Result<DumpIterator<'a, DefaultFileBuilder>> {
+        Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
     }
 }
 
@@ -351,7 +354,11 @@ where
     }
 
     /// Dumps all operations.
-    pub fn dump_with_file_builder(path: &Path, file_builder: Arc<B>) -> Result<LogItemReader<B>> {
+    pub fn dump_with_file_builder<'a>(
+        path: &Path,
+        raft_groups: &'a [u64],
+        file_builder: Arc<B>,
+    ) -> Result<DumpIterator<'a, B>> {
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
                 "raft-engine directory or file '{}' does not exist.",
@@ -359,11 +366,35 @@ where
             )));
         }
 
-        if path.is_dir() {
-            LogItemReader::new_directory_reader(file_builder, path)
+        let item_reader = if path.is_dir() {
+            LogItemReader::new_directory_reader(file_builder, path)?
         } else {
-            LogItemReader::new_file_reader(file_builder, path)
+            LogItemReader::new_file_reader(file_builder, path)?
+        };
+
+        return Ok(DumpIterator {
+            item_reader: item_reader,
+            raft_grous_ids: raft_groups,
+        });
+    }
+}
+
+pub struct DumpIterator<'a, B: FileBuilder> {
+    raft_grous_ids: &'a [u64],
+    item_reader: LogItemReader<B>,
+}
+
+impl<'a, B: FileBuilder> Iterator for DumpIterator<'a, B> {
+    type Item = LogItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(Ok(item)) = self.item_reader.next() {
+            if self.raft_grous_ids.is_empty() || self.raft_grous_ids.contains(&item.raft_group_id) {
+                return Some(item);
+            }
         }
+
+        return None;
     }
 }
 
