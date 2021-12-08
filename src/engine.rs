@@ -372,10 +372,10 @@ where
             LogItemReader::new_file_reader(file_builder, path)?
         };
 
-        return Ok(DumpIterator {
-            item_reader: item_reader,
+        Ok(DumpIterator {
             raft_grous_ids: raft_groups,
-        });
+            item_reader,
+        })
     }
 }
 
@@ -394,7 +394,7 @@ impl<'a, B: FileBuilder> Iterator for DumpIterator<'a, B> {
             }
         }
 
-        return None;
+        None
     }
 }
 

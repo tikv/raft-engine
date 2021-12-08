@@ -225,19 +225,19 @@ pub mod debug {
 
             //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
             let raft_groups_ids = &[7u64; 1];
-            let mut dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            let dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
             let mut total = 0;
-            while let Some(_) = dump_it.next() {
-                total = total + 1;
+            for _ in dump_it {
+                total += 1;
             }
             assert!(total == 8);
 
             //dump dir with empty raft groups
             let raft_groups_ids = &[];
-            let mut dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            let dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
             let mut total = 0;
-            while let Some(_) = dump_it.next() {
-                total = total + 1;
+            for _ in dump_it {
+                total += 1;
             }
             assert!(total == 10);
 

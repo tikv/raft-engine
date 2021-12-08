@@ -91,8 +91,8 @@ impl ControlOpt {
     }
 
     fn dump<'a>(&self, path: &str, raft_groups: &'a [u64]) -> Result<()> {
-        let mut it = Engine::dump(Path::new(path), raft_groups)?;
-        while let Some(item) = it.next() {
+        let it = Engine::dump(Path::new(path), raft_groups)?;
+        for item in it {
             println!("{:?}", item)
         }
 
