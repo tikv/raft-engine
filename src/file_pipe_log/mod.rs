@@ -7,6 +7,7 @@ mod pipe_builder;
 mod reader;
 
 pub use format::FileNameExt;
+pub use log_file::{build_file_writer, LogFd};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
 

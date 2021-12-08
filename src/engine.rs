@@ -404,8 +404,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_pipe_log::debug::build_file_writer;
-    use crate::file_pipe_log::FileNameExt;
+    use crate::file_pipe_log::build_file_writer;
+    use crate::file_pipe_log::{FileNameExt, LogFd};
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
@@ -1184,8 +1184,10 @@ mod tests {
         for bs in batches.iter_mut() {
             let file_path = file_id.build_file_path(dir.path());
             // Write a file.
+            let fd = LogFd::create(&file_path).unwrap();
             let mut writer =
-                build_file_writer(builder.as_ref(), &file_path, true /*create*/).unwrap();
+                build_file_writer(builder.as_ref(), &file_path, Arc::new(fd), true).unwrap();
+
             for batch in bs.iter_mut() {
                 let offset = writer.offset() as u64;
                 let len = batch.finish_populate(1 /*compression_threshold*/).unwrap();
@@ -1203,51 +1205,22 @@ mod tests {
         }
 
         //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
-        let raft_groups_ids = &[7u64; 1];
         let dump_it = Engine::dump(dir.path()).unwrap();
         let mut total = 0;
-        for item in dump_it {
-            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                total += 1;
-            }
-        }
-        assert!(total == 8);
-
-        //dump dir with empty raft groups
-        let raft_groups_ids = &[];
-        let dump_it = Engine::dump(dir.path()).unwrap();
-        let mut total = 0;
-        for item in dump_it {
-            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                total += 1;
-            }
+        for _ in dump_it {
+            total += 1;
         }
         assert!(total == 10);
-
-        //dump raft_groups_ids that does not exists
-        let raft_groups_ids = &[6u64; 1];
-        let dump_it = Engine::dump(dir.path()).unwrap();
-        let mut total = 0;
-        for item in dump_it {
-            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                total += 1;
-            }
-        }
-        assert!(total == 0);
 
         //dump file
         let file_id = FileId {
             queue: LogQueue::Rewrite,
             seq: 7,
         };
-
-        let raft_groups_ids = &[8u64; 1];
         let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
         let mut total = 0;
-        for item in dump_it {
-            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                total += 1;
-            }
+        for _ in dump_it {
+            total += 1;
         }
         assert!(total == 0);
 
