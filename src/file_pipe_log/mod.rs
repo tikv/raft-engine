@@ -225,26 +225,36 @@ pub mod debug {
 
             //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
             let raft_groups_ids = &[7u64; 1];
-            let dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            let dump_it = Engine::dump(dir.path()).unwrap();
             let mut total = 0;
-            for _ in dump_it {
-                total += 1;
+            for item in dump_it {
+                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                    total += 1;
+                }
             }
             assert!(total == 8);
 
             //dump dir with empty raft groups
             let raft_groups_ids = &[];
-            let dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
+            let dump_it = Engine::dump(dir.path()).unwrap();
             let mut total = 0;
-            for _ in dump_it {
-                total += 1;
+            for item in dump_it {
+                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                    total += 1;
+                }
             }
             assert!(total == 10);
 
             //dump raft_groups_ids that does not exists
             let raft_groups_ids = &[6u64; 1];
-            let mut dump_it = Engine::dump(dir.path(), raft_groups_ids).unwrap();
-            assert!(dump_it.next().is_none());
+            let dump_it = Engine::dump(dir.path()).unwrap();
+            let mut total = 0;
+            for item in dump_it {
+                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                    total += 1;
+                }
+            }
+            assert!(total == 0);
 
             //dump file
             let file_id = FileId {
@@ -253,20 +263,22 @@ pub mod debug {
             };
 
             let raft_groups_ids = &[8u64; 1];
-            let mut dump_it = Engine::dump(
-                file_id.build_file_path(dir.path()).as_path(),
-                raft_groups_ids,
-            )
-            .unwrap();
-            assert!(dump_it.next().is_none());
+            let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
+            let mut total = 0;
+            for item in dump_it {
+                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                    total += 1;
+                }
+            }
+            assert!(total == 0);
 
             //dump dir that does not exists
-            assert!(Engine::dump(Path::new("/not_exists_dir"), raft_groups_ids).is_err());
+            assert!(Engine::dump(Path::new("/not_exists_dir")).is_err());
 
             //dump file that does not exists
             let mut not_exists_file = PathBuf::from(dir.as_ref());
             not_exists_file.push("not_exists_file");
-            assert!(Engine::dump(not_exists_file.as_path(), raft_groups_ids).is_err());
+            assert!(Engine::dump(not_exists_file.as_path()).is_err());
         }
 
         #[test]

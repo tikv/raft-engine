@@ -299,11 +299,8 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump<'a>(
-        path: &Path,
-        raft_groups: &'a [u64],
-    ) -> Result<DumpIterator<'a, DefaultFileBuilder>> {
-        Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
+    pub fn dump(path: &Path) -> Result<DumpIterator<DefaultFileBuilder>> {
+        Self::dump_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 }
 
@@ -354,11 +351,7 @@ where
     }
 
     /// Dumps all operations.
-    pub fn dump_with_file_builder<'a>(
-        path: &Path,
-        raft_groups: &'a [u64],
-        file_builder: Arc<B>,
-    ) -> Result<DumpIterator<'a, B>> {
+    pub fn dump_with_file_builder(path: &Path, file_builder: Arc<B>) -> Result<DumpIterator<B>> {
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
                 "raft-engine directory or file '{}' does not exist.",
@@ -372,28 +365,21 @@ where
             LogItemReader::new_file_reader(file_builder, path)?
         };
 
-        Ok(DumpIterator {
-            raft_grous_ids: raft_groups,
-            item_reader,
-        })
+        Ok(DumpIterator { item_reader })
     }
 }
 
-pub struct DumpIterator<'a, B: FileBuilder> {
-    raft_grous_ids: &'a [u64],
+pub struct DumpIterator<B: FileBuilder> {
     item_reader: LogItemReader<B>,
 }
 
-impl<'a, B: FileBuilder> Iterator for DumpIterator<'a, B> {
+impl<B: FileBuilder> Iterator for DumpIterator<B> {
     type Item = LogItem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(Ok(item)) = self.item_reader.next() {
-            if self.raft_grous_ids.is_empty() || self.raft_grous_ids.contains(&item.raft_group_id) {
-                return Some(item);
-            }
+        if let Some(Ok(item)) = self.item_reader.next() {
+            return Some(item);
         }
-
         None
     }
 }

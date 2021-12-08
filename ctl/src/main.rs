@@ -91,9 +91,11 @@ impl ControlOpt {
     }
 
     fn dump<'a>(&self, path: &str, raft_groups: &'a [u64]) -> Result<()> {
-        let it = Engine::dump(Path::new(path), raft_groups)?;
+        let it = Engine::dump(Path::new(path))?;
         for item in it {
-            println!("{:?}", item)
+            if raft_groups.is_empty() || raft_groups.contains(&item.raft_group_id) {
+                println!("{:?}", item)
+            }
         }
 
         Ok(())
