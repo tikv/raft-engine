@@ -8,6 +8,7 @@ mod reader;
 
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
+pub use format::FileNameExt;
 
 /// Public utilities used only for debugging purposes.
 pub mod debug {
@@ -50,6 +51,17 @@ pub mod debug {
         files: VecDeque<(FileId, PathBuf)>,
         batch_reader: LogItemBatchFileReader<B>,
         items: VecDeque<LogItem>,
+    }
+
+    impl<B: FileBuilder> Iterator for LogItemReader<B> {
+        type Item = LogItem;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if let Some(Ok(item)) = self.next() {
+                return Some(item);
+            }
+            None
+        }
     }
 
     impl<B: FileBuilder> LogItemReader<B> {
@@ -148,7 +160,6 @@ pub mod debug {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::engine::Engine;
         use crate::file_builder::DefaultFileBuilder;
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogQueue};
@@ -222,63 +233,6 @@ pub mod debug {
                     }
                 }
             }
-
-            //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
-            let raft_groups_ids = &[7u64; 1];
-            let dump_it = Engine::dump(dir.path()).unwrap();
-            let mut total = 0;
-            for item in dump_it {
-                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                    total += 1;
-                }
-            }
-            assert!(total == 8);
-
-            //dump dir with empty raft groups
-            let raft_groups_ids = &[];
-            let dump_it = Engine::dump(dir.path()).unwrap();
-            let mut total = 0;
-            for item in dump_it {
-                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                    total += 1;
-                }
-            }
-            assert!(total == 10);
-
-            //dump raft_groups_ids that does not exists
-            let raft_groups_ids = &[6u64; 1];
-            let dump_it = Engine::dump(dir.path()).unwrap();
-            let mut total = 0;
-            for item in dump_it {
-                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                    total += 1;
-                }
-            }
-            assert!(total == 0);
-
-            //dump file
-            let file_id = FileId {
-                queue: LogQueue::Rewrite,
-                seq: 7,
-            };
-
-            let raft_groups_ids = &[8u64; 1];
-            let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
-            let mut total = 0;
-            for item in dump_it {
-                if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
-                    total += 1;
-                }
-            }
-            assert!(total == 0);
-
-            //dump dir that does not exists
-            assert!(Engine::dump(Path::new("/not_exists_dir")).is_err());
-
-            //dump file that does not exists
-            let mut not_exists_file = PathBuf::from(dir.as_ref());
-            not_exists_file.push("not_exists_file");
-            assert!(Engine::dump(not_exists_file.as_path()).is_err());
         }
 
         #[test]

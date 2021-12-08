@@ -299,7 +299,7 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump(path: &Path) -> Result<DumpIterator<DefaultFileBuilder>> {
+    pub fn dump(path: &Path) -> Result<LogItemReader<DefaultFileBuilder>> {
         Self::dump_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 }
@@ -351,7 +351,7 @@ where
     }
 
     /// Dumps all operations.
-    pub fn dump_with_file_builder(path: &Path, file_builder: Arc<B>) -> Result<DumpIterator<B>> {
+    pub fn dump_with_file_builder(path: &Path, file_builder: Arc<B>) -> Result<LogItemReader<B>> {
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
                 "raft-engine directory or file '{}' does not exist.",
@@ -359,13 +359,11 @@ where
             )));
         }
 
-        let item_reader = if path.is_dir() {
-            LogItemReader::new_directory_reader(file_builder, path)?
+        if path.is_dir() {
+            LogItemReader::new_directory_reader(file_builder, path)
         } else {
-            LogItemReader::new_file_reader(file_builder, path)?
-        };
-
-        Ok(DumpIterator { item_reader })
+            LogItemReader::new_file_reader(file_builder, path)
+        }
     }
 }
 
@@ -410,6 +408,9 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use crate::file_pipe_log::debug::build_file_writer;
+    use crate::file_pipe_log::FileNameExt;
+    use std::path::PathBuf;
 
     type RaftLogEngine<B = DefaultFileBuilder> = Engine<B>;
     impl<B: FileBuilder> RaftLogEngine<B> {
@@ -1149,5 +1150,114 @@ mod tests {
                 assert_eq!(d, &data);
             });
         }
+    }
+
+
+    #[test]
+    fn test_dump_file_or_directory() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_dump_file_or_directory")
+            .tempdir()
+            .unwrap();
+        let mut file_id = FileId {
+            queue: LogQueue::Rewrite,
+            seq: 7,
+        };
+        let builder = Arc::new(DefaultFileBuilder);
+        let entry_data = vec![b'x'; 1024];
+
+        let mut batches = vec![vec![LogBatch::default()]];
+        let mut batch = LogBatch::default();
+        batch
+            .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
+            .unwrap();
+        batch.add_command(7, Command::Clean);
+        batch.put(7, b"key".to_vec(), b"value".to_vec());
+        batch.delete(7, b"key2".to_vec());
+        batches.push(vec![batch.clone()]);
+        let mut batch2 = LogBatch::default();
+        batch2.put(8, b"key3".to_vec(), b"value".to_vec());
+        batch2
+            .add_entries::<Entry>(8, &generate_entries(5, 15, Some(&entry_data)))
+            .unwrap();
+        batches.push(vec![batch, batch2]);
+
+        for bs in batches.iter_mut() {
+            let file_path = file_id.build_file_path(dir.path());
+            // Write a file.
+            let mut writer =
+                build_file_writer(builder.as_ref(), &file_path, true /*create*/).unwrap();
+            for batch in bs.iter_mut() {
+                let offset = writer.offset() as u64;
+                let len = batch.finish_populate(1 /*compression_threshold*/).unwrap();
+                writer
+                    .write(batch.encoded_bytes(), 0 /*target_file_hint*/)
+                    .unwrap();
+                batch.finish_write(FileBlockHandle {
+                    id: file_id,
+                    offset,
+                    len,
+                });
+            }
+            writer.close().unwrap();
+            file_id.seq += 1;
+        }
+
+        //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
+        let raft_groups_ids = &[7u64; 1];
+        let dump_it = Engine::dump(dir.path()).unwrap();
+        let mut total = 0;
+        for item in dump_it {
+            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                total += 1;
+            }
+        }
+        assert!(total == 8);
+
+        //dump dir with empty raft groups
+        let raft_groups_ids = &[];
+        let dump_it = Engine::dump(dir.path()).unwrap();
+        let mut total = 0;
+        for item in dump_it {
+            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                total += 1;
+            }
+        }
+        assert!(total == 10);
+
+        //dump raft_groups_ids that does not exists
+        let raft_groups_ids = &[6u64; 1];
+        let dump_it = Engine::dump(dir.path()).unwrap();
+        let mut total = 0;
+        for item in dump_it {
+            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                total += 1;
+            }
+        }
+        assert!(total == 0);
+
+        //dump file
+        let file_id = FileId {
+            queue: LogQueue::Rewrite,
+            seq: 7,
+        };
+
+        let raft_groups_ids = &[8u64; 1];
+        let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
+        let mut total = 0;
+        for item in dump_it {
+            if raft_groups_ids.is_empty() || raft_groups_ids.contains(&item.raft_group_id) {
+                total += 1;
+            }
+        }
+        assert!(total == 0);
+
+        //dump dir that does not exists
+        assert!(Engine::dump(Path::new("/not_exists_dir")).is_err());
+
+        //dump file that does not exists
+        let mut not_exists_file = PathBuf::from(dir.as_ref());
+        not_exists_file.push("not_exists_file");
+        assert!(Engine::dump(not_exists_file.as_path()).is_err());
     }
 }
