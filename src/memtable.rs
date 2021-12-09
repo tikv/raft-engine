@@ -1708,4 +1708,28 @@ mod tests {
             sequential_global_stats.deleted_rewrite_entries(),
         );
     }
+
+    #[bench]
+    fn bench_memtable_single_put(b: &mut test::Bencher) {
+        let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));
+        let key = b"some_key".to_vec();
+        let value = vec![7; 12];
+        b.iter(move || {
+            memtable.put(key.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+        });
+    }
+
+    #[bench]
+    fn bench_memtable_triple_puts(b: &mut test::Bencher) {
+        let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));
+        let key0 = b"some_key0".to_vec();
+        let key1 = b"some_key1".to_vec();
+        let key2 = b"some_key2".to_vec();
+        let value = vec![7; 12];
+        b.iter(move || {
+            memtable.put(key0.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+            memtable.put(key1.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+            memtable.put(key2.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+        });
+    }
 }
