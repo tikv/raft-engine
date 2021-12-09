@@ -3,10 +3,9 @@
 use std::path::Path;
 
 use clap::{crate_authors, crate_version, AppSettings, Parser};
+use raft_engine::{Engine, Error, LogQueue, Result as EngineResult};
 
-use raft_engine::{Engine, Error, LogQueue, Result};
-
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
 #[clap(
     name = "basic",
     author = crate_authors!(),
@@ -26,7 +25,7 @@ pub enum Cmd {
         #[clap(
             short,
             long = "path",
-            about = "Path of log file directory or specific log file"
+            help = "Path of log file directory or specific log file"
         )]
         path: String,
 
@@ -72,7 +71,7 @@ fn convert_queue(queue: &str) -> Option<LogQueue> {
 }
 
 impl ControlOpt {
-    pub fn validate_and_execute(&self) -> Result<()> {
+    pub fn validate_and_execute(&self) -> EngineResult<()> {
         if self.cmd.is_none() {
             return Err(Error::InvalidArgument("subcommand is needed".to_owned()));
         }
@@ -90,7 +89,7 @@ impl ControlOpt {
         }
     }
 
-    fn dump<'a>(&self, path: &str, raft_groups: &'a [u64]) -> Result<()> {
+    fn dump<'a>(&self, path: &str, raft_groups: &'a [u64]) -> EngineResult<()> {
         let it = Engine::dump(Path::new(path))?;
         for item in it {
             if let Ok(v) = item {
@@ -106,11 +105,17 @@ impl ControlOpt {
         Ok(())
     }
 
-    fn truncate(&self, path: &str, mode: &str, queue: &str, raft_groups: &[u64]) -> Result<()> {
+    fn truncate(
+        &self,
+        path: &str,
+        mode: &str,
+        queue: &str,
+        raft_groups: &[u64],
+    ) -> EngineResult<()> {
         Engine::unsafe_truncate(Path::new(path), mode, convert_queue(queue), raft_groups)
     }
 
-    fn check(&self, path: &str) -> Result<()> {
+    fn check(&self, path: &str) -> EngineResult<()> {
         let r = Engine::consistency_check(Path::new(path))?;
 
         if r.is_empty() {
