@@ -475,7 +475,7 @@ impl LogItemBatch {
         compression_type: CompressionType,
     ) -> Result<LogItemBatch> {
         verify_checksum(buf)?;
-        *buf = &mut &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
+        *buf = &mut buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
         let mut items = LogItemBatch::with_capacity(count as usize);
         let mut entries_size = 0;
@@ -837,7 +837,7 @@ mod tests {
 
     fn decode_entries_from_bytes<M: MessageExt>(
         buf: &[u8],
-        entry_indexes: &[EntryIndex],
+        entry_indexes: &VecDeque<EntryIndex>,
         _encoded: bool,
     ) -> Vec<M::Entry> {
         let mut entries = Vec::with_capacity(entry_indexes.len());
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn test_entry_indexes_enc_dec() {
-        fn encode_and_decode(entry_indexes: &mut Vec<EntryIndex>) -> EntryIndexes {
+        fn encode_and_decode(entry_indexes: &mut VecDeque<EntryIndex>) -> EntryIndexes {
             let mut entries_size = 0;
             for idx in entry_indexes.iter_mut() {
                 idx.entry_offset = entries_size as u64;
@@ -869,7 +869,7 @@ mod tests {
             decoded_indexes
         }
 
-        let entry_indexes = vec![Vec::new(), generate_entry_indexes_opt(7, 17, None)];
+        let entry_indexes = vec![VecDeque::new(), generate_entry_indexes_opt(7, 17, None)];
         for mut idxs in entry_indexes.into_iter() {
             let decoded = encode_and_decode(&mut idxs);
             assert_eq!(idxs, decoded.0);
@@ -1063,8 +1063,8 @@ mod tests {
                 if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
                     if !entry_indexes.0.is_empty() {
                         let (begin, end) = (
-                            entry_indexes.0.first().unwrap().index,
-                            entry_indexes.0.last().unwrap().index + 1,
+                            entry_indexes.0.front().unwrap().index,
+                            entry_indexes.0.back().unwrap().index + 1,
                         );
                         let origin_entries = generate_entries(begin, end, Some(entry_data));
                         let decoded_entries =

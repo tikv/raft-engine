@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
 
 use raft::eraftpb::Entry;
@@ -22,7 +23,11 @@ pub fn generate_entries(begin_index: u64, end_index: u64, data: Option<&[u8]>) -
     v
 }
 
-pub fn generate_entry_indexes(begin_idx: u64, end_idx: u64, file_id: FileId) -> Vec<EntryIndex> {
+pub fn generate_entry_indexes(
+    begin_idx: u64,
+    end_idx: u64,
+    file_id: FileId,
+) -> VecDeque<EntryIndex> {
     generate_entry_indexes_opt(begin_idx, end_idx, Some(file_id))
 }
 
@@ -30,7 +35,7 @@ pub fn generate_entry_indexes_opt(
     begin_idx: u64,
     end_idx: u64,
     file_id: Option<FileId>,
-) -> Vec<EntryIndex> {
+) -> VecDeque<EntryIndex> {
     assert!(end_idx >= begin_idx);
     let mut ents_idx = vec![];
     for idx in begin_idx..end_idx {
@@ -43,7 +48,7 @@ pub fn generate_entry_indexes_opt(
 
         ents_idx.push(ent_idx);
     }
-    ents_idx
+    ents_idx.into()
 }
 
 /// Catch panic while suppressing default panic hook.

@@ -835,7 +835,7 @@ mod tests {
         memtable.consistency_check();
 
         // Empty.
-        memtable.append(Vec::new());
+        memtable.append(VecDeque::new());
 
         // Hole.
         assert!(
@@ -1728,6 +1728,21 @@ mod tests {
             memtable.put(key0.clone(), value.clone(), FileId::dummy(LogQueue::Append));
             memtable.put(key1.clone(), value.clone(), FileId::dummy(LogQueue::Append));
             memtable.put(key2.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+        });
+    }
+
+    #[bench]
+    fn bench_memtable_append(b: &mut test::Bencher) {
+        let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));
+        b.iter(move || {
+            let last_index = memtable.last_index().unwrap_or(0);
+            let entry_indexes = generate_entry_indexes(
+                last_index + 1,
+                last_index + 11,
+                FileId::dummy(LogQueue::Append),
+            );
+            memtable.append(entry_indexes);
+            memtable.compact_to(last_index + 1);
         });
     }
 }
