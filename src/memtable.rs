@@ -1,8 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::borrow::BorrowMut;
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -67,7 +66,7 @@ pub struct MemTable {
     rewrite_count: usize,
 
     // key -> (value, queue, file_id)
-    kvs: HashMap<Vec<u8>, (Vec<u8>, FileId)>,
+    kvs: BTreeMap<Vec<u8>, (Vec<u8>, FileId)>,
 
     global_stats: Arc<GlobalStats>,
 }
@@ -78,7 +77,7 @@ impl MemTable {
             region_id,
             entry_indexes: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
             rewrite_count: 0,
-            kvs: HashMap::default(),
+            kvs: BTreeMap::default(),
 
             global_stats,
         }
@@ -102,7 +101,7 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        for (key, (value, file_id)) in rhs.kvs.drain() {
+        while let Some((key, (value, file_id))) = rhs.kvs.pop_first() {
             self.put(key, value, file_id);
         }
 
@@ -125,7 +124,7 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        for (key, (value, file_id)) in rhs.kvs.drain() {
+        while let Some((key, (value, file_id))) = rhs.kvs.pop_first() {
             self.put(key, value, file_id);
         }
 
