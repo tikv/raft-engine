@@ -1,15 +1,6 @@
 version: 2
 updates:
-  # TODO: wait on https://github.com/dependabot/dependabot-core/issues/2178.
   - package-ecosystem: "cargo"
     directory: "/"
-    schedule:
-      interval: "daily"
-  - package-ecosystem: "cargo"
-    directory: "/ctl"
-    schedule:
-      interval: "daily"
-  - package-ecosystem: "cargo"
-    directory: "/stress"
     schedule:
       interval: "daily"
