@@ -61,7 +61,7 @@ struct ControlOpt {
     #[clap(
         long = "path",
         takes_value = true,
-        about = "Set the data path for Raft Engine"
+        help = "Set the data path for Raft Engine"
     )]
     path: String,
 
@@ -70,7 +70,7 @@ struct ControlOpt {
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_TIME.as_secs()),
         value_name = "time[s]",
-        about = "Set the stress test time"
+        help = "Set the stress test time"
     )]
     time: u64,
 
@@ -78,7 +78,7 @@ struct ControlOpt {
         long = "regions",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_REGIONS),
-        about = "Set the region count"
+        help = "Set the region count"
     )]
     regions: u64,
 
@@ -87,7 +87,7 @@ struct ControlOpt {
         value_name = "interval[s]",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_PURGE_INTERVAL.as_secs()),
-        about = "Set the interval to purge obsolete log files"
+        help = "Set the interval to purge obsolete log files"
     )]
     purge_interval: u64,
 
@@ -96,7 +96,7 @@ struct ControlOpt {
         value_name = "n",
         takes_value = true,
         required = false,
-        about = "Compact log entries exceeding this threshold"
+        help = "Compact log entries exceeding this threshold"
     )]
     compact_count: Option<u64>,
 
@@ -115,7 +115,7 @@ struct ControlOpt {
                 Ok(())
             }
         },
-        about = "Factor to shrink raft log during force compact"
+        help = "Factor to shrink raft log during force compact"
     )]
     force_compact_factor: f32,
 
@@ -123,7 +123,7 @@ struct ControlOpt {
         long = "write-threads",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_THREADS),
-        about = "Set the thread count for writing logs"
+        help = "Set the thread count for writing logs"
     )]
     write_threads: u64,
 
@@ -132,7 +132,7 @@ struct ControlOpt {
         value_name = "ops",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
-        about = "Set the per-thread OPS for read entry requests"
+        help = "Set the per-thread OPS for read entry requests"
     )]
     write_ops_per_thread: u64,
 
@@ -141,7 +141,7 @@ struct ControlOpt {
         value_name = "threads",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_THREADS),
-        about = "Set the thread count for reading logs"
+        help = "Set the thread count for reading logs"
     )]
     read_threads: u64,
 
@@ -150,7 +150,7 @@ struct ControlOpt {
         value_name = "ops",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
-        about = "Set the per-thread OPS for read entry requests"
+        help = "Set the per-thread OPS for read entry requests"
     )]
     read_ops_per_thread: u64,
 
@@ -159,7 +159,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_ENTRY_SIZE),
-        about = "Set the average size of log entry"
+        help = "Set the average size of log entry"
     )]
     entry_size: usize,
 
@@ -168,7 +168,7 @@ struct ControlOpt {
         value_name = "count",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_ENTRY_COUNT),
-        about = "Set the average number of written entries of a region in a log batch"
+        help = "Set the average number of written entries of a region in a log batch"
     )]
     write_entry_count: u64,
 
@@ -177,7 +177,7 @@ struct ControlOpt {
         value_name = "count",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_WRITE_REGION_COUNT),
-        about = "Set the average number of written regions in a log batch"
+        help = "Set the average number of written regions in a log batch"
     )]
     write_region_count: u64,
 
@@ -185,7 +185,7 @@ struct ControlOpt {
         long = "write-async",
         value_name = "async",
         takes_value = true,
-        about = "Whether to async write raft logs"
+        help = "Whether to async write raft logs"
     )]
     write_async: bool,
 
@@ -193,7 +193,7 @@ struct ControlOpt {
         long = "reuse-data",
         value_name = "reuse",
         takes_value = true,
-        about = "Whether to reuse existing data in specified path"
+        help = "Whether to reuse existing data in specified path"
     )]
     reuse_data: bool,
 
@@ -202,7 +202,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "128MB",
-        about = "Target log file size for Raft Engine"
+        help = "Target log file size for Raft Engine"
     )]
     target_file_size: String,
 
@@ -211,7 +211,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "10GB",
-        about = "Purge if log files are greater than this threshold"
+        help = "Purge if log files are greater than this threshold"
     )]
     purge_threshold: String,
 
@@ -220,7 +220,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "1GB",
-        about = "Purge if rewrite log files are greater than this threshold"
+        help = "Purge if rewrite log files are greater than this threshold"
     )]
     purge_rewrite_threshold: String,
 
@@ -229,7 +229,7 @@ struct ControlOpt {
         value_name = "ratio",
         takes_value = true,
         default_value = "0.6",
-        about = "Purge if rewrite log files garbage ratio is greater than this threshold"
+        help = "Purge if rewrite log files garbage ratio is greater than this threshold"
     )]
     purge_rewrite_garbage_ratio: String,
 
@@ -238,7 +238,7 @@ struct ControlOpt {
         value_name = "size",
         takes_value = true,
         default_value = "10GB",
-        about = "Compress log batch bigger than this threshold"
+        help = "Compress log batch bigger than this threshold"
     )]
     batch_compression_threshold: String,
 }
