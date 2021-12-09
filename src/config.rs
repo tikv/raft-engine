@@ -13,7 +13,10 @@ const MIN_RECOVERY_THREADS: usize = 1;
 pub enum RecoveryMode {
     AbsoluteConsistency,
     // For backward compatibility.
-    #[serde(alias = "tolerate-corrupted-tail-records")]
+    #[serde(
+        alias = "tolerate-corrupted-tail-records",
+        rename(serialize = "tolerate-corrupted-tail-records")
+    )]
     TolerateTailCorruption,
     TolerateAnyCorruption,
 }
@@ -135,14 +138,14 @@ mod tests {
     fn test_custom() {
         let custom = r#"
             dir = "custom_dir"
-            recovery-mode = "absolute-consistency"
+            recovery-mode = "tolerate-tail-corruption"
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
-        assert_eq!(load.recovery_mode, RecoveryMode::AbsoluteConsistency);
+        assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
@@ -177,10 +180,15 @@ mod tests {
 
     #[test]
     fn test_backward_compactibility() {
+        // Upgrade from older version.
         let old = r#"
             recovery-mode = "tolerate-corrupted-tail-records"
         "#;
         let mut load: Config = toml::from_str(old).unwrap();
         load.sanitize().unwrap();
+        // Downgrade to older version.
+        assert!(toml::to_string(&load)
+            .unwrap()
+            .contains("tolerate-corrupted-tail-records"));
     }
 }
