@@ -55,13 +55,10 @@ pub mod debug {
     }
 
     impl<B: FileBuilder> Iterator for LogItemReader<B> {
-        type Item = LogItem;
+        type Item = Result<LogItem>;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if let Some(Ok(item)) = self.next() {
-                return Some(item);
-            }
-            None
+            self.next()
         }
     }
 

@@ -1207,8 +1207,10 @@ mod tests {
         //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
         let dump_it = Engine::dump(dir.path()).unwrap();
         let mut total = 0;
-        for _ in dump_it {
-            total += 1;
+        for item in dump_it {
+            if item.is_ok() {
+                total += 1;
+            }
         }
         assert!(total == 10);
 
@@ -1219,8 +1221,10 @@ mod tests {
         };
         let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
         let mut total = 0;
-        for _ in dump_it {
-            total += 1;
+        for item in dump_it {
+            if item.is_ok() {
+                total += 1;
+            }
         }
         assert!(total == 0);
 
