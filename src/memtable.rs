@@ -186,29 +186,28 @@ impl MemTable {
         }
     }
 
-    pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
+    pub fn append(&mut self, mut entry_indexes: VecDeque<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
             self.prepare_append(entry_indexes[0].index, false, false);
             self.global_stats.add(LogQueue::Append, len);
-            // TODO: Optimize this.
-            self.entry_indexes.extend(entry_indexes);
+            self.entry_indexes.append(&mut entry_indexes);
         }
     }
 
     // This will only be called during recovery.
-    pub fn append_rewrite(&mut self, entry_indexes: Vec<EntryIndex>) {
+    pub fn append_rewrite(&mut self, mut entry_indexes: VecDeque<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
             debug_assert_eq!(self.rewrite_count, self.entry_indexes.len());
             self.prepare_append(entry_indexes[0].index, true, true);
             self.global_stats.add(LogQueue::Rewrite, len);
-            self.entry_indexes.extend(entry_indexes);
+            self.entry_indexes.append(&mut entry_indexes);
             self.rewrite_count = self.entry_indexes.len();
         }
     }
 
-    pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, gate: Option<FileSeq>) {
+    pub fn rewrite(&mut self, rewrite_indexes: VecDeque<EntryIndex>, gate: Option<FileSeq>) {
         if rewrite_indexes.is_empty() {
             return;
         }
@@ -240,8 +239,8 @@ impl MemTable {
         );
         let rewrite_pos = (rewrite_first - rewrite_indexes[0].index) as usize;
 
-        for (i, rindex) in rewrite_indexes[rewrite_pos..rewrite_pos + rewrite_len]
-            .iter()
+        for (i, rindex) in rewrite_indexes
+            .range(rewrite_pos..rewrite_pos + rewrite_len)
             .enumerate()
         {
             let index = &mut self.entry_indexes[i + pos];

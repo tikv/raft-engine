@@ -291,7 +291,11 @@ where
                     std::mem::swap(&mut take_entries, &mut entries);
                     let mut take_entry_indexes = entry_indexes.split_off(cursor + 1);
                     std::mem::swap(&mut take_entry_indexes, &mut entry_indexes);
-                    log_batch.add_raw_entries(region_id, take_entry_indexes, take_entries)?;
+                    log_batch.add_raw_entries(
+                        region_id,
+                        take_entry_indexes.into(),
+                        take_entries,
+                    )?;
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
                     total_size = 0;
                     cursor = 0;
@@ -300,7 +304,7 @@ where
                 }
             }
             if !entries.is_empty() {
-                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
+                log_batch.add_raw_entries(region_id, entry_indexes.into(), entries)?;
             }
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);

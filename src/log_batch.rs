@@ -8,6 +8,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
 use protobuf::parse_from_bytes;
 use protobuf::Message;
+use std::collections::VecDeque;
 
 use crate::codec::{self, NumberEncoder};
 use crate::memtable::EntryIndex;
@@ -63,12 +64,12 @@ type SliceReader<'a> = &'a [u8];
 // Format:
 // { count | first index | [ tail offsets ] }
 #[derive(Clone, Debug, PartialEq)]
-pub struct EntryIndexes(pub Vec<EntryIndex>);
+pub struct EntryIndexes(pub VecDeque<EntryIndex>);
 
 impl EntryIndexes {
     pub fn decode(buf: &mut SliceReader, entries_size: &mut usize) -> Result<Self> {
         let mut count = codec::decode_var_u64(buf)?;
-        let mut entry_indexes = Vec::with_capacity(count as usize);
+        let mut entry_indexes = VecDeque::with_capacity(count as usize);
         let mut index = 0;
         if count > 0 {
             index = codec::decode_var_u64(buf)?;
@@ -83,7 +84,7 @@ impl EntryIndexes {
                 ..Default::default()
             };
             *entries_size += entry_len;
-            entry_indexes.push(entry_index);
+            entry_indexes.push_back(entry_index);
             index += 1;
             count -= 1;
         }
@@ -247,7 +248,7 @@ pub enum LogItemContent {
 }
 
 impl LogItem {
-    pub fn new_entry_indexes(raft_group_id: u64, entry_indexes: Vec<EntryIndex>) -> LogItem {
+    pub fn new_entry_indexes(raft_group_id: u64, entry_indexes: VecDeque<EntryIndex>) -> LogItem {
         LogItem {
             raft_group_id,
             content: LogItemContent::EntryIndexes(EntryIndexes(entry_indexes)),
@@ -423,7 +424,7 @@ impl LogItemBatch {
         }
     }
 
-    pub fn add_entry_indexes(&mut self, region_id: u64, mut entry_indexes: Vec<EntryIndex>) {
+    pub fn add_entry_indexes(&mut self, region_id: u64, mut entry_indexes: VecDeque<EntryIndex>) {
         for ei in entry_indexes.iter_mut() {
             ei.entry_offset = self.entries_size as u64;
             self.entries_size += ei.entry_len;
@@ -574,12 +575,12 @@ impl LogBatch {
     ) -> Result<()> {
         debug_assert!(self.buf_state == BufState::Open);
 
-        let mut entry_indexes = Vec::with_capacity(entries.len());
+        let mut entry_indexes = VecDeque::with_capacity(entries.len());
         self.buf_state = BufState::Incomplete;
         for e in entries {
             let buf_offset = self.buf.len();
             e.write_to_vec(&mut self.buf)?;
-            entry_indexes.push(EntryIndex {
+            entry_indexes.push_back(EntryIndex {
                 index: M::index(e),
                 entry_len: self.buf.len() - buf_offset,
                 ..Default::default()
@@ -593,7 +594,7 @@ impl LogBatch {
     pub(crate) fn add_raw_entries(
         &mut self,
         region_id: u64,
-        mut entry_indexes: Vec<EntryIndex>,
+        mut entry_indexes: VecDeque<EntryIndex>,
         entries: Vec<Vec<u8>>,
     ) -> Result<()> {
         debug_assert!(entry_indexes.len() == entries.len());

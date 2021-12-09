@@ -28,8 +28,8 @@ impl ReplayMachine for ConsistencyChecker {
         for item in item_batch.iter() {
             if let LogItemContent::EntryIndexes(ents) = &item.content {
                 if !ents.0.is_empty() {
-                    let incoming_first_index = ents.0.first().unwrap().index;
-                    let incoming_last_index = ents.0.last().unwrap().index;
+                    let incoming_first_index = ents.0.front().unwrap().index;
+                    let incoming_last_index = ents.0.back().unwrap().index;
                     let index_range = self
                         .raft_groups
                         .entry(item.raft_group_id)
