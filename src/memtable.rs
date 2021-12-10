@@ -709,8 +709,8 @@ impl MemTableAccessor {
 
     #[inline]
     fn slot_index(mut id: u64) -> usize {
-        id = (id ^ (id >> 30)) * 0xbf58476d1ce4e5b9;
-        id = (id ^ (id >> 27)) * 0x94d049bb133111eb;
+        id = (id ^ (id >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        id = (id ^ (id >> 27)).wrapping_mul(0x94d049bb133111eb);
         // Assuming slot count is power of two.
         (id ^ (id >> 31)) as usize & (MEMTABLE_SLOT_COUNT - 1)
     }
