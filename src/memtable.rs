@@ -567,7 +567,7 @@ impl MemTableAccessor {
 
     pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
         let global_stats = self.global_stats.clone();
-        let mut memtables = self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT].write();
+        let mut memtables = self.slots[Self::slot_index(raft_group_id)].write();
         let memtable = memtables
             .entry(raft_group_id)
             .or_insert_with(|| Arc::new(RwLock::new(MemTable::new(raft_group_id, global_stats))));
@@ -575,20 +575,20 @@ impl MemTableAccessor {
     }
 
     pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
-        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+        self.slots[Self::slot_index(raft_group_id)]
             .read()
             .get(&raft_group_id)
             .cloned()
     }
 
     pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable>>) {
-        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+        self.slots[Self::slot_index(raft_group_id)]
             .write()
             .insert(raft_group_id, memtable);
     }
 
     pub fn remove(&self, raft_group_id: u64, queue: LogQueue) {
-        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+        self.slots[Self::slot_index(raft_group_id)]
             .write()
             .remove(&raft_group_id);
         if queue == LogQueue::Append {
@@ -704,6 +704,14 @@ impl MemTableAccessor {
                 },
             }
         }
+    }
+
+    #[inline]
+    fn slot_index(mut id: u64) -> usize {
+        id = (id ^ (id >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        id = (id ^ (id >> 27)).wrapping_mul(0x94d049bb133111eb);
+        // Assuming slot count is power of two.
+        (id ^ (id >> 31)) as usize & (MEMTABLE_SLOT_COUNT - 1)
     }
 }
 
