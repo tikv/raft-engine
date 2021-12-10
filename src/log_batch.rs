@@ -475,7 +475,7 @@ impl LogItemBatch {
         compression_type: CompressionType,
     ) -> Result<LogItemBatch> {
         verify_checksum(buf)?;
-        *buf = &mut buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
+        *buf = &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
         let mut items = LogItemBatch::with_capacity(count as usize);
         let mut entries_size = 0;

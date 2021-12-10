@@ -8,7 +8,52 @@ use std::time::Instant;
 use fail::fail_point;
 use parking_lot::{Condvar, Mutex};
 
-type Ptr<T> = Option<NonNull<T>>;
+struct Ptr<T>(Option<NonNull<T>>);
+
+unsafe impl<T: Send> Send for Ptr<T> {}
+
+impl<T> std::clone::Clone for Ptr<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Ptr(self.0)
+    }
+}
+
+impl<T> std::marker::Copy for Ptr<T> {}
+
+impl<T> PartialEq for Ptr<T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T> Ptr<T> {
+    #[inline]
+    fn null() -> Self {
+        Ptr(None)
+    }
+
+    #[inline]
+    fn from_mut(t: &mut T) -> Self {
+        unsafe { Ptr(Some(NonNull::new_unchecked(t))) }
+    }
+
+    #[inline]
+    fn as_mut<'a>(&self) -> &'a mut T {
+        unsafe { self.0.unwrap().as_mut() }
+    }
+
+    #[inline]
+    fn is_null(&self) -> bool {
+        self.0.is_none()
+    }
+
+    #[inline]
+    fn set_null(&mut self) {
+        self.0 = None;
+    }
+}
 
 pub struct Writer<P, O> {
     next: Cell<Ptr<Writer<P, O>>>,
@@ -19,11 +64,13 @@ pub struct Writer<P, O> {
     pub(crate) start_time: Instant,
 }
 
+unsafe impl<P: Send, O: Send> Send for Writer<P, O> {}
+
 impl<P, O> Writer<P, O> {
     // SAFETY: Data pointed by `payload` is owned by this writer during its lifetime.
     pub fn new(payload: &mut P, sync: bool, start_time: Instant) -> Self {
         Writer {
-            next: Cell::new(None),
+            next: Cell::new(Ptr::null()),
             payload: payload as *mut _,
             output: None,
             sync,
@@ -91,12 +138,12 @@ impl<'a, 'b, 'c, P, O> Iterator for WriterIter<'a, 'b, 'c, P, O> {
     type Item = &'a mut Writer<P, O>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.start.is_none() {
+        if self.start.is_null() {
             None
         } else {
-            let writer = unsafe { self.start.unwrap().as_mut() };
+            let writer = self.start.as_mut();
             if self.start == self.back {
-                self.start = None;
+                self.start.set_null();
             } else {
                 self.start = writer.get_next();
             }
@@ -118,9 +165,9 @@ unsafe impl<P: Send, O: Send> Send for WriteBarrierInner<P, O> {}
 impl<P, O> Default for WriteBarrierInner<P, O> {
     fn default() -> Self {
         WriteBarrierInner {
-            head: Cell::new(None),
-            tail: Cell::new(None),
-            pending_leader: Cell::new(None),
+            head: Cell::new(Ptr::null()),
+            tail: Cell::new(Ptr::null()),
+            pending_leader: Cell::new(Ptr::null()),
             pending_index: Cell::new(0),
         }
     }
@@ -147,15 +194,15 @@ impl<P, O> WriteBarrier<P, O> {
     /// become the leader of a set of writers, returns a `WriteGroup` that
     /// contains them, `writer` included.
     pub fn enter<'a>(&self, writer: &'a mut Writer<P, O>) -> Option<WriteGroup<'_, 'a, P, O>> {
-        let node = unsafe { Some(NonNull::new_unchecked(writer)) };
+        let node = Ptr::from_mut(writer);
         let mut inner = self.inner.lock();
-        if let Some(tail) = inner.tail.get() {
+        if let Ptr(Some(tail)) = inner.tail.get() {
             unsafe {
                 tail.as_ref().set_next(node);
             }
             inner.tail.set(node);
 
-            if inner.pending_leader.get().is_some() {
+            if inner.pending_leader.get().is_null() {
                 // follower of next write group.
                 self.follower_cvs[inner.pending_index.get() % 2].wait(&mut inner);
                 return None;
@@ -167,11 +214,11 @@ impl<P, O> WriteBarrier<P, O> {
                     .set(inner.pending_index.get().wrapping_add(1));
                 //
                 self.leader_cv.wait(&mut inner);
-                inner.pending_leader.set(None);
+                inner.pending_leader.set(Ptr::null());
             }
         } else {
             // leader of a empty write group. proceed directly.
-            debug_assert!(inner.pending_leader.get().is_none());
+            debug_assert!(inner.pending_leader.get().is_null());
             inner.head.set(node);
             inner.tail.set(node);
         }
@@ -189,17 +236,17 @@ impl<P, O> WriteBarrier<P, O> {
     fn leader_exit(&self) {
         fail_point!("write_barrier::leader_exit", |_| {});
         let inner = self.inner.lock();
-        if let Some(leader) = inner.pending_leader.get() {
+        if let Ptr(Some(leader)) = inner.pending_leader.get() {
             // wake up leader of next write group.
             self.leader_cv.notify_one();
             // wake up follower of current write group.
             self.follower_cvs[inner.pending_index.get().wrapping_sub(1) % 2].notify_all();
-            inner.head.set(Some(leader));
+            inner.head.set(Ptr(Some(leader)));
         } else {
             // wake up follower of current write group.
             self.follower_cvs[inner.pending_index.get() % 2].notify_all();
-            inner.head.set(None);
-            inner.tail.set(None);
+            inner.head.set(Ptr::null());
+            inner.tail.set(Ptr::null());
         }
     }
 }

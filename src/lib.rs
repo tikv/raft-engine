@@ -11,7 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(shrink_to)]
 #![feature(map_first_last)]
 #![feature(generic_associated_types)]
 #![feature(test)]
