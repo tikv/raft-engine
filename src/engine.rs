@@ -14,7 +14,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
-use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
+use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
@@ -367,21 +367,6 @@ where
     }
 }
 
-pub struct DumpIterator<B: FileBuilder> {
-    item_reader: LogItemReader<B>,
-}
-
-impl<B: FileBuilder> Iterator for DumpIterator<B> {
-    type Item = LogItem;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(Ok(item)) = self.item_reader.next() {
-            return Some(item);
-        }
-        None
-    }
-}
-
 pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<M::Entry>
 where
     M: MessageExt,
@@ -404,8 +389,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_pipe_log::build_file_writer;
-    use crate::file_pipe_log::{FileNameExt, LogFd};
+    use crate::file_pipe_log::FileNameExt;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
@@ -1158,11 +1142,6 @@ mod tests {
             .prefix("test_dump_file_or_directory")
             .tempdir()
             .unwrap();
-        let mut file_id = FileId {
-            queue: LogQueue::Rewrite,
-            seq: 7,
-        };
-        let builder = Arc::new(DefaultFileBuilder);
         let entry_data = vec![b'x'; 1024];
 
         let mut batches = vec![vec![LogBatch::default()]];
@@ -1181,27 +1160,19 @@ mod tests {
             .unwrap();
         batches.push(vec![batch, batch2]);
 
-        for bs in batches.iter_mut() {
-            let file_path = file_id.build_file_path(dir.path());
-            // Write a file.
-            let fd = LogFd::create(&file_path).unwrap();
-            let mut writer =
-                build_file_writer(builder.as_ref(), &file_path, Arc::new(fd), true).unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
 
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+        for bs in batches.iter_mut() {
             for batch in bs.iter_mut() {
-                let offset = writer.offset() as u64;
-                let len = batch.finish_populate(1 /*compression_threshold*/).unwrap();
-                writer
-                    .write(batch.encoded_bytes(), 0 /*target_file_hint*/)
-                    .unwrap();
-                batch.finish_write(FileBlockHandle {
-                    id: file_id,
-                    offset,
-                    len,
-                });
+                let _ = engine.write(batch, false);
             }
-            writer.close().unwrap();
-            file_id.seq += 1;
+
+            let _ = engine.sync();
         }
 
         //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
@@ -1217,7 +1188,7 @@ mod tests {
         //dump file
         let file_id = FileId {
             queue: LogQueue::Rewrite,
-            seq: 7,
+            seq: 1,
         };
         let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
         let mut total = 0;
