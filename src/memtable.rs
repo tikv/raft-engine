@@ -1,8 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::borrow::BorrowMut;
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -67,7 +66,7 @@ pub struct MemTable {
     rewrite_count: usize,
 
     // key -> (value, queue, file_id)
-    kvs: HashMap<Vec<u8>, (Vec<u8>, FileId)>,
+    kvs: BTreeMap<Vec<u8>, (Vec<u8>, FileId)>,
 
     global_stats: Arc<GlobalStats>,
 }
@@ -78,7 +77,7 @@ impl MemTable {
             region_id,
             entry_indexes: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
             rewrite_count: 0,
-            kvs: HashMap::default(),
+            kvs: BTreeMap::default(),
 
             global_stats,
         }
@@ -102,7 +101,7 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        for (key, (value, file_id)) in rhs.kvs.drain() {
+        while let Some((key, (value, file_id))) = rhs.kvs.pop_first() {
             self.put(key, value, file_id);
         }
 
@@ -125,7 +124,7 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        for (key, (value, file_id)) in rhs.kvs.drain() {
+        while let Some((key, (value, file_id))) = rhs.kvs.pop_first() {
             self.put(key, value, file_id);
         }
 
@@ -569,7 +568,7 @@ impl MemTableAccessor {
 
     pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
         let global_stats = self.global_stats.clone();
-        let mut memtables = self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT].write();
+        let mut memtables = self.slots[Self::slot_index(raft_group_id)].write();
         let memtable = memtables
             .entry(raft_group_id)
             .or_insert_with(|| Arc::new(RwLock::new(MemTable::new(raft_group_id, global_stats))));
@@ -577,20 +576,20 @@ impl MemTableAccessor {
     }
 
     pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
-        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+        self.slots[Self::slot_index(raft_group_id)]
             .read()
             .get(&raft_group_id)
             .cloned()
     }
 
     pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable>>) {
-        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+        self.slots[Self::slot_index(raft_group_id)]
             .write()
             .insert(raft_group_id, memtable);
     }
 
     pub fn remove(&self, raft_group_id: u64, queue: LogQueue) {
-        self.slots[raft_group_id as usize % MEMTABLE_SLOT_COUNT]
+        self.slots[Self::slot_index(raft_group_id)]
             .write()
             .remove(&raft_group_id);
         if queue == LogQueue::Append {
@@ -706,6 +705,14 @@ impl MemTableAccessor {
                 },
             }
         }
+    }
+
+    #[inline]
+    fn slot_index(mut id: u64) -> usize {
+        id = (id ^ (id >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        id = (id ^ (id >> 27)).wrapping_mul(0x94d049bb133111eb);
+        // Assuming slot count is power of two.
+        (id ^ (id >> 31)) as usize & (MEMTABLE_SLOT_COUNT - 1)
     }
 }
 
@@ -1707,5 +1714,29 @@ mod tests {
             merged_global_stats.deleted_rewrite_entries(),
             sequential_global_stats.deleted_rewrite_entries(),
         );
+    }
+
+    #[bench]
+    fn bench_memtable_single_put(b: &mut test::Bencher) {
+        let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));
+        let key = b"some_key".to_vec();
+        let value = vec![7; 12];
+        b.iter(move || {
+            memtable.put(key.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+        });
+    }
+
+    #[bench]
+    fn bench_memtable_triple_puts(b: &mut test::Bencher) {
+        let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));
+        let key0 = b"some_key0".to_vec();
+        let key1 = b"some_key1".to_vec();
+        let key2 = b"some_key2".to_vec();
+        let value = vec![7; 12];
+        b.iter(move || {
+            memtable.put(key0.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+            memtable.put(key1.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+            memtable.put(key2.clone(), value.clone(), FileId::dummy(LogQueue::Append));
+        });
     }
 }
