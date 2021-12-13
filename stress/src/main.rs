@@ -35,9 +35,8 @@ impl MessageExt for MessageExtTyped {
 const DEFAULT_TIME: Duration = Duration::from_secs(60);
 const DEFAULT_REGIONS: u64 = 5;
 const DEFAULT_PURGE_INTERVAL: Duration = Duration::from_millis(10 * 1000);
-const DEFAULT_COMPACT_TTL: Duration = Duration::from_millis(0);
 const DEFAULT_COMPACT_COUNT: u64 = 0;
-const DEFAULT_FORCE_COMPACT_FACTOR_STR: &str = "0.5";
+const DEFAULT_FORCE_COMPACT_FACTOR: f64 = 0.5;
 const DEFAULT_WRITE_THREADS: u64 = 1;
 const DEFAULT_WRITE_OPS_PER_THREAD: u64 = 0;
 const DEFAULT_READ_THREADS: u64 = 0;
@@ -106,7 +105,7 @@ struct ControlOpt {
         takes_value = true,
         default_value = "0.5",
         validator = |s| {
-            let factor = s.parse::<f32>().unwrap();
+            let factor = s.parse::<f64>().unwrap();
             if factor >= 1.0 {
                 Err(String::from("Factor must be smaller than 1.0"))
             } else if factor <= 0.0 {
@@ -117,7 +116,7 @@ struct ControlOpt {
         },
         help = "Factor to shrink raft log during force compact"
     )]
-    force_compact_factor: f32,
+    force_compact_factor: f64,
 
     #[clap(
         long = "write-threads",
@@ -131,13 +130,13 @@ struct ControlOpt {
         long = "write-ops-per-thread",
         value_name = "ops",
         takes_value = true,
-        default_value = formatcp!("{}", DEFAULT_READ_OPS_PER_THREAD),
+        default_value = formatcp!("{}", DEFAULT_WRITE_OPS_PER_THREAD),
         help = "Set the per-thread OPS for read entry requests"
     )]
     write_ops_per_thread: u64,
 
     #[clap(
-        long = "read-thread",
+        long = "read-threads",
         value_name = "threads",
         takes_value = true,
         default_value = formatcp!("{}", DEFAULT_READ_THREADS),
@@ -181,20 +180,10 @@ struct ControlOpt {
     )]
     write_region_count: u64,
 
-    #[clap(
-        long = "write-async",
-        value_name = "async",
-        takes_value = true,
-        help = "Whether to async write raft logs"
-    )]
-    write_async: bool,
+    #[clap(long = "write-without-sync", help = "Do not sync after write")]
+    write_without_sync: bool,
 
-    #[clap(
-        long = "reuse-data",
-        value_name = "reuse",
-        takes_value = true,
-        help = "Whether to reuse existing data in specified path"
-    )]
+    #[clap(long = "reuse-data", help = "Reuse existing data in specified path")]
     reuse_data: bool,
 
     #[clap(
@@ -231,13 +220,13 @@ struct ControlOpt {
         default_value = "0.6",
         help = "Purge if rewrite log files garbage ratio is greater than this threshold"
     )]
-    purge_rewrite_garbage_ratio: String,
+    purge_rewrite_garbage_ratio: f64,
 
     #[clap(
         long = "compression-threshold",
         value_name = "size",
         takes_value = true,
-        default_value = "10GB",
+        default_value = "8KB",
         help = "Compress log batch bigger than this threshold"
     )]
     batch_compression_threshold: String,
@@ -248,9 +237,8 @@ struct TestArgs {
     time: Duration,
     regions: u64,
     purge_interval: Duration,
-    compact_ttl: Duration,
     compact_count: u64,
-    force_compact_factor: f32,
+    force_compact_factor: f64,
     write_threads: u64,
     write_ops_per_thread: u64,
     read_threads: u64,
@@ -258,7 +246,7 @@ struct TestArgs {
     entry_size: usize,
     write_entry_count: u64,
     write_region_count: u64,
-    write_async: bool,
+    write_without_sync: bool,
 }
 
 impl Default for TestArgs {
@@ -267,9 +255,8 @@ impl Default for TestArgs {
             time: DEFAULT_TIME,
             regions: DEFAULT_REGIONS,
             purge_interval: DEFAULT_PURGE_INTERVAL,
-            compact_ttl: DEFAULT_COMPACT_TTL,
             compact_count: DEFAULT_COMPACT_COUNT,
-            force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR_STR.parse::<f32>().unwrap(),
+            force_compact_factor: DEFAULT_FORCE_COMPACT_FACTOR,
             write_threads: DEFAULT_WRITE_THREADS,
             write_ops_per_thread: DEFAULT_WRITE_OPS_PER_THREAD,
             read_threads: DEFAULT_READ_THREADS,
@@ -277,7 +264,7 @@ impl Default for TestArgs {
             entry_size: DEFAULT_ENTRY_SIZE,
             write_entry_count: DEFAULT_WRITE_ENTRY_COUNT,
             write_region_count: DEFAULT_WRITE_REGION_COUNT,
-            write_async: DEFAULT_WRITE_SYNC,
+            write_without_sync: DEFAULT_WRITE_SYNC,
         }
     }
 }
@@ -441,7 +428,7 @@ fn spawn_write(
                     // TODO(tabokie): compensate for slow requests
                     wait_til(&mut start, last + i);
                 }
-                if let Err(e) = engine.write(&mut log_batch, !args.write_async) {
+                if let Err(e) = engine.write(&mut log_batch, !args.write_without_sync) {
                     println!("write error {:?} in thread {}", e, index);
                 }
                 let end = Instant::now();
@@ -508,7 +495,7 @@ fn spawn_purge(
                             let first = engine.first_index(region).unwrap_or(0);
                             let last = engine.last_index(region).unwrap_or(0);
                             let compact_to = last
-                                - ((last - first + 1) as f32 * args.force_compact_factor) as u64
+                                - ((last - first + 1) as f64 * args.force_compact_factor) as u64
                                 + 1;
                             engine.compact_to(region, compact_to);
                         }
@@ -585,12 +572,12 @@ fn main() {
     config.purge_threshold = ReadableSize::from_str(&opts.purge_threshold).unwrap();
     config.purge_rewrite_threshold =
         Some(ReadableSize::from_str(&opts.purge_rewrite_threshold).unwrap());
-    config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio.parse::<f64>().unwrap();
+    config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio;
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
-    args.purge_interval = Duration::from_millis(opts.purge_interval);
+    args.purge_interval = Duration::from_secs(opts.purge_interval);
 
     if let Some(count) = opts.compact_count {
         args.compact_count = count;
@@ -604,7 +591,7 @@ fn main() {
     args.entry_size = opts.entry_size;
     args.write_entry_count = opts.write_entry_count;
     args.write_region_count = opts.write_region_count;
-    args.write_async = opts.write_async;
+    args.write_without_sync = opts.write_without_sync;
     if !opts.reuse_data {
         // clean up existing log files
         let _ = std::fs::remove_dir_all(&config.dir);

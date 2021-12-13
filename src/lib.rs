@@ -12,7 +12,7 @@
 // limitations under the License.
 
 #![feature(shrink_to)]
-#![feature(cell_update)]
+#![feature(map_first_last)]
 #![feature(generic_associated_types)]
 #![feature(test)]
 
