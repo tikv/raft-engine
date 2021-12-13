@@ -3,6 +3,7 @@
 use std::borrow::BorrowMut;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -16,7 +17,7 @@ use crate::log_batch::{
 };
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 use crate::util::slices_in_range;
-use crate::{Error, GlobalStats, Result};
+use crate::{Error, FileBuilder, GlobalStats, Result};
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 const SHRINK_CACHE_LIMIT: usize = 512;
@@ -760,6 +761,10 @@ impl ReplayMachine for MemTableRecoverContext {
         self.log_batch.merge(&mut rhs.log_batch.clone());
         self.memtables.apply(rhs.log_batch.drain(), queue);
         self.memtables.merge_newer_neighbor(&mut rhs.memtables);
+        Ok(())
+    }
+
+    fn end<B: FileBuilder>(&mut self, _path: &Path, _builder: Arc<B>) -> Result<()> {
         Ok(())
     }
 }

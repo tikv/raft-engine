@@ -24,6 +24,8 @@ pub trait ReplayMachine: Send + Default {
     fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
+
+    fn end<B: FileBuilder>(&mut self, path: &Path, builder: Arc<B>) -> Result<()>;
 }
 
 struct FileToRecover {
@@ -125,7 +127,10 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<S: ReplayMachine>(&mut self) -> Result<(S, S)> {
+    pub fn recover<S: ReplayMachine>(
+        &mut self,
+        queue: Option<LogQueue>,
+    ) -> Result<(Option<S>, Option<S>)> {
         let threads = self.cfg.recovery_threads;
         let (append_concurrency, rewrite_concurrency) =
             match (self.append_files.len(), self.rewrite_files.len()) {
@@ -143,24 +148,32 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .unwrap();
         let (append, rewrite) = pool.join(
             || {
-                Self::recover_queue(
-                    LogQueue::Append,
-                    self.file_builder.clone(),
-                    self.cfg.recovery_mode,
-                    append_concurrency,
-                    self.cfg.recovery_read_block_size.0 as usize,
-                    &self.append_files,
-                )
+                if queue.is_none() || queue.unwrap() == LogQueue::Append {
+                    Self::recover_queue(
+                        LogQueue::Append,
+                        self.file_builder.clone(),
+                        self.cfg.recovery_mode,
+                        append_concurrency,
+                        self.cfg.recovery_read_block_size.0 as usize,
+                        &self.append_files,
+                    )
+                } else {
+                    Ok(None)
+                }
             },
             || {
-                Self::recover_queue(
-                    LogQueue::Rewrite,
-                    self.file_builder.clone(),
-                    self.cfg.recovery_mode,
-                    rewrite_concurrency,
-                    self.cfg.recovery_read_block_size.0 as usize,
-                    &self.rewrite_files,
-                )
+                if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
+                    Self::recover_queue(
+                        LogQueue::Rewrite,
+                        self.file_builder.clone(),
+                        self.cfg.recovery_mode,
+                        rewrite_concurrency,
+                        self.cfg.recovery_read_block_size.0 as usize,
+                        &self.rewrite_files,
+                    )
+                } else {
+                    Ok(None)
+                }
             },
         );
 
@@ -180,9 +193,9 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         concurrency: usize,
         read_block_size: usize,
         files: &[FileToRecover],
-    ) -> Result<S> {
+    ) -> Result<Option<S>> {
         if concurrency == 0 || files.is_empty() {
-            return Ok(S::default());
+            return Ok(Some(S::default()));
         }
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks(max_chunk_size);
@@ -223,6 +236,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                             Err(e) => return Err(e),
                         }
                     }
+                    sequential_replay_machine.end(f.path.as_path(), file_builder.clone())?;
                 }
                 Ok(sequential_replay_machine)
             })
@@ -233,7 +247,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                     Ok(sequential_replay_machine_left)
                 },
             )?;
-        Ok(sequential_replay_machine)
+        Ok(Some(sequential_replay_machine))
     }
 
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {

@@ -2,6 +2,7 @@
 
 use log::warn;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 use crate::{util::ReadableSize, Result};
 
@@ -19,6 +20,17 @@ pub enum RecoveryMode {
     )]
     TolerateTailCorruption,
     TolerateAnyCorruption,
+}
+
+impl FromStr for RecoveryMode {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::prelude::rust_2015::Result<Self, Self::Err> {
+        match s {
+            "back" => Ok(RecoveryMode::TolerateTailCorruption),
+            _ => Ok(RecoveryMode::TolerateAnyCorruption),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -1,11 +1,13 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use hashbrown::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::{LogItemBatch, LogItemContent};
 use crate::pipe_log::{FileId, LogQueue};
-use crate::Result;
+use crate::{FileBuilder, Result};
 
 /// A `ConsistencyChecker` scans for log entry holes in a log queue. It will
 /// return a list of corrupted raft groups along with their last valid log index.
@@ -65,6 +67,10 @@ impl ReplayMachine for ConsistencyChecker {
         for (id, last_index) in rhs.corrupted.drain() {
             self.corrupted.entry(id).or_insert(last_index);
         }
+        Ok(())
+    }
+
+    fn end<B: FileBuilder>(&mut self, _path: &Path, _builder: Arc<B>) -> Result<()> {
         Ok(())
     }
 }

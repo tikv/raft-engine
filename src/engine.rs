@@ -2,6 +2,7 @@
 
 use std::marker::PhantomData;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,6 +19,7 @@ use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
+use crate::truncate::Truncater;
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
@@ -76,8 +78,11 @@ where
         let start = Instant::now();
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
         builder.scan()?;
-        let (append, rewrite) = builder.recover::<MemTableRecoverContext>()?;
+        let (_append, _rewrite) = builder.recover::<MemTableRecoverContext>(None)?;
         let pipe_log = Arc::new(builder.finish()?);
+        let rewrite = _rewrite.unwrap();
+        let append = _append.unwrap();
+
         rewrite.merge_append_context(append);
         let (memtables, stats) = rewrite.finish();
         info!("Recovering raft logs takes {:?}", start.elapsed());
@@ -327,9 +332,9 @@ where
         };
         let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
         builder.scan()?;
-        let (append, rewrite) = builder.recover::<ConsistencyChecker>()?;
-        let mut map = rewrite.finish();
-        for (id, index) in append.finish() {
+        let (append, rewrite) = builder.recover::<ConsistencyChecker>(None)?;
+        let mut map = rewrite.unwrap().finish();
+        for (id, index) in append.unwrap().finish() {
             map.entry(id).or_insert(index);
         }
         let mut list: Vec<(u64, u64)> = map.into_iter().collect();
@@ -346,7 +351,25 @@ where
         raft_groups: &[u64],
         file_builder: Arc<B>,
     ) -> Result<()> {
-        todo!();
+        if !path.exists() {
+            return Err(Error::InvalidArgument(format!(
+                "raft-engine directory '{}' does not exist.",
+                path.to_str().unwrap()
+            )));
+        }
+
+        let recovery_mode = RecoveryMode::from_str(mode)?;
+        let cfg = Config {
+            dir: path.to_str().unwrap().to_owned(),
+            recovery_mode,
+            ..Default::default()
+        };
+
+        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
+        builder.scan()?;
+
+        builder.recover::<Truncater>(queue)?;
+        Ok(())
     }
 
     /// Dumps all operations.

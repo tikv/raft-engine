@@ -49,6 +49,7 @@ mod pipe_log;
 mod purge;
 #[cfg(test)]
 mod test_util;
+mod truncate;
 mod util;
 mod write_barrier;
 
