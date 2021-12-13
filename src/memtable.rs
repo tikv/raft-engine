@@ -2,6 +2,7 @@
 
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 
 use fail::fail_point;
