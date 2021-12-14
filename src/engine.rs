@@ -1169,10 +1169,10 @@ mod tests {
             RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
         for bs in batches.iter_mut() {
             for batch in bs.iter_mut() {
-                let _ = engine.write(batch, false);
+                engine.write(batch, false).unwrap();
             }
 
-            let _ = engine.sync();
+            engine.sync().unwrap();
         }
 
         //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
