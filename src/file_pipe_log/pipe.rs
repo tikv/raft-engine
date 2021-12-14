@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
 use fs2::FileExt;
-use log::warn;
+use log::{warn, error};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
@@ -47,7 +47,9 @@ pub struct SinglePipe<B: FileBuilder> {
 impl<B: FileBuilder> Drop for SinglePipe<B> {
     fn drop(&mut self) {
         let mut active_file = self.active_file.lock();
-        active_file.writer.close().unwrap();
+        if Err(e) = active_file.writer.close() {
+            error!("error while closing sigle pipe: {}", e);
+        }
     }
 }
 
