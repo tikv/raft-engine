@@ -1177,7 +1177,11 @@ mod tests {
 
         //dump dir with raft groups. 8 element with raft groups 7 and 2 elements with raft groups 8
         let dump_it = Engine::dump(dir.path()).unwrap();
-        let total = dump_it.inspect(|i| {i.as_ref().unwrap();}).count();
+        let total = dump_it
+            .inspect(|i| {
+                i.as_ref().unwrap();
+            })
+            .count();
         assert!(total == 10);
 
         //dump file
@@ -1186,7 +1190,11 @@ mod tests {
             seq: 1,
         };
         let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
-        let total = dump_it.map(|i| {i.as_ref().unwrap();}).count();
+        let total = dump_it
+            .map(|i| {
+                i.as_ref().unwrap();
+            })
+            .count();
         assert!(0 == total);
 
         //dump dir that does not exists
