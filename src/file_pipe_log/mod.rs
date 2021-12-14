@@ -6,6 +6,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
+pub use format::FileNameExt;
 pub use log_file::LogFd;
 pub use log_file::{build_file_reader, build_file_writer};
 pub use log_file::{LogFileReader, LogFileWriter};
@@ -53,6 +54,14 @@ pub mod debug {
         files: VecDeque<(FileId, PathBuf)>,
         batch_reader: LogItemBatchFileReader<B>,
         items: VecDeque<LogItem>,
+    }
+
+    impl<B: FileBuilder> Iterator for LogItemReader<B> {
+        type Item = Result<LogItem>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.next()
+        }
     }
 
     impl<B: FileBuilder> LogItemReader<B> {

@@ -89,14 +89,17 @@ impl ControlOpt {
         }
     }
 
-    fn dump(&self, path: &str, raft_groups: &[u64]) -> EngineResult<()> {
-        let r = Engine::dump(Path::new(path), &raft_groups.to_vec())?;
-
-        if r.is_empty() {
-            println!("No data");
-        } else {
-            println!("Raft entrys are as follows:\n");
-            r.iter().for_each(|entry| println!("{:?}", entry));
+    fn dump<'a>(&self, path: &str, raft_groups: &'a [u64]) -> EngineResult<()> {
+        let it = Engine::dump(Path::new(path))?;
+        for item in it {
+            if let Ok(v) = item {
+                if raft_groups.is_empty() || raft_groups.contains(&v.raft_group_id) {
+                    println!("{:?}", v)
+                }
+            } else {
+                // output error message
+                println!("{:?}", item)
+            }
         }
 
         Ok(())

@@ -13,8 +13,9 @@ use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
+use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
-use crate::log_batch::{Command, LogBatch, LogItem, MessageExt};
+use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
@@ -303,8 +304,8 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         )
     }
 
-    pub fn dump(path: &Path, raft_groups: &[u64]) -> Result<Vec<LogItem>> {
-        Self::dump_with_file_builder(path, raft_groups, Arc::new(DefaultFileBuilder))
+    pub fn dump(path: &Path) -> Result<LogItemReader<DefaultFileBuilder>> {
+        Self::dump_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 }
 
@@ -373,13 +374,19 @@ where
     }
 
     /// Dumps all operations.
-    #[allow(unused_variables)]
-    pub fn dump_with_file_builder(
-        path: &Path,
-        raft_groups: &[u64],
-        file_builder: Arc<B>,
-    ) -> Result<Vec<LogItem>> {
-        todo!()
+    pub fn dump_with_file_builder(path: &Path, file_builder: Arc<B>) -> Result<LogItemReader<B>> {
+        if !path.exists() {
+            return Err(Error::InvalidArgument(format!(
+                "raft-engine directory or file '{}' does not exist.",
+                path.to_str().unwrap()
+            )));
+        }
+
+        if path.is_dir() {
+            LogItemReader::new_directory_reader(file_builder, path)
+        } else {
+            LogItemReader::new_file_reader(file_builder, path)
+        }
     }
 }
 
@@ -405,10 +412,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_pipe_log::FileNameExt;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::path::PathBuf;
 
     type RaftLogEngine<B = DefaultFileBuilder> = Engine<B>;
     impl<B: FileBuilder> RaftLogEngine<B> {
@@ -1148,5 +1157,76 @@ mod tests {
                 assert_eq!(d, &data);
             });
         }
+    }
+
+    #[test]
+    fn test_dump_file_or_directory() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_dump_file_or_directory")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 1024];
+
+        let mut batches = vec![vec![LogBatch::default()]];
+        let mut batch = LogBatch::default();
+        batch
+            .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
+            .unwrap();
+        batch.add_command(7, Command::Clean);
+        batch.put(7, b"key".to_vec(), b"value".to_vec());
+        batch.delete(7, b"key2".to_vec());
+        batches.push(vec![batch.clone()]);
+        let mut batch2 = LogBatch::default();
+        batch2.put(8, b"key3".to_vec(), b"value".to_vec());
+        batch2
+            .add_entries::<Entry>(8, &generate_entries(5, 15, Some(&entry_data)))
+            .unwrap();
+        batches.push(vec![batch, batch2]);
+
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+        for bs in batches.iter_mut() {
+            for batch in bs.iter_mut() {
+                engine.write(batch, false).unwrap();
+            }
+
+            engine.sync().unwrap();
+        }
+
+        drop(engine);
+        //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft groups 8
+        let dump_it = Engine::dump(dir.path()).unwrap();
+        let total = dump_it
+            .inspect(|i| {
+                i.as_ref().unwrap();
+            })
+            .count();
+        assert!(total == 10);
+
+        //dump file
+        let file_id = FileId {
+            queue: LogQueue::Rewrite,
+            seq: 1,
+        };
+        let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
+        let total = dump_it
+            .inspect(|i| {
+                i.as_ref().unwrap();
+            })
+            .count();
+        assert!(0 == total);
+
+        //dump dir that does not exists
+        assert!(Engine::dump(Path::new("/not_exists_dir")).is_err());
+
+        //dump file that does not exists
+        let mut not_exists_file = PathBuf::from(dir.as_ref());
+        not_exists_file.push("not_exists_file");
+        assert!(Engine::dump(not_exists_file.as_path()).is_err());
     }
 }
