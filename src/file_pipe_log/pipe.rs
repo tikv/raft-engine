@@ -44,6 +44,13 @@ pub struct SinglePipe<B: FileBuilder> {
     active_file: CachePadded<Mutex<ActiveFile<B>>>,
 }
 
+impl<B: FileBuilder> Drop for SinglePipe<B> {
+    fn drop(&mut self) {
+        let mut active_file = self.active_file.lock();
+        active_file.writer.close().unwrap();
+    }
+}
+
 impl<B: FileBuilder> SinglePipe<B> {
     pub fn open(
         cfg: &Config,
