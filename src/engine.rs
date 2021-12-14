@@ -1175,6 +1175,7 @@ mod tests {
             engine.sync().unwrap();
         }
 
+        drop(engine);
         //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft groups 8
         let dump_it = Engine::dump(dir.path()).unwrap();
         let total = dump_it
@@ -1191,7 +1192,7 @@ mod tests {
         };
         let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
         let total = dump_it
-            .map(|i| {
+            .inspect(|i| {
                 i.as_ref().unwrap();
             })
             .count();
