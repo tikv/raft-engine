@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 
 BASEDIR=$(dirname "$0")
-cd ${BASEDIR}
+cd "${BASEDIR}" || exit 1
 
-
-cargo fmt --all -- --check
+cargo fmt --all
 cargo clippy --all --all-targets -- -D clippy::all
 cargo clippy --features failpoints --all --all-targets -- -D clippy::all
 
