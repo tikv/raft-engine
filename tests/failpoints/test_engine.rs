@@ -383,7 +383,7 @@ fn test_truncate_files_in_directory() {
     for item in dump_it {
         let v = item.unwrap();
         if let LogItemContent::EntryIndexes(_) = v.content {
-            assert!(false, "should not come here...")
+            panic!("should not come here..");
         }
     }
 
@@ -393,7 +393,7 @@ fn test_truncate_files_in_directory() {
     for item in dump_it {
         let v = item.unwrap();
         if let LogItemContent::EntryIndexes(_) = v.content {
-            assert!(false, "should not come here...")
+            panic!("should not come here..");
         }
     }
 
@@ -424,7 +424,7 @@ fn create_log_with_hole(file_name: &str) -> TempDir {
     };
 
     fail::cfg("memtable::enable_hole", "return").unwrap();
-    let engine = Engine::open(cfg.clone()).unwrap();
+    let engine = Engine::open(cfg).unwrap();
     let entry_data = vec![b'x'; 1024];
     append(&engine, 7, 1, 11, Some(&entry_data));
     append(&engine, 7, 13, 15, Some(&entry_data));
