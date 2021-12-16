@@ -59,6 +59,7 @@ pub use event_listener::EventListener;
 pub use file_builder::FileBuilder;
 pub use log_batch::{Command, EntryIndexes, LogBatch, LogItemContent, MessageExt};
 pub use pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
+pub use truncate::TruncateMode;
 pub use util::ReadableSize;
 pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine<FileBuilder>;
 

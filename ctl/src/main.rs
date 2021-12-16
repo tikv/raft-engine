@@ -1,9 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use clap::{crate_authors, crate_version, AppSettings, Parser};
-use raft_engine::{Engine, Error, LogQueue, Result as EngineResult};
+use raft_engine::{Engine, Error, LogQueue, Result as EngineResult, TruncateMode};
 
 #[derive(Debug, clap::Parser)]
 #[clap(
@@ -112,7 +113,12 @@ impl ControlOpt {
         queue: &str,
         raft_groups: &[u64],
     ) -> EngineResult<()> {
-        Engine::unsafe_truncate(Path::new(path), mode, convert_queue(queue), raft_groups)
+        Engine::unsafe_truncate(
+            Path::new(path),
+            TruncateMode::from_str(mode)?,
+            convert_queue(queue),
+            raft_groups,
+        )
     }
 
     fn check(&self, path: &str) -> EngineResult<()> {

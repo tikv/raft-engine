@@ -28,10 +28,12 @@ pub trait ReplayMachine: Send + Default {
 
     fn end<B: FileBuilder>(
         &mut self,
-        path: &Path,
-        builder: Arc<B>,
-        truncate_params: &TruncateQueueParameter,
-    ) -> Result<()>;
+        _path: &Path,
+        _builder: Arc<B>,
+        _truncate_params: &TruncateQueueParameter,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct FileToRecover {

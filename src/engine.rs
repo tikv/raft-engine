@@ -2,7 +2,6 @@
 
 use std::marker::PhantomData;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -291,7 +290,7 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
 
     pub fn unsafe_truncate(
         path: &Path,
-        mode: &str,
+        mode: TruncateMode,
         queue: Option<LogQueue>,
         raft_groups: &[u64],
     ) -> Result<()> {
@@ -347,7 +346,7 @@ where
     #[allow(unused_variables)]
     pub fn unsafe_truncate_with_file_builder(
         path: &Path,
-        mode: &str,
+        mode: TruncateMode,
         queue: Option<LogQueue>,
         raft_groups: &[u64],
         file_builder: Arc<B>,
@@ -369,7 +368,7 @@ where
 
         builder.recover_or_truncate::<TruncateMachine>(Some(TruncateQueueParameter {
             queue,
-            truncate_mode: TruncateMode::from_str(mode)?,
+            truncate_mode: mode,
             raft_groups_ids: raft_groups,
         }))?;
 
