@@ -5,6 +5,7 @@ use std::sync::Arc;
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 use raft_engine::*;
+use tempfile::TempDir;
 
 use crate::util::*;
 
@@ -345,4 +346,89 @@ fn test_incomplete_purge() {
     assert_eq!(engine.file_span(LogQueue::Append).0, append_first);
     assert_eq!(engine.first_index(rid).unwrap(), 38);
     assert_eq!(engine.last_index(rid).unwrap(), 59);
+}
+
+#[test]
+fn test_truncate_files_in_directory() {
+    let dir = create_log_with_hole("test_mode_front");
+    Engine::unsafe_truncate(dir.path(), "front", Some(LogQueue::Append), &[7u64]).unwrap();
+    let dump_it = Engine::dump(dir.path()).unwrap();
+    for item in dump_it {
+        let v = item.unwrap();
+        if let LogItemContent::EntryIndexes(entry) = v.content {
+            let start_index = entry.0.first().unwrap().index;
+            let end_index = entry.0.last().unwrap().index;
+
+            assert!(start_index == 1);
+            assert!(end_index == 10);
+        }
+    }
+
+    let dir = create_log_with_hole("test_mode_back");
+    Engine::unsafe_truncate(dir.path(), "back", Some(LogQueue::Append), &[7u64]).unwrap();
+    let dump_it = Engine::dump(dir.path()).unwrap();
+    for item in dump_it {
+        let v = item.unwrap();
+        if let LogItemContent::EntryIndexes(entry) = v.content {
+            let start_index = entry.0.first().unwrap().index;
+            let end_index = entry.0.last().unwrap().index;
+            assert!(start_index == 17);
+            assert!(end_index == 21);
+        }
+    }
+
+    let dir = create_log_with_hole("test_mode_all");
+    Engine::unsafe_truncate(dir.path(), "all", Some(LogQueue::Append), &[7u64]).unwrap();
+    let dump_it = Engine::dump(dir.path()).unwrap();
+    for item in dump_it {
+        let v = item.unwrap();
+        if let LogItemContent::EntryIndexes(_) = v.content {
+            assert!(false, "should not come here...")
+        }
+    }
+
+    let dir = create_log_with_hole("test_empty_raft_groups");
+    Engine::unsafe_truncate(dir.path(), "all", Some(LogQueue::Append), &[]).unwrap();
+    let dump_it = Engine::dump(dir.path()).unwrap();
+    for item in dump_it {
+        let v = item.unwrap();
+        if let LogItemContent::EntryIndexes(_) = v.content {
+            assert!(false, "should not come here...")
+        }
+    }
+
+    let dir = create_log_with_hole("test_raft_groups_is_not_in_files");
+    Engine::unsafe_truncate(dir.path(), "all", Some(LogQueue::Append), &[9u64]).unwrap();
+    let dump_it = Engine::dump(dir.path()).unwrap();
+
+    let mut entry_count = 0;
+    for item in dump_it {
+        let v = item.unwrap();
+        if let LogItemContent::EntryIndexes(_) = v.content {
+            entry_count += 1;
+        }
+    }
+
+    assert!(entry_count == 3);
+}
+
+fn create_log_with_hole(file_name: &str) -> TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix(file_name)
+        .tempdir()
+        .unwrap();
+
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+
+    fail::cfg("memtable::enable_hole", "return").unwrap();
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let entry_data = vec![b'x'; 1024];
+    append(&engine, 7, 1, 11, Some(&entry_data));
+    append(&engine, 7, 13, 15, Some(&entry_data));
+    append(&engine, 7, 17, 22, Some(&entry_data));
+    drop(engine);
+    dir
 }

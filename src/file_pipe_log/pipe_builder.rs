@@ -13,6 +13,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::truncate::TruncateQueueParamter;
 use crate::Result;
 
 use super::format::FileNameExt;
@@ -25,7 +26,12 @@ pub trait ReplayMachine: Send + Default {
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 
-    fn end<B: FileBuilder>(&mut self, path: &Path, builder: Arc<B>) -> Result<()>;
+    fn end<B: FileBuilder>(
+        &mut self,
+        path: &Path,
+        builder: Arc<B>,
+        truncate_params: &TruncateQueueParamter,
+    ) -> Result<()>;
 }
 
 struct FileToRecover {
@@ -127,9 +133,9 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<S: ReplayMachine>(
+    pub fn recover_or_truncate<S: ReplayMachine>(
         &mut self,
-        queue: Option<LogQueue>,
+        truncate_params: Option<TruncateQueueParamter>,
     ) -> Result<(Option<S>, Option<S>)> {
         let threads = self.cfg.recovery_threads;
         let (append_concurrency, rewrite_concurrency) =
@@ -148,28 +154,36 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .unwrap();
         let (append, rewrite) = pool.join(
             || {
-                if queue.is_none() || queue.unwrap() == LogQueue::Append {
-                    Self::recover_queue(
+                if truncate_params.is_none()
+                    || truncate_params.unwrap().queue.is_none()
+                    || truncate_params.unwrap().queue.unwrap() == LogQueue::Append
+                {
+                    Self::recover_or_truncate_queue(
                         LogQueue::Append,
                         self.file_builder.clone(),
                         self.cfg.recovery_mode,
                         append_concurrency,
                         self.cfg.recovery_read_block_size.0 as usize,
                         &self.append_files,
+                        &truncate_params,
                     )
                 } else {
                     Ok(None)
                 }
             },
             || {
-                if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
-                    Self::recover_queue(
+                if truncate_params.is_none()
+                    || truncate_params.unwrap().queue.is_none()
+                    || truncate_params.unwrap().queue.unwrap() == LogQueue::Append
+                {
+                    Self::recover_or_truncate_queue(
                         LogQueue::Rewrite,
                         self.file_builder.clone(),
                         self.cfg.recovery_mode,
                         rewrite_concurrency,
                         self.cfg.recovery_read_block_size.0 as usize,
                         &self.rewrite_files,
+                        &truncate_params,
                     )
                 } else {
                     Ok(None)
@@ -186,13 +200,14 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         DualPipes::open(&self.cfg.dir, appender, rewriter)
     }
 
-    fn recover_queue<S: ReplayMachine>(
+    fn recover_or_truncate_queue<S: ReplayMachine>(
         queue: LogQueue,
         file_builder: Arc<B>,
         recovery_mode: RecoveryMode,
         concurrency: usize,
         read_block_size: usize,
         files: &[FileToRecover],
+        truncate_params: &Option<TruncateQueueParamter>,
     ) -> Result<Option<S>> {
         if concurrency == 0 || files.is_empty() {
             return Ok(Some(S::default()));
@@ -236,7 +251,14 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                             Err(e) => return Err(e),
                         }
                     }
-                    sequential_replay_machine.end(f.path.as_path(), file_builder.clone())?;
+
+                    if truncate_params.is_some() {
+                        sequential_replay_machine.end(
+                            f.path.as_path(),
+                            file_builder.clone(),
+                            &truncate_params.unwrap(),
+                        )?;
+                    }
                 }
                 Ok(sequential_replay_machine)
             })

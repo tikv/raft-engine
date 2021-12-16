@@ -15,6 +15,7 @@ use crate::log_batch::{
     OpType,
 };
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
+use crate::truncate::TruncateQueueParamter;
 use crate::util::slices_in_range;
 use crate::{Error, FileBuilder, GlobalStats, Result};
 
@@ -343,6 +344,17 @@ impl MemTable {
                 if allow_hole {
                     self.unsafe_truncate_back(first, 0, last);
                 } else {
+                    #[cfg(feature = "failpoints")]
+                    {
+                        let enable_hole = || {
+                            fail::fail_point!("memtable::enable_hole", |_| true);
+                            false
+                        };
+
+                        if enable_hole() {
+                            return;
+                        }
+                    }
                     panic!("memtable {} has a hole", self.region_id);
                 }
             } else if first_index_to_add != last + 1 {
@@ -771,7 +783,12 @@ impl ReplayMachine for MemTableRecoverContext {
         Ok(())
     }
 
-    fn end<B: FileBuilder>(&mut self, _path: &Path, _builder: Arc<B>) -> Result<()> {
+    fn end<B: FileBuilder>(
+        &mut self,
+        _path: &Path,
+        _builder: Arc<B>,
+        _truncate_params: &TruncateQueueParamter,
+    ) -> Result<()> {
         Ok(())
     }
 }
