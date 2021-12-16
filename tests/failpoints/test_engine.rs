@@ -351,7 +351,7 @@ fn test_incomplete_purge() {
 #[test]
 fn test_truncate_files_in_directory() {
     let dir = create_log_with_hole("test_mode_front");
-    Engine::unsafe_truncate(dir.path(), "front", Some(LogQueue::Append), &[7u64]).unwrap();
+    Engine::unsafe_truncate(dir.path(), TruncateMode::Front, Some(LogQueue::Append), &[7u64]).unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
     for item in dump_it {
         let v = item.unwrap();
@@ -365,7 +365,7 @@ fn test_truncate_files_in_directory() {
     }
 
     let dir = create_log_with_hole("test_mode_back");
-    Engine::unsafe_truncate(dir.path(), "back", Some(LogQueue::Append), &[7u64]).unwrap();
+    Engine::unsafe_truncate(dir.path(), TruncateMode::Back, Some(LogQueue::Append), &[7u64]).unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
     for item in dump_it {
         let v = item.unwrap();
@@ -378,7 +378,7 @@ fn test_truncate_files_in_directory() {
     }
 
     let dir = create_log_with_hole("test_mode_all");
-    Engine::unsafe_truncate(dir.path(), "all", Some(LogQueue::Append), &[7u64]).unwrap();
+    Engine::unsafe_truncate(dir.path(), TruncateMode::All, Some(LogQueue::Append), &[7u64]).unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
     for item in dump_it {
         let v = item.unwrap();
@@ -388,7 +388,7 @@ fn test_truncate_files_in_directory() {
     }
 
     let dir = create_log_with_hole("test_empty_raft_groups");
-    Engine::unsafe_truncate(dir.path(), "all", Some(LogQueue::Append), &[]).unwrap();
+    Engine::unsafe_truncate(dir.path(), TruncateMode::All, Some(LogQueue::Append), &[]).unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
     for item in dump_it {
         let v = item.unwrap();
@@ -398,7 +398,7 @@ fn test_truncate_files_in_directory() {
     }
 
     let dir = create_log_with_hole("test_raft_groups_is_not_in_files");
-    Engine::unsafe_truncate(dir.path(), "all", Some(LogQueue::Append), &[9u64]).unwrap();
+    Engine::unsafe_truncate(dir.path(), TruncateMode::All, Some(LogQueue::Append), &[9u64]).unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
 
     let mut entry_count = 0;
