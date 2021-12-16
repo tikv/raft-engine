@@ -34,7 +34,10 @@ impl FromStr for TruncateMode {
             "front" => Ok(Front),
             "back" => Ok(Back),
             "all" => Ok(All),
-            _ => Err(InvalidArgument(format!("unsupported truncate mode {}, only support 'front', 'back', 'all'", s))),
+            _ => Err(InvalidArgument(format!(
+                "unsupported truncate mode {}, only support 'front', 'back', 'all'",
+                s
+            ))),
         }
     }
 }
