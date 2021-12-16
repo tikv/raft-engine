@@ -13,7 +13,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::truncate::TruncateQueueParamter;
+use crate::truncate::TruncateQueueParameter;
 use crate::Result;
 
 use super::format::FileNameExt;
@@ -30,7 +30,7 @@ pub trait ReplayMachine: Send + Default {
         &mut self,
         path: &Path,
         builder: Arc<B>,
-        truncate_params: &TruncateQueueParamter,
+        truncate_params: &TruncateQueueParameter,
     ) -> Result<()>;
 }
 
@@ -135,7 +135,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
 
     pub fn recover_or_truncate<S: ReplayMachine>(
         &mut self,
-        truncate_params: Option<TruncateQueueParamter>,
+        truncate_params: Option<TruncateQueueParameter>,
     ) -> Result<(Option<S>, Option<S>)> {
         let threads = self.cfg.recovery_threads;
         let (append_concurrency, rewrite_concurrency) =
@@ -207,7 +207,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         concurrency: usize,
         read_block_size: usize,
         files: &[FileToRecover],
-        truncate_params: &Option<TruncateQueueParamter>,
+        truncate_params: &Option<TruncateQueueParameter>,
     ) -> Result<Option<S>> {
         if concurrency == 0 || files.is_empty() {
             return Ok(Some(S::default()));

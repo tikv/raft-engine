@@ -20,7 +20,7 @@ use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::truncate::{TruncateMachine, TruncateMode, TruncateQueueParamter};
+use crate::truncate::{TruncateMachine, TruncateMode, TruncateQueueParameter};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
@@ -367,7 +367,7 @@ where
         let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
         builder.scan()?;
 
-        builder.recover_or_truncate::<TruncateMachine>(Some(TruncateQueueParamter {
+        builder.recover_or_truncate::<TruncateMachine>(Some(TruncateQueueParameter {
             queue,
             truncate_mode: TruncateMode::from_str(mode)?,
             raft_groups_ids: raft_groups,

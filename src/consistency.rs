@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::{LogItemBatch, LogItemContent};
 use crate::pipe_log::{FileId, LogQueue};
-use crate::truncate::TruncateQueueParamter;
+use crate::truncate::TruncateQueueParameter;
 use crate::{FileBuilder, Result};
 
 /// A `ConsistencyChecker` scans for log entry holes in a log queue. It will
@@ -75,7 +75,7 @@ impl ReplayMachine for ConsistencyChecker {
         &mut self,
         _path: &Path,
         _builder: Arc<B>,
-        _truncate_params: &TruncateQueueParamter,
+        _truncate_params: &TruncateQueueParameter,
     ) -> Result<()> {
         Ok(())
     }

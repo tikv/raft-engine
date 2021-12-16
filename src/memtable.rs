@@ -15,7 +15,7 @@ use crate::log_batch::{
     OpType,
 };
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-use crate::truncate::TruncateQueueParamter;
+use crate::truncate::TruncateQueueParameter;
 use crate::util::slices_in_range;
 use crate::{Error, FileBuilder, GlobalStats, Result};
 
@@ -787,7 +787,7 @@ impl ReplayMachine for MemTableRecoverContext {
         &mut self,
         _path: &Path,
         _builder: Arc<B>,
-        _truncate_params: &TruncateQueueParamter,
+        _truncate_params: &TruncateQueueParameter,
     ) -> Result<()> {
         Ok(())
     }

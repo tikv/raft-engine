@@ -30,17 +30,17 @@ impl FromStr for TruncateMode {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.to_lowercase().as_str() {
             "front" => Ok(Front),
             "back" => Ok(Back),
             "all" => Ok(All),
-            _ => Err(InvalidArgument(format!("unsupported truncate mode {}", s))),
+            _ => Err(InvalidArgument(format!("unsupported truncate mode {}, only support 'front', 'back', 'all'", s))),
         }
     }
 }
 
 #[derive(Clone, Copy)]
-pub struct TruncateQueueParamter<'a> {
+pub struct TruncateQueueParameter<'a> {
     pub queue: Option<LogQueue>,
     pub truncate_mode: TruncateMode,
     pub raft_groups_ids: &'a [u64],
@@ -66,7 +66,7 @@ impl ReplayMachine for TruncateMachine {
         &mut self,
         path: &Path,
         builder: Arc<B>,
-        truncate_params: &TruncateQueueParamter,
+        truncate_params: &TruncateQueueParameter,
     ) -> crate::Result<()> {
         let origin_name = path.to_str().unwrap();
         let truncate_file_name = origin_name.to_owned() + "_truncated";
@@ -92,7 +92,7 @@ impl TruncateMachine {
         &mut self,
         log_writer: &mut LogFileWriter<B>,
         log_reader: &mut LogFileReader<B>,
-        truncate_params: &TruncateQueueParamter,
+        truncate_params: &TruncateQueueParameter,
     ) -> crate::Result<()> {
         let mut batch = LogBatch::default();
         let mut region_id_to_index = HashMap::<u64, Vec<(Vec<EntryIndex>, Vec<Vec<u8>>)>>::new();
@@ -119,7 +119,6 @@ impl TruncateMachine {
                             let vec = vec![(entry_indexes.0.clone(), entrys)];
                             region_id_to_index.insert(raft_id, vec);
                         }
-                        //batch.add_raw_entries(raft_id, entry_indexes.0.clone(), entrys)?;
                     }
                     Command(cmd) => batch.add_command(raft_id, cmd.clone()),
                     Kv(kv) => match kv.op_type {
