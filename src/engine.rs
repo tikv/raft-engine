@@ -359,10 +359,8 @@ where
             )));
         }
 
-        let recovery_mode = RecoveryMode::from_str(mode)?;
         let cfg = Config {
             dir: path.to_str().unwrap().to_owned(),
-            recovery_mode,
             ..Default::default()
         };
 
