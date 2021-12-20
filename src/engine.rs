@@ -13,7 +13,7 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder};
+use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder, ReplayMachineBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
@@ -78,7 +78,10 @@ where
         let start = Instant::now();
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
         builder.scan()?;
-        let (_append, _rewrite) = builder.recover_or_truncate::<MemTableRecoverContext>(None)?;
+        let machine_builder = ReplayMachineBuilder {
+            truncate_params: None,
+        };
+        let (_append, _rewrite) = builder.recover::<MemTableRecoverContext>(&machine_builder)?;
         let pipe_log = Arc::new(builder.finish()?);
         let rewrite = _rewrite.unwrap();
         let append = _append.unwrap();
@@ -332,7 +335,10 @@ where
         };
         let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
         builder.scan()?;
-        let (append, rewrite) = builder.recover_or_truncate::<ConsistencyChecker>(None)?;
+        let machine_builder = ReplayMachineBuilder {
+            truncate_params: None,
+        };
+        let (append, rewrite) = builder.recover::<ConsistencyChecker>(&machine_builder)?;
         let mut map = rewrite.unwrap().finish();
         for (id, index) in append.unwrap().finish() {
             map.entry(id).or_insert(index);
@@ -366,11 +372,16 @@ where
         let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
         builder.scan()?;
 
-        builder.recover_or_truncate::<TruncateMachine>(Some(TruncateQueueParameter {
+        let parms = TruncateQueueParameter {
             queue,
             truncate_mode: mode,
-            raft_groups_ids: raft_groups,
-        }))?;
+            raft_groups_ids: raft_groups.to_vec(),
+        };
+
+        let machine_builder = ReplayMachineBuilder {
+            truncate_params: Some(parms),
+        };
+        builder.recover::<TruncateMachine>(&machine_builder)?;
 
         Ok(())
     }

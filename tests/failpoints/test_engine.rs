@@ -350,7 +350,7 @@ fn test_incomplete_purge() {
 
 #[test]
 fn test_truncate_files_in_directory() {
-    let dir = create_log_with_hole("test_mode_front");
+    let dir = create_log_with_hole("test_mode_front", true);
     Engine::unsafe_truncate(
         dir.path(),
         TruncateMode::Front,
@@ -370,7 +370,7 @@ fn test_truncate_files_in_directory() {
         }
     }
 
-    let dir = create_log_with_hole("test_mode_back");
+    let dir = create_log_with_hole("test_mode_back", true);
     Engine::unsafe_truncate(
         dir.path(),
         TruncateMode::Back,
@@ -389,7 +389,7 @@ fn test_truncate_files_in_directory() {
         }
     }
 
-    let dir = create_log_with_hole("test_mode_all");
+    let dir = create_log_with_hole("test_mode_all", true);
     Engine::unsafe_truncate(
         dir.path(),
         TruncateMode::All,
@@ -405,7 +405,7 @@ fn test_truncate_files_in_directory() {
         }
     }
 
-    let dir = create_log_with_hole("test_empty_raft_groups");
+    let dir = create_log_with_hole("test_empty_raft_groups", true);
     Engine::unsafe_truncate(dir.path(), TruncateMode::All, Some(LogQueue::Append), &[]).unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
     for item in dump_it {
@@ -415,7 +415,7 @@ fn test_truncate_files_in_directory() {
         }
     }
 
-    let dir = create_log_with_hole("test_raft_groups_is_not_in_files");
+    let dir = create_log_with_hole("test_raft_groups_is_not_in_files", true);
     Engine::unsafe_truncate(
         dir.path(),
         TruncateMode::All,
@@ -432,11 +432,29 @@ fn test_truncate_files_in_directory() {
             entry_count += 1;
         }
     }
+    assert!(entry_count == 3);
 
+    let dir = create_log_with_hole("test_files_that_does_not_needs_truncate", false);
+    Engine::unsafe_truncate(
+        dir.path(),
+        TruncateMode::All,
+        Some(LogQueue::Append),
+        &[7u64],
+    )
+        .unwrap();
+    let dump_it = Engine::dump(dir.path()).unwrap();
+
+    let mut entry_count = 0;
+    for item in dump_it {
+        let v = item.unwrap();
+        if let LogItemContent::EntryIndexes(_) = v.content {
+            entry_count += 1;
+        }
+    }
     assert!(entry_count == 3);
 }
 
-fn create_log_with_hole(file_name: &str) -> TempDir {
+fn create_log_with_hole(file_name: &str, with_hole: bool) -> TempDir {
     let dir = tempfile::Builder::new()
         .prefix(file_name)
         .tempdir()
@@ -450,9 +468,16 @@ fn create_log_with_hole(file_name: &str) -> TempDir {
     fail::cfg("memtable::enable_hole", "return").unwrap();
     let engine = Engine::open(cfg).unwrap();
     let entry_data = vec![b'x'; 1024];
-    append(&engine, 7, 1, 11, Some(&entry_data));
-    append(&engine, 7, 13, 15, Some(&entry_data));
-    append(&engine, 7, 17, 22, Some(&entry_data));
+    if with_hole {
+        append(&engine, 7, 1, 11, Some(&entry_data));
+        append(&engine, 7, 13, 15, Some(&entry_data));
+        append(&engine, 7, 17, 22, Some(&entry_data));
+    } else {
+        append(&engine, 7, 1, 11, Some(&entry_data));
+        append(&engine, 7, 11, 15, Some(&entry_data));
+        append(&engine, 7, 15, 22, Some(&entry_data));
+    }
+
     drop(engine);
     dir
 }

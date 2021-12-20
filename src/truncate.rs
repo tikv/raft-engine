@@ -8,7 +8,7 @@ use crate::log_batch::LogItemBatch;
 use crate::log_batch::LogItemContent::{Command, EntryIndexes, Kv};
 use crate::memtable::EntryIndex;
 use crate::truncate::TruncateMode::{All, Back, Front};
-use crate::{log_batch, FileBuilder, FileId, LogBatch, LogQueue};
+use crate::{log_batch, FileBuilder, FileId, LogBatch, LogItemContent, LogQueue};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 pub struct TruncateMachine {
     items: Vec<LogItemBatch>,
+    truncate_info: Option<TruncateQueueParameter>,
+    has_hole: bool,
+    raft_id_to_index: HashMap<u64, u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,21 +45,45 @@ impl FromStr for TruncateMode {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct TruncateQueueParameter<'a> {
+#[derive(Clone)]
+pub struct TruncateQueueParameter {
     pub queue: Option<LogQueue>,
     pub truncate_mode: TruncateMode,
-    pub raft_groups_ids: &'a [u64],
+    pub raft_groups_ids: Vec<u64>,
 }
 
 impl Default for TruncateMachine {
     fn default() -> Self {
-        Self { items: vec![] }
+        Self {
+            items: vec![],
+            truncate_info: None,
+            has_hole: false,
+            raft_id_to_index: Default::default(),
+        }
     }
 }
 
 impl ReplayMachine for TruncateMachine {
     fn replay(&mut self, item_batch: LogItemBatch, _file_id: FileId) -> crate::Result<()> {
+        for it in item_batch.iter() {
+            let raft_group_id = it.raft_group_id;
+            if let LogItemContent::EntryIndexes(entry) = &it.content {
+                let first_index = entry.0.first().unwrap().index;
+                let last_index = entry.0.last().unwrap().index;
+
+                if let Some(v) = self.raft_id_to_index.get(&raft_group_id) {
+                    let ids = &self.truncate_info.as_ref().unwrap().raft_groups_ids;
+                    let in_raft_groups = ids.is_empty() || ids.contains(&raft_group_id);
+                    if v + 1 != first_index && in_raft_groups {
+                        self.has_hole = true;
+                        break;
+                    }
+                }
+
+                self.raft_id_to_index.insert(raft_group_id, last_index);
+            }
+        }
+
         self.items.push(item_batch);
         Ok(())
     }
@@ -65,12 +92,15 @@ impl ReplayMachine for TruncateMachine {
         Ok(())
     }
 
-    fn end<B: FileBuilder>(
+    fn truncate<B: FileBuilder>(
         &mut self,
         path: &Path,
         builder: Arc<B>,
-        truncate_params: &TruncateQueueParameter,
     ) -> crate::Result<()> {
+        if !self.has_hole {
+            return Ok(());
+        }
+
         let origin_name = path.to_str().unwrap();
         let truncate_file_name = origin_name.to_owned() + "_truncated";
 
@@ -82,11 +112,17 @@ impl ReplayMachine for TruncateMachine {
             build_file_reader(builder.as_ref(), path, Arc::new(LogFd::open(path)?)).unwrap();
 
         //write to file
-        self.flush_to_new_file::<B>(&mut log_writer, &mut log_reader, truncate_params)?;
+        self.flush_to_new_file::<B>(&mut log_writer, &mut log_reader)?;
 
         //rename to original file name
         fs::rename(buf.as_path(), path)?;
+
+        self.has_hole = false;
         Ok(())
+    }
+
+    fn init(&mut self, _params: Option<TruncateQueueParameter>) {
+        self.truncate_info = _params;
     }
 }
 
@@ -95,9 +131,8 @@ impl TruncateMachine {
         &mut self,
         log_writer: &mut LogFileWriter<B>,
         log_reader: &mut LogFileReader<B>,
-        truncate_params: &TruncateQueueParameter,
     ) -> crate::Result<()> {
-        let mut batch = LogBatch::default();
+        let mut batch = LogBatch::with_capacity(self.items.len());
         let mut region_id_to_index = HashMap::<u64, Vec<(Vec<EntryIndex>, Vec<Vec<u8>>)>>::new();
 
         for log_item_batch in self.items.iter() {
@@ -134,8 +169,10 @@ impl TruncateMachine {
             }
         }
 
-        let raft_group_ids = truncate_params.raft_groups_ids;
-        let truncate_mode = &truncate_params.truncate_mode;
+
+        let truncate_parms = self.truncate_info.as_mut().unwrap();
+        let raft_group_ids = &truncate_parms.raft_groups_ids;
+        let truncate_mode = truncate_parms.truncate_mode;
 
         for (k, v) in region_id_to_index.iter() {
             if raft_group_ids.is_empty() || raft_group_ids.contains(k) {

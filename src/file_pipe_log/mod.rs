@@ -11,7 +11,9 @@ pub use log_file::LogFd;
 pub use log_file::{build_file_reader, build_file_writer};
 pub use log_file::{LogFileReader, LogFileWriter};
 pub use pipe::DualPipes as FilePipeLog;
-pub use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
+pub use pipe_builder::{
+    DualPipesBuilder as FilePipeLogBuilder, ReplayMachine, ReplayMachineBuilder,
+};
 
 /// Public utilities used only for debugging purposes.
 pub mod debug {
