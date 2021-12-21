@@ -342,17 +342,6 @@ impl MemTable {
                 if allow_hole {
                     self.unsafe_truncate_back(first, 0, last);
                 } else {
-                    #[cfg(feature = "failpoints")]
-                    {
-                        let enable_hole = || {
-                            fail::fail_point!("memtable::enable_hole", |_| true);
-                            false
-                        };
-
-                        if enable_hole() {
-                            return;
-                        }
-                    }
                     panic!("memtable {} has a hole", self.region_id);
                 }
             } else if first_index_to_add != last + 1 {

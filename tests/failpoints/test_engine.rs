@@ -366,7 +366,7 @@ fn test_truncate_files_in_directory() {
             let end_index = entry.0.last().unwrap().index;
 
             assert!(start_index == 1);
-            assert!(end_index == 10);
+            assert!(end_index == 9);
         }
     }
 
@@ -384,8 +384,8 @@ fn test_truncate_files_in_directory() {
         if let LogItemContent::EntryIndexes(entry) = v.content {
             let start_index = entry.0.first().unwrap().index;
             let end_index = entry.0.last().unwrap().index;
-            assert!(start_index == 17);
-            assert!(end_index == 21);
+            assert!(start_index == 15);
+            assert!(end_index == 20);
         }
     }
 
@@ -441,7 +441,7 @@ fn test_truncate_files_in_directory() {
         Some(LogQueue::Append),
         &[7u64],
     )
-        .unwrap();
+    .unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
 
     let mut entry_count = 0;
@@ -465,19 +465,17 @@ fn create_log_with_hole(file_name: &str, with_hole: bool) -> TempDir {
         ..Default::default()
     };
 
-    fail::cfg("memtable::enable_hole", "return").unwrap();
     let engine = Engine::open(cfg).unwrap();
     let entry_data = vec![b'x'; 1024];
     if with_hole {
-        append(&engine, 7, 1, 11, Some(&entry_data));
-        append(&engine, 7, 13, 15, Some(&entry_data));
-        append(&engine, 7, 17, 22, Some(&entry_data));
-    } else {
-        append(&engine, 7, 1, 11, Some(&entry_data));
-        append(&engine, 7, 11, 15, Some(&entry_data));
-        append(&engine, 7, 15, 22, Some(&entry_data));
+        fail::cfg("memtable::enable_hole", "return").unwrap();
     }
 
+    append(&engine, 7, 1, 11, Some(&entry_data));
+    append(&engine, 7, 11, 15, Some(&entry_data));
+    append(&engine, 7, 15, 22, Some(&entry_data));
+
     drop(engine);
+    fail::remove("memtable::enable_hole");
     dir
 }

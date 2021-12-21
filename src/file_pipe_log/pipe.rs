@@ -292,25 +292,29 @@ impl<B: FileBuilder> SinglePipe<B> {
 pub struct DualPipes<B: FileBuilder> {
     pipes: [SinglePipe<B>; 2],
 
-    _lock_file: File,
+    pub lock_file: Arc<File>,
+}
+
+pub fn get_lock_file(dir: &str) -> Result<File> {
+    let lock_file = File::create(lock_file_path(dir))?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        Error::Other(box_err!(
+            "Failed to lock file: {}, maybe another instance is using this directory.",
+            e
+        ))
+    })?;
+    Ok(lock_file)
 }
 
 impl<B: FileBuilder> DualPipes<B> {
     pub fn open(dir: &str, appender: SinglePipe<B>, rewriter: SinglePipe<B>) -> Result<Self> {
-        let lock_file = File::create(lock_file_path(dir))?;
-        lock_file.try_lock_exclusive().map_err(|e| {
-            Error::Other(box_err!(
-                "Failed to lock file: {}, maybe another instance is using this directory.",
-                e
-            ))
-        })?;
-
         // TODO: remove this dependency.
         debug_assert_eq!(LogQueue::Append as usize, 0);
         debug_assert_eq!(LogQueue::Rewrite as usize, 1);
+
         Ok(Self {
             pipes: [appender, rewriter],
-            _lock_file: lock_file,
+            lock_file: Arc::new(get_lock_file(dir)?),
         })
     }
 

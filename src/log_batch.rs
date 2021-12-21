@@ -90,14 +90,29 @@ impl EntryIndexes {
         Ok(Self(entry_indexes))
     }
 
+    #[allow(unused_mut)]
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
-        let count = self.0.len() as u64;
+        let mut count = self.0.len() as u64;
+        #[cfg(feature = "failpoints")]
+        {
+            let enable_hole = || {
+                fail::fail_point!("memtable::enable_hole", |_| true);
+                false
+            };
+
+            if enable_hole() {
+                count -= 1;
+            }
+        }
+
         buf.encode_var_u64(count)?;
         if count > 0 {
             buf.encode_var_u64(self.0[0].index)?;
         }
-        for ei in self.0.iter() {
-            buf.encode_var_u64(ei.entry_offset + ei.entry_len as u64)?;
+
+        for i in 0..count {
+            let item = self.0.get(i as usize).unwrap();
+            buf.encode_var_u64(item.entry_offset + item.entry_len as u64)?;
         }
         Ok(())
     }

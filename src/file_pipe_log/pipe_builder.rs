@@ -26,11 +26,7 @@ pub trait ReplayMachine: Send + Default {
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 
-    fn truncate<B: FileBuilder>(
-        &mut self,
-        _path: &Path,
-        _builder: Arc<B>,
-    ) -> Result<()> {
+    fn truncate<B: FileBuilder>(&mut self, _path: &Path, _builder: Arc<B>) -> Result<()> {
         Ok(())
     }
 
@@ -283,10 +279,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                     }
 
                     if replay_machine_builder.need_truncate() {
-                        sequential_replay_machine.truncate(
-                            f.path.as_path(),
-                            file_builder.clone(),
-                        )?;
+                        sequential_replay_machine
+                            .truncate(f.path.as_path(), file_builder.clone())?;
                     }
                 }
                 Ok(sequential_replay_machine)

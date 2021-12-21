@@ -13,7 +13,7 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{FilePipeLog, FilePipeLogBuilder, ReplayMachineBuilder};
+use crate::file_pipe_log::{get_lock_file, FilePipeLog, FilePipeLogBuilder, ReplayMachineBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
@@ -376,6 +376,7 @@ where
             queue,
             truncate_mode: mode,
             raft_groups_ids: raft_groups.to_vec(),
+            lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
         };
 
         let machine_builder = ReplayMachineBuilder {

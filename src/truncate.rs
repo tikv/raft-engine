@@ -11,6 +11,7 @@ use crate::truncate::TruncateMode::{All, Back, Front};
 use crate::{log_batch, FileBuilder, FileId, LogBatch, LogItemContent, LogQueue};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -50,6 +51,7 @@ pub struct TruncateQueueParameter {
     pub queue: Option<LogQueue>,
     pub truncate_mode: TruncateMode,
     pub raft_groups_ids: Vec<u64>,
+    pub lock_file: Arc<File>,
 }
 
 impl Default for TruncateMachine {
@@ -92,11 +94,7 @@ impl ReplayMachine for TruncateMachine {
         Ok(())
     }
 
-    fn truncate<B: FileBuilder>(
-        &mut self,
-        path: &Path,
-        builder: Arc<B>,
-    ) -> crate::Result<()> {
+    fn truncate<B: FileBuilder>(&mut self, path: &Path, builder: Arc<B>) -> crate::Result<()> {
         if !self.has_hole {
             return Ok(());
         }
@@ -168,7 +166,6 @@ impl TruncateMachine {
                 }
             }
         }
-
 
         let truncate_parms = self.truncate_info.as_mut().unwrap();
         let raft_group_ids = &truncate_parms.raft_groups_ids;
