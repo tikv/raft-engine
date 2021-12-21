@@ -43,6 +43,14 @@ pub struct ReplayMachineBuilder {
     pub(crate) truncate_params: Option<TruncateQueueParameter>,
 }
 
+impl Default for ReplayMachineBuilder {
+    fn default() -> Self {
+        ReplayMachineBuilder {
+            truncate_params: None,
+        }
+    }
+}
+
 impl<M: ReplayMachine> ReplayMachineFactory<M> for ReplayMachineBuilder {
     fn new_machine(&self) -> M {
         let mut m = M::default();
