@@ -365,8 +365,8 @@ fn test_truncate_files_in_directory() {
             let start_index = entry.0.first().unwrap().index;
             let end_index = entry.0.last().unwrap().index;
 
-            assert!(start_index == 1);
-            assert!(end_index == 9);
+            assert_eq!(start_index, 1);
+            assert_eq!(end_index, 9);
         }
     }
 
@@ -384,8 +384,8 @@ fn test_truncate_files_in_directory() {
         if let LogItemContent::EntryIndexes(entry) = v.content {
             let start_index = entry.0.first().unwrap().index;
             let end_index = entry.0.last().unwrap().index;
-            assert!(start_index == 15);
-            assert!(end_index == 20);
+            assert_eq!(start_index, 15);
+            assert_eq!(end_index, 20);
         }
     }
 
@@ -432,7 +432,7 @@ fn test_truncate_files_in_directory() {
             entry_count += 1;
         }
     }
-    assert!(entry_count == 3);
+    assert_eq!(entry_count, 3);
 
     let dir = create_log_with_hole("test_files_that_does_not_needs_truncate", false);
     Engine::unsafe_truncate(
@@ -451,7 +451,7 @@ fn test_truncate_files_in_directory() {
             entry_count += 1;
         }
     }
-    assert!(entry_count == 3);
+    assert_eq!(entry_count, 3);
 }
 
 fn create_log_with_hole(file_name: &str, with_hole: bool) -> TempDir {

@@ -79,7 +79,7 @@ where
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
         builder.scan()?;
         let (_append, _rewrite) =
-            builder.recover::<MemTableRecoverContext>(&ReplayMachineBuilder::default())?;
+            builder.recover(&ReplayMachineBuilder::<MemTableRecoverContext>::default())?;
         let pipe_log = Arc::new(builder.finish()?);
         let rewrite = _rewrite.unwrap();
         let append = _append.unwrap();
@@ -334,7 +334,7 @@ where
         let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
         builder.scan()?;
         let (append, rewrite) =
-            builder.recover::<ConsistencyChecker>(&ReplayMachineBuilder::default())?;
+            builder.recover(&ReplayMachineBuilder::<ConsistencyChecker>::default())?;
         let mut map = rewrite.unwrap().finish();
         for (id, index) in append.unwrap().finish() {
             map.entry(id).or_insert(index);
@@ -375,10 +375,9 @@ where
             lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
         };
 
-        let machine_builder = ReplayMachineBuilder {
-            truncate_params: Some(parms),
-        };
-        builder.recover::<TruncateMachine>(&machine_builder)?;
+        let mut machine_builder = ReplayMachineBuilder::<TruncateMachine>::default();
+        machine_builder.truncate_params = Some(parms);
+        builder.recover(&machine_builder)?;
 
         Ok(())
     }

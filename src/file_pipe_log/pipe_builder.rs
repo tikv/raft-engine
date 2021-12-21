@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +22,7 @@ use super::log_file::{build_file_reader, LogFd};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
-pub trait ReplayMachine: Send + Default {
+pub trait ReplayMachine: Send + Default + Sync {
     fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
@@ -33,33 +34,37 @@ pub trait ReplayMachine: Send + Default {
     fn init(&mut self, _params: Option<TruncateQueueParameter>) {}
 }
 pub trait ReplayMachineFactory<M: ReplayMachine> {
-    fn new_machine(&self) -> M {
-        M::default()
-    }
+    type Machine;
+
+    fn new_machine(&self) -> Self::Machine;
 }
 
 #[derive(Clone)]
-pub struct ReplayMachineBuilder {
+pub struct ReplayMachineBuilder<M: ReplayMachine> {
     pub(crate) truncate_params: Option<TruncateQueueParameter>,
+    _phantom: PhantomData<M>,
 }
 
-impl Default for ReplayMachineBuilder {
+impl<M: ReplayMachine> Default for ReplayMachineBuilder<M> {
     fn default() -> Self {
         ReplayMachineBuilder {
             truncate_params: None,
+            _phantom: Default::default(),
         }
     }
 }
 
-impl<M: ReplayMachine> ReplayMachineFactory<M> for ReplayMachineBuilder {
-    fn new_machine(&self) -> M {
-        let mut m = M::default();
+impl<M: ReplayMachine> ReplayMachineFactory<M> for ReplayMachineBuilder<M> {
+    type Machine = M;
+
+    fn new_machine(&self) -> Self::Machine {
+        let mut m = Self::Machine::default();
         m.init(self.truncate_params.clone());
         m
     }
 }
 
-impl ReplayMachineBuilder {
+impl<M: ReplayMachine> ReplayMachineBuilder<M> {
     fn need_truncate(&self) -> bool {
         self.truncate_params.is_some()
     }
@@ -166,7 +171,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
 
     pub fn recover<S: ReplayMachine>(
         &mut self,
-        machine_builder: &ReplayMachineBuilder,
+        machine_builder: &ReplayMachineBuilder<S>,
     ) -> Result<(Option<S>, Option<S>)> {
         let threads = self.cfg.recovery_threads;
         let truncate_params = &machine_builder.truncate_params;
@@ -239,10 +244,10 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         concurrency: usize,
         read_block_size: usize,
         files: &[FileToRecover],
-        replay_machine_builder: &ReplayMachineBuilder,
+        replay_machine_builder: &ReplayMachineBuilder<S>,
     ) -> Result<Option<S>> {
         if concurrency == 0 || files.is_empty() {
-            return Ok(Some(S::default()));
+            return Ok(Some(replay_machine_builder.new_machine()));
         }
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks(max_chunk_size);
