@@ -30,8 +30,7 @@ pub trait ReplayMachine: Send + Default {
         Ok(())
     }
 
-    #[allow(unused_variables)]
-    fn init(&mut self, params: Option<TruncateQueueParameter>) {}
+    fn init(&mut self, _params: Option<TruncateQueueParameter>) {}
 }
 pub trait ReplayMachineFactory<M: ReplayMachine> {
     fn new_machine(&self) -> M {
