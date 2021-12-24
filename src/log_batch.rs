@@ -90,17 +90,15 @@ impl EntryIndexes {
         Ok(Self(entry_indexes))
     }
 
-    #[allow(unused_mut)]
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
-        let mut count = self.0.len() as u64;
+        let count = self.0.len() as u64;
         buf.encode_var_u64(count)?;
         if count > 0 {
             buf.encode_var_u64(self.0[0].index)?;
         }
 
-        for i in 0..count {
-            let item = self.0.get(i as usize).unwrap();
-            buf.encode_var_u64(item.entry_offset + item.entry_len as u64)?;
+        for ei in self.0.iter() {
+            buf.encode_var_u64(ei.entry_offset + ei.entry_len as u64)?;
         }
         Ok(())
     }

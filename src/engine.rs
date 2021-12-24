@@ -345,7 +345,6 @@ where
     }
 
     /// Truncates Raft groups to remove possible corruptions.
-    #[allow(unused_variables)]
     pub fn unsafe_truncate_with_file_builder(
         path: &Path,
         mode: TruncateMode,
