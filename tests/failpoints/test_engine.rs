@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use kvproto::raft_serverpb::RaftLocalState;
@@ -359,16 +360,22 @@ fn test_truncate_files_in_directory() {
     )
     .unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
+    let expect_index = vec![(1, 2), (3, 3), (4, 4)];
+    let mut real_index = vec![];
+
     for item in dump_it {
         let v = item.unwrap();
         if let LogItemContent::EntryIndexes(entry) = v.content {
+            if entry.0.is_empty() {
+                continue;
+            }
+
             let start_index = entry.0.first().unwrap().index;
             let end_index = entry.0.last().unwrap().index;
-
-            assert_eq!(start_index, 1);
-            assert_eq!(end_index, 9);
+            real_index.push((start_index, end_index));
         }
     }
+    assert_eq!(expect_index, real_index);
 
     let dir = create_log_with_hole("test_mode_back", true);
     Engine::unsafe_truncate(
@@ -379,15 +386,22 @@ fn test_truncate_files_in_directory() {
     )
     .unwrap();
     let dump_it = Engine::dump(dir.path()).unwrap();
+
+    let expect_index = vec![(96, 96), (97, 97), (98, 98), (99, 99)];
+    let mut real_index = vec![];
+
     for item in dump_it {
         let v = item.unwrap();
         if let LogItemContent::EntryIndexes(entry) = v.content {
+            if entry.0.is_empty() {
+                continue;
+            }
             let start_index = entry.0.first().unwrap().index;
             let end_index = entry.0.last().unwrap().index;
-            assert_eq!(start_index, 15);
-            assert_eq!(end_index, 20);
+            real_index.push((start_index, end_index));
         }
     }
+    assert_eq!(expect_index, real_index);
 
     let dir = create_log_with_hole("test_mode_all", true);
     Engine::unsafe_truncate(
@@ -432,7 +446,7 @@ fn test_truncate_files_in_directory() {
             entry_count += 1;
         }
     }
-    assert_eq!(entry_count, 3);
+    assert_eq!(entry_count, 99 - 100 / 5);
 
     let dir = create_log_with_hole("test_files_that_does_not_needs_truncate", false);
     Engine::unsafe_truncate(
@@ -451,7 +465,8 @@ fn test_truncate_files_in_directory() {
             entry_count += 1;
         }
     }
-    assert_eq!(entry_count, 3);
+    // idx 1~2, 3, 4, ..., 99 = 98
+    assert_eq!(entry_count, 98);
 }
 
 fn create_log_with_hole(file_name: &str, with_hole: bool) -> TempDir {
@@ -459,23 +474,28 @@ fn create_log_with_hole(file_name: &str, with_hole: bool) -> TempDir {
         .prefix(file_name)
         .tempdir()
         .unwrap();
-
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::from_str("5KB").unwrap(),
         ..Default::default()
     };
 
     let engine = Engine::open(cfg).unwrap();
     let entry_data = vec![b'x'; 1024];
-    if with_hole {
-        fail::cfg("memtable::enable_hole", "return").unwrap();
+    append(&engine, 7, 1, 3, Some(&entry_data));
+
+    for i in 3..100 {
+        if with_hole && i % 5 == 0 {
+            fail::cfg("log_batch::corrupted_items", "return").unwrap();
+        }
+
+        append(&engine, 7, i, i + 1, Some(&entry_data));
+
+        if with_hole && i % 5 == 0 {
+            fail::remove("log_batch::corrupted_items");
+        }
     }
 
-    append(&engine, 7, 1, 11, Some(&entry_data));
-    append(&engine, 7, 11, 15, Some(&entry_data));
-    append(&engine, 7, 15, 22, Some(&entry_data));
-
     drop(engine);
-    fail::remove("memtable::enable_hole");
     dir
 }

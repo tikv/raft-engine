@@ -23,11 +23,11 @@ use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
 pub trait ReplayMachine: Send + Default + Sync {
-    fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
+    fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId, path: &Path) -> Result<()>;
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 
-    fn truncate<B: FileBuilder>(&mut self, _path: &Path, _builder: Arc<B>) -> Result<()> {
+    fn truncate<B: FileBuilder>(&mut self, _builder: Arc<B>) -> Result<()> {
         Ok(())
     }
 
@@ -254,7 +254,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
 
-        let sequential_replay_machine = chunks
+        let mut sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
                 let mut reader = LogItemBatchFileReader::new(read_block_size);
@@ -269,8 +269,11 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
-                                sequential_replay_machine
-                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
+                                sequential_replay_machine.replay(
+                                    item_batch,
+                                    FileId { queue, seq: f.seq },
+                                    f.path.as_path(),
+                                )?;
                             }
                             Ok(None) => break,
                             Err(e)
@@ -289,21 +292,21 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                             Err(e) => return Err(e),
                         }
                     }
-
-                    if replay_machine_builder.need_truncate() {
-                        sequential_replay_machine
-                            .truncate(f.path.as_path(), file_builder.clone())?;
-                    }
                 }
                 Ok(sequential_replay_machine)
             })
             .try_reduce(
-                S::default,
+                || replay_machine_builder.new_machine(),
                 |mut sequential_replay_machine_left, sequential_replay_machine_right| {
                     sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
                     Ok(sequential_replay_machine_left)
                 },
             )?;
+
+        if replay_machine_builder.need_truncate() {
+            sequential_replay_machine.truncate(file_builder)?;
+        }
+
         Ok(Some(sequential_replay_machine))
     }
 

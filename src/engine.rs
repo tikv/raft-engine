@@ -362,6 +362,7 @@ where
 
         let cfg = Config {
             dir: path.to_str().unwrap().to_owned(),
+            recovery_mode: RecoveryMode::TolerateAnyCorruption,
             ..Default::default()
         };
 

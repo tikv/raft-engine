@@ -2,16 +2,16 @@
 
 use crate::errors::Error;
 use crate::errors::Error::InvalidArgument;
-use crate::file_pipe_log::{build_file_reader, build_file_writer, LogFileReader, LogFileWriter};
+use crate::file_pipe_log::{build_file_reader, build_file_writer};
 use crate::file_pipe_log::{LogFd, ReplayMachine};
 use crate::log_batch::LogItemBatch;
 use crate::log_batch::LogItemContent::{Command, EntryIndexes, Kv};
-use crate::memtable::EntryIndex;
 use crate::truncate::TruncateMode::{All, Back, Front};
 use crate::{log_batch, FileBuilder, FileId, LogBatch, LogItemContent, LogQueue};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::fs;
 use std::fs::File;
+use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -19,8 +19,10 @@ use std::sync::Arc;
 pub struct TruncateMachine {
     items: Vec<LogItemBatch>,
     truncate_info: Option<TruncateQueueParameter>,
-    has_hole: bool,
-    raft_id_to_index: HashMap<u64, u64>,
+
+    all_items: HashMap<String, Vec<LogItemBatch>>,
+
+    all_item_postion_info: HashMap<String, HashMap<u64, (u64, u64)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,63 +61,188 @@ impl Default for TruncateMachine {
         Self {
             items: vec![],
             truncate_info: None,
-            has_hole: false,
-            raft_id_to_index: Default::default(),
+            all_items: Default::default(),
+            all_item_postion_info: Default::default(),
         }
     }
 }
 
 impl ReplayMachine for TruncateMachine {
-    fn replay(&mut self, item_batch: LogItemBatch, _file_id: FileId) -> crate::Result<()> {
-        for it in item_batch.iter() {
-            let raft_group_id = it.raft_group_id;
-            if let LogItemContent::EntryIndexes(entry) = &it.content {
-                let first_index = entry.0.first().unwrap().index;
-                let last_index = entry.0.last().unwrap().index;
+    fn replay(
+        &mut self,
+        item_batch: LogItemBatch,
+        _file_id: FileId,
+        path: &Path,
+    ) -> crate::Result<()> {
+        let file_name = path.to_str().unwrap().to_owned();
+        self.get_item_position_info(&item_batch, &file_name);
 
-                if let Some(v) = self.raft_id_to_index.get(&raft_group_id) {
-                    let ids = &self.truncate_info.as_ref().unwrap().raft_groups_ids;
-                    let in_raft_groups = ids.is_empty() || ids.contains(&raft_group_id);
-                    if v + 1 != first_index && in_raft_groups {
-                        self.has_hole = true;
-                        break;
-                    }
-                }
-
-                self.raft_id_to_index.insert(raft_group_id, last_index);
-            }
-        }
-
-        self.items.push(item_batch);
+        self.all_items
+            .entry(file_name)
+            .and_modify(|v| v.push(item_batch.clone()))
+            .or_insert(vec![item_batch.clone()]);
         Ok(())
     }
 
     fn merge(&mut self, _rhs: Self, _queue: LogQueue) -> crate::Result<()> {
+        for (k, v) in _rhs.all_items {
+            self.all_items.insert(k, v);
+        }
+        for (k, v) in _rhs.all_item_postion_info {
+            self.all_item_postion_info.insert(k, v);
+        }
+
         Ok(())
     }
 
-    fn truncate<B: FileBuilder>(&mut self, path: &Path, builder: Arc<B>) -> crate::Result<()> {
-        if !self.has_hole {
-            return Ok(());
+    fn truncate<B: FileBuilder>(&mut self, builder: Arc<B>) -> crate::Result<()> {
+        //first we should convert map to vec and sort
+        let mut all_item_vec = Vec::from_iter(self.all_items.iter());
+        all_item_vec.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let truncate_mode = self.truncate_info.as_ref().unwrap().truncate_mode;
+
+        let need_truncate_raft_group_id = &self.truncate_info.as_ref().unwrap().raft_groups_ids;
+
+        // raft_group_id to last valid index
+        let mut last_valid_offset = HashMap::new();
+
+        // raft_group_id to the last index
+        let mut group_last_index = HashMap::new();
+
+        // raft_group to last continuous section
+        let mut group_last_valid_start_index = HashMap::<u64, (u64, u64)>::new();
+        for (file_name, _) in &all_item_vec {
+            let idx_info = self
+                .all_item_postion_info
+                .get(&(*file_name).clone())
+                .unwrap();
+            for (k, v) in idx_info {
+                group_last_index
+                    .entry(*k)
+                    .and_modify(|x| {
+                        if *x < v.1 {
+                            *x = v.1
+                        }
+                    })
+                    .or_insert(v.1);
+                group_last_valid_start_index
+                    .entry(*k)
+                    .and_modify(|val| {
+                        if val.1 + 1 == v.0 {
+                            *val = (val.0, v.1);
+                        }
+
+                        if val.1 + 1 < v.0 {
+                            *val = *v;
+                        }
+                    })
+                    .or_insert(*v);
+
+                last_valid_offset
+                    .entry(*k)
+                    .and_modify(|x| {
+                        if *x + 1 == v.0 {
+                            *x = v.1
+                        }
+                    })
+                    .or_insert(v.1);
+            }
         }
 
-        let origin_name = path.to_str().unwrap();
-        let truncate_file_name = origin_name.to_owned() + "_truncated";
+        for (file_name, items) in &all_item_vec {
+            let mut need_truncate = false;
+            match truncate_mode {
+                TruncateMode::Front => {
+                    let position_info = self
+                        .all_item_postion_info
+                        .get(&(*file_name).clone())
+                        .unwrap();
+                    for (k, v) in position_info {
+                        if need_truncate_raft_group_id.is_empty()
+                            || need_truncate_raft_group_id.contains(k)
+                        {
+                            if let Some(last_valid_index) = last_valid_offset.get(k) {
+                                if last_valid_index < &v.1 {
+                                    // this file need to trucate
+                                    need_truncate = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
 
-        let buf = PathBuf::from(truncate_file_name);
-        let fd = Arc::new(LogFd::create(buf.as_path())?);
-        let mut log_writer = build_file_writer(builder.as_ref(), buf.as_path(), fd, true)?;
+                    if need_truncate {
+                        self.flush_to_new_file(
+                            Path::new(file_name).as_ref(),
+                            builder.clone(),
+                            items,
+                            &mut last_valid_offset,
+                            &mut group_last_index,
+                            &mut group_last_valid_start_index,
+                        )?;
+                    }
+                }
 
-        let mut log_reader =
-            build_file_reader(builder.as_ref(), path, Arc::new(LogFd::open(path)?)).unwrap();
+                TruncateMode::Back => {
+                    let position_info = self
+                        .all_item_postion_info
+                        .get(&(*file_name).clone())
+                        .unwrap();
+                    for (k, v) in position_info {
+                        if need_truncate_raft_group_id.is_empty()
+                            || need_truncate_raft_group_id.contains(k)
+                        {
+                            let last_sequence = group_last_valid_start_index.get(k).unwrap();
+                            if !(v.0 >= last_sequence.0 && v.1 <= last_sequence.1) {
+                                need_truncate = true;
+                                break;
+                            }
+                        }
+                    }
 
-        //write to file
-        self.flush_to_new_file::<B>(&mut log_writer, &mut log_reader)?;
+                    if need_truncate {
+                        self.flush_to_new_file(
+                            Path::new(file_name).as_ref(),
+                            builder.clone(),
+                            items,
+                            &mut last_valid_offset,
+                            &mut group_last_index,
+                            &mut group_last_valid_start_index,
+                        )?;
+                    }
+                }
 
-        //rename to original file name
-        fs::rename(buf.as_path(), path)?;
+                TruncateMode::All => {
+                    let position_info = self
+                        .all_item_postion_info
+                        .get(&(*file_name).clone())
+                        .unwrap();
+                    for (k, _) in position_info {
+                        if need_truncate_raft_group_id.is_empty()
+                            || need_truncate_raft_group_id.contains(k)
+                        {
+                            let offset_in_all_file = group_last_index.get(k).unwrap();
+                            let valid_offset_in_all_file = last_valid_offset.get(k).unwrap();
+                            if offset_in_all_file != valid_offset_in_all_file {
+                                need_truncate = true;
+                                break;
+                            }
+                        }
+                    }
 
-        self.has_hole = false;
+                    if need_truncate {
+                        self.flush_to_new_file(
+                            Path::new(file_name).as_ref(),
+                            builder.clone(),
+                            items,
+                            &mut last_valid_offset,
+                            &mut group_last_index,
+                            &mut group_last_valid_start_index,
+                        )?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -126,34 +253,114 @@ impl ReplayMachine for TruncateMachine {
 
 impl TruncateMachine {
     fn flush_to_new_file<B: FileBuilder>(
-        &mut self,
-        log_writer: &mut LogFileWriter<B>,
-        log_reader: &mut LogFileReader<B>,
+        &self,
+        path: &Path,
+        builder: Arc<B>,
+        items: &[LogItemBatch],
+        last_valid_offset: &mut HashMap<u64, u64>,
+        group_last_index: &mut HashMap<u64, u64>,
+        group_last_valid_start_index: &mut HashMap<u64, (u64, u64)>,
     ) -> crate::Result<()> {
-        let mut batch = LogBatch::with_capacity(self.items.len());
-        let mut region_id_to_index = HashMap::<u64, Vec<(Vec<EntryIndex>, Vec<Vec<u8>>)>>::new();
+        let origin_name = path.to_str().unwrap();
+        let truncate_file_name = origin_name.to_owned() + "_truncated";
 
-        for log_item_batch in self.items.iter() {
+        let buf = PathBuf::from(truncate_file_name);
+        let fd = Arc::new(LogFd::create(buf.as_path())?);
+        let mut log_writer = build_file_writer(builder.as_ref(), buf.as_path(), fd, true)?;
+        let mut log_reader =
+            build_file_reader(builder.as_ref(), path, Arc::new(LogFd::open(path)?)).unwrap();
+
+        let mut batch = LogBatch::with_capacity(self.items.len());
+
+        let truncate_parms = self.truncate_info.as_ref().unwrap();
+        let raft_group_ids = &truncate_parms.raft_groups_ids;
+        let truncate_mode = truncate_parms.truncate_mode;
+
+        for log_item_batch in items {
             for item in log_item_batch.iter() {
                 let item_type = &item.content;
                 let raft_id = item.raft_group_id;
 
                 match item_type {
                     EntryIndexes(entry_indexes) => {
-                        let mut cursor = 0;
-                        let mut entrys = Vec::new();
-                        while cursor < entry_indexes.0.len() {
-                            let entry = log_reader
-                                .read(entry_indexes.0[cursor].entries.unwrap())
-                                .unwrap();
-                            entrys.push(entry);
-                            cursor += 1;
-                        }
-                        if let Some(v) = region_id_to_index.get_mut(&raft_id) {
-                            v.push((entry_indexes.0.clone(), entrys));
-                        } else {
-                            let vec = vec![(entry_indexes.0.clone(), entrys)];
-                            region_id_to_index.insert(raft_id, vec);
+                        let raft_group_last_valid_offset =
+                            if last_valid_offset.get(&raft_id).is_some() {
+                                *last_valid_offset.get(&raft_id).unwrap()
+                            } else {
+                                u64::MAX
+                            };
+
+                        match truncate_mode {
+                            All => {
+                                let need_skip = raft_group_last_valid_offset != u64::MAX
+                                    && *group_last_index.get(&raft_id).unwrap()
+                                        != raft_group_last_valid_offset
+                                    && (raft_group_ids.is_empty()
+                                        || raft_group_ids.contains(&raft_id));
+                                if need_skip {
+                                    continue;
+                                }
+
+                                let mut entrys = Vec::new();
+                                let mut indexs = Vec::new();
+                                for entry_index in &entry_indexes.0 {
+                                    let entry =
+                                        log_reader.read(entry_index.entries.unwrap()).unwrap();
+                                    entrys.push(entry);
+                                    indexs.push(*entry_index);
+                                }
+
+                                if !indexs.is_empty() {
+                                    batch.add_raw_entries(raft_id, indexs, entrys)?;
+                                }
+                            }
+
+                            Front => {
+                                let mut entrys = Vec::new();
+                                let mut indexs = Vec::new();
+                                for entry_index in &entry_indexes.0 {
+                                    let idx = entry_index.index;
+                                    if (raft_group_ids.is_empty()
+                                        || raft_group_ids.contains(&raft_id))
+                                        && idx > raft_group_last_valid_offset
+                                    {
+                                        continue;
+                                    }
+
+                                    let entry =
+                                        log_reader.read(entry_index.entries.unwrap()).unwrap();
+                                    entrys.push(entry);
+                                    indexs.push(*entry_index);
+                                }
+
+                                if !indexs.is_empty() {
+                                    batch.add_raw_entries(raft_id, indexs, entrys)?;
+                                }
+                            }
+                            Back => {
+                                let mut entrys = Vec::new();
+                                let mut indexs = Vec::new();
+                                let first_idx_to_keep =
+                                    group_last_valid_start_index.get(&raft_id).unwrap().0;
+                                for entry_index in &entry_indexes.0 {
+                                    let idx = entry_index.index;
+                                    if (raft_group_ids.is_empty()
+                                        || raft_group_ids.contains(&raft_id))
+                                        && idx < first_idx_to_keep
+                                    {
+                                        continue;
+                                    }
+
+                                    let entry =
+                                        log_reader.read(entry_index.entries.unwrap()).unwrap();
+                                    entrys.push(entry);
+                                    indexs.push(*entry_index);
+                                }
+
+                                if !indexs.is_empty() {
+                                    batch.add_raw_entries(raft_id, indexs, entrys)?;
+                                }
+                            }
                         }
                     }
                     Command(cmd) => batch.add_command(raft_id, cmd.clone()),
@@ -167,78 +374,34 @@ impl TruncateMachine {
             }
         }
 
-        let truncate_parms = self.truncate_info.as_mut().unwrap();
-        let raft_group_ids = &truncate_parms.raft_groups_ids;
-        let truncate_mode = truncate_parms.truncate_mode;
-
-        for (k, v) in region_id_to_index.iter() {
-            if raft_group_ids.is_empty() || raft_group_ids.contains(k) {
-                match truncate_mode {
-                    TruncateMode::Front => {
-                        let mut last_index: u64 = 0;
-                        for (index, entrys) in v {
-                            let first_entry_index_in_batch = index.get(0).unwrap().index;
-                            let last_entry_index_in_batch = index.last().unwrap().index;
-                            if last_index != 0 && last_index + 1 != first_entry_index_in_batch {
-                                break;
-                            }
-                            batch.add_raw_entries(*k, index.clone(), entrys.clone())?;
-                            last_index = last_entry_index_in_batch;
-                        }
-                    }
-
-                    TruncateMode::Back => {
-                        let mut last_index: u64 = 0;
-                        let mut need_keep = Vec::new();
-                        for (index, entrys) in v {
-                            let first_entry_index_in_batch = index.get(0).unwrap().index;
-                            let last_entry_index_in_batch = index.last().unwrap().index;
-
-                            if last_index != 0 && last_index + 1 != first_entry_index_in_batch {
-                                need_keep.clear();
-                            }
-                            need_keep.push((index.clone(), entrys.clone()));
-                            last_index = last_entry_index_in_batch;
-                        }
-
-                        for (index, entrys) in need_keep {
-                            batch.add_raw_entries(*k, index.clone(), entrys.clone())?;
-                        }
-                    }
-
-                    TruncateMode::All => {
-                        //judge whether there is hole in the raft group
-                        let mut last_index: u64 = 0;
-                        let mut has_hole = false;
-                        for (index, _) in v {
-                            let first_entry_index_in_batch = index.get(0).unwrap().index;
-                            let last_entry_index_in_batch = index.last().unwrap().index;
-                            if last_index != 0 && last_index + 1 != first_entry_index_in_batch {
-                                has_hole = true;
-                                break;
-                            }
-                            last_index = last_entry_index_in_batch;
-                        }
-
-                        if !has_hole {
-                            for (index, entrys) in v {
-                                batch.add_raw_entries(*k, index.clone(), entrys.clone())?;
-                            }
-                        }
-                    }
-                }
-            } else {
-                // do not need to truncate, just write to file as origin
-                for (index, entry) in v {
-                    batch.add_raw_entries(*k, index.clone(), entry.clone())?;
-                }
-            }
-        }
-
         batch.finish_populate(1)?;
         log_writer.write(batch.encoded_bytes(), 0)?;
         log_writer.close()?;
+        fs::rename(buf.as_path(), path)?;
 
         Ok(())
+    }
+
+    fn get_item_position_info(&mut self, item_batch: &LogItemBatch, file_name: &str) {
+        for it in item_batch.iter() {
+            let raft_group_id = it.raft_group_id;
+            if let LogItemContent::EntryIndexes(entry) = &it.content {
+                let first_index = entry.0.first().unwrap().index;
+                let last_index = entry.0.last().unwrap().index;
+
+                let mut new_map = HashMap::new();
+                new_map.insert(raft_group_id, (first_index, last_index));
+                self.all_item_postion_info
+                    .entry(file_name.to_string())
+                    .and_modify(|v| {
+                        v.entry(raft_group_id).and_modify(|y| {
+                            if last_index > y.1 {
+                                *y = (y.0, last_index)
+                            }
+                        });
+                    })
+                    .or_insert(new_map);
+            }
+        }
     }
 }

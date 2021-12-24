@@ -1,6 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use hashbrown::HashMap;
+use std::path::Path;
 
 use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::{LogItemBatch, LogItemContent};
@@ -24,7 +25,7 @@ impl ConsistencyChecker {
 }
 
 impl ReplayMachine for ConsistencyChecker {
-    fn replay(&mut self, item_batch: LogItemBatch, _file_id: FileId) -> Result<()> {
+    fn replay(&mut self, item_batch: LogItemBatch, _file_id: FileId, _path: &Path) -> Result<()> {
         for item in item_batch.iter() {
             if let LogItemContent::EntryIndexes(ents) = &item.content {
                 if !ents.0.is_empty() {

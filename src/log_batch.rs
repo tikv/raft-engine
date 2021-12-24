@@ -93,18 +93,6 @@ impl EntryIndexes {
     #[allow(unused_mut)]
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         let mut count = self.0.len() as u64;
-        #[cfg(feature = "failpoints")]
-        {
-            let enable_hole = || {
-                fail::fail_point!("memtable::enable_hole", |_| true);
-                false
-            };
-
-            if enable_hole() {
-                count -= 1;
-            }
-        }
-
         buf.encode_var_u64(count)?;
         if count > 0 {
             buf.encode_var_u64(self.0[0].index)?;
