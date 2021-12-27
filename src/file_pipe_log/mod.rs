@@ -14,6 +14,7 @@ pub use pipe::get_lock_file;
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DualPipesBuilder as FilePipeLogBuilder, ReplayMachine, ReplayMachineBuilder,
+    ReplayMachineFactory,
 };
 
 /// Public utilities used only for debugging purposes.

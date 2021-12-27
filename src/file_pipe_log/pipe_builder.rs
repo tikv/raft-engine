@@ -33,14 +33,25 @@ pub trait ReplayMachine: Send + Default + Sync {
 
     fn init(&mut self, _params: Option<TruncateQueueParameter>) {}
 }
-pub trait ReplayMachineFactory<M: ReplayMachine> {
-    type Machine;
+
+pub trait ReplayMachineFactory: Sync {
+    type Machine: ReplayMachine;
 
     fn new_machine(&self) -> Self::Machine;
+
+    fn parameters(&self) -> Option<TruncateQueueParameter>;
+
+
+    fn buildable(&self, _: LogQueue) -> bool {
+        true
+    }
 }
 
 #[derive(Clone)]
-pub struct ReplayMachineBuilder<M: ReplayMachine> {
+pub struct ReplayMachineBuilder<M>
+where
+    M: ReplayMachine,
+{
     pub(crate) truncate_params: Option<TruncateQueueParameter>,
     _phantom: PhantomData<M>,
 }
@@ -54,7 +65,7 @@ impl<M: ReplayMachine> Default for ReplayMachineBuilder<M> {
     }
 }
 
-impl<M: ReplayMachine> ReplayMachineFactory<M> for ReplayMachineBuilder<M> {
+impl<M: ReplayMachine> ReplayMachineFactory for ReplayMachineBuilder<M> {
     type Machine = M;
 
     fn new_machine(&self) -> Self::Machine {
@@ -62,11 +73,15 @@ impl<M: ReplayMachine> ReplayMachineFactory<M> for ReplayMachineBuilder<M> {
         m.init(self.truncate_params.clone());
         m
     }
-}
 
-impl<M: ReplayMachine> ReplayMachineBuilder<M> {
-    fn need_truncate(&self) -> bool {
-        self.truncate_params.is_some()
+    fn parameters(&self) -> Option<TruncateQueueParameter> {
+        self.truncate_params.clone()
+    }
+
+    fn buildable(&self, queue: LogQueue) -> bool {
+        return self.truncate_params.is_none()
+            || self.truncate_params.as_ref().unwrap().queue.is_none()
+            || self.truncate_params.as_ref().unwrap().queue.unwrap() == queue;
     }
 }
 
@@ -84,6 +99,8 @@ pub struct DualPipesBuilder<B: FileBuilder> {
     append_files: Vec<FileToRecover>,
     rewrite_files: Vec<FileToRecover>,
 }
+
+type RecoverResult<T> = (Option<T>, Option<T>);
 
 impl<B: FileBuilder> DualPipesBuilder<B> {
     pub fn new(cfg: Config, file_builder: Arc<B>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
@@ -169,12 +186,14 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<S: ReplayMachine>(
+    pub fn recover<F>(
         &mut self,
-        machine_builder: &ReplayMachineBuilder<S>,
-    ) -> Result<(Option<S>, Option<S>)> {
+        machine_builder: &F,
+    ) -> Result<RecoverResult<F::Machine>>
+    where
+        F: ReplayMachineFactory,
+    {
         let threads = self.cfg.recovery_threads;
-        let truncate_params = &machine_builder.truncate_params;
         let (append_concurrency, rewrite_concurrency) =
             match (self.append_files.len(), self.rewrite_files.len()) {
                 (a, b) if a > 0 && b > 0 => {
@@ -191,9 +210,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .unwrap();
         let (append, rewrite) = pool.join(
             || {
-                if truncate_params.is_none()
-                    || truncate_params.as_ref().unwrap().queue.is_none()
-                    || truncate_params.as_ref().unwrap().queue.unwrap() == LogQueue::Append
+                if machine_builder.buildable(LogQueue::Append)
                 {
                     Self::recover_queue(
                         LogQueue::Append,
@@ -209,9 +226,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 }
             },
             || {
-                if truncate_params.is_none()
-                    || truncate_params.as_ref().unwrap().queue.is_none()
-                    || truncate_params.as_ref().unwrap().queue.unwrap() == LogQueue::Append
+                if machine_builder.buildable(LogQueue::Rewrite)
                 {
                     Self::recover_queue(
                         LogQueue::Rewrite,
@@ -237,15 +252,18 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         DualPipes::open(&self.cfg.dir, appender, rewriter)
     }
 
-    fn recover_queue<S: ReplayMachine>(
+    fn recover_queue<F>(
         queue: LogQueue,
         file_builder: Arc<B>,
         recovery_mode: RecoveryMode,
         concurrency: usize,
         read_block_size: usize,
         files: &[FileToRecover],
-        replay_machine_builder: &ReplayMachineBuilder<S>,
-    ) -> Result<Option<S>> {
+        replay_machine_builder: &F,
+    ) -> Result<Option<F::Machine>>
+    where
+        F: ReplayMachineFactory,
+    {
         if concurrency == 0 || files.is_empty() {
             return Ok(Some(replay_machine_builder.new_machine()));
         }
@@ -258,7 +276,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .enumerate()
             .map(|(index, chunk)| {
                 let mut reader = LogItemBatchFileReader::new(read_block_size);
-                let mut sequential_replay_machine: S = replay_machine_builder.new_machine();
+                let mut sequential_replay_machine: F::Machine =
+                    replay_machine_builder.new_machine();
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
@@ -303,7 +322,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 },
             )?;
 
-        if replay_machine_builder.need_truncate() {
+        if replay_machine_builder.parameters().is_some() {
             sequential_replay_machine.truncate(file_builder)?;
         }
 
