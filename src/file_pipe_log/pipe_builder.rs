@@ -41,7 +41,6 @@ pub trait ReplayMachineFactory: Sync {
 
     fn parameters(&self) -> Option<TruncateQueueParameter>;
 
-
     fn buildable(&self, _: LogQueue) -> bool {
         true
     }
@@ -186,10 +185,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<F>(
-        &mut self,
-        machine_builder: &F,
-    ) -> Result<RecoverResult<F::Machine>>
+    pub fn recover<F>(&mut self, machine_builder: &F) -> Result<RecoverResult<F::Machine>>
     where
         F: ReplayMachineFactory,
     {
@@ -210,8 +206,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .unwrap();
         let (append, rewrite) = pool.join(
             || {
-                if machine_builder.buildable(LogQueue::Append)
-                {
+                if machine_builder.buildable(LogQueue::Append) {
                     Self::recover_queue(
                         LogQueue::Append,
                         self.file_builder.clone(),
@@ -226,8 +221,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 }
             },
             || {
-                if machine_builder.buildable(LogQueue::Rewrite)
-                {
+                if machine_builder.buildable(LogQueue::Rewrite) {
                     Self::recover_queue(
                         LogQueue::Rewrite,
                         self.file_builder.clone(),
