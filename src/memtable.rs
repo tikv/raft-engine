@@ -102,7 +102,7 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        while let Some((key, (value, file_id))) = rhs.kvs.pop_first() {
+        for (key, (value, file_id)) in rhs.kvs.drain_filter(|_, _| true) {
             self.put(key, value, file_id);
         }
 
@@ -125,7 +125,7 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        while let Some((key, (value, file_id))) = rhs.kvs.pop_first() {
+        for (key, (value, file_id)) in rhs.kvs.drain_filter(|_, _| true) {
             self.put(key, value, file_id);
         }
 

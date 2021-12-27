@@ -282,6 +282,10 @@ where
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
     }
+
+    pub fn get_used_size(&self) -> usize {
+        self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
+    }
 }
 
 impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {

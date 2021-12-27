@@ -12,7 +12,7 @@
 // limitations under the License.
 
 #![feature(shrink_to)]
-#![feature(map_first_last)]
+#![feature(btree_drain_filter)]
 #![feature(generic_associated_types)]
 #![feature(test)]
 
