@@ -99,148 +99,41 @@ impl ReplayMachine for TruncateMachine {
         //first we should convert map to vec and sort
         let mut all_item_vec = Vec::from_iter(self.all_items.iter());
         all_item_vec.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let truncate_mode = self.truncate_info.as_ref().unwrap().truncate_mode;
 
+        let truncate_mode = self.truncate_info.as_ref().unwrap().truncate_mode;
         let need_truncate_raft_group_id = &self.truncate_info.as_ref().unwrap().raft_groups_ids;
 
         // raft_group_id to last valid index
         let mut last_valid_offset = HashMap::new();
-
         // raft_group_id to the last index
         let mut group_last_index = HashMap::new();
-
         // raft_group to last continuous section
         let mut group_last_valid_start_index = HashMap::<u64, (u64, u64)>::new();
-        for (file_name, _) in &all_item_vec {
-            let idx_info = self
-                .all_item_postion_info
-                .get(&(*file_name).clone())
-                .unwrap();
-            for (k, v) in idx_info {
-                group_last_index
-                    .entry(*k)
-                    .and_modify(|x| {
-                        if *x < v.1 {
-                            *x = v.1
-                        }
-                    })
-                    .or_insert(v.1);
-                group_last_valid_start_index
-                    .entry(*k)
-                    .and_modify(|val| {
-                        if val.1 + 1 == v.0 {
-                            *val = (val.0, v.1);
-                        }
-
-                        if val.1 + 1 < v.0 {
-                            *val = *v;
-                        }
-                    })
-                    .or_insert(*v);
-
-                last_valid_offset
-                    .entry(*k)
-                    .and_modify(|x| {
-                        if *x + 1 == v.0 {
-                            *x = v.1
-                        }
-                    })
-                    .or_insert(v.1);
-            }
-        }
+        self.fill_raft_group_postion_info(
+            &all_item_vec,
+            &mut last_valid_offset,
+            &mut group_last_index,
+            &mut group_last_valid_start_index,
+        );
 
         for (file_name, items) in &all_item_vec {
-            let mut need_truncate = false;
-            match truncate_mode {
-                TruncateMode::Front => {
-                    let position_info = self
-                        .all_item_postion_info
-                        .get(&(*file_name).clone())
-                        .unwrap();
-                    for (k, v) in position_info {
-                        if need_truncate_raft_group_id.is_empty()
-                            || need_truncate_raft_group_id.contains(k)
-                        {
-                            if let Some(last_valid_index) = last_valid_offset.get(k) {
-                                if last_valid_index < &v.1 {
-                                    // this file need to trucate
-                                    need_truncate = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if need_truncate {
-                        self.flush_to_new_file(
-                            Path::new(file_name).as_ref(),
-                            builder.clone(),
-                            items,
-                            &mut last_valid_offset,
-                            &mut group_last_index,
-                            &mut group_last_valid_start_index,
-                        )?;
-                    }
-                }
-
-                TruncateMode::Back => {
-                    let position_info = self
-                        .all_item_postion_info
-                        .get(&(*file_name).clone())
-                        .unwrap();
-                    for (k, v) in position_info {
-                        if need_truncate_raft_group_id.is_empty()
-                            || need_truncate_raft_group_id.contains(k)
-                        {
-                            let last_sequence = group_last_valid_start_index.get(k).unwrap();
-                            if !(v.0 >= last_sequence.0 && v.1 <= last_sequence.1) {
-                                need_truncate = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if need_truncate {
-                        self.flush_to_new_file(
-                            Path::new(file_name).as_ref(),
-                            builder.clone(),
-                            items,
-                            &mut last_valid_offset,
-                            &mut group_last_index,
-                            &mut group_last_valid_start_index,
-                        )?;
-                    }
-                }
-
-                TruncateMode::All => {
-                    let position_info = self
-                        .all_item_postion_info
-                        .get(&(*file_name).clone())
-                        .unwrap();
-                    for (k, _) in position_info {
-                        if need_truncate_raft_group_id.is_empty()
-                            || need_truncate_raft_group_id.contains(k)
-                        {
-                            let offset_in_all_file = group_last_index.get(k).unwrap();
-                            let valid_offset_in_all_file = last_valid_offset.get(k).unwrap();
-                            if offset_in_all_file != valid_offset_in_all_file {
-                                need_truncate = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if need_truncate {
-                        self.flush_to_new_file(
-                            Path::new(file_name).as_ref(),
-                            builder.clone(),
-                            items,
-                            &mut last_valid_offset,
-                            &mut group_last_index,
-                            &mut group_last_valid_start_index,
-                        )?;
-                    }
-                }
+            let need_truncate = self.need_truncate(
+                truncate_mode,
+                need_truncate_raft_group_id,
+                &mut last_valid_offset,
+                &mut group_last_index,
+                &mut group_last_valid_start_index,
+                file_name,
+            );
+            if need_truncate {
+                self.truncate_to_new_file(
+                    Path::new(file_name).as_ref(),
+                    builder.clone(),
+                    items,
+                    &mut last_valid_offset,
+                    &mut group_last_index,
+                    &mut group_last_valid_start_index,
+                )?;
             }
         }
         Ok(())
@@ -252,7 +145,7 @@ impl ReplayMachine for TruncateMachine {
 }
 
 impl TruncateMachine {
-    fn flush_to_new_file<B: FileBuilder>(
+    fn truncate_to_new_file<B: FileBuilder>(
         &self,
         path: &Path,
         builder: Arc<B>,
@@ -403,5 +296,97 @@ impl TruncateMachine {
                     .or_insert(new_map);
             }
         }
+    }
+
+    fn fill_raft_group_postion_info(
+        &self,
+        all_item_vec: &[(&String, &Vec<LogItemBatch>)],
+        last_valid_offset: &mut HashMap<u64, u64>,
+        group_last_index: &mut HashMap<u64, u64>,
+        group_last_valid_start_index: &mut HashMap<u64, (u64, u64)>,
+    ) {
+        for (file_name, _) in all_item_vec {
+            let idx_info = self
+                .all_item_postion_info
+                .get(&(*file_name).clone())
+                .unwrap();
+            for (k, v) in idx_info {
+                group_last_index
+                    .entry(*k)
+                    .and_modify(|x| {
+                        if *x < v.1 {
+                            *x = v.1
+                        }
+                    })
+                    .or_insert(v.1);
+                group_last_valid_start_index
+                    .entry(*k)
+                    .and_modify(|val| {
+                        if val.1 + 1 == v.0 {
+                            *val = (val.0, v.1);
+                        }
+
+                        if val.1 + 1 < v.0 {
+                            *val = *v;
+                        }
+                    })
+                    .or_insert(*v);
+
+                last_valid_offset
+                    .entry(*k)
+                    .and_modify(|x| {
+                        if *x + 1 == v.0 {
+                            *x = v.1
+                        }
+                    })
+                    .or_insert(v.1);
+            }
+        }
+    }
+
+    fn need_truncate(
+        &self,
+        truncate_mode: TruncateMode,
+        need_truncate_raft_group_id: &[u64],
+        last_valid_offset: &mut HashMap<u64, u64>,
+        group_last_index: &mut HashMap<u64, u64>,
+        group_last_valid_start_index: &mut HashMap<u64, (u64, u64)>,
+        file_name: &&String,
+    ) -> bool {
+        let position_info = self
+            .all_item_postion_info
+            .get(&(*file_name).clone())
+            .unwrap();
+
+        for (k, v) in position_info {
+            let in_truncate_raft_groups =
+                need_truncate_raft_group_id.is_empty() || need_truncate_raft_group_id.contains(k);
+            if in_truncate_raft_groups {
+                match truncate_mode {
+                    TruncateMode::Front => {
+                        if let Some(last_valid_index) = last_valid_offset.get(k) {
+                            if last_valid_index < &v.1 {
+                                return true;
+                            }
+                        }
+                    }
+                    TruncateMode::Back => {
+                        let last_sequence = group_last_valid_start_index.get(k).unwrap();
+                        if !(v.0 >= last_sequence.0 && v.1 <= last_sequence.1) {
+                            return true;
+                        }
+                    }
+
+                    TruncateMode::All => {
+                        let offset_in_all_file = group_last_index.get(k).unwrap();
+                        let valid_offset_in_all_file = last_valid_offset.get(k).unwrap();
+                        if offset_in_all_file != valid_offset_in_all_file {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 }
