@@ -292,7 +292,7 @@ impl<B: FileBuilder> SinglePipe<B> {
 pub struct DualPipes<B: FileBuilder> {
     pipes: [SinglePipe<B>; 2],
 
-    pub lock_file: Arc<File>,
+    _lock_file: Arc<File>,
 }
 
 pub fn get_lock_file(dir: &str) -> Result<File> {
@@ -314,7 +314,7 @@ impl<B: FileBuilder> DualPipes<B> {
 
         Ok(Self {
             pipes: [appender, rewriter],
-            lock_file: Arc::new(get_lock_file(dir)?),
+            _lock_file: Arc::new(get_lock_file(dir)?),
         })
     }
 
