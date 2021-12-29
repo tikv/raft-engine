@@ -195,7 +195,6 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .num_threads(threads)
             .build()
             .unwrap();
-
         let (append, rewrite) = pool.join(
             || {
                 if machine_builder.buildable(LogQueue::Append) {
@@ -257,7 +256,6 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let chunks = files.par_chunks(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
-
         let mut sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {

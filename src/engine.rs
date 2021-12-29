@@ -81,7 +81,6 @@ where
         let (append, rewrite) =
             builder.recover(&ReplayMachineBuilder::<MemTableRecoverContext>::default())?;
         let pipe_log = Arc::new(builder.finish()?);
-
         rewrite.merge_append_context(append);
         let (memtables, stats) = rewrite.finish();
         info!("Recovering raft logs takes {:?}", start.elapsed());

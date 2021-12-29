@@ -96,7 +96,6 @@ impl EntryIndexes {
         if count > 0 {
             buf.encode_var_u64(self.0[0].index)?;
         }
-
         for ei in self.0.iter() {
             buf.encode_var_u64(ei.entry_offset + ei.entry_len as u64)?;
         }
