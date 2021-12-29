@@ -176,13 +176,14 @@ impl TruncateMachine {
 
                 match item_type {
                     EntryIndexes(entry_indexes) => {
-                        let raft_group_last_valid_offset = *last_valid_offset.get(&raft_id).unwrap();
+                        let raft_group_last_valid_offset =
+                            *last_valid_offset.get(&raft_id).unwrap();
                         let mut entrys = Vec::new();
                         let mut indexs = Vec::new();
                         match truncate_mode {
                             All => {
                                 let need_skip = *group_last_index.get(&raft_id).unwrap()
-                                        != raft_group_last_valid_offset
+                                    != raft_group_last_valid_offset
                                     && (raft_group_ids.is_empty()
                                         || raft_group_ids.contains(&raft_id));
                                 if need_skip {
