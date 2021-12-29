@@ -39,29 +39,22 @@ pub trait ReplayMachineFactory: Sync {
 
     fn new_machine(&self) -> Self::Machine;
 
-    fn parameters(&self) -> Option<TruncateQueueParameter>;
+    fn need_truncate(&self) -> bool {
+        false
+    }
 
     fn buildable(&self, _: LogQueue) -> bool {
         true
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ReplayMachineBuilder<M>
 where
     M: ReplayMachine,
 {
     pub(crate) truncate_params: Option<TruncateQueueParameter>,
     _phantom: PhantomData<M>,
-}
-
-impl<M: ReplayMachine> Default for ReplayMachineBuilder<M> {
-    fn default() -> Self {
-        ReplayMachineBuilder {
-            truncate_params: None,
-            _phantom: Default::default(),
-        }
-    }
 }
 
 impl<M: ReplayMachine> ReplayMachineFactory for ReplayMachineBuilder<M> {
@@ -73,8 +66,8 @@ impl<M: ReplayMachine> ReplayMachineFactory for ReplayMachineBuilder<M> {
         m
     }
 
-    fn parameters(&self) -> Option<TruncateQueueParameter> {
-        self.truncate_params.clone()
+    fn need_truncate(&self) -> bool {
+        self.truncate_params.is_some()
     }
 
     fn buildable(&self, queue: LogQueue) -> bool {
@@ -98,8 +91,6 @@ pub struct DualPipesBuilder<B: FileBuilder> {
     append_files: Vec<FileToRecover>,
     rewrite_files: Vec<FileToRecover>,
 }
-
-type RecoverResult<T> = (Option<T>, Option<T>);
 
 impl<B: FileBuilder> DualPipesBuilder<B> {
     pub fn new(cfg: Config, file_builder: Arc<B>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
@@ -185,7 +176,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<F>(&mut self, machine_builder: &F) -> Result<RecoverResult<F::Machine>>
+    pub fn recover<F>(&mut self, machine_builder: &F) -> Result<(F::Machine, F::Machine)>
     where
         F: ReplayMachineFactory,
     {
@@ -204,6 +195,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .num_threads(threads)
             .build()
             .unwrap();
+
         let (append, rewrite) = pool.join(
             || {
                 if machine_builder.buildable(LogQueue::Append) {
@@ -217,7 +209,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                         machine_builder,
                     )
                 } else {
-                    Ok(None)
+                    Ok(machine_builder.new_machine())
                 }
             },
             || {
@@ -232,7 +224,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                         machine_builder,
                     )
                 } else {
-                    Ok(None)
+                    Ok(machine_builder.new_machine())
                 }
             },
         );
@@ -254,12 +246,12 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         read_block_size: usize,
         files: &[FileToRecover],
         replay_machine_builder: &F,
-    ) -> Result<Option<F::Machine>>
+    ) -> Result<F::Machine>
     where
         F: ReplayMachineFactory,
     {
         if concurrency == 0 || files.is_empty() {
-            return Ok(Some(replay_machine_builder.new_machine()));
+            return Ok(replay_machine_builder.new_machine());
         }
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks(max_chunk_size);
@@ -316,11 +308,11 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 },
             )?;
 
-        if replay_machine_builder.parameters().is_some() {
+        if replay_machine_builder.need_truncate() {
             sequential_replay_machine.truncate(file_builder)?;
         }
 
-        Ok(Some(sequential_replay_machine))
+        Ok(sequential_replay_machine)
     }
 
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {

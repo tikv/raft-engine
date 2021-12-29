@@ -78,11 +78,9 @@ where
         let start = Instant::now();
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
         builder.scan()?;
-        let (_append, _rewrite) =
+        let (append, rewrite) =
             builder.recover(&ReplayMachineBuilder::<MemTableRecoverContext>::default())?;
         let pipe_log = Arc::new(builder.finish()?);
-        let rewrite = _rewrite.unwrap();
-        let append = _append.unwrap();
 
         rewrite.merge_append_context(append);
         let (memtables, stats) = rewrite.finish();
@@ -339,8 +337,8 @@ where
         builder.scan()?;
         let (append, rewrite) =
             builder.recover(&ReplayMachineBuilder::<ConsistencyChecker>::default())?;
-        let mut map = rewrite.unwrap().finish();
-        for (id, index) in append.unwrap().finish() {
+        let mut map = rewrite.finish();
+        for (id, index) in append.finish() {
             map.entry(id).or_insert(index);
         }
         let mut list: Vec<(u64, u64)> = map.into_iter().collect();
