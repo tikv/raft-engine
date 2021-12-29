@@ -176,17 +176,12 @@ impl TruncateMachine {
 
                 match item_type {
                     EntryIndexes(entry_indexes) => {
-                        let raft_group_last_valid_offset =
-                            if last_valid_offset.get(&raft_id).is_some() {
-                                *last_valid_offset.get(&raft_id).unwrap()
-                            } else {
-                                u64::MAX
-                            };
-
+                        let raft_group_last_valid_offset = *last_valid_offset.get(&raft_id).unwrap();
+                        let mut entrys = Vec::new();
+                        let mut indexs = Vec::new();
                         match truncate_mode {
                             All => {
-                                let need_skip = raft_group_last_valid_offset != u64::MAX
-                                    && *group_last_index.get(&raft_id).unwrap()
+                                let need_skip = *group_last_index.get(&raft_id).unwrap()
                                         != raft_group_last_valid_offset
                                     && (raft_group_ids.is_empty()
                                         || raft_group_ids.contains(&raft_id));
@@ -194,23 +189,15 @@ impl TruncateMachine {
                                     continue;
                                 }
 
-                                let mut entrys = Vec::new();
-                                let mut indexs = Vec::new();
                                 for entry_index in &entry_indexes.0 {
                                     let entry =
                                         log_reader.read(entry_index.entries.unwrap()).unwrap();
                                     entrys.push(entry);
                                     indexs.push(*entry_index);
                                 }
-
-                                if !indexs.is_empty() {
-                                    batch.add_raw_entries(raft_id, indexs, entrys)?;
-                                }
                             }
 
                             Front => {
-                                let mut entrys = Vec::new();
-                                let mut indexs = Vec::new();
                                 for entry_index in &entry_indexes.0 {
                                     let idx = entry_index.index;
                                     if (raft_group_ids.is_empty()
@@ -225,14 +212,8 @@ impl TruncateMachine {
                                     entrys.push(entry);
                                     indexs.push(*entry_index);
                                 }
-
-                                if !indexs.is_empty() {
-                                    batch.add_raw_entries(raft_id, indexs, entrys)?;
-                                }
                             }
                             Back => {
-                                let mut entrys = Vec::new();
-                                let mut indexs = Vec::new();
                                 let first_idx_to_keep =
                                     group_last_valid_start_index.get(&raft_id).unwrap().0;
                                 for entry_index in &entry_indexes.0 {
@@ -249,11 +230,10 @@ impl TruncateMachine {
                                     entrys.push(entry);
                                     indexs.push(*entry_index);
                                 }
-
-                                if !indexs.is_empty() {
-                                    batch.add_raw_entries(raft_id, indexs, entrys)?;
-                                }
                             }
+                        }
+                        if !indexs.is_empty() {
+                            batch.add_raw_entries(raft_id, indexs, entrys)?;
                         }
                     }
                     Command(cmd) => batch.add_command(raft_id, cmd.clone()),
