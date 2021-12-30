@@ -81,6 +81,16 @@ impl ReplayMachineFactory for TruncateMachineFactory {
         m.init(self.truncate_params.clone());
         m
     }
+
+    fn need_truncate(&self) -> bool {
+        self.truncate_params.is_some()
+    }
+
+    fn buildable(&self, queue: LogQueue) -> bool {
+        return self.truncate_params.is_none()
+            || self.truncate_params.as_ref().unwrap().queue.is_none()
+            || self.truncate_params.as_ref().unwrap().queue.unwrap() == queue;
+    }
 }
 
 struct FileToRecover {
