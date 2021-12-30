@@ -13,13 +13,15 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{get_lock_file, FilePipeLog, FilePipeLogBuilder, ReplayMachineBuilder};
+use crate::file_pipe_log::{
+    get_lock_file, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, TruncateMachineFactory,
+};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::truncate::{TruncateMachine, TruncateMode, TruncateQueueParameter};
+use crate::truncate::{TruncateMode, TruncateQueueParameter};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
@@ -79,7 +81,7 @@ where
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, listeners.clone());
         builder.scan()?;
         let (append, rewrite) =
-            builder.recover(&ReplayMachineBuilder::<MemTableRecoverContext>::default())?;
+            builder.recover(&DefaultMachineFactory::<MemTableRecoverContext>::default())?;
         let pipe_log = Arc::new(builder.finish()?);
         rewrite.merge_append_context(append);
         let (memtables, stats) = rewrite.finish();
@@ -335,7 +337,7 @@ where
         let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
         builder.scan()?;
         let (append, rewrite) =
-            builder.recover(&ReplayMachineBuilder::<ConsistencyChecker>::default())?;
+            builder.recover(&DefaultMachineFactory::<ConsistencyChecker>::default())?;
         let mut map = rewrite.finish();
         for (id, index) in append.finish() {
             map.entry(id).or_insert(index);
@@ -376,9 +378,7 @@ where
             lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
         };
 
-        let mut machine_builder = ReplayMachineBuilder::<TruncateMachine>::default();
-        machine_builder.truncate_params = Some(parms);
-        builder.recover(&machine_builder)?;
+        builder.recover(&TruncateMachineFactory::new(Some(parms)))?;
 
         Ok(())
     }

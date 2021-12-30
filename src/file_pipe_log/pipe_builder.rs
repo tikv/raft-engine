@@ -14,7 +14,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::truncate::TruncateQueueParameter;
+use crate::truncate::{TruncateMachine, TruncateQueueParameter};
 use crate::Result;
 
 use super::format::FileNameExt;
@@ -37,7 +37,9 @@ pub trait ReplayMachine: Send + Default + Sync {
 pub trait ReplayMachineFactory: Sync {
     type Machine: ReplayMachine;
 
-    fn new_machine(&self) -> Self::Machine;
+    fn new_machine(&self) -> Self::Machine {
+        Self::Machine::default()
+    }
 
     fn need_truncate(&self) -> bool {
         false
@@ -48,32 +50,36 @@ pub trait ReplayMachineFactory: Sync {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct ReplayMachineBuilder<M>
-where
-    M: ReplayMachine,
-{
-    pub(crate) truncate_params: Option<TruncateQueueParameter>,
-    _phantom: PhantomData<M>,
-}
+pub type DefaultMachineFactory<M> = PhantomData<M>;
 
-impl<M: ReplayMachine> ReplayMachineFactory for ReplayMachineBuilder<M> {
+impl<M: ReplayMachine> ReplayMachineFactory for DefaultMachineFactory<M> {
     type Machine = M;
 
     fn new_machine(&self) -> Self::Machine {
-        let mut m = Self::Machine::default();
+        M::default()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct TruncateMachineFactory {
+    pub(crate) truncate_params: Option<TruncateQueueParameter>,
+}
+
+impl TruncateMachineFactory {
+    pub fn new(params: Option<TruncateQueueParameter>) -> Self {
+        TruncateMachineFactory {
+            truncate_params: params,
+        }
+    }
+}
+
+impl ReplayMachineFactory for TruncateMachineFactory {
+    type Machine = TruncateMachine;
+
+    fn new_machine(&self) -> TruncateMachine {
+        let mut m = TruncateMachine::default();
         m.init(self.truncate_params.clone());
         m
-    }
-
-    fn need_truncate(&self) -> bool {
-        self.truncate_params.is_some()
-    }
-
-    fn buildable(&self, queue: LogQueue) -> bool {
-        return self.truncate_params.is_none()
-            || self.truncate_params.as_ref().unwrap().queue.is_none()
-            || self.truncate_params.as_ref().unwrap().queue.unwrap() == queue;
     }
 }
 

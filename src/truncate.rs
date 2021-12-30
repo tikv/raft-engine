@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[derive(Default)]
 pub struct TruncateMachine {
     items: Vec<LogItemBatch>,
     truncate_info: Option<TruncateQueueParameter>,
@@ -56,16 +57,16 @@ pub struct TruncateQueueParameter {
     pub lock_file: Arc<File>,
 }
 
-impl Default for TruncateMachine {
-    fn default() -> Self {
-        Self {
-            items: vec![],
-            truncate_info: None,
-            all_items: Default::default(),
-            all_item_postion_info: Default::default(),
-        }
-    }
-}
+// impl Default for TruncateMachine {
+//     fn default() -> Self {
+//         Self {
+//             items: vec![],
+//             truncate_info: None,
+//             all_items: Default::default(),
+//             all_item_postion_info: Default::default(),
+//         }
+//     }
+// }
 
 impl ReplayMachine for TruncateMachine {
     fn replay(
