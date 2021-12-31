@@ -14,7 +14,7 @@ use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::truncate::{TruncateMachine, TruncateQueueParameter};
+use crate::truncate::TruncateQueueParameter;
 use crate::Result;
 
 use super::format::FileNameExt;
@@ -27,11 +27,13 @@ pub trait ReplayMachine: Send + Default + Sync {
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 
-    fn truncate<B: FileBuilder>(&mut self, _builder: Arc<B>) -> Result<()> {
+    fn truncate<B: FileBuilder>(
+        &mut self,
+        _builder: Arc<B>,
+        _truncate_info: &Option<TruncateQueueParameter>,
+    ) -> Result<()> {
         Ok(())
     }
-
-    fn init(&mut self, _params: Option<TruncateQueueParameter>) {}
 }
 
 pub trait ReplayMachineFactory: Sync {
@@ -39,14 +41,6 @@ pub trait ReplayMachineFactory: Sync {
 
     fn new_machine(&self) -> Self::Machine {
         Self::Machine::default()
-    }
-
-    fn need_truncate(&self) -> bool {
-        false
-    }
-
-    fn buildable(&self, _: LogQueue) -> bool {
-        true
     }
 }
 
@@ -57,39 +51,6 @@ impl<M: ReplayMachine> ReplayMachineFactory for DefaultMachineFactory<M> {
 
     fn new_machine(&self) -> Self::Machine {
         M::default()
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct TruncateMachineFactory {
-    pub(crate) truncate_params: Option<TruncateQueueParameter>,
-}
-
-impl TruncateMachineFactory {
-    pub fn new(params: Option<TruncateQueueParameter>) -> Self {
-        TruncateMachineFactory {
-            truncate_params: params,
-        }
-    }
-}
-
-impl ReplayMachineFactory for TruncateMachineFactory {
-    type Machine = TruncateMachine;
-
-    fn new_machine(&self) -> TruncateMachine {
-        let mut m = TruncateMachine::default();
-        m.init(self.truncate_params.clone());
-        m
-    }
-
-    fn need_truncate(&self) -> bool {
-        self.truncate_params.is_some()
-    }
-
-    fn buildable(&self, queue: LogQueue) -> bool {
-        return self.truncate_params.is_none()
-            || self.truncate_params.as_ref().unwrap().queue.is_none()
-            || self.truncate_params.as_ref().unwrap().queue.unwrap() == queue;
     }
 }
 
@@ -106,6 +67,104 @@ pub struct DualPipesBuilder<B: FileBuilder> {
 
     append_files: Vec<FileToRecover>,
     rewrite_files: Vec<FileToRecover>,
+    extra_params: Option<TruncateQueueParameter>,
+}
+
+trait RecoverQueue {
+    fn recover_queue<F: ReplayMachineFactory>(
+        &self,
+        queue: LogQueue,
+        concurrency: usize,
+        machine_builder: &F,
+    ) -> Result<F::Machine>;
+}
+
+impl<B: FileBuilder> RecoverQueue for DualPipesBuilder<B> {
+    fn recover_queue<F: ReplayMachineFactory>(
+        &self,
+        queue: LogQueue,
+        concurrency: usize,
+        replay_machine_builder: &F,
+    ) -> Result<F::Machine> {
+        let files = if queue == LogQueue::Append {
+            &self.append_files
+        } else {
+            &self.rewrite_files
+        };
+
+        let recovery_this_queue = {
+            self.extra_params.is_none()
+                || self.extra_params.as_ref().unwrap().queue.is_none()
+                || self.extra_params.as_ref().unwrap().queue.unwrap() == queue
+        };
+
+        if !recovery_this_queue || concurrency == 0 || files.is_empty() {
+            return Ok(replay_machine_builder.new_machine());
+        }
+
+        let recovery_mode = self.cfg.recovery_mode;
+
+        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
+        let chunks = files.par_chunks(max_chunk_size);
+        let chunk_count = chunks.len();
+        debug_assert!(chunk_count <= concurrency);
+        let mut sequential_replay_machine = chunks
+            .enumerate()
+            .map(|(index, chunk)| {
+                let mut reader =
+                    LogItemBatchFileReader::new(self.cfg.recovery_read_block_size.0 as usize);
+                let mut sequential_replay_machine: F::Machine =
+                    replay_machine_builder.new_machine();
+                let file_count = chunk.len();
+                for (i, f) in chunk.iter().enumerate() {
+                    let is_last_file = index == chunk_count - 1 && i == file_count - 1;
+                    reader.open(
+                        FileId { queue, seq: f.seq },
+                        build_file_reader(self.file_builder.as_ref(), &f.path, f.fd.clone())?,
+                    )?;
+                    loop {
+                        match reader.next() {
+                            Ok(Some(item_batch)) => {
+                                sequential_replay_machine.replay(
+                                    item_batch,
+                                    FileId { queue, seq: f.seq },
+                                    f.path.as_path(),
+                                )?;
+                            }
+                            Ok(None) => break,
+                            Err(e)
+                                if recovery_mode == RecoveryMode::TolerateTailCorruption
+                                    && is_last_file =>
+                            {
+                                warn!("The tail of raft log is corrupted but ignored: {}", e);
+                                f.fd.truncate(reader.valid_offset())?;
+                                break;
+                            }
+                            Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
+                                warn!("File is corrupted but ignored: {}", e);
+                                f.fd.truncate(reader.valid_offset())?;
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                Ok(sequential_replay_machine)
+            })
+            .try_reduce(
+                || replay_machine_builder.new_machine(),
+                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
+                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
+                    Ok(sequential_replay_machine_left)
+                },
+            )?;
+
+        if self.need_truncate() {
+            sequential_replay_machine.truncate(self.file_builder.clone(), &self.extra_params)?;
+        }
+
+        Ok(sequential_replay_machine)
+    }
 }
 
 impl<B: FileBuilder> DualPipesBuilder<B> {
@@ -116,7 +175,16 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             listeners,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
+            extra_params: None,
         }
+    }
+
+    pub fn set_truncate_params(&mut self, truncate_params: Option<TruncateQueueParameter>) {
+        self.extra_params = truncate_params;
+    }
+
+    pub fn need_truncate(&self) -> bool {
+        self.extra_params.is_some()
     }
 
     pub fn scan(&mut self) -> Result<()> {
@@ -212,36 +280,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .build()
             .unwrap();
         let (append, rewrite) = pool.join(
-            || {
-                if machine_builder.buildable(LogQueue::Append) {
-                    Self::recover_queue(
-                        LogQueue::Append,
-                        self.file_builder.clone(),
-                        self.cfg.recovery_mode,
-                        append_concurrency,
-                        self.cfg.recovery_read_block_size.0 as usize,
-                        &self.append_files,
-                        machine_builder,
-                    )
-                } else {
-                    Ok(machine_builder.new_machine())
-                }
-            },
-            || {
-                if machine_builder.buildable(LogQueue::Rewrite) {
-                    Self::recover_queue(
-                        LogQueue::Rewrite,
-                        self.file_builder.clone(),
-                        self.cfg.recovery_mode,
-                        rewrite_concurrency,
-                        self.cfg.recovery_read_block_size.0 as usize,
-                        &self.rewrite_files,
-                        machine_builder,
-                    )
-                } else {
-                    Ok(machine_builder.new_machine())
-                }
-            },
+            || self.recover_queue(LogQueue::Append, append_concurrency, machine_builder),
+            || self.recover_queue(LogQueue::Rewrite, rewrite_concurrency, machine_builder),
         );
 
         Ok((append?, rewrite?))
@@ -251,82 +291,6 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let appender = self.build_pipe(LogQueue::Append)?;
         let rewriter = self.build_pipe(LogQueue::Rewrite)?;
         DualPipes::open(&self.cfg.dir, appender, rewriter)
-    }
-
-    fn recover_queue<F>(
-        queue: LogQueue,
-        file_builder: Arc<B>,
-        recovery_mode: RecoveryMode,
-        concurrency: usize,
-        read_block_size: usize,
-        files: &[FileToRecover],
-        replay_machine_builder: &F,
-    ) -> Result<F::Machine>
-    where
-        F: ReplayMachineFactory,
-    {
-        if concurrency == 0 || files.is_empty() {
-            return Ok(replay_machine_builder.new_machine());
-        }
-        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
-        let chunks = files.par_chunks(max_chunk_size);
-        let chunk_count = chunks.len();
-        debug_assert!(chunk_count <= concurrency);
-        let mut sequential_replay_machine = chunks
-            .enumerate()
-            .map(|(index, chunk)| {
-                let mut reader = LogItemBatchFileReader::new(read_block_size);
-                let mut sequential_replay_machine: F::Machine =
-                    replay_machine_builder.new_machine();
-                let file_count = chunk.len();
-                for (i, f) in chunk.iter().enumerate() {
-                    let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    reader.open(
-                        FileId { queue, seq: f.seq },
-                        build_file_reader(file_builder.as_ref(), &f.path, f.fd.clone())?,
-                    )?;
-                    loop {
-                        match reader.next() {
-                            Ok(Some(item_batch)) => {
-                                sequential_replay_machine.replay(
-                                    item_batch,
-                                    FileId { queue, seq: f.seq },
-                                    f.path.as_path(),
-                                )?;
-                            }
-                            Ok(None) => break,
-                            Err(e)
-                                if recovery_mode == RecoveryMode::TolerateTailCorruption
-                                    && is_last_file =>
-                            {
-                                warn!("The tail of raft log is corrupted but ignored: {}", e);
-                                f.fd.truncate(reader.valid_offset())?;
-                                break;
-                            }
-                            Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
-                                warn!("File is corrupted but ignored: {}", e);
-                                f.fd.truncate(reader.valid_offset())?;
-                                break;
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
-                Ok(sequential_replay_machine)
-            })
-            .try_reduce(
-                || replay_machine_builder.new_machine(),
-                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
-                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
-                    Ok(sequential_replay_machine_left)
-                },
-            )?;
-
-        if replay_machine_builder.need_truncate() {
-            sequential_replay_machine.truncate(file_builder)?;
-        }
-
-        Ok(sequential_replay_machine)
     }
 
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {

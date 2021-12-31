@@ -13,15 +13,13 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{
-    get_lock_file, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, TruncateMachineFactory,
-};
+use crate::file_pipe_log::{get_lock_file, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::truncate::{TruncateMode, TruncateQueueParameter};
+use crate::truncate::{TruncateMachine, TruncateMode, TruncateQueueParameter};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
@@ -368,9 +366,6 @@ where
             ..Default::default()
         };
 
-        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
-        builder.scan()?;
-
         let parms = TruncateQueueParameter {
             queue,
             truncate_mode: mode,
@@ -378,7 +373,10 @@ where
             lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
         };
 
-        builder.recover(&TruncateMachineFactory::new(Some(parms)))?;
+        let mut builder = FilePipeLogBuilder::new(cfg, file_builder, Vec::new());
+        builder.set_truncate_params(Some(parms));
+        builder.scan()?;
+        builder.recover(&DefaultMachineFactory::<TruncateMachine>::default())?;
 
         Ok(())
     }
