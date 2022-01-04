@@ -30,6 +30,12 @@ pub enum TruncateMode {
     All = 2,
 }
 
+impl Default for TruncateMode {
+    fn default() -> Self {
+        TruncateMode::All
+    }
+}
+
 impl FromStr for TruncateMode {
     type Err = Error;
 
@@ -85,14 +91,14 @@ impl ReplayMachine for TruncateMachine {
     fn truncate<B: FileBuilder>(
         &mut self,
         builder: Arc<B>,
-        truncate_info: &Option<TruncateQueueParameter>,
+        truncate_info: &TruncateQueueParameter,
     ) -> crate::Result<()> {
         //first we should convert map to vec and sort
         let mut all_item_vec = Vec::from_iter(self.all_items.iter());
         all_item_vec.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        let truncate_mode = truncate_info.as_ref().unwrap().truncate_mode;
-        let need_truncate_raft_group_id = &truncate_info.as_ref().unwrap().raft_groups_ids;
+        let truncate_mode = truncate_info.truncate_mode;
+        let need_truncate_raft_group_id = &truncate_info.raft_groups_ids;
 
         // raft_group_id to last valid index
         let mut last_valid_offset = HashMap::new();
@@ -149,7 +155,7 @@ impl TruncateMachine {
         builder: Arc<B>,
         items: &[LogItemBatch],
         index_info: OffsetInfo,
-        truncate_info: &Option<TruncateQueueParameter>,
+        truncate_parms: &TruncateQueueParameter,
     ) -> crate::Result<()> {
         let origin_name = path.to_str().unwrap();
         let truncate_file_name = origin_name.to_owned() + "_truncated";
@@ -166,7 +172,6 @@ impl TruncateMachine {
 
         let mut batch = LogBatch::with_capacity(self.items.len());
 
-        let truncate_parms = truncate_info.as_ref().unwrap();
         let raft_group_ids = &truncate_parms.raft_groups_ids;
         let truncate_mode = truncate_parms.truncate_mode;
 
