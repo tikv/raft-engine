@@ -87,8 +87,10 @@ impl ReplayMachine for TruncateMachine {
 
         Ok(())
     }
+}
 
-    fn truncate<B: FileBuilder>(
+impl TruncateMachine {
+    pub fn truncate<B: FileBuilder>(
         &mut self,
         builder: Arc<B>,
         truncate_info: &TruncateQueueParameter,

@@ -14,7 +14,6 @@ use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::truncate::{TruncateMachine, TruncateQueueParameter};
 use crate::Result;
 
 use super::format::FileNameExt;
@@ -26,14 +25,6 @@ pub trait ReplayMachine: Send + Default + Sync {
     fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId, path: &Path) -> Result<()>;
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
-
-    fn truncate<B: FileBuilder>(
-        &mut self,
-        _builder: Arc<B>,
-        _truncate_info: &TruncateQueueParameter,
-    ) -> Result<()> {
-        Ok(())
-    }
 }
 
 pub trait ReplayMachineFactory: Sync {
@@ -42,41 +33,12 @@ pub trait ReplayMachineFactory: Sync {
     fn new_machine(&self) -> Self::Machine {
         Self::Machine::default()
     }
-
-    fn truncate<B: FileBuilder>(&self, _: &mut Self::Machine, _: Arc<B>) -> Result<()> {
-        Ok(())
-    }
 }
 
 pub type DefaultMachineFactory<M> = PhantomData<M>;
 
 impl<M: ReplayMachine> ReplayMachineFactory for DefaultMachineFactory<M> {
     type Machine = M;
-
-    fn new_machine(&self) -> Self::Machine {
-        M::default()
-    }
-}
-
-#[derive(Clone)]
-pub struct TruncateMachineFactory {
-    pub(crate) truncate_params: Option<TruncateQueueParameter>,
-}
-
-impl ReplayMachineFactory for TruncateMachineFactory {
-    type Machine = TruncateMachine;
-
-    fn truncate<B: FileBuilder>(&self, m: &mut Self::Machine, file_builder: Arc<B>) -> Result<()> {
-        m.truncate(file_builder, self.truncate_params.as_ref().unwrap())
-    }
-}
-
-impl TruncateMachineFactory {
-    pub fn new(params: TruncateQueueParameter) -> Self {
-        TruncateMachineFactory {
-            truncate_params: Some(params),
-        }
-    }
 }
 
 struct FileToRecover {
@@ -254,7 +216,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let chunks = files.par_chunks(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
-        let mut sequential_replay_machine = chunks
+        let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
                 let mut reader =
@@ -304,9 +266,6 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                     Ok(sequential_replay_machine_left)
                 },
             )?;
-
-        replay_machine_builder
-            .truncate(&mut sequential_replay_machine, self.file_builder.clone())?;
 
         Ok(sequential_replay_machine)
     }

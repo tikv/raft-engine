@@ -13,16 +13,13 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{
-    get_lock_file, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, ReplayMachineFactory,
-    TruncateMachineFactory,
-};
+use crate::file_pipe_log::{get_lock_file, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::truncate::{TruncateMode, TruncateQueueParameter};
+use crate::truncate::{TruncateMachine, TruncateMode, TruncateQueueParameter};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
@@ -376,7 +373,7 @@ where
             lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
         };
 
-        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder, Vec::new());
+        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder.clone(), Vec::new());
         builder.scan()?;
 
         let threads = cfg.recovery_threads;
@@ -399,21 +396,29 @@ where
         let recovery_rewrite_queue =
             parms.queue.is_none() || parms.queue.unwrap() == LogQueue::Rewrite;
 
-        let machine_factory = TruncateMachineFactory::new(parms);
+        let machine_factory = DefaultMachineFactory::<TruncateMachine>::default();
         let (r1, r2) = pool.join(
             || {
-                if recovery_append_queue {
-                    builder.recover_queue(LogQueue::Append, append_concurrency, &machine_factory)
+                let mut m = if recovery_append_queue {
+                    builder.recover_queue(LogQueue::Append, append_concurrency, &machine_factory)?
                 } else {
-                    Ok(<TruncateMachineFactory as ReplayMachineFactory>::Machine::default())
-                }
+                    TruncateMachine::default()
+                };
+
+                m.truncate(file_builder.clone(), &parms)
             },
             || {
-                if recovery_rewrite_queue {
-                    builder.recover_queue(LogQueue::Rewrite, rewrite_concurrency, &machine_factory)
+                let mut m = if recovery_rewrite_queue {
+                    builder.recover_queue(
+                        LogQueue::Rewrite,
+                        rewrite_concurrency,
+                        &machine_factory,
+                    )?
                 } else {
-                    Ok(<TruncateMachineFactory as ReplayMachineFactory>::Machine::default())
-                }
+                    TruncateMachine::default()
+                };
+
+                m.truncate(file_builder.clone(), &parms)
             },
         );
         r1?;
