@@ -58,7 +58,7 @@ pub struct DualPipesBuilder<B: FileBuilder> {
 
 impl<B: FileBuilder> DualPipesBuilder<B> {
     pub fn file_length(&self) -> (usize, usize) {
-        ((&self.rewrite_files).len(), (&self.rewrite_files).len())
+        ((&self.append_files).len(), (&self.rewrite_files).len())
     }
 
     pub fn new(cfg: Config, file_builder: Arc<B>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
@@ -149,23 +149,13 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         F: ReplayMachineFactory,
     {
         let threads = self.cfg.recovery_threads;
-        let (append_concurrency, rewrite_concurrency) =
-            match (self.append_files.len(), self.rewrite_files.len()) {
-                (a, b) if a > 0 && b > 0 => {
-                    let a_threads = std::cmp::max(1, threads * a / (a + b));
-                    let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
-                    (a_threads, b_threads)
-                }
-                _ => (threads, threads),
-            };
-
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
         let (append, rewrite) = pool.join(
-            || self.recover_queue(LogQueue::Append, append_concurrency, machine_builder),
-            || self.recover_queue(LogQueue::Rewrite, rewrite_concurrency, machine_builder),
+            || self.recover_queue(LogQueue::Append, machine_builder),
+            || self.recover_queue(LogQueue::Rewrite, machine_builder),
         );
 
         Ok((append?, rewrite?))
@@ -197,13 +187,27 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
     pub fn recover_queue<F: ReplayMachineFactory>(
         &self,
         queue: LogQueue,
-        concurrency: usize,
         replay_machine_builder: &F,
     ) -> Result<F::Machine> {
         let files = if queue == LogQueue::Append {
             &self.append_files
         } else {
             &self.rewrite_files
+        };
+
+        let threads = self.cfg.recovery_threads;
+        let (append_concurrency, rewrite_concurrency) = match self.file_length() {
+            (a, b) if a > 0 && b > 0 => {
+                let a_threads = std::cmp::max(1, threads * a / (a + b));
+                let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
+                (a_threads, b_threads)
+            }
+            _ => (threads, threads),
+        };
+        let concurrency = if queue == LogQueue::Append {
+            append_concurrency
+        } else {
+            rewrite_concurrency
         };
 
         if concurrency == 0 || files.is_empty() {

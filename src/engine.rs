@@ -366,41 +366,31 @@ where
             ..Default::default()
         };
 
+        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder.clone(), Vec::new());
+        builder.scan()?;
+
         let parms = TruncateQueueParameter {
             queue,
             truncate_mode: mode,
             raft_groups_ids: raft_groups.to_vec(),
             lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
         };
-
-        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder.clone(), Vec::new());
-        builder.scan()?;
-
-        let threads = cfg.recovery_threads;
-        let (append_concurrency, rewrite_concurrency) = match builder.file_length() {
-            (a, b) if a > 0 && b > 0 => {
-                let a_threads = std::cmp::max(1, threads * a / (a + b));
-                let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
-                (a_threads, b_threads)
-            }
-            _ => (threads, threads),
-        };
-
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap();
-
         let recovery_append_queue =
             parms.queue.is_none() || parms.queue.unwrap() == LogQueue::Append;
         let recovery_rewrite_queue =
             parms.queue.is_none() || parms.queue.unwrap() == LogQueue::Rewrite;
 
         let machine_factory = DefaultMachineFactory::<TruncateMachine>::default();
+        let threads = cfg.recovery_threads;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+
         let (r1, r2) = pool.join(
             || {
                 let mut m = if recovery_append_queue {
-                    builder.recover_queue(LogQueue::Append, append_concurrency, &machine_factory)?
+                    builder.recover_queue(LogQueue::Append, &machine_factory)?
                 } else {
                     TruncateMachine::default()
                 };
@@ -409,11 +399,7 @@ where
             },
             || {
                 let mut m = if recovery_rewrite_queue {
-                    builder.recover_queue(
-                        LogQueue::Rewrite,
-                        rewrite_concurrency,
-                        &machine_factory,
-                    )?
+                    builder.recover_queue(LogQueue::Rewrite, &machine_factory)?
                 } else {
                     TruncateMachine::default()
                 };
