@@ -23,7 +23,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2021-07-28
+          toolchain: nightly-2022-01-17
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -62,7 +62,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2021-07-28
+          toolchain: nightly-2022-01-17
           override: true
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
