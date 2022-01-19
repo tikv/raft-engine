@@ -670,11 +670,10 @@ impl MemTableAccessor {
                 }
             }
         }
-        // Rewrite tombstones here can be discarded, they are transmitted from
-        // append queue (`ctx.log_batch`).
-        std::mem::swap(
-            &mut *self.removed_memtables.lock(),
-            &mut *rhs.removed_memtables.lock(),
+        // Tombstones from both table are identical.
+        debug_assert_eq!(
+            self.removed_memtables.lock().len(),
+            rhs.removed_memtables.lock().len()
         );
     }
 
