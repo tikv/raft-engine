@@ -646,7 +646,7 @@ impl MemTableAccessor {
     }
 
     /// Merge memtables from the next right one during segmented recovery.
-    pub fn merge_newer_neighbor(&self, rhs: &mut Self) {
+    pub fn merge_newer_neighbor(&self, mut rhs: Self) {
         for slot in rhs.slots.iter_mut() {
             for (raft_group_id, memtable) in slot.write().drain() {
                 self.get_or_insert(raft_group_id)
@@ -654,12 +654,11 @@ impl MemTableAccessor {
                     .merge_newer_neighbor(memtable.write().borrow_mut());
             }
         }
-        self.removed_memtables
-            .lock()
-            .append(&mut rhs.removed_memtables.lock());
+        // Discarding neighbor's tombstones, they will be applied by
+        // `MemTableRecoverContext`.
     }
 
-    pub fn merge_append_table(&self, rhs: &mut Self) {
+    pub fn merge_append_table(&self, mut rhs: Self) {
         for slot in rhs.slots.iter_mut() {
             for (id, memtable) in std::mem::take(&mut *slot.write()) {
                 if let Some(existing_memtable) = self.get(id) {
@@ -671,6 +670,11 @@ impl MemTableAccessor {
                 }
             }
         }
+        // Tombstones from both table are identical.
+        debug_assert_eq!(
+            self.removed_memtables.lock().len(),
+            rhs.removed_memtables.lock().len()
+        );
     }
 
     pub fn apply(&self, log_items: LogItemDrain, queue: LogQueue) {
@@ -709,6 +713,7 @@ impl MemTableAccessor {
 
     #[inline]
     fn slot_index(mut id: u64) -> usize {
+        debug_assert!(MEMTABLE_SLOT_COUNT.is_power_of_two());
         id = (id ^ (id >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         id = (id ^ (id >> 27)).wrapping_mul(0x94d049bb133111eb);
         // Assuming slot count is power of two.
@@ -727,10 +732,10 @@ impl MemTableRecoverContext {
         (self.memtables, self.stats)
     }
 
-    pub fn merge_append_context(&self, mut append: MemTableRecoverContext) {
+    pub fn merge_append_context(&self, append: MemTableRecoverContext) {
         self.memtables
             .apply(append.log_batch.clone().drain(), LogQueue::Append);
-        self.memtables.merge_append_table(&mut append.memtables);
+        self.memtables.merge_append_table(append.memtables);
     }
 }
 
@@ -766,7 +771,7 @@ impl ReplayMachine for MemTableRecoverContext {
     fn merge(&mut self, mut rhs: Self, queue: LogQueue) -> Result<()> {
         self.log_batch.merge(&mut rhs.log_batch.clone());
         self.memtables.apply(rhs.log_batch.drain(), queue);
-        self.memtables.merge_newer_neighbor(&mut rhs.memtables);
+        self.memtables.merge_newer_neighbor(rhs.memtables);
         Ok(())
     }
 }

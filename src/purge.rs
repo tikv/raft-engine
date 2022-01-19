@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use log::{error, info};
+use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -64,7 +64,7 @@ where
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
-            error!("Failed to purge expired files: locked");
+            warn!("Unable to purge expired files: locked");
             return Ok(should_compact);
         }
 
@@ -80,19 +80,27 @@ where
             if let (Some(rewrite_watermark), Some(compact_watermark)) =
                 self.append_queue_watermarks()
             {
-                should_compact =
-                    self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
                 let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
                 let append_queue_barrier =
                     self.listeners.iter().fold(latest_append, |barrier, l| {
                         l.first_file_not_ready_for_purge(LogQueue::Append)
                             .map_or(barrier, |f| std::cmp::min(f, barrier))
                     });
-                if append_queue_barrier == first_append && first_append < latest_append {
-                    error!("Failed to purge expired files: blocked by barrier");
-                }
-                // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
+
+                // Ordering
+                // 1. Must rewrite tombstones AFTER acquiring
+                //    `append_queue_barrier`, or deletion marks might be lost
+                //    after restart.
+                // 2. Must rewrite tombstones BEFORE rewrite entries, or
+                //    entries from recreated region might be lost after
+                //    restart.
                 self.rewrite_append_queue_tombstones()?;
+                should_compact =
+                    self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
+
+                if append_queue_barrier == first_append && first_append < latest_append {
+                    warn!("Unable to purge expired files: blocked by barrier");
+                }
                 self.purge_to(LogQueue::Append, append_queue_barrier)?;
             }
         }
@@ -113,12 +121,12 @@ where
         if watermark == last {
             self.pipe_log.rotate(LogQueue::Append).unwrap();
         }
-        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
-            .unwrap();
+        self.rewrite_append_queue_tombstones().unwrap();
         if exit_after_step == Some(1) {
             return;
         }
-        self.rewrite_append_queue_tombstones().unwrap();
+        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
+            .unwrap();
         if exit_after_step == Some(2) {
             return;
         }
