@@ -590,19 +590,15 @@ mod tests {
 
     #[test]
     fn test_clean_raft_group() {
-        let rid = 1;
-        let data = vec![b'x'; 1024];
+        fn run_steps(steps: &[Option<(u64, u64)>]) {
+            let rid = 1;
+            let data = vec![b'x'; 1024];
 
-        let steps = [Some((1, 5)), None];
-        // TODO: Support recreating region and active this test case.
-        // let steps = [Some((1, 5)), None, Some((2, 6)), None, Some((3, 7)), None];
-        for n_step in 2..=steps.len() {
-            // Rewrite after step N.
-            for rewrite_step in 1..=n_step {
+            for rewrite_step in 1..=steps.len() {
                 for exit_purge in [None, Some(1), Some(2)] {
                     let _guard = PanicGuard::with_prompt(format!(
-                        "case: [{}, {}, {:?}]",
-                        n_step, rewrite_step, exit_purge
+                        "case: [{:?}, {}, {:?}]",
+                        steps, rewrite_step, exit_purge
                     ));
                     let dir = tempfile::Builder::new()
                         .prefix("test_clean_raft_group")
@@ -615,7 +611,7 @@ mod tests {
                     };
                     let engine = RaftLogEngine::open(cfg.clone()).unwrap();
 
-                    for (i, step) in steps.iter().enumerate().take(n_step) {
+                    for (i, step) in steps.iter().enumerate() {
                         if let Some((start, end)) = *step {
                             engine.append(rid, start, end, Some(&data));
                         } else {
@@ -629,7 +625,17 @@ mod tests {
                     }
 
                     let engine = engine.reopen();
-                    if let Some((start, end)) = steps[n_step - 1] {
+                    if let Some((start, end)) = *steps.last().unwrap() {
+                        engine.scan(rid, start, end, |_, _, d| {
+                            assert_eq!(d, &data);
+                        });
+                    } else {
+                        assert!(engine.raft_groups().is_empty());
+                    }
+
+                    engine.purge_manager.must_rewrite_append_queue(None, None);
+                    let engine = engine.reopen();
+                    if let Some((start, end)) = *steps.last().unwrap() {
                         engine.scan(rid, start, end, |_, _, d| {
                             assert_eq!(d, &data);
                         });
@@ -639,6 +645,12 @@ mod tests {
                 }
             }
         }
+
+        run_steps(&[Some((1, 5)), None, Some((2, 6)), None, Some((3, 7)), None]);
+        run_steps(&[Some((1, 5)), None, Some((2, 6)), None, Some((3, 7))]);
+        run_steps(&[Some((1, 5)), None, Some((2, 6)), None]);
+        run_steps(&[Some((1, 5)), None, Some((2, 6))]);
+        run_steps(&[Some((1, 5)), None]);
     }
 
     #[test]
