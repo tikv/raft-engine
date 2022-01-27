@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
-use fs2::FileExt;
 use log::{error, warn};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -18,7 +17,7 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt};
+use super::format::FileNameExt;
 use super::log_file::{build_file_reader, build_file_writer, LogFd, LogFileWriter};
 
 struct FileCollection {
@@ -292,29 +291,18 @@ impl<B: FileBuilder> SinglePipe<B> {
 pub struct DualPipes<B: FileBuilder> {
     pipes: [SinglePipe<B>; 2],
 
-    _lock_file: Arc<File>,
-}
-
-pub fn get_lock_file(dir: &str) -> Result<File> {
-    let lock_file = File::create(lock_file_path(dir))?;
-    lock_file.try_lock_exclusive().map_err(|e| {
-        Error::Other(box_err!(
-            "Failed to lock file: {}, maybe another instance is using this directory.",
-            e
-        ))
-    })?;
-    Ok(lock_file)
+    _dir_lock: File,
 }
 
 impl<B: FileBuilder> DualPipes<B> {
-    pub fn open(dir: &str, appender: SinglePipe<B>, rewriter: SinglePipe<B>) -> Result<Self> {
+    pub fn open(dir_lock: File, appender: SinglePipe<B>, rewriter: SinglePipe<B>) -> Result<Self> {
         // TODO: remove this dependency.
         debug_assert_eq!(LogQueue::Append as usize, 0);
         debug_assert_eq!(LogQueue::Rewrite as usize, 1);
 
         Ok(Self {
             pipes: [appender, rewriter],
-            _lock_file: Arc::new(get_lock_file(dir)?),
+            _dir_lock: dir_lock,
         })
     }
 
@@ -366,6 +354,7 @@ mod tests {
     use tempfile::Builder;
 
     use super::super::format::LogFileHeader;
+    use super::super::pipe_builder::lock_dir;
     use super::*;
     use crate::file_builder::DefaultFileBuilder;
     use crate::util::ReadableSize;
@@ -383,7 +372,7 @@ mod tests {
 
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileBuilder>> {
         DualPipes::open(
-            &cfg.dir,
+            lock_dir(&cfg.dir)?,
             new_test_pipe(cfg, LogQueue::Append)?,
             new_test_pipe(cfg, LogQueue::Rewrite)?,
         )

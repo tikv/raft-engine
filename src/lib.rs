@@ -14,10 +14,12 @@
 #![feature(shrink_to)]
 #![feature(btree_drain_filter)]
 #![feature(generic_associated_types)]
+#![feature(associated_type_bounds)]
 #![feature(test)]
 
 #[macro_use]
 extern crate lazy_static;
+extern crate scopeguard;
 extern crate test;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +44,8 @@ mod errors;
 mod event_listener;
 mod file_builder;
 mod file_pipe_log;
+#[cfg(feature = "scripting")]
+mod filter;
 mod log_batch;
 mod memtable;
 mod metrics;
@@ -49,7 +53,6 @@ mod pipe_log;
 mod purge;
 #[cfg(test)]
 mod test_util;
-mod truncate;
 mod util;
 mod write_barrier;
 
@@ -59,7 +62,6 @@ pub use event_listener::EventListener;
 pub use file_builder::FileBuilder;
 pub use log_batch::{Command, EntryIndexes, LogBatch, LogItemContent, MessageExt};
 pub use pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-pub use truncate::TruncateMode;
 pub use util::ReadableSize;
 pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine<FileBuilder>;
 

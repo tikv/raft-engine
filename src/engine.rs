@@ -13,13 +13,12 @@ use crate::consistency::ConsistencyChecker;
 use crate::event_listener::EventListener;
 use crate::file_builder::*;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{get_lock_file, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
+use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
-use crate::truncate::{TruncateMachine, TruncateMode, TruncateQueueParameter};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
@@ -290,19 +289,9 @@ impl Engine<DefaultFileBuilder, FilePipeLog<DefaultFileBuilder>> {
         Self::consistency_check_with_file_builder(path, Arc::new(DefaultFileBuilder))
     }
 
-    pub fn unsafe_truncate(
-        path: &Path,
-        mode: TruncateMode,
-        queue: Option<LogQueue>,
-        raft_groups: &[u64],
-    ) -> Result<()> {
-        Self::unsafe_truncate_with_file_builder(
-            path,
-            mode,
-            queue,
-            raft_groups,
-            Arc::new(DefaultFileBuilder),
-        )
+    #[cfg(feature = "scripting")]
+    pub fn unsafe_repair(path: &Path, queue: Option<LogQueue>, script: String) -> Result<()> {
+        Self::unsafe_repair_with_file_builder(path, queue, script, Arc::new(DefaultFileBuilder))
     }
 
     pub fn dump(path: &Path) -> Result<LogItemReader<DefaultFileBuilder>> {
@@ -345,14 +334,15 @@ where
         Ok(list)
     }
 
-    /// Truncates Raft groups to remove possible corruptions.
-    pub fn unsafe_truncate_with_file_builder(
+    #[cfg(feature = "scripting")]
+    pub fn unsafe_repair_with_file_builder(
         path: &Path,
-        mode: TruncateMode,
         queue: Option<LogQueue>,
-        raft_groups: &[u64],
+        script: String,
         file_builder: Arc<B>,
     ) -> Result<()> {
+        use crate::file_pipe_log::ReplayMachine;
+
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
                 "raft-engine directory '{}' does not exist.",
@@ -366,50 +356,22 @@ where
             ..Default::default()
         };
 
-        let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_builder.clone(), Vec::new());
+        let mut builder = FilePipeLogBuilder::new(cfg, file_builder.clone(), Vec::new());
         builder.scan()?;
-
-        let parms = TruncateQueueParameter {
-            queue,
-            truncate_mode: mode,
-            raft_groups_ids: raft_groups.to_vec(),
-            lock_file: Arc::new(get_lock_file(path.to_str().unwrap())?),
-        };
-        let recovery_append_queue =
-            parms.queue.is_none() || parms.queue.unwrap() == LogQueue::Append;
-        let recovery_rewrite_queue =
-            parms.queue.is_none() || parms.queue.unwrap() == LogQueue::Rewrite;
-
-        let machine_factory = DefaultMachineFactory::<TruncateMachine>::default();
-        let threads = cfg.recovery_threads;
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap();
-
-        let (r1, r2) = pool.join(
-            || {
-                let mut m = if recovery_append_queue {
-                    builder.recover_queue(LogQueue::Append, &machine_factory)?
-                } else {
-                    TruncateMachine::default()
-                };
-
-                m.truncate(file_builder.clone(), &parms)
-            },
-            || {
-                let mut m = if recovery_rewrite_queue {
-                    builder.recover_queue(LogQueue::Rewrite, &machine_factory)?
-                } else {
-                    TruncateMachine::default()
-                };
-
-                m.truncate(file_builder.clone(), &parms)
-            },
-        );
-        r1?;
-        r2?;
-
+        let factory = crate::filter::RhaiFilterMachineFactory::from_script(script);
+        let mut machine = None;
+        if queue.is_none() || queue.unwrap() == LogQueue::Append {
+            machine = Some(builder.recover_queue(LogQueue::Append, &factory, 1)?);
+        }
+        if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
+            let machine2 = builder.recover_queue(LogQueue::Rewrite, &factory, 1)?;
+            if let Some(machine) = &mut machine {
+                machine.merge(machine2, LogQueue::Rewrite)?;
+            }
+        }
+        if let Some(machine) = machine {
+            machine.finish(file_builder.as_ref(), path)?;
+        }
         Ok(())
     }
 

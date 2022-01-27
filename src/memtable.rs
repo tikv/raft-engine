@@ -2,7 +2,6 @@
 
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::path::Path;
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -752,12 +751,7 @@ impl Default for MemTableRecoverContext {
 }
 
 impl ReplayMachine for MemTableRecoverContext {
-    fn replay(
-        &mut self,
-        mut item_batch: LogItemBatch,
-        file_id: FileId,
-        _path: &Path,
-    ) -> Result<()> {
+    fn replay(&mut self, mut item_batch: LogItemBatch, file_id: FileId) -> Result<()> {
         for item in item_batch.iter() {
             match &item.content {
                 LogItemContent::Command(Command::Clean)
@@ -1658,7 +1652,7 @@ mod tests {
         let mut ctxs = VecDeque::default();
         for (batch, file_id) in batches.clone().into_iter().zip(files) {
             let mut ctx = MemTableRecoverContext::default();
-            ctx.replay(batch, file_id, Path::new("/tmp")).unwrap();
+            ctx.replay(batch, file_id).unwrap();
             ctxs.push_back(ctx);
         }
         while ctxs.len() > 1 {

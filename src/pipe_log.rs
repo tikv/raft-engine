@@ -12,7 +12,7 @@ pub enum LogQueue {
 
 pub type FileSeq = u64;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct FileId {
     pub queue: LogQueue,
     pub seq: FileSeq,

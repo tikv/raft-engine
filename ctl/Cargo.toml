@@ -6,4 +6,4 @@ authors = ["The TiKV Authors"]
 
 [dependencies]
 clap = { version = "3.0.0-rc.0", features = ["derive", "cargo"] }
-raft-engine = { path = ".." }
+raft-engine = { path = "..", features = ["scripting"] }

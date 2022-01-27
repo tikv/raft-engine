@@ -1,11 +1,12 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::{self, File};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use fs2::FileExt;
 use log::{info, warn};
 use rayon::prelude::*;
 
@@ -14,31 +15,27 @@ use crate::event_listener::EventListener;
 use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::Result;
+use crate::util::Factory;
+use crate::{Error, Result};
 
-use super::format::FileNameExt;
+use super::format::{lock_file_path, FileNameExt};
 use super::log_file::{build_file_reader, LogFd};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
-pub trait ReplayMachine: Send + Default + Sync {
-    fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId, path: &Path) -> Result<()>;
+pub trait ReplayMachine: Send {
+    fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
 
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 }
 
-pub trait ReplayMachineFactory: Sync {
-    type Machine: ReplayMachine;
+#[derive(Clone, Default)]
+pub struct DefaultMachineFactory<M>(PhantomData<std::sync::Mutex<M>>);
 
-    fn new_machine(&self) -> Self::Machine {
-        Self::Machine::default()
+impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
+    fn new_target(&self) -> M {
+        M::default()
     }
-}
-
-pub type DefaultMachineFactory<M> = PhantomData<M>;
-
-impl<M: ReplayMachine> ReplayMachineFactory for DefaultMachineFactory<M> {
-    type Machine = M;
 }
 
 struct FileToRecover {
@@ -52,20 +49,18 @@ pub struct DualPipesBuilder<B: FileBuilder> {
     file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
 
+    dir_lock: Option<File>,
     append_files: Vec<FileToRecover>,
     rewrite_files: Vec<FileToRecover>,
 }
 
 impl<B: FileBuilder> DualPipesBuilder<B> {
-    pub fn file_length(&self) -> (usize, usize) {
-        ((&self.append_files).len(), (&self.rewrite_files).len())
-    }
-
     pub fn new(cfg: Config, file_builder: Arc<B>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
         Self {
             cfg,
             file_builder,
             listeners,
+            dir_lock: None,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
         }
@@ -82,6 +77,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         if !path.is_dir() {
             return Err(box_err!("Not directory: {}", dir));
         }
+        self.dir_lock = Some(lock_dir(dir)?);
 
         let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
@@ -144,74 +140,45 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<F>(&mut self, machine_builder: &F) -> Result<(F::Machine, F::Machine)>
-    where
-        F: ReplayMachineFactory,
-    {
+    pub fn recover<M: ReplayMachine, F: Factory<M>>(
+        &mut self,
+        machine_builder: &F,
+    ) -> Result<(M, M)> {
         let threads = self.cfg.recovery_threads;
+        let (append_concurrency, rewrite_concurrency) =
+            match (self.append_files.len(), self.rewrite_files.len()) {
+                (a, b) if a > 0 && b > 0 => {
+                    let a_threads = std::cmp::max(1, threads * a / (a + b));
+                    let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
+                    (a_threads, b_threads)
+                }
+                _ => (threads, threads),
+            };
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
         let (append, rewrite) = pool.join(
-            || self.recover_queue(LogQueue::Append, machine_builder),
-            || self.recover_queue(LogQueue::Rewrite, machine_builder),
+            || self.recover_queue(LogQueue::Append, machine_builder, append_concurrency),
+            || self.recover_queue(LogQueue::Rewrite, machine_builder, rewrite_concurrency),
         );
 
         Ok((append?, rewrite?))
     }
 
-    pub fn finish(self) -> Result<DualPipes<B>> {
-        let appender = self.build_pipe(LogQueue::Append)?;
-        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
-        DualPipes::open(&self.cfg.dir, appender, rewriter)
-    }
-
-    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {
-        let files = match queue {
-            LogQueue::Append => &self.append_files,
-            LogQueue::Rewrite => &self.rewrite_files,
-        };
-        let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<Arc<LogFd>> = files.iter().map(|f| f.fd.clone()).collect();
-        SinglePipe::open(
-            &self.cfg,
-            self.file_builder.clone(),
-            self.listeners.clone(),
-            queue,
-            first_seq,
-            files,
-        )
-    }
-
-    pub fn recover_queue<F: ReplayMachineFactory>(
+    pub fn recover_queue<M: ReplayMachine, F: Factory<M>>(
         &self,
         queue: LogQueue,
         replay_machine_builder: &F,
-    ) -> Result<F::Machine> {
+        concurrency: usize,
+    ) -> Result<M> {
         let files = if queue == LogQueue::Append {
             &self.append_files
         } else {
             &self.rewrite_files
         };
-
-        let threads = self.cfg.recovery_threads;
-        let (append_concurrency, rewrite_concurrency) = match self.file_length() {
-            (a, b) if a > 0 && b > 0 => {
-                let a_threads = std::cmp::max(1, threads * a / (a + b));
-                let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
-                (a_threads, b_threads)
-            }
-            _ => (threads, threads),
-        };
-        let concurrency = if queue == LogQueue::Append {
-            append_concurrency
-        } else {
-            rewrite_concurrency
-        };
-
         if concurrency == 0 || files.is_empty() {
-            return Ok(replay_machine_builder.new_machine());
+            return Ok(replay_machine_builder.new_target());
         }
 
         let recovery_mode = self.cfg.recovery_mode;
@@ -225,8 +192,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .map(|(index, chunk)| {
                 let mut reader =
                     LogItemBatchFileReader::new(self.cfg.recovery_read_block_size.0 as usize);
-                let mut sequential_replay_machine: F::Machine =
-                    replay_machine_builder.new_machine();
+                let mut sequential_replay_machine = replay_machine_builder.new_target();
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
@@ -237,11 +203,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
-                                sequential_replay_machine.replay(
-                                    item_batch,
-                                    FileId { queue, seq: f.seq },
-                                    f.path.as_path(),
-                                )?;
+                                sequential_replay_machine
+                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
                             }
                             Ok(None) => break,
                             Err(e)
@@ -264,7 +227,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 Ok(sequential_replay_machine)
             })
             .try_reduce(
-                || replay_machine_builder.new_machine(),
+                || replay_machine_builder.new_target(),
                 |mut sequential_replay_machine_left, sequential_replay_machine_right| {
                     sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
                     Ok(sequential_replay_machine_left)
@@ -273,4 +236,38 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
 
         Ok(sequential_replay_machine)
     }
+
+    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {
+        let files = match queue {
+            LogQueue::Append => &self.append_files,
+            LogQueue::Rewrite => &self.rewrite_files,
+        };
+        let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
+        let files: VecDeque<Arc<LogFd>> = files.iter().map(|f| f.fd.clone()).collect();
+        SinglePipe::open(
+            &self.cfg,
+            self.file_builder.clone(),
+            self.listeners.clone(),
+            queue,
+            first_seq,
+            files,
+        )
+    }
+
+    pub fn finish(self) -> Result<DualPipes<B>> {
+        let appender = self.build_pipe(LogQueue::Append)?;
+        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
+        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
+    }
+}
+
+pub fn lock_dir(dir: &str) -> Result<File> {
+    let lock_file = File::create(lock_file_path(dir))?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        Error::Other(box_err!(
+            "Failed to lock file: {}, maybe another instance is using this directory.",
+            e
+        ))
+    })?;
+    Ok(lock_file)
 }

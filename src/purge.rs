@@ -288,6 +288,7 @@ where
                 m.region_id()
             };
 
+            // FIXME: This code makes my brain hurt.
             let mut cursor = 0;
             while cursor < entry_indexes.len() {
                 let entry =
