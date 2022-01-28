@@ -1,19 +1,21 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
-use crate::file_pipe_log::{FileNameExt, ReplayMachine};
-use crate::log_batch::{Command, EntryIndexes};
-use crate::log_batch::{LogItem, LogItemBatch};
-use crate::util::Factory;
-use crate::{Error, Result};
-use crate::{FileBuilder, FileId, LogBatch, LogItemContent, LogQueue};
-
 use std::path::Path;
 use std::sync::Arc;
 
 use hashbrown::HashMap;
 use rhai::{Engine, Scope, AST};
 use scopeguard::{guard, ScopeGuard};
+
+use crate::file_builder::FileBuilder;
+use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
+use crate::file_pipe_log::{FileNameExt, ReplayMachine};
+use crate::log_batch::{
+    Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
+};
+use crate::pipe_log::{FileId, LogQueue};
+use crate::util::Factory;
+use crate::{Error, Result};
 
 /// `FilterResult` determines how to alter the existing log items in `RhaiFilterMachine`.
 #[derive(PartialEq)]
@@ -27,7 +29,7 @@ pub enum FilterResult {
 }
 
 impl FilterResult {
-    fn from_u8(i: u8) -> Self {
+    fn from_i64(i: i64) -> Self {
         match i {
             0 => FilterResult::Default,
             1 => FilterResult::DiscardIncoming,
@@ -105,7 +107,9 @@ impl RaftGroupState {
                     }
                 }
             }
-            LogItemContent::Command(Command::Compact { index }) if *index > self.first_index => {
+            LogItemContent::Command(Command::Compact { index })
+                if *index > self.first_index && self.count > 0 =>
+            {
                 if *index < self.first_index + self.count as u64 - 1 {
                     let deleted = *index - self.first_index;
                     self.first_index = *index;
@@ -166,13 +170,13 @@ impl RhaiFilter {
                     &self.ast,
                     "filter_append",
                     (
-                        raft_group_id,
-                        state.first_index,
-                        state.count,
-                        state.rewrite_count,
-                        new_item_queue as u32,
-                        eis.first().unwrap().index,
-                        eis.last().unwrap().index,
+                        raft_group_id as i64,
+                        state.first_index as i64,
+                        state.count as i64,
+                        state.rewrite_count as i64,
+                        new_item_queue as i64,
+                        eis.first().unwrap().index as i64,
+                        eis.last().unwrap().index as i64,
                     ),
                 )
             }
@@ -181,12 +185,12 @@ impl RhaiFilter {
                 &self.ast,
                 "filter_compact",
                 (
-                    raft_group_id,
-                    state.first_index,
-                    state.count,
-                    state.rewrite_count,
-                    new_item_queue as u32,
-                    *index,
+                    raft_group_id as i64,
+                    state.first_index as i64,
+                    state.count as i64,
+                    state.rewrite_count as i64,
+                    new_item_queue as i64,
+                    *index as i64,
                 ),
             ),
             LogItemContent::Command(Command::Clean) => self.engine.call_fn(
@@ -194,17 +198,17 @@ impl RhaiFilter {
                 &self.ast,
                 "filter_clean",
                 (
-                    raft_group_id,
-                    state.first_index,
-                    state.count,
-                    state.rewrite_count,
-                    new_item_queue as u32,
+                    raft_group_id as i64,
+                    state.first_index as i64,
+                    state.count as i64,
+                    state.rewrite_count as i64,
+                    new_item_queue as i64,
                 ),
             ),
             _ => Ok(0),
         };
         match res {
-            Ok(n) => Ok(FilterResult::from_u8(n)),
+            Ok(n) => Ok(FilterResult::from_i64(n)),
             Err(e) => {
                 if matches!(*e, rhai::EvalAltResult::ErrorFunctionNotFound(_, _)) {
                     Ok(FilterResult::Default)
@@ -273,14 +277,23 @@ impl RhaiFilterMachine {
                         LogItemContent::EntryIndexes(EntryIndexes(eis)) => {
                             let mut entries = Vec::with_capacity(eis.len());
                             for ei in &eis {
-                                entries.push(reader.read(ei.entries.unwrap())?);
+                                let entries_buf = reader.read(ei.entries.unwrap())?;
+                                entries.push(LogBatch::parse_entry_bytes(&entries_buf, ei)?);
                             }
                             log_batch.add_raw_entries(item.raft_group_id, eis, entries)?;
                         }
                         LogItemContent::Command(cmd) => {
                             log_batch.add_command(item.raft_group_id, cmd);
                         }
-                        _ => {}
+                        LogItemContent::Kv(KeyValue {
+                            op_type,
+                            key,
+                            value,
+                            ..
+                        }) => match op_type {
+                            OpType::Put => log_batch.put(item.raft_group_id, key, value.unwrap()),
+                            OpType::Del => log_batch.delete(item.raft_group_id, key),
+                        },
                     }
                     // Batch 64KB.
                     if log_batch.approximate_size() >= 64 * 1024 {
@@ -289,6 +302,7 @@ impl RhaiFilterMachine {
                             log_batch.encoded_bytes(),
                             usize::MAX, /*target_size_hint*/
                         )?;
+                        log_batch.drain();
                     }
                 }
                 if !log_batch.is_empty() {
@@ -297,6 +311,7 @@ impl RhaiFilterMachine {
                         log_batch.encoded_bytes(),
                         usize::MAX, /*target_size_hint*/
                     )?;
+                    log_batch.drain();
                 }
                 writer.close()?;
                 // Delete backup file and defuse the guard.

@@ -142,7 +142,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
 
     pub fn recover<M: ReplayMachine, F: Factory<M>>(
         &mut self,
-        machine_builder: &F,
+        machine_factory: &F,
     ) -> Result<(M, M)> {
         let threads = self.cfg.recovery_threads;
         let (append_concurrency, rewrite_concurrency) =
@@ -159,8 +159,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .build()
             .unwrap();
         let (append, rewrite) = pool.join(
-            || self.recover_queue(LogQueue::Append, machine_builder, append_concurrency),
-            || self.recover_queue(LogQueue::Rewrite, machine_builder, rewrite_concurrency),
+            || self.recover_queue(LogQueue::Append, machine_factory, append_concurrency),
+            || self.recover_queue(LogQueue::Rewrite, machine_factory, rewrite_concurrency),
         );
 
         Ok((append?, rewrite?))
@@ -169,7 +169,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
     pub fn recover_queue<M: ReplayMachine, F: Factory<M>>(
         &self,
         queue: LogQueue,
-        replay_machine_builder: &F,
+        replay_machine_factory: &F,
         concurrency: usize,
     ) -> Result<M> {
         let files = if queue == LogQueue::Append {
@@ -178,11 +178,10 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             &self.rewrite_files
         };
         if concurrency == 0 || files.is_empty() {
-            return Ok(replay_machine_builder.new_target());
+            return Ok(replay_machine_factory.new_target());
         }
 
         let recovery_mode = self.cfg.recovery_mode;
-
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks(max_chunk_size);
         let chunk_count = chunks.len();
@@ -192,7 +191,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
             .map(|(index, chunk)| {
                 let mut reader =
                     LogItemBatchFileReader::new(self.cfg.recovery_read_block_size.0 as usize);
-                let mut sequential_replay_machine = replay_machine_builder.new_target();
+                let mut sequential_replay_machine = replay_machine_factory.new_target();
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
@@ -227,7 +226,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 Ok(sequential_replay_machine)
             })
             .try_reduce(
-                || replay_machine_builder.new_target(),
+                || replay_machine_factory.new_target(),
                 |mut sequential_replay_machine_left, sequential_replay_machine_right| {
                     sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
                     Ok(sequential_replay_machine_left)

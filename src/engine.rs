@@ -457,14 +457,10 @@ mod tests {
             self.write(&mut log_batch, true).unwrap();
         }
 
-        fn last_index_slow(&self, rid: u64) -> Option<u64> {
-            let mem = self.last_index(rid);
-            let disk = self
-                .get_message::<RaftLocalState>(rid, b"last_index")
+        fn decode_last_index(&self, rid: u64) -> Option<u64> {
+            self.get_message::<RaftLocalState>(rid, b"last_index")
                 .unwrap()
-                .map(|s| s.last_index);
-            assert_eq!(mem, disk);
-            mem
+                .map(|s| s.last_index)
         }
 
         fn reopen(self) -> Self {
@@ -489,7 +485,7 @@ mod tests {
             assert_eq!(entries.first().unwrap().index, start);
             assert_eq!(
                 entries.last().unwrap().index,
-                self.last_index_slow(rid).unwrap()
+                self.decode_last_index(rid).unwrap()
             );
             assert_eq!(entries.last().unwrap().index + 1, end);
             for e in entries.iter() {
@@ -1173,6 +1169,8 @@ mod tests {
         }
     }
 
+    /// Test cases related to tools ///
+
     #[test]
     fn test_dump_file_or_directory() {
         let dir = tempfile::Builder::new()
@@ -1242,5 +1240,155 @@ mod tests {
         let mut not_exists_file = PathBuf::from(dir.as_ref());
         not_exists_file.push("not_exists_file");
         assert!(Engine::dump(not_exists_file.as_path()).is_err());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn test_repair_default() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_repair_default")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1), // Create lots of files.
+            ..Default::default()
+        };
+
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(DefaultFileBuilder))
+                .unwrap();
+        for rid in 1..=50 {
+            engine.append(rid, 1, 6, Some(&entry_data));
+        }
+        for rid in 25..=50 {
+            engine.append(rid, 6, 11, Some(&entry_data));
+        }
+        drop(engine);
+
+        let script1 = "".to_owned();
+        RaftLogEngine::unsafe_repair_with_file_builder(
+            dir.path(),
+            None, /*queue*/
+            script1,
+            Arc::new(DefaultFileBuilder),
+        )
+        .unwrap();
+        let script2 = "
+            fn filter_append(id, first, count, rewrite_count, queue, ifirst, ilast) {
+                0
+            }
+            fn filter_compact(id, first, count, rewrite_count, queue, compact_to) {
+                0
+            }
+            fn filter_clean(id, first, count, rewrite_count, queue) {
+                0
+            }
+        "
+        .to_owned();
+        RaftLogEngine::unsafe_repair_with_file_builder(
+            dir.path(),
+            None, /*queue*/
+            script2,
+            Arc::new(DefaultFileBuilder),
+        )
+        .unwrap();
+
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+        for rid in 1..25 {
+            engine.scan(rid, 1, 6, |_, _, d| {
+                assert_eq!(d, &entry_data);
+            });
+        }
+        for rid in 25..=50 {
+            engine.scan(rid, 1, 11, |_, _, d| {
+                assert_eq!(d, &entry_data);
+            });
+        }
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn test_repair_discard_entries() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_repair_discard")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1), // Create lots of files.
+            ..Default::default()
+        };
+
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(DefaultFileBuilder))
+                .unwrap();
+        for rid in 1..=50 {
+            engine.append(rid, 1, 6, Some(&entry_data));
+        }
+        for rid in 25..=50 {
+            engine.append(rid, 6, 11, Some(&entry_data));
+        }
+        drop(engine);
+
+        let incoming_emptied = [1, 25];
+        let existing_emptied = [2, 26];
+        let script = "
+            fn filter_append(id, first, count, rewrite_count, queue, ifirst, ilast) {
+                if id == 1 {
+                    return 1;
+                } else if id == 2 {
+                    return 2;
+                } else if id == 25 {
+                    return 1;
+                } else if id == 26 {
+                    return 2;
+                }
+                0 // default
+            }
+        "
+        .to_owned();
+        RaftLogEngine::unsafe_repair_with_file_builder(
+            dir.path(),
+            None, /*queue*/
+            script,
+            Arc::new(DefaultFileBuilder),
+        )
+        .unwrap();
+
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+        for rid in 1..25 {
+            if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
+                continue;
+            }
+            engine.scan(rid, 1, 6, |_, _, d| {
+                assert_eq!(d, &entry_data);
+            });
+        }
+        for rid in 25..=50 {
+            if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
+                continue;
+            }
+            engine.scan(rid, 1, 11, |_, _, d| {
+                assert_eq!(d, &entry_data);
+            });
+        }
+        for rid in existing_emptied {
+            let first_index = if rid < 25 { 1 } else { 6 };
+            let last_index = if rid < 25 { 5 } else { 10 };
+            engine.scan(rid, first_index, last_index + 1, |_, _, d| {
+                assert_eq!(d, &entry_data);
+            });
+        }
+        for rid in incoming_emptied {
+            let last_index = if rid < 25 { 5 } else { 10 };
+            assert_eq!(engine.first_index(rid), None);
+            assert_eq!(engine.last_index(rid), None);
+            assert_eq!(engine.decode_last_index(rid), Some(last_index));
+        }
     }
 }

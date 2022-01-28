@@ -14,7 +14,6 @@
 #![feature(shrink_to)]
 #![feature(btree_drain_filter)]
 #![feature(generic_associated_types)]
-#![feature(associated_type_bounds)]
 #![feature(test)]
 
 #[macro_use]
@@ -60,7 +59,7 @@ pub use config::{Config, RecoveryMode};
 pub use errors::{Error, Result};
 pub use event_listener::EventListener;
 pub use file_builder::FileBuilder;
-pub use log_batch::{Command, EntryIndexes, LogBatch, LogItemContent, MessageExt};
+pub use log_batch::{Command, LogBatch, MessageExt};
 pub use pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 pub use util::ReadableSize;
 pub type Engine<FileBuilder = file_builder::DefaultFileBuilder> = engine::Engine<FileBuilder>;
