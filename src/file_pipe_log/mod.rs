@@ -8,7 +8,9 @@ mod reader;
 
 pub use format::FileNameExt;
 pub use pipe::DualPipes as FilePipeLog;
-pub use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
+pub use pipe_builder::{
+    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
+};
 
 /// Public utilities used only for debugging purposes.
 pub mod debug {

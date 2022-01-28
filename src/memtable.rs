@@ -83,15 +83,15 @@ impl MemTable {
         }
     }
 
-    /// Mrege from newer neighbor `rhs`.
-    /// Only called during parllel recovery.
+    /// Merges with newer neighbor `rhs`. Assumes `self` contains oldest data
+    /// in current log queue. This will only be called during parllel recovery.
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
         if let Some((rhs_first, _)) = rhs.span() {
             self.prepare_append(
                 rhs_first,
                 rhs.rewrite_count > 0, /*allow_hole*/
-                true,                  /*allow_overwrite*/
+                rhs.rewrite_count > 0, /*allow_overwrite*/
             );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,

@@ -67,14 +67,14 @@ Contributions are always welcome! Here are a few tips for making a PR:
 ```
 cargo fmt --all -- --check
 cargo clippy --all --all-features --all-targets -- -D clippy::all
-cargo test --all
-cargo test --test failpoints --features failpoints -- --test-threads 1
+cargo test --all --features scripting
+cargo test --test failpoints --all-features -- --test-threads 1
 ```
 
 - For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.
 
 ```
-cargo bench --features failpoints <bench-case-name>
+cargo bench --all-features <bench-case-name>
 cargo run --release --package stress --help
 ```
 

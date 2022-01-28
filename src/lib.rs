@@ -18,6 +18,7 @@
 
 #[macro_use]
 extern crate lazy_static;
+extern crate scopeguard;
 extern crate test;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +43,8 @@ mod errors;
 mod event_listener;
 mod file_builder;
 mod file_pipe_log;
+#[cfg(feature = "scripting")]
+mod filter;
 mod log_batch;
 mod memtable;
 mod metrics;

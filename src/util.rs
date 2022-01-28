@@ -322,6 +322,10 @@ pub mod lz4 {
     }
 }
 
+pub trait Factory<Target>: Send + Sync {
+    fn new_target(&self) -> Target;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

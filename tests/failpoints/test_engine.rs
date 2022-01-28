@@ -285,23 +285,66 @@ fn test_consistency_tools() {
     let data = vec![b'x'; 128];
     for index in 1..=100 {
         for rid in 1..=10 {
-            if index == rid * rid {
-                fail::cfg("log_batch::corrupted_items", "return").unwrap();
-            }
+            let _f = if index == rid * rid {
+                Some(FailGuard::new("log_batch::corrupted_items", "return"))
+            } else {
+                None
+            };
             append(&engine, rid, index, index + 1, Some(&data));
-            if index == rid * rid {
-                fail::remove("log_batch::corrupted_items");
-            }
         }
     }
     drop(engine);
+    assert!(Engine::open(cfg.clone()).is_err());
 
     let ids = Engine::consistency_check(dir.path()).unwrap();
     for (id, index) in ids.iter() {
         assert_eq!(id * id, index + 1);
     }
 
+    // Panic instead of err because `consistency_check` also removes corruptions.
     assert!(catch_unwind_silent(|| Engine::open(cfg.clone())).is_err());
+}
+
+#[cfg(feature = "scripting")]
+#[test]
+fn test_repair_tool() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_repair_tool")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(128),
+        ..Default::default()
+    };
+    let engine = Arc::new(Engine::open(cfg.clone()).unwrap());
+    let data = vec![b'x'; 128];
+    for index in 1..=100 {
+        for rid in 1..=10 {
+            let _f = if index == rid * rid {
+                Some(FailGuard::new("log_batch::corrupted_items", "return"))
+            } else {
+                None
+            };
+            append(&engine, rid, index, index + 1, Some(&data));
+        }
+    }
+    drop(engine);
+
+    assert!(Engine::open(cfg.clone()).is_err());
+    let script = "".to_owned();
+    assert!(Engine::unsafe_repair(dir.path(), None, script).is_err());
+    let script = "
+        fn filter_append(id, first, count, rewrite_count, queue, ifirst, ilast) {
+            if first + count < ifirst {
+                return 2; // discard existing
+            }
+            0 // default
+        }
+    "
+    .to_owned();
+    Engine::unsafe_repair(dir.path(), None, script).unwrap();
+    Engine::open(cfg).unwrap();
 }
 
 #[test]
