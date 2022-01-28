@@ -419,6 +419,7 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::io::{Read, Result, Result as IoResult, Seek, SeekFrom, Write};
     use std::path::PathBuf;
 
     type RaftLogEngine<B = DefaultFileBuilder> = Engine<B>;
@@ -502,6 +503,66 @@ mod tests {
         }
     }
 
+    struct ObfuscatedFile<F> {
+        inner: F,
+        offset: u64,
+    }
+
+    impl<F: Write> Write for ObfuscatedFile<F> {
+        fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+            let mut new_buf = buf.to_owned();
+            for c in &mut new_buf {
+                *c = c.wrapping_add(1);
+            }
+            let len = self.inner.write(&new_buf)?;
+            self.offset += len as u64;
+            Ok(len)
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl<F: Read> Read for ObfuscatedFile<F> {
+        fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+            let len = self.inner.read(buf)?;
+            for c in buf {
+                *c = c.wrapping_sub(1);
+            }
+            self.offset += len as u64;
+            Ok(len)
+        }
+    }
+
+    impl<F: Seek> Seek for ObfuscatedFile<F> {
+        fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
+            self.offset = self.inner.seek(pos)?;
+            Ok(self.offset)
+        }
+    }
+
+    struct ObfuscatedFileBuilder;
+
+    impl FileBuilder for ObfuscatedFileBuilder {
+        type Reader<R: Seek + Read + Send> = ObfuscatedFile<R>;
+        type Writer<W: Seek + Write + Send> = ObfuscatedFile<W>;
+
+        fn build_reader<R>(&self, _path: &Path, inner: R) -> Result<Self::Reader<R>>
+        where
+            R: Seek + Read + Send,
+        {
+            Ok(ObfuscatedFile { inner, offset: 0 })
+        }
+
+        fn build_writer<W>(&self, _path: &Path, inner: W, _create: bool) -> Result<Self::Writer<W>>
+        where
+            W: Seek + Write + Send,
+        {
+            Ok(ObfuscatedFile { inner, offset: 0 })
+        }
+    }
+
     #[test]
     fn test_get_entry() {
         let normal_batch_size = 10;
@@ -517,7 +578,9 @@ mod tests {
                 ..Default::default()
             };
 
-            let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+            let engine =
+                RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(ObfuscatedFileBuilder))
+                    .unwrap();
             let data = vec![b'x'; entry_size];
             for i in 10..20 {
                 let rid = i;
@@ -567,7 +630,11 @@ mod tests {
                         target_file_size: ReadableSize(1),
                         ..Default::default()
                     };
-                    let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+                    let engine = RaftLogEngine::open_with_file_builder(
+                        cfg.clone(),
+                        Arc::new(ObfuscatedFileBuilder),
+                    )
+                    .unwrap();
 
                     for (i, step) in steps.iter().enumerate() {
                         if let Some((start, end)) = *step {
@@ -634,7 +701,8 @@ mod tests {
 
         // put | delete
         //     ^ rewrite
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.purge_manager.must_rewrite_append_queue(None, None);
         engine.write(&mut delete_batch.clone(), true).unwrap();
@@ -729,7 +797,8 @@ mod tests {
             target_file_size: ReadableSize(1),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         let data = vec![b'x'; 1024];
 
         // rewrite:[1  ..10]
@@ -838,7 +907,8 @@ mod tests {
             ..Default::default()
         };
 
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         let data = vec![b'x'; 1024];
         for index in 0..100 {
             engine.append(1, index, index + 1, Some(&data));
@@ -896,7 +966,8 @@ mod tests {
             purge_threshold: ReadableSize::kb(80),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         let data = vec![b'x'; 1024];
 
         // Put 100 entries into 10 regions.
@@ -958,7 +1029,8 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
 
         let mut log_batch = LogBatch::default();
         let empty_entry = Entry::new();
@@ -1007,106 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn test_file_builder() {
-        use std::io::{Read, Result, Result as IoResult, Seek, SeekFrom, Write};
-        struct TestFile<F> {
-            inner: F,
-            offset: u64,
-        }
-
-        impl<F: Write> Write for TestFile<F> {
-            fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-                let mut new_buf = buf.to_owned();
-                for c in &mut new_buf {
-                    *c = c.wrapping_add(1);
-                }
-                let len = self.inner.write(&new_buf)?;
-                self.offset += len as u64;
-                Ok(len)
-            }
-
-            fn flush(&mut self) -> IoResult<()> {
-                self.inner.flush()
-            }
-        }
-
-        impl<F: Read> Read for TestFile<F> {
-            fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-                let len = self.inner.read(buf)?;
-                for c in buf {
-                    *c = c.wrapping_sub(1);
-                }
-                self.offset += len as u64;
-                Ok(len)
-            }
-        }
-
-        impl<F: Seek> Seek for TestFile<F> {
-            fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
-                self.offset = self.inner.seek(pos)?;
-                Ok(self.offset)
-            }
-        }
-
-        struct TestFileBuilder;
-
-        impl FileBuilder for TestFileBuilder {
-            type Reader<R: Seek + Read + Send> = TestFile<R>;
-            type Writer<W: Seek + Write + Send> = TestFile<W>;
-
-            fn build_reader<R>(&self, _path: &Path, inner: R) -> Result<Self::Reader<R>>
-            where
-                R: Seek + Read + Send,
-            {
-                Ok(TestFile { inner, offset: 0 })
-            }
-
-            fn build_writer<W>(
-                &self,
-                _path: &Path,
-                inner: W,
-                _create: bool,
-            ) -> Result<Self::Writer<W>>
-            where
-                W: Seek + Write + Send,
-            {
-                Ok(TestFile { inner, offset: 0 })
-            }
-        }
-
-        let dir = tempfile::Builder::new()
-            .prefix("test_file_builder")
-            .tempdir()
-            .unwrap();
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            ..Default::default()
-        };
-
-        let engine = RaftLogEngine::open_with_file_builder(cfg, Arc::new(TestFileBuilder)).unwrap();
-        let data = vec![b'x'; 128];
-        for rid in 10..20 {
-            let index = rid * 2;
-            engine.append(rid, index, index + rid, Some(&data));
-        }
-        for rid in 10..20 {
-            let index = rid * 2;
-            engine.scan(rid, index, index + rid, |_, q, d| {
-                assert_eq!(q, LogQueue::Append);
-                assert_eq!(d, &data);
-            });
-        }
-        let engine = engine.reopen();
-        for rid in 10..20 {
-            let index = rid * 2;
-            engine.scan(rid, index, index + rid, |_, q, d| {
-                assert_eq!(q, LogQueue::Append);
-                assert_eq!(d, &data);
-            });
-        }
-    }
-
-    #[test]
     fn test_dirty_recovery() {
         let dir = tempfile::Builder::new()
             .prefix("test_dirty_recovery")
@@ -1116,7 +1088,8 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         let data = vec![b'x'; 1024];
 
         for rid in 1..21 {
@@ -1147,7 +1120,8 @@ mod tests {
             target_file_size: ReadableSize(1),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         let data = vec![b'x'; 2 * 1024 * 1024];
 
         for rid in 1..=3 {
@@ -1201,7 +1175,7 @@ mod tests {
         };
 
         let engine =
-            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         for bs in batches.iter_mut() {
             for batch in bs.iter_mut() {
                 engine.write(batch, false).unwrap();
@@ -1212,7 +1186,8 @@ mod tests {
 
         drop(engine);
         //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft groups 8
-        let dump_it = Engine::dump(dir.path()).unwrap();
+        let dump_it =
+            Engine::dump_with_file_builder(dir.path(), Arc::new(ObfuscatedFileBuilder)).unwrap();
         let total = dump_it
             .inspect(|i| {
                 i.as_ref().unwrap();
@@ -1225,7 +1200,11 @@ mod tests {
             queue: LogQueue::Rewrite,
             seq: 1,
         };
-        let dump_it = Engine::dump(file_id.build_file_path(dir.path()).as_path()).unwrap();
+        let dump_it = Engine::dump_with_file_builder(
+            file_id.build_file_path(dir.path()).as_path(),
+            Arc::new(ObfuscatedFileBuilder),
+        )
+        .unwrap();
         let total = dump_it
             .inspect(|i| {
                 i.as_ref().unwrap();
@@ -1234,12 +1213,20 @@ mod tests {
         assert!(0 == total);
 
         //dump dir that does not exists
-        assert!(Engine::dump(Path::new("/not_exists_dir")).is_err());
+        assert!(Engine::dump_with_file_builder(
+            Path::new("/not_exists_dir"),
+            Arc::new(ObfuscatedFileBuilder)
+        )
+        .is_err());
 
         //dump file that does not exists
         let mut not_exists_file = PathBuf::from(dir.as_ref());
         not_exists_file.push("not_exists_file");
-        assert!(Engine::dump(not_exists_file.as_path()).is_err());
+        assert!(Engine::dump_with_file_builder(
+            not_exists_file.as_path(),
+            Arc::new(ObfuscatedFileBuilder)
+        )
+        .is_err());
     }
 
     #[cfg(feature = "scripting")]
@@ -1257,7 +1244,7 @@ mod tests {
         };
 
         let engine =
-            RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(DefaultFileBuilder))
+            RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(ObfuscatedFileBuilder))
                 .unwrap();
         for rid in 1..=50 {
             engine.append(rid, 1, 6, Some(&entry_data));
@@ -1272,7 +1259,7 @@ mod tests {
             dir.path(),
             None, /*queue*/
             script1,
-            Arc::new(DefaultFileBuilder),
+            Arc::new(ObfuscatedFileBuilder),
         )
         .unwrap();
         let script2 = "
@@ -1291,12 +1278,12 @@ mod tests {
             dir.path(),
             None, /*queue*/
             script2,
-            Arc::new(DefaultFileBuilder),
+            Arc::new(ObfuscatedFileBuilder),
         )
         .unwrap();
 
         let engine =
-            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         for rid in 1..25 {
             engine.scan(rid, 1, 6, |_, _, d| {
                 assert_eq!(d, &entry_data);
@@ -1324,7 +1311,7 @@ mod tests {
         };
 
         let engine =
-            RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(DefaultFileBuilder))
+            RaftLogEngine::open_with_file_builder(cfg.clone(), Arc::new(ObfuscatedFileBuilder))
                 .unwrap();
         for rid in 1..=50 {
             engine.append(rid, 1, 6, Some(&entry_data));
@@ -1355,12 +1342,12 @@ mod tests {
             dir.path(),
             None, /*queue*/
             script,
-            Arc::new(DefaultFileBuilder),
+            Arc::new(ObfuscatedFileBuilder),
         )
         .unwrap();
 
         let engine =
-            RaftLogEngine::open_with_file_builder(cfg, Arc::new(DefaultFileBuilder)).unwrap();
+            RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
         for rid in 1..25 {
             if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
                 continue;

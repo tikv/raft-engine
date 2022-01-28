@@ -248,27 +248,31 @@ impl RhaiFilterMachine {
     /// fails.
     pub fn finish<B: FileBuilder>(self, builder: &B, path: &Path) -> Result<()> {
         let mut log_batch = LogBatch::default();
+        let mut guards = Vec::new();
         for f in self.files.into_iter() {
             if f.filtered {
                 // Backup file and set up a guard to recover on exit.
                 let target_path = f.file_id.build_file_path(path);
                 let bak_path = target_path.with_extension("bak");
                 std::fs::rename(&target_path, &bak_path)?;
-                let guard = guard(f.file_id, |f| {
-                    let original = f.build_file_path(path);
-                    let bak = original.with_extension("bak");
-                    if bak.exists() {
-                        std::fs::rename(bak, original).unwrap_or_else(|e| {
-                            panic!(
-                                "Failed to recover original log file {} ({}),
+                guards.push((
+                    bak_path.clone(),
+                    guard(f.file_id, |f| {
+                        let original = f.build_file_path(path);
+                        let bak = original.with_extension("bak");
+                        if bak.exists() {
+                            std::fs::rename(bak, original).unwrap_or_else(|e| {
+                                panic!(
+                                    "Failed to recover original log file {} ({}),
                                 you should manually replace it with {}.bak.",
-                                f.build_file_name(),
-                                e,
-                                f.build_file_name(),
-                            )
-                        });
-                    }
-                });
+                                    f.build_file_name(),
+                                    e,
+                                    f.build_file_name(),
+                                )
+                            });
+                        }
+                    }),
+                ));
                 let mut reader = build_file_reader(builder, &bak_path)?;
                 let mut writer = build_file_writer(builder, &target_path, true /*create*/)?;
                 // Write out new log file.
@@ -314,10 +318,12 @@ impl RhaiFilterMachine {
                     log_batch.drain();
                 }
                 writer.close()?;
-                // Delete backup file and defuse the guard.
-                let _ = std::fs::remove_file(&bak_path);
-                let _ = ScopeGuard::into_inner(guard);
             }
+        }
+        // Delete backup file and defuse the guard.
+        for (bak, guard) in guards.into_iter() {
+            let _ = std::fs::remove_file(&bak);
+            let _ = ScopeGuard::into_inner(guard);
         }
         Ok(())
     }
