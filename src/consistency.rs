@@ -10,7 +10,7 @@ use crate::Result;
 /// A `ConsistencyChecker` scans for log entry holes in a log queue. It will
 /// return a list of corrupted raft groups along with their last valid log index.
 #[derive(Default)]
-pub(crate) struct ConsistencyChecker {
+pub struct ConsistencyChecker {
     // Mappings from raft group id to (first-index, last-index).
     raft_groups: HashMap<u64, (u64, u64)>,
     // Mappings from raft group id to last valid index.

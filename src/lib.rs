@@ -63,14 +63,20 @@ pub use log_batch::{Command, LogBatch, MessageExt};
 pub use util::ReadableSize;
 
 #[cfg(feature = "internals")]
-pub use event_listener::EventListener;
-#[cfg(feature = "internals")]
-pub use pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
+pub mod internals {
+    //! A selective view of key components in Raft Engine. Exported under the
+    //! `internals` feature only.
+    //!
+    pub use crate::event_listener::*;
+    pub use crate::file_pipe_log::*;
+    pub use crate::memtable::*;
+    pub use crate::pipe_log::*;
+}
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
-pub(crate) struct GlobalStats {
+pub struct GlobalStats {
     live_append_entries: AtomicUsize,
     rewrite_entries: AtomicUsize,
     deleted_rewrite_entries: AtomicUsize,

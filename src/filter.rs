@@ -228,7 +228,7 @@ struct FileAndItems {
 
 /// `RhaiFilterMachine` is a `ReplayMachine` that filters existing log files
 /// based on external Rhai script.
-pub(crate) struct RhaiFilterMachine {
+pub struct RhaiFilterMachine {
     filter: RhaiFilter,
     files: Vec<FileAndItems>,
     states: HashMap<u64, RaftGroupState>,
@@ -391,7 +391,7 @@ impl ReplayMachine for RhaiFilterMachine {
     }
 }
 
-pub(crate) struct RhaiFilterMachineFactory {
+pub struct RhaiFilterMachineFactory {
     engine: Arc<Engine>,
     ast: Arc<AST>,
 }

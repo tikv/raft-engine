@@ -1,6 +1,8 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 //! A [`PipeLog`] implementation that stores data in filesystem.
+//!
+//! [`PipeLog`]: ../trait.PipeLog.html
 
 mod format;
 mod log_file;
@@ -8,14 +10,15 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub(crate) use format::FileNameExt;
-pub(crate) use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
-
+pub use format::FileNameExt;
 pub use pipe::DualPipes as FilePipeLog;
-pub use pipe_builder::DefaultMachineFactory;
+pub use pipe_builder::{
+    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
+};
 
-/// A set of public utilities used for interacting with log files.
 pub mod debug {
+    //! A set of public utilities used for interacting with log files.
+
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -31,6 +34,7 @@ pub mod debug {
 
     /// Opens a log file for write. When `create` is true, the specified file will
     /// be created first if not exists.
+    #[allow(dead_code)]
     pub fn build_file_writer<B: FileBuilder>(
         builder: &B,
         path: &Path,

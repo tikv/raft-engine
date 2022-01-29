@@ -1,7 +1,11 @@
 [package]
 name = "raft-engine"
 version = "0.1.0"
-authors = ["The TiKV Authors"]
+authors = ["The TiKV Project Developers"]
+license = "Apache-2.0"
+repository = "https://github.com/tikv/raft-engine"
+description = "A persistent storage engine for Multi-Raft logs"
+readme = "README.md"
 edition = "2018"
 
 [[example]]

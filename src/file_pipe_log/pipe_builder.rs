@@ -25,14 +25,15 @@ use super::log_file::{build_file_reader, LogFd};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
-/// A [`ReplayMachine`] is a type of deterministic state machine that obeys
-/// associative law. Sequentially arranged log items can be divided and
-/// replayed to several [`ReplayMachine`]s, and their merged state will be the
-/// same as when replayed to one single [`ReplayMachine`].
+/// A type of deterministic state machine that obeys associative law.
+///
+/// Sequentially arranged log items can be divided and replayed to several
+/// [`ReplayMachine`]s, and their merged state will be the same as when
+/// replayed to one single [`ReplayMachine`].
 ///
 /// This abstraction is useful for recovery in parallel: a set of log files can
 /// be replayed in a divide-and-conquer fashion.
-pub(crate) trait ReplayMachine: Send {
+pub trait ReplayMachine: Send {
     /// Inputs a batch of log items from the given file to this machine.
     /// Returns whether the input sequence up till now is accepted.
     fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
@@ -42,7 +43,7 @@ pub(crate) trait ReplayMachine: Send {
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 }
 
-/// A [`Factory`] of [`ReplayMachine`]s that can be default constructed.
+/// A factory of [`ReplayMachine`]s that can be default constructed.
 #[derive(Clone, Default)]
 pub struct DefaultMachineFactory<M>(PhantomData<std::sync::Mutex<M>>);
 
@@ -59,7 +60,7 @@ struct FileToRecover {
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
-pub(crate) struct DualPipesBuilder<B: FileBuilder> {
+pub struct DualPipesBuilder<B: FileBuilder> {
     cfg: Config,
     file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,

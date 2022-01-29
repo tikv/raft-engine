@@ -264,10 +264,10 @@ impl<B: FileBuilder> SinglePipe<B> {
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let (compacted, remained) = {
+        let (purged, remained) = {
             let mut files = self.files.write();
             if file_seq > files.active_seq {
-                return Err(box_err!("Compact active or newer files"));
+                return Err(box_err!("Purge active or newer files"));
             }
             let end_offset = file_seq.saturating_sub(files.first_seq) as usize;
             files.fds.drain(..end_offset);
@@ -275,7 +275,7 @@ impl<B: FileBuilder> SinglePipe<B> {
             (end_offset, files.fds.len())
         };
         self.flush_metrics(remained);
-        for seq in file_seq - compacted as u64..file_seq {
+        for seq in file_seq - purged as u64..file_seq {
             let file_id = FileId {
                 queue: self.queue,
                 seq,
@@ -292,10 +292,10 @@ impl<B: FileBuilder> SinglePipe<B> {
                 }
             }
             if let Err(e) = fs::remove_file(&path) {
-                warn!("Remove compacted log file {:?} failed: {}", path, e);
+                warn!("Remove purged log file {:?} failed: {}", path, e);
             }
         }
-        Ok(compacted)
+        Ok(purged)
     }
 }
 
@@ -445,11 +445,11 @@ mod tests {
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 3);
 
-        // compact file 1
+        // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
         assert_eq!(pipe_log.file_span(queue).0, 2);
 
-        // cannot compact active file
+        // cannot purge active file
         assert!(pipe_log.purge_to(FileId { queue, seq: 4 }).is_err());
 
         // append position

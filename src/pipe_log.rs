@@ -6,18 +6,17 @@ use std::cmp::Ordering;
 
 use crate::Result;
 
-/// The type of log queue. Exported under the `internals` feature only.
+/// The type of log queue.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LogQueue {
     Append = 0,
     Rewrite = 1,
 }
 
-/// Sequence number for log file. It is unique within a log queue. Exported
-/// under the `internals` feature only.
+/// Sequence number for log file. It is unique within a log queue.
 pub type FileSeq = u64;
 
-/// A unique identifier for a log file. Exported under the `internals` feature
+/// A unique identifier for a log file.
 /// only.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct FileId {
@@ -55,8 +54,7 @@ impl std::cmp::PartialOrd for FileId {
     }
 }
 
-/// A logical pointer to a chunk of log file data. Exported under the
-/// `internals` feature only.
+/// A logical pointer to a chunk of log file data.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FileBlockHandle {
     pub id: FileId,
@@ -77,7 +75,7 @@ impl FileBlockHandle {
 }
 
 /// A log storage that serves reads and writes over multiple queues of log
-/// files. Exported under the `internals` feature only.
+/// files.
 pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;

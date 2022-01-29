@@ -2,7 +2,6 @@
 
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 
-/// Exported under the `internals` feature only.
 pub trait EventListener: Sync + Send {
     /// Called *after* a new log file is created.
     fn post_new_log_file(&self, _file_id: FileId) {}

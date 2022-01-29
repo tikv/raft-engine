@@ -337,7 +337,7 @@ pub(crate) type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
 // Format:
 // { item count | [items] | crc32 }
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LogItemBatch {
+pub struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
     entries_size: usize,
@@ -828,8 +828,7 @@ fn verify_checksum(buf: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LogQueue;
-
+    use crate::pipe_log::LogQueue;
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use raft::eraftpb::Entry;
     use rand::{thread_rng, Rng};

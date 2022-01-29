@@ -24,7 +24,7 @@ const REWRITE_RATIO: f64 = 0.7;
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
 
-pub(crate) struct PurgeManager<P>
+pub struct PurgeManager<P>
 where
     P: PipeLog,
 {

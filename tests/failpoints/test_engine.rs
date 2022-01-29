@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
+use raft_engine::internals::*;
 use raft_engine::*;
 
 use crate::util::*;
