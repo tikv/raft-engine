@@ -56,7 +56,7 @@ impl Default for EntryIndex {
  *                      |                                        |
  *                 first entry                               last entry
  */
-pub struct MemTable {
+pub(crate) struct MemTable {
     region_id: u64,
 
     // Entries are pushed back with continuously ascending indexes.
@@ -83,15 +83,17 @@ impl MemTable {
         }
     }
 
-    /// Merges with newer neighbor `rhs`. Assumes `self` contains oldest data
-    /// in current log queue. This will only be called during parllel recovery.
+    /// Merges with newer neighbor `rhs`. This will only be called during
+    /// parllel recovery.
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
         if let Some((rhs_first, _)) = rhs.span() {
             self.prepare_append(
                 rhs_first,
                 rhs.rewrite_count > 0, /*allow_hole*/
-                rhs.rewrite_count > 0, /*allow_overwrite*/
+                // This must be set true, because `self` might not have all
+                // entries in history.
+                true, /*allow_overwrite*/
             );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
@@ -545,7 +547,7 @@ type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 
 /// Collection of MemTables, indexed by Raft group ID.
 #[derive(Clone)]
-pub struct MemTableAccessor {
+pub(crate) struct MemTableAccessor {
     global_stats: Arc<GlobalStats>,
 
     slots: Vec<Arc<RwLock<MemTables>>>,
@@ -721,7 +723,7 @@ impl MemTableAccessor {
     }
 }
 
-pub struct MemTableRecoverContext {
+pub(crate) struct MemTableRecoverContext {
     stats: Arc<GlobalStats>,
     log_batch: LogItemBatch,
     memtables: MemTableAccessor,
@@ -1573,6 +1575,55 @@ mod tests {
                 }
                 memtable
             },
+            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+                match on {
+                    None => {
+                        memtable.append(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Append, 1),
+                        ));
+                        memtable.rewrite(
+                            generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
+                            Some(1),
+                        );
+                        memtable.append(generate_entry_indexes(
+                            10,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        memtable.append(generate_entry_indexes(
+                            5,
+                            10,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                    }
+                    Some(LogQueue::Append) => {
+                        let mut m1 = empty_table(memtable.region_id);
+                        m1.append(generate_entry_indexes(
+                            10,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        let mut m2 = empty_table(memtable.region_id);
+                        m2.append(generate_entry_indexes(
+                            5,
+                            10,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        m1.merge_newer_neighbor(&mut m2);
+                        memtable.merge_newer_neighbor(&mut m1);
+                    }
+                    Some(LogQueue::Rewrite) => {
+                        memtable.append_rewrite(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Rewrite, 1),
+                        ));
+                    }
+                }
+                memtable
+            },
         ];
 
         // merge against empty table.
@@ -1638,7 +1689,7 @@ mod tests {
         batches[0].put(last_rid, b"key".to_vec(), b"ANYTHING".to_vec());
         batches[1].add_command(last_rid, Command::Clean);
 
-        // entries [1, 10) => compact 5 => entries [11, 20)
+        // entries [1, 10] => compact 5 => entries [11, 20]
         last_rid += 1;
         batches[0].add_entry_indexes(last_rid, generate_entry_indexes(1, 11, files[0]));
         batches[1].add_command(last_rid, Command::Compact { index: 5 });
