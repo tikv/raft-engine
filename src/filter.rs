@@ -19,7 +19,7 @@ use crate::{Error, Result};
 
 /// `FilterResult` determines how to alter the existing log items in `RhaiFilterMachine`.
 #[derive(PartialEq)]
-pub enum FilterResult {
+enum FilterResult {
     /// Apply in the usual way.
     Default,
     /// Ignore all incoming entries or operations.
@@ -41,7 +41,7 @@ impl FilterResult {
 
 /// `RaftGroupState` represents a simplistic view of a Raft Group.
 #[derive(Copy, Clone)]
-pub struct RaftGroupState {
+struct RaftGroupState {
     pub first_index: u64,
     pub count: usize,
     pub rewrite_count: usize,
@@ -147,7 +147,7 @@ impl RaftGroupState {
 ///   0 // default
 /// }
 /// ```
-pub struct RhaiFilter {
+struct RhaiFilter {
     engine: Arc<Engine>,
     ast: Arc<AST>,
     scope: Scope<'static>,
@@ -228,7 +228,7 @@ struct FileAndItems {
 
 /// `RhaiFilterMachine` is a `ReplayMachine` that filters existing log files
 /// based on external Rhai script.
-pub struct RhaiFilterMachine {
+pub(crate) struct RhaiFilterMachine {
     filter: RhaiFilter,
     files: Vec<FileAndItems>,
     states: HashMap<u64, RaftGroupState>,
@@ -391,7 +391,7 @@ impl ReplayMachine for RhaiFilterMachine {
     }
 }
 
-pub struct RhaiFilterMachineFactory {
+pub(crate) struct RhaiFilterMachineFactory {
     engine: Arc<Engine>,
     ast: Arc<AST>,
 }

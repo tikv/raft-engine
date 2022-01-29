@@ -36,7 +36,11 @@ pub fn generate_entry_indexes_opt(
     for idx in begin_idx..end_idx {
         let ent_idx = EntryIndex {
             index: idx,
-            entries: file_id.map(|id| FileBlockHandle::new(id, 0, 0)),
+            entries: file_id.map(|id| FileBlockHandle {
+                id,
+                offset: 0,
+                len: 0,
+            }),
             entry_len: 1,
             ..Default::default()
         };

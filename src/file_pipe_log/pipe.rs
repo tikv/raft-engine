@@ -31,7 +31,8 @@ struct ActiveFile<B: FileBuilder> {
     writer: LogFileWriter<B>,
 }
 
-pub struct SinglePipe<B: FileBuilder> {
+/// A file-based log storage that arranges files as one single queue.
+pub(super) struct SinglePipe<B: FileBuilder> {
     queue: LogQueue,
     dir: String,
     target_file_size: usize,
@@ -39,7 +40,9 @@ pub struct SinglePipe<B: FileBuilder> {
     file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
 
+    /// All log files.
     files: CachePadded<RwLock<FileCollection>>,
+    /// The log file opened for write.
     active_file: CachePadded<Mutex<ActiveFile<B>>>,
 }
 
@@ -53,6 +56,7 @@ impl<B: FileBuilder> Drop for SinglePipe<B> {
 }
 
 impl<B: FileBuilder> SinglePipe<B> {
+    /// Opens a new [`SinglePipe`].
     pub fn open(
         cfg: &Config,
         file_builder: Arc<B>,
@@ -116,12 +120,15 @@ impl<B: FileBuilder> SinglePipe<B> {
         Ok(pipe)
     }
 
+    /// Synchronizes all metadatas associated with the working directory to the
+    /// filesystem.
     fn sync_dir(&self) -> Result<()> {
         let path = PathBuf::from(&self.dir);
         std::fs::File::open(path).and_then(|d| d.sync_all())?;
         Ok(())
     }
 
+    /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<LogFd>> {
         let files = self.files.read();
         if file_seq < files.first_seq || file_seq > files.active_seq {
@@ -130,6 +137,9 @@ impl<B: FileBuilder> SinglePipe<B> {
         Ok(files.fds[(file_seq - files.first_seq) as usize].clone())
     }
 
+    /// Creates a new file for write, and rotates the active log file.
+    ///
+    /// This operation is atomic in face of errors.
     fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<B>>) -> Result<()> {
         let _t = StopWatch::new(&LOG_ROTATE_DURATION_HISTOGRAM);
         let seq = active_file.seq + 1;
@@ -172,6 +182,7 @@ impl<B: FileBuilder> SinglePipe<B> {
         Ok(())
     }
 
+    /// Synchronizes current states to related metrics.
     fn flush_metrics(&self, len: usize) {
         match self.queue {
             LogQueue::Append => LOG_FILE_COUNT.append.set(len as i64),
@@ -253,10 +264,10 @@ impl<B: FileBuilder> SinglePipe<B> {
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let (purged, remained) = {
+        let (compacted, remained) = {
             let mut files = self.files.write();
             if file_seq > files.active_seq {
-                return Err(box_err!("Purge active or newer files"));
+                return Err(box_err!("Compact active or newer files"));
             }
             let end_offset = file_seq.saturating_sub(files.first_seq) as usize;
             files.fds.drain(..end_offset);
@@ -264,7 +275,7 @@ impl<B: FileBuilder> SinglePipe<B> {
             (end_offset, files.fds.len())
         };
         self.flush_metrics(remained);
-        for seq in file_seq - purged as u64..file_seq {
+        for seq in file_seq - compacted as u64..file_seq {
             let file_id = FileId {
                 queue: self.queue,
                 seq,
@@ -281,13 +292,14 @@ impl<B: FileBuilder> SinglePipe<B> {
                 }
             }
             if let Err(e) = fs::remove_file(&path) {
-                warn!("Remove purged log file {:?} failed: {}", path, e);
+                warn!("Remove compacted log file {:?} failed: {}", path, e);
             }
         }
-        Ok(purged)
+        Ok(compacted)
     }
 }
 
+/// A [`PipeLog`] implementation that stores data in filesystem.
 pub struct DualPipes<B: FileBuilder> {
     pipes: [SinglePipe<B>; 2],
 
@@ -295,7 +307,13 @@ pub struct DualPipes<B: FileBuilder> {
 }
 
 impl<B: FileBuilder> DualPipes<B> {
-    pub fn open(dir_lock: File, appender: SinglePipe<B>, rewriter: SinglePipe<B>) -> Result<Self> {
+    /// Open a new [`DualPipes`]. Assumes the two [`SinglePipe`]s share the
+    /// same directory, and that directory is locked by `dir_lock`.
+    pub(super) fn open(
+        dir_lock: File,
+        appender: SinglePipe<B>,
+        rewriter: SinglePipe<B>,
+    ) -> Result<Self> {
         // TODO: remove this dependency.
         debug_assert_eq!(LogQueue::Append as usize, 0);
         debug_assert_eq!(LogQueue::Rewrite as usize, 1);
@@ -427,11 +445,11 @@ mod tests {
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 3);
 
-        // purge file 1
+        // compact file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
         assert_eq!(pipe_log.file_span(queue).0, 2);
 
-        // cannot purge active file
+        // cannot compact active file
         assert!(pipe_log.purge_to(FileId { queue, seq: 4 }).is_err());
 
         // append position

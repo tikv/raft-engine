@@ -1,5 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! Log file types.
+
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
@@ -16,25 +18,30 @@ use nix::NixPath;
 
 use crate::file_builder::FileBuilder;
 use crate::metrics::*;
-use crate::FileBlockHandle;
+use crate::pipe_log::FileBlockHandle;
 use crate::Result;
 
 use super::format::LogFileHeader;
 
+/// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
-
-/// A `LogFd` is a RAII file that provides basic I/O functionality.
-///
-/// This implementation is a thin wrapper around `RawFd`, and primarily targets
-/// UNIX-based systems.
-pub struct LogFd(RawFd);
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
     std::io::Error::new(kind, custom)
 }
 
+/// A RAII-style low-level file. Errors occurred during automatic resource
+/// release are logged and ignored.
+///
+/// A [`LogFd`] is essentially a thin wrapper around [`RawFd`]. It's only
+/// supported on *Unix*, and primarily optimized for *Linux*.
+///
+/// All [`LogFd`] instances are opened with read and write permission.
+pub(super) struct LogFd(RawFd);
+
 impl LogFd {
+    /// Opens a file with the given `path`.
     pub fn open<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
         fail_point!("log_fd::open::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -56,6 +63,8 @@ impl LogFd {
         ))
     }
 
+    /// Opens a file with the given `path`. The specified file will be created
+    /// first if not exists.
     pub fn create<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
         fail_point!("log_fd::create::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -67,6 +76,7 @@ impl LogFd {
         Ok(LogFd(fd))
     }
 
+    /// Closes the file.
     pub fn close(&self) -> IoResult<()> {
         fail_point!("log_fd::close::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -74,6 +84,8 @@ impl LogFd {
         close(self.0).map_err(|e| from_nix_error(e, "close"))
     }
 
+    /// Synchronizes all in-memory data of the file except metadata to the
+    /// filesystem.
     pub fn sync(&self) -> IoResult<()> {
         fail_point!("log_fd::sync::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -88,6 +100,8 @@ impl LogFd {
         }
     }
 
+    /// Reads some bytes starting at `offset` from this file into the specified
+    /// buffer. Returns how many bytes were read.
     pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
         let mut readed = 0;
         while readed < buf.len() {
@@ -109,6 +123,8 @@ impl LogFd {
         Ok(readed)
     }
 
+    /// Writes some bytes to this file starting at `offset`. Returns how many
+    /// bytes were written.
     pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
         fail_point!("log_fd::write::zero", |_| { Ok(0) });
         let mut written = 0;
@@ -130,6 +146,7 @@ impl LogFd {
         Ok(written)
     }
 
+    /// Returns the current size of this file.
     pub fn file_size(&self) -> IoResult<usize> {
         fail_point!("log_fd::file_size::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -139,6 +156,7 @@ impl LogFd {
             .map_err(|e| from_nix_error(e, "lseek"))
     }
 
+    /// Truncates all data after `offset`.
     pub fn truncate(&self, offset: usize) -> IoResult<()> {
         fail_point!("log_fd::truncate::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -146,6 +164,7 @@ impl LogFd {
         ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
     }
 
+    /// Attempts to allocate space for `size` bytes starting at `offset`.
     #[allow(unused_variables)]
     pub fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
         fail_point!("log_fd::allocate::err", |_| {
@@ -176,13 +195,14 @@ impl Drop for LogFd {
     }
 }
 
-/// A `LogFile` is a `LogFd` wrapper that implements `Seek`, `Write` and `Read`.
-pub struct LogFile {
+/// A low-level file adapted for standard interfaces including [`Seek`], [`Write`] and [`Read`].
+pub(super) struct LogFile {
     inner: Arc<LogFd>,
     offset: usize,
 }
 
 impl LogFile {
+    /// Creates a new [`LogFile`] from a shared [`LogFd`].
     pub fn new(fd: Arc<LogFd>) -> Self {
         Self {
             inner: fd,
@@ -222,7 +242,7 @@ impl Seek for LogFile {
     }
 }
 
-pub fn build_file_writer<B: FileBuilder>(
+pub(super) fn build_file_writer<B: FileBuilder>(
     builder: &B,
     path: &Path,
     fd: Arc<LogFd>,
@@ -322,7 +342,7 @@ impl<B: FileBuilder> LogFileWriter<B> {
     }
 }
 
-pub fn build_file_reader<B: FileBuilder>(
+pub(super) fn build_file_reader<B: FileBuilder>(
     builder: &B,
     path: &Path,
     fd: Arc<LogFd>,

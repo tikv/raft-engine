@@ -332,12 +332,12 @@ impl LogItem {
     }
 }
 
-pub type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
+pub(crate) type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
 
 // Format:
 // { item count | [items] | crc32 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct LogItemBatch {
+pub(crate) struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
     entries_size: usize,

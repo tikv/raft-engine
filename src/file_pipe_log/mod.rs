@@ -1,32 +1,36 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! A [`PipeLog`] implementation that stores data in filesystem.
+
 mod format;
 mod log_file;
 mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::FileNameExt;
-pub use pipe::DualPipes as FilePipeLog;
-pub use pipe_builder::{
-    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
-};
+pub(crate) use format::FileNameExt;
+pub(crate) use pipe_builder::{DualPipesBuilder as FilePipeLogBuilder, ReplayMachine};
 
-/// Public utilities used only for debugging purposes.
+pub use pipe::DualPipes as FilePipeLog;
+pub use pipe_builder::DefaultMachineFactory;
+
+/// A set of public utilities used for interacting with log files.
 pub mod debug {
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use super::format::FileNameExt;
-    use super::log_file::{LogFd, LogFileReader, LogFileWriter};
-    use super::reader::LogItemBatchFileReader;
     use crate::file_builder::FileBuilder;
     use crate::log_batch::LogItem;
     use crate::pipe_log::FileId;
     use crate::{Error, Result};
 
-    #[allow(dead_code)]
+    use super::format::FileNameExt;
+    use super::log_file::{LogFd, LogFileReader, LogFileWriter};
+    use super::reader::LogItemBatchFileReader;
+
+    /// Opens a log file for write. When `create` is true, the specified file will
+    /// be created first if not exists.
     pub fn build_file_writer<B: FileBuilder>(
         builder: &B,
         path: &Path,
@@ -41,13 +45,13 @@ pub mod debug {
         super::log_file::build_file_writer(builder, path, fd, create)
     }
 
-    #[allow(dead_code)]
+    /// Opens a log file for read.
     pub fn build_file_reader<B: FileBuilder>(builder: &B, path: &Path) -> Result<LogFileReader<B>> {
         let fd = Arc::new(LogFd::open(path)?);
         super::log_file::build_file_reader(builder, path, fd)
     }
 
-    #[allow(dead_code)]
+    /// An iterator over the log items in log files.
     pub struct LogItemReader<B: FileBuilder> {
         builder: Arc<B>,
         files: VecDeque<(FileId, PathBuf)>,
@@ -64,7 +68,7 @@ pub mod debug {
     }
 
     impl<B: FileBuilder> LogItemReader<B> {
-        #[allow(dead_code)]
+        /// Creates a new log item reader over one specified log file.
         pub fn new_file_reader(builder: Arc<B>, file: &Path) -> Result<Self> {
             if !file.is_file() {
                 return Err(Error::InvalidArgument(format!(
@@ -88,7 +92,8 @@ pub mod debug {
             })
         }
 
-        #[allow(dead_code)]
+        /// Creates a new log item reader over all log files under the
+        /// specified directory.
         pub fn new_directory_reader(builder: Arc<B>, dir: &Path) -> Result<Self> {
             if !dir.is_dir() {
                 return Err(Error::InvalidArgument(format!(
@@ -120,8 +125,7 @@ pub mod debug {
             })
         }
 
-        #[allow(dead_code)]
-        pub fn next(&mut self) -> Option<Result<LogItem>> {
+        fn next(&mut self) -> Option<Result<LogItem>> {
             if self.items.is_empty() {
                 let next_batch = self.batch_reader.next();
                 match next_batch {

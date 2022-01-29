@@ -7,7 +7,7 @@ use prometheus_static_metric::*;
 
 use crate::util::InstantExt;
 
-pub struct StopWatch<'a> {
+pub(crate) struct StopWatch<'a> {
     histogram: &'a Histogram,
     start: Instant,
 }
