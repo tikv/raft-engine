@@ -17,9 +17,10 @@ use crate::pipe_log::{FileId, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-/// `FilterResult` determines how to alter the existing log items in `RhaiFilterMachine`.
+/// `FilterResult` determines how to alter the existing log items in
+/// `RhaiFilterMachine`.
 #[derive(PartialEq)]
-pub enum FilterResult {
+enum FilterResult {
     /// Apply in the usual way.
     Default,
     /// Ignore all incoming entries or operations.
@@ -41,7 +42,7 @@ impl FilterResult {
 
 /// `RaftGroupState` represents a simplistic view of a Raft Group.
 #[derive(Copy, Clone)]
-pub struct RaftGroupState {
+struct RaftGroupState {
     pub first_index: u64,
     pub count: usize,
     pub rewrite_count: usize,
@@ -147,7 +148,7 @@ impl RaftGroupState {
 ///   0 // default
 /// }
 /// ```
-pub struct RhaiFilter {
+struct RhaiFilter {
     engine: Arc<Engine>,
     ast: Arc<AST>,
     scope: Scope<'static>,
@@ -274,7 +275,7 @@ impl RhaiFilterMachine {
                     }),
                 ));
                 let mut reader = build_file_reader(builder, &bak_path)?;
-                let mut writer = build_file_writer(builder, &target_path, true /*create*/)?;
+                let mut writer = build_file_writer(builder, &target_path, true /* create */)?;
                 // Write out new log file.
                 for item in f.items.into_iter() {
                     match item.content {
@@ -301,19 +302,19 @@ impl RhaiFilterMachine {
                     }
                     // Batch 64KB.
                     if log_batch.approximate_size() >= 64 * 1024 {
-                        log_batch.finish_populate(0 /*compression_threshold*/)?;
+                        log_batch.finish_populate(0 /* compression_threshold */)?;
                         writer.write(
                             log_batch.encoded_bytes(),
-                            usize::MAX, /*target_size_hint*/
+                            usize::MAX, /* target_size_hint */
                         )?;
                         log_batch.drain();
                     }
                 }
                 if !log_batch.is_empty() {
-                    log_batch.finish_populate(0 /*compression_threshold*/)?;
+                    log_batch.finish_populate(0 /* compression_threshold */)?;
                     writer.write(
                         log_batch.encoded_bytes(),
-                        usize::MAX, /*target_size_hint*/
+                        usize::MAX, /* target_size_hint */
                     )?;
                     log_batch.drain();
                 }

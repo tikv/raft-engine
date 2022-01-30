@@ -17,57 +17,61 @@ use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 use crate::util::slices_in_range;
 use crate::{Error, GlobalStats, Result};
 
-const SHRINK_CACHE_CAPACITY: usize = 64;
-const SHRINK_CACHE_LIMIT: usize = 512;
-
+/// Attempt to shrink entry container if its capacity exceeds the threshold.
+const SHRINK_CAPACITY_THRESHOLD: usize = 512;
+/// Target capacity to shrink entry container.
+const SHRINK_CAPACITY_TARGET: usize = 64;
+/// Number of hash table to store [`MemTable`].
 const MEMTABLE_SLOT_COUNT: usize = 128;
 
+/// Location of a log entry.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct EntryIndex {
+    /// Logical index.
     pub index: u64,
 
-    // Compressed section physical position in file.
-    pub compression_type: CompressionType,
-    // offset and length of current entry within `entries`.
-    pub entry_offset: u64,
-    pub entry_len: usize,
-
+    /// File location of the group of entries that this entry belongs to.
     pub entries: Option<FileBlockHandle>,
+    // How its group of entries is compacted.
+    pub compression_type: CompressionType,
+
+    /// The relative offset within its group of entries.
+    pub entry_offset: u64,
+    /// The encoded length within its group of entries.
+    pub entry_len: usize,
 }
 
 impl Default for EntryIndex {
     fn default() -> EntryIndex {
         EntryIndex {
             index: 0,
+            entries: None,
             compression_type: CompressionType::None,
             entry_offset: 0,
             entry_len: 0,
-            entries: None,
         }
     }
 }
 
-/*
- * Each region has an individual `MemTable` to store all entries indices.
- * `MemTable` also have a map to store all key value pairs for this region.
- *
- * All entries indices [******************************************]
- *                      ^                                        ^
- *                      |                                        |
- *                 first entry                               last entry
- */
+/// In-memory storage for Raft Groups.
+///
+/// Each Raft Group has its own `MemTable` to store all key value pairs and the
+/// file locations of all log entries.
 pub struct MemTable {
+    /// The ID of current Raft Group.
     region_id: u64,
 
-    // Entries are pushed back with continuously ascending indexes.
+    /// Container of entries. Incoming entries are pushed to the back with
+    /// ascending log indexes.
     entry_indexes: VecDeque<EntryIndex>,
-    // The amount of rewritten entries. This can be used to index appended entries
-    // because rewritten entries are always at front.
+    /// The amount of rewritten entries. Rewritten entries are the oldest
+    /// entries and stored at the front of the container.
     rewrite_count: usize,
 
-    // key -> (value, queue, file_id)
+    /// A map of active key value pairs.
     kvs: BTreeMap<Vec<u8>, (Vec<u8>, FileId)>,
 
+    /// Shared statistics.
     global_stats: Arc<GlobalStats>,
 }
 
@@ -75,23 +79,27 @@ impl MemTable {
     pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable {
         MemTable {
             region_id,
-            entry_indexes: VecDeque::with_capacity(SHRINK_CACHE_CAPACITY),
+            entry_indexes: VecDeque::with_capacity(SHRINK_CAPACITY_TARGET),
             rewrite_count: 0,
             kvs: BTreeMap::default(),
-
             global_stats,
         }
     }
 
-    /// Merges with newer neighbor `rhs`. Assumes `self` contains oldest data
-    /// in current log queue. This will only be called during parllel recovery.
+    /// Merges with a newer neighbor [`MemTable`].
+    ///
+    /// This method is only used for recovery.
     pub fn merge_newer_neighbor(&mut self, rhs: &mut Self) {
         debug_assert_eq!(self.region_id, rhs.region_id);
         if let Some((rhs_first, _)) = rhs.span() {
             self.prepare_append(
                 rhs_first,
-                rhs.rewrite_count > 0, /*allow_hole*/
-                rhs.rewrite_count > 0, /*allow_overwrite*/
+                // Rewrite -> Compact Append -> Rewrite.
+                // TODO: add test case.
+                rhs.rewrite_count > 0, /* allow_hole */
+                // Always true, because `self` might not have all entries in
+                // history.
+                true, /* allow_overwrite */
             );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
@@ -110,13 +118,25 @@ impl MemTable {
         self.global_stats.delete(LogQueue::Rewrite, deleted);
     }
 
-    /// Merge a counter part that contains all append data of current region.
+    /// Merges with a [`MemTable`] that contains only append data. Assumes
+    /// `self` contains all rewritten data of the same region.
+    ///
+    /// This method is only used for recovery.
     pub fn merge_append_table(&mut self, rhs: &mut Self) {
+        debug_assert_eq!(self.region_id, rhs.region_id);
         debug_assert_eq!(self.rewrite_count, self.entry_indexes.len());
         debug_assert_eq!(rhs.rewrite_count, 0);
 
         if let Some((first, _)) = rhs.span() {
-            self.prepare_append(first, true, true);
+            self.prepare_append(
+                first,
+                // FIXME: It's possibly okay to set it to false. Any compact
+                // command applied to append queue will also be applied to
+                // rewrite queue.
+                true, /* allow_hole */
+                // Compact -> Rewrite -> Data loss of the compact command.
+                true, /* allow_overwrite */
+            );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
                 rhs.entry_indexes.len(),
@@ -133,16 +153,20 @@ impl MemTable {
         self.global_stats.delete(LogQueue::Rewrite, deleted);
     }
 
+    /// Returns value for a given key.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
+    /// Deletes a key value pair.
     pub fn delete(&mut self, key: &[u8]) {
         if let Some(value) = self.kvs.remove(key) {
             self.global_stats.delete(value.1.queue, 1);
         }
     }
 
+    /// Puts a key value pair that has been written to the specified file. The
+    /// old value for this key will be deleted if exists.
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
         if let Some(origin) = self.kvs.insert(key, (value, file_id)) {
             self.global_stats.delete(origin.1.queue, 1);
@@ -150,6 +174,11 @@ impl MemTable {
         self.global_stats.add(file_id.queue, 1);
     }
 
+    /// Rewrites a key by marking its location to the `seq`-th log file in
+    /// rewrite queue. No-op if the key does not exist.
+    ///
+    /// When `gate` is present, only append data no newer than it will be
+    /// rewritten.
     pub fn rewrite_key(&mut self, key: Vec<u8>, gate: Option<FileSeq>, seq: FileSeq) {
         self.global_stats.add(LogQueue::Rewrite, 1);
         if let Some(origin) = self.kvs.get_mut(&key) {
@@ -172,6 +201,7 @@ impl MemTable {
         self.global_stats.delete(LogQueue::Rewrite, 1);
     }
 
+    /// Returns the log entry location for a given logical log index.
     pub fn get_entry(&self, index: u64) -> Option<EntryIndex> {
         if let Some((first, last)) = self.span() {
             if index < first || index > last {
@@ -186,28 +216,63 @@ impl MemTable {
         }
     }
 
+    /// Appends some log entries from append queue. Existing entries newer than
+    /// any of the incoming entries will be deleted silently. Assumes the
+    /// provided entries have consecutive logical indexes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if index of the first entry in `entry_indexes` is greater than
+    /// largest existing index + 1 (hole).
+    ///
+    /// Panics if incoming entries contains indexes that might be compacted
+    /// before (overwrite history).
     pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
-            self.prepare_append(entry_indexes[0].index, false, false);
+            self.prepare_append(
+                entry_indexes[0].index,
+                false, /* allow_hole */
+                false, /* allow_overwrite */
+            );
             self.global_stats.add(LogQueue::Append, len);
             // TODO: Optimize this.
             self.entry_indexes.extend(entry_indexes);
         }
     }
 
-    // This will only be called during recovery.
+    /// Appends some entries from rewrite queue. Assumes this table has no
+    /// append data.
+    ///
+    /// This method is only used for recovery.
     pub fn append_rewrite(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
             debug_assert_eq!(self.rewrite_count, self.entry_indexes.len());
-            self.prepare_append(entry_indexes[0].index, true, true);
+            self.prepare_append(
+                entry_indexes[0].index,
+                // Rewrite -> Compact Append -> Rewrite.
+                true, /* allow_hole */
+                // Refer to case in `merge_append_table`. They can be adapted
+                // to attack this path via a global rewrite without deleting
+                // obsolete rewrite files.
+                true, /* allow_overwrite */
+            );
             self.global_stats.add(LogQueue::Rewrite, len);
             self.entry_indexes.extend(entry_indexes);
             self.rewrite_count = self.entry_indexes.len();
         }
     }
 
+    /// Rewrites some entries by modifying their location.
+    ///
+    /// When `gate` is present, only append data no newer than it will be
+    /// rewritten.
+    ///
+    /// # Panics
+    ///
+    /// Panics if index of the first entry in `rewrite_indexes` is greater than
+    /// largest existing rewritten index + 1 (hole).
     pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, gate: Option<FileSeq>) {
         if rewrite_indexes.is_empty() {
             return;
@@ -273,8 +338,8 @@ impl MemTable {
         self.rewrite_count = pos + rewrite_len;
     }
 
-    // Removes all entry indexes with index smaller than to `index`.
-    // Returns the number of deleted entries.
+    /// Removes all entries with index smaller than `index`. Returns the number
+    /// of deleted entries.
     pub fn compact_to(&mut self, index: u64) -> u64 {
         if self.entry_indexes.is_empty() {
             return 0;
@@ -296,9 +361,10 @@ impl MemTable {
         count as u64
     }
 
-    // Removes all entry indexes with index greater than or equal to `index`.
-    // Returns the truncated amount.
-    // Assumes index <= last.
+    /// Removes all entry indexes with index greater than or equal to `index`.
+    /// Assumes `index` <= `last`.
+    ///
+    /// Returns the number of deleted entries.
     fn unsafe_truncate_back(&mut self, first: u64, index: u64, last: u64) -> usize {
         debug_assert!(index <= last);
         let len = self.entry_indexes.len();
@@ -321,6 +387,16 @@ impl MemTable {
         truncated
     }
 
+    /// Prepares to append entries with indexes starting at
+    /// `first_index_to_add`. After preparation, those entries can be directly
+    /// appended to internal container.
+    ///
+    /// When `allow_hole` is set, existing entries will be removes if there is a
+    /// hole detected. Otherwise, panic.
+    ///
+    /// When `allow_overwrite_compacted` is set, existing entries will be
+    /// removes if incoming entries attempt to overwrite compacted slots.
+    /// Otherwise, panic.
     #[inline]
     fn prepare_append(
         &mut self,
@@ -350,14 +426,20 @@ impl MemTable {
         }
     }
 
+    #[inline]
     fn maybe_shrink_entry_indexes(&mut self) {
-        if self.entry_indexes.capacity() > SHRINK_CACHE_LIMIT
-            && self.entry_indexes.len() <= SHRINK_CACHE_CAPACITY
+        if self.entry_indexes.capacity() > SHRINK_CAPACITY_THRESHOLD
+            && self.entry_indexes.len() <= SHRINK_CAPACITY_TARGET
         {
-            self.entry_indexes.shrink_to(SHRINK_CACHE_CAPACITY);
+            self.entry_indexes.shrink_to(SHRINK_CAPACITY_TARGET);
         }
     }
 
+    /// Pulls all entries between log index `begin` and `end` to the given
+    /// buffer. Returns error if any entry is missing.
+    ///
+    /// When `max_size` is present, stops pulling entries when the total size
+    /// reaches it.
     pub fn fetch_entries_to(
         &self,
         begin: u64,
@@ -402,7 +484,8 @@ impl MemTable {
         Ok(())
     }
 
-    // Inclusive.
+    /// Pulls all append entries older than or equal to `gate`, to the provided
+    /// buffer.
     pub fn fetch_entry_indexes_before(
         &self,
         gate: FileSeq,
@@ -425,6 +508,7 @@ impl MemTable {
         Ok(())
     }
 
+    /// Pulls all rewrite entries to the provided buffer.
     pub fn fetch_rewritten_entry_indexes(&self, vec_idx: &mut Vec<EntryIndex>) -> Result<()> {
         if self.rewrite_count > 0 {
             let first = self.entry_indexes[0].index;
@@ -435,7 +519,8 @@ impl MemTable {
         }
     }
 
-    // Inclusive.
+    /// Pulls all key value pairs older than or equal to `gate`, to the provided
+    /// buffer.
     pub fn fetch_kvs_before(&self, gate: FileSeq, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, file_id)) in &self.kvs {
             if file_id.queue == LogQueue::Append && file_id.seq <= gate {
@@ -444,6 +529,7 @@ impl MemTable {
         }
     }
 
+    /// Pulls all rewrite key value pairs to the provided buffer.
     pub fn fetch_rewritten_kvs(&self, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, file_id)) in &self.kvs {
             if file_id.queue == LogQueue::Rewrite {
@@ -452,6 +538,8 @@ impl MemTable {
         }
     }
 
+    /// Returns the smallest file sequence number of entries or key value pairs
+    /// in this table.
     pub fn min_file_seq(&self, queue: LogQueue) -> Option<FileSeq> {
         let entry = match queue {
             LogQueue::Append => self.entry_indexes.get(self.rewrite_count),
@@ -478,6 +566,7 @@ impl MemTable {
         }
     }
 
+    /// Returns the number of entries smaller than or equal to `gate`.
     pub fn entries_count_before(&self, mut gate: FileId) -> usize {
         gate.seq += 1;
         let idx = self
@@ -489,18 +578,22 @@ impl MemTable {
         }
     }
 
+    /// Returns the region ID.
     pub fn region_id(&self) -> u64 {
         self.region_id
     }
 
+    /// Returns the log index of the first log entry.
     pub fn first_index(&self) -> Option<u64> {
         self.entry_indexes.front().map(|e| e.index)
     }
 
+    /// Returns the log index of the last log entry.
     pub fn last_index(&self) -> Option<u64> {
         self.entry_indexes.back().map(|e| e.index)
     }
 
+    /// Returns the first and last log index of the entries in this table.
     #[inline]
     fn span(&self) -> Option<(u64, u64)> {
         let len = self.entry_indexes.len();
@@ -543,13 +636,17 @@ impl MemTable {
 
 type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 
-/// Collection of MemTables, indexed by Raft group ID.
+/// A collection of [`MemTable`]s.
+///
+/// Internally, they are stored in multiple [`HashMap`]s, which are indexed by
+/// hashed region IDs.
 #[derive(Clone)]
 pub struct MemTableAccessor {
     global_stats: Arc<GlobalStats>,
 
+    /// A fixed-size array of maps of [`MemTable`]s.
     slots: Vec<Arc<RwLock<MemTables>>>,
-    // Deleted region memtables that are not yet rewritten.
+    /// Deleted [`MemTable`]s that are not yet rewritten.
     removed_memtables: Arc<Mutex<VecDeque<u64>>>,
 }
 
@@ -588,11 +685,11 @@ impl MemTableAccessor {
             .insert(raft_group_id, memtable);
     }
 
-    pub fn remove(&self, raft_group_id: u64, queue: LogQueue) {
+    pub fn remove(&self, raft_group_id: u64, record_tombstone: bool) {
         self.slots[Self::slot_index(raft_group_id)]
             .write()
             .remove(&raft_group_id);
-        if queue == LogQueue::Append {
+        if record_tombstone {
             let mut removed_memtables = self.removed_memtables.lock();
             removed_memtables.push_back(raft_group_id);
         }
@@ -623,7 +720,9 @@ impl MemTableAccessor {
         memtables
     }
 
-    // Returns a `LogBatch` containing Clean commands for all the removed MemTables.
+    /// Returns a [`LogBatch`] containing `Command::Clean`s of all deleted
+    /// [`MemTable`]s. The records for these tables will be cleaned up
+    /// afterwards.
     pub fn take_cleaned_region_logs(&self) -> LogBatch {
         let mut log_batch = LogBatch::default();
         let mut removed_memtables = self.removed_memtables.lock();
@@ -633,8 +732,10 @@ impl MemTableAccessor {
         log_batch
     }
 
-    // Returns a `HashSet<u64>` containing ids for cleaned regions.
-    // Only used for recover.
+    /// Returns a [`HashSet`] containing region IDs of all deleted
+    /// [`MemTable`]s.
+    ///
+    /// This method is only used for recovery.
     #[allow(dead_code)]
     pub fn cleaned_region_ids(&self) -> HashSet<u64> {
         let mut ids = HashSet::default();
@@ -645,7 +746,9 @@ impl MemTableAccessor {
         ids
     }
 
-    /// Merge memtables from the next right one during segmented recovery.
+    /// Merges with a newer neighbor [`MemTableAccessor`].
+    ///
+    /// This method is only used for recovery.
     pub fn merge_newer_neighbor(&self, mut rhs: Self) {
         for slot in rhs.slots.iter_mut() {
             for (raft_group_id, memtable) in slot.write().drain() {
@@ -658,6 +761,10 @@ impl MemTableAccessor {
         // `MemTableRecoverContext`.
     }
 
+    /// Merges with a [`MemTableAccessor`] that contains only append data.
+    /// Assumes `self` contains all rewritten data.
+    ///
+    /// This method is only used for recovery.
     pub fn merge_append_table(&self, mut rhs: Self) {
         for slot in rhs.slots.iter_mut() {
             for (id, memtable) in std::mem::take(&mut *slot.write()) {
@@ -677,22 +784,81 @@ impl MemTableAccessor {
         );
     }
 
-    pub fn apply(&self, log_items: LogItemDrain, queue: LogQueue) {
+    /// Applies changes from log items that have been written to append queue.
+    pub fn apply_append_writes(&self, log_items: LogItemDrain) {
         for item in log_items {
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
-            fail_point!("memtable_accessor::apply::region_3", raft == 3, |_| {});
+            fail_point!(
+                "memtable_accessor::apply_append_writes::region_3",
+                raft == 3,
+                |_| {}
+            );
             match item.content {
                 LogItemContent::EntryIndexes(entries_to_add) => {
-                    let entry_indexes = entries_to_add.0;
-                    if queue == LogQueue::Rewrite {
-                        memtable.write().append_rewrite(entry_indexes);
-                    } else {
-                        memtable.write().append(entry_indexes);
-                    }
+                    memtable.write().append(entries_to_add.0);
                 }
                 LogItemContent::Command(Command::Clean) => {
-                    self.remove(raft, queue);
+                    self.remove(raft, true /* record_tombstone */);
+                }
+                LogItemContent::Command(Command::Compact { index }) => {
+                    memtable.write().compact_to(index);
+                }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => {
+                        let value = kv.value.unwrap();
+                        memtable.write().put(kv.key, value, kv.file_id.unwrap());
+                    }
+                    OpType::Del => {
+                        let key = kv.key;
+                        memtable.write().delete(key.as_slice());
+                    }
+                },
+            }
+        }
+    }
+
+    /// Applies changes from log items that have been written to rewrite queue.
+    pub fn apply_rewrite_writes(
+        &self,
+        log_items: LogItemDrain,
+        watermark: Option<FileSeq>,
+        new_file: FileSeq,
+    ) {
+        for item in log_items {
+            let raft = item.raft_group_id;
+            let memtable = self.get_or_insert(raft);
+            match item.content {
+                LogItemContent::EntryIndexes(entries_to_add) => {
+                    memtable.write().rewrite(entries_to_add.0, watermark);
+                }
+                LogItemContent::Kv(kv) => match kv.op_type {
+                    OpType::Put => {
+                        let key = kv.key;
+                        memtable.write().rewrite_key(key, watermark, new_file);
+                    }
+                    _ => unreachable!(),
+                },
+                LogItemContent::Command(Command::Clean) => {}
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// Applies changes from log items that are replayed from a rewrite queue.
+    /// Assumes it haven't applied any append data.
+    ///
+    /// This method is only used for recovery.
+    pub fn apply_replayed_rewrite_writes(&self, log_items: LogItemDrain) {
+        for item in log_items {
+            let raft = item.raft_group_id;
+            let memtable = self.get_or_insert(raft);
+            match item.content {
+                LogItemContent::EntryIndexes(entries_to_add) => {
+                    memtable.write().append_rewrite(entries_to_add.0);
+                }
+                LogItemContent::Command(Command::Clean) => {
+                    self.remove(raft, false /* record_tombstone */);
                 }
                 LogItemContent::Command(Command::Compact { index }) => {
                     memtable.write().compact_to(index);
@@ -734,7 +900,7 @@ impl MemTableRecoverContext {
 
     pub fn merge_append_context(&self, append: MemTableRecoverContext) {
         self.memtables
-            .apply(append.log_batch.clone().drain(), LogQueue::Append);
+            .apply_append_writes(append.log_batch.clone().drain());
         self.memtables.merge_append_table(append.memtables);
     }
 }
@@ -764,13 +930,23 @@ impl ReplayMachine for MemTableRecoverContext {
                 _ => {}
             }
         }
-        self.memtables.apply(item_batch.drain(), file_id.queue);
+        match file_id.queue {
+            LogQueue::Append => self.memtables.apply_append_writes(item_batch.drain()),
+            LogQueue::Rewrite => self
+                .memtables
+                .apply_replayed_rewrite_writes(item_batch.drain()),
+        }
         Ok(())
     }
 
     fn merge(&mut self, mut rhs: Self, queue: LogQueue) -> Result<()> {
         self.log_batch.merge(&mut rhs.log_batch.clone());
-        self.memtables.apply(rhs.log_batch.drain(), queue);
+        match queue {
+            LogQueue::Append => self.memtables.apply_append_writes(rhs.log_batch.drain()),
+            LogQueue::Rewrite => self
+                .memtables
+                .apply_replayed_rewrite_writes(rhs.log_batch.drain()),
+        }
         self.memtables.merge_newer_neighbor(rhs.memtables);
         Ok(())
     }
@@ -1485,7 +1661,6 @@ mod tests {
 
     #[test]
     fn test_memtable_merge_append() {
-        let region_id = 7;
         fn empty_table(id: u64) -> MemTable {
             MemTable::new(id, Arc::new(GlobalStats::default()))
         }
@@ -1569,6 +1744,57 @@ mod tests {
                             7,
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
+                        // By MemTableRecoveryContext.
+                        memtable.compact_to(10);
+                    }
+                }
+                memtable
+            },
+            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+                match on {
+                    None => {
+                        memtable.append(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Append, 1),
+                        ));
+                        memtable.rewrite(
+                            generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1)),
+                            Some(1),
+                        );
+                        memtable.append(generate_entry_indexes(
+                            10,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        memtable.append(generate_entry_indexes(
+                            5,
+                            10,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                    }
+                    Some(LogQueue::Append) => {
+                        let mut m1 = empty_table(memtable.region_id);
+                        m1.append(generate_entry_indexes(
+                            10,
+                            15,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        let mut m2 = empty_table(memtable.region_id);
+                        m2.append(generate_entry_indexes(
+                            5,
+                            10,
+                            FileId::new(LogQueue::Append, 2),
+                        ));
+                        m1.merge_newer_neighbor(&mut m2);
+                        memtable.merge_newer_neighbor(&mut m1);
+                    }
+                    Some(LogQueue::Rewrite) => {
+                        memtable.append_rewrite(generate_entry_indexes(
+                            0,
+                            10,
+                            FileId::new(LogQueue::Rewrite, 1),
+                        ));
                     }
                 }
                 memtable
@@ -1576,7 +1802,8 @@ mod tests {
         ];
 
         // merge against empty table.
-        for case in cases {
+        for (i, case) in cases.iter().enumerate() {
+            let region_id = i as u64;
             let mut append = empty_table(region_id);
             let mut rewrite = case(empty_table(region_id), Some(LogQueue::Rewrite));
             rewrite.merge_append_table(&mut append);
@@ -1596,7 +1823,8 @@ mod tests {
             assert!(append.entry_indexes.is_empty());
         }
 
-        for case in cases {
+        for (i, case) in cases.iter().enumerate() {
+            let region_id = i as u64;
             let mut append = case(empty_table(region_id), Some(LogQueue::Append));
             let mut rewrite = case(empty_table(region_id), Some(LogQueue::Rewrite));
             rewrite.merge_append_table(&mut append);
@@ -1638,7 +1866,7 @@ mod tests {
         batches[0].put(last_rid, b"key".to_vec(), b"ANYTHING".to_vec());
         batches[1].add_command(last_rid, Command::Clean);
 
-        // entries [1, 10) => compact 5 => entries [11, 20)
+        // entries [1, 10] => compact 5 => entries [11, 20]
         last_rid += 1;
         batches[0].add_entry_indexes(last_rid, generate_entry_indexes(1, 11, files[0]));
         batches[1].add_command(last_rid, Command::Compact { index: 5 });
@@ -1666,7 +1894,7 @@ mod tests {
         let sequential_global_stats = Arc::new(GlobalStats::default());
         let sequential_memtables = MemTableAccessor::new(sequential_global_stats.clone());
         for mut batch in batches.clone() {
-            sequential_memtables.apply(batch.drain(), LogQueue::Append);
+            sequential_memtables.apply_append_writes(batch.drain());
         }
 
         for rid in first_rid..=last_rid {

@@ -111,9 +111,9 @@ where
     B: FileBuilder,
     P: PipeLog,
 {
-    /// Writes the content of `log_batch` into the engine and returns written bytes.
-    /// If `sync` is true, the write will be followed by a call to `fdatasync` on
-    /// the log file.
+    /// Writes the content of `log_batch` into the engine and returns written
+    /// bytes. If `sync` is true, the write will be followed by a call to
+    /// `fdatasync` on the log file.
     pub fn write(&self, log_batch: &mut LogBatch, mut sync: bool) -> Result<usize> {
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
@@ -156,7 +156,7 @@ where
         let mut now = Instant::now();
         if len > 0 {
             log_batch.finish_write(block_handle);
-            self.memtables.apply(log_batch.drain(), LogQueue::Append);
+            self.memtables.apply_append_writes(log_batch.drain());
             for listener in &self.listeners {
                 listener.post_apply_memtables(block_handle.id);
             }
@@ -303,8 +303,8 @@ impl<B> Engine<B, FilePipeLog<B>>
 where
     B: FileBuilder,
 {
-    /// Returns a list of corrupted Raft groups, including their ids and last valid
-    /// log index. Head or tail corruption cannot be detected.
+    /// Returns a list of corrupted Raft groups, including their ids and last
+    /// valid log index. Head or tail corruption cannot be detected.
     pub fn consistency_check_with_file_builder(
         path: &Path,
         file_builder: Arc<B>,
@@ -833,9 +833,7 @@ mod tests {
         // Simulate loss of buffered write.
         let mut compact_log = LogBatch::default();
         compact_log.add_command(rid, Command::Compact { index: 20 });
-        engine
-            .memtables
-            .apply(compact_log.drain(), LogQueue::Append);
+        engine.memtables.apply_append_writes(compact_log.drain());
         engine.purge_manager.must_rewrite_rewrite_queue();
         let engine = engine.reopen();
         engine.scan(rid, 10, 25, |_, q, d| {
@@ -1185,7 +1183,8 @@ mod tests {
         }
 
         drop(engine);
-        //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft groups 8
+        //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft
+        // groups 8
         let dump_it =
             Engine::dump_with_file_builder(dir.path(), Arc::new(ObfuscatedFileBuilder)).unwrap();
         let total = dump_it
@@ -1257,7 +1256,7 @@ mod tests {
         let script1 = "".to_owned();
         RaftLogEngine::unsafe_repair_with_file_builder(
             dir.path(),
-            None, /*queue*/
+            None, /* queue */
             script1,
             Arc::new(ObfuscatedFileBuilder),
         )
@@ -1276,7 +1275,7 @@ mod tests {
         .to_owned();
         RaftLogEngine::unsafe_repair_with_file_builder(
             dir.path(),
-            None, /*queue*/
+            None, /* queue */
             script2,
             Arc::new(ObfuscatedFileBuilder),
         )
@@ -1340,7 +1339,7 @@ mod tests {
         .to_owned();
         RaftLogEngine::unsafe_repair_with_file_builder(
             dir.path(),
-            None, /*queue*/
+            None, /* queue */
             script,
             Arc::new(ObfuscatedFileBuilder),
         )

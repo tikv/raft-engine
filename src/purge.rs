@@ -10,7 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
-use crate::log_batch::{Command, LogBatch, LogItemContent, OpType};
+use crate::log_batch::LogBatch;
 use crate::memtable::{MemTable, MemTableAccessor};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
@@ -107,8 +107,8 @@ where
         Ok(should_compact)
     }
 
-    /// Rewrite append files with seqno no larger than `watermark`. When it's None,
-    /// rewrite the entire queue. Returns the number of purged files.
+    /// Rewrite append files with seqno no larger than `watermark`. When it's
+    /// None, rewrite the entire queue. Returns the number of purged files.
     #[cfg(test)]
     pub fn must_rewrite_append_queue(
         &self,
@@ -228,7 +228,7 @@ where
             .memtables
             .collect(|t| t.min_file_seq(LogQueue::Rewrite).is_some());
 
-        self.rewrite_memtables(memtables, 0 /*expect_rewrites_per_memtable*/, None)?;
+        self.rewrite_memtables(memtables, 0 /* expect_rewrites_per_memtable */, None)?;
         self.global_stats.reset_rewrite_counters();
         Ok(())
     }
@@ -237,8 +237,8 @@ where
         let mut log_batch = self.memtables.take_cleaned_region_logs();
         self.rewrite_impl(
             &mut log_batch,
-            None, /*rewrite_watermark*/
-            true, /*sync*/
+            None, /* rewrite_watermark */
+            true, /* sync */
         )
     }
 
@@ -333,27 +333,11 @@ where
             .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
         self.pipe_log.maybe_sync(LogQueue::Rewrite, sync)?;
         log_batch.finish_write(file_handle);
-        for item in log_batch.drain() {
-            let raft = item.raft_group_id;
-            let memtable = self.memtables.get_or_insert(raft);
-            match item.content {
-                LogItemContent::EntryIndexes(entries_to_add) => {
-                    let entry_indexes = entries_to_add.0;
-                    memtable.write().rewrite(entry_indexes, rewrite_watermark);
-                }
-                LogItemContent::Kv(kv) => match kv.op_type {
-                    OpType::Put => {
-                        let key = kv.key;
-                        memtable
-                            .write()
-                            .rewrite_key(key, rewrite_watermark, file_handle.id.seq);
-                    }
-                    _ => unreachable!(),
-                },
-                LogItemContent::Command(Command::Clean) => {}
-                _ => unreachable!(),
-            }
-        }
+        self.memtables.apply_rewrite_writes(
+            log_batch.drain(),
+            rewrite_watermark,
+            file_handle.id.seq,
+        );
         for listener in &self.listeners {
             listener.post_apply_memtables(file_handle.id);
         }

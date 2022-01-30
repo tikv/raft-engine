@@ -1,5 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! Helper types to recover in-memory states from log files.
+
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::marker::PhantomData;
@@ -23,12 +25,26 @@ use super::log_file::{build_file_reader, LogFd};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
+/// `ReplayMachine` is a type of deterministic state machine that obeys
+/// associative law.
+///
+/// Sequentially arranged log items can be divided and replayed to several
+/// [`ReplayMachine`]s, and their merged state will be the same as when
+/// replayed to one single [`ReplayMachine`].
+///
+/// This abstraction is useful for recovery in parallel: a set of log files can
+/// be replayed in a divide-and-conquer fashion.
 pub trait ReplayMachine: Send {
+    /// Inputs a batch of log items from the given file to this machine.
+    /// Returns whether the input sequence up till now is accepted.
     fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
 
+    /// Merges with another [`ReplayMachine`] that has consumed newer log items
+    /// in the same input sequence.
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 }
 
+/// A factory of [`ReplayMachine`]s that can be default constructed.
 #[derive(Clone, Default)]
 pub struct DefaultMachineFactory<M>(PhantomData<std::sync::Mutex<M>>);
 
@@ -44,17 +60,22 @@ struct FileToRecover {
     fd: Arc<LogFd>,
 }
 
+/// [`DualPipes`] factory that can also recover other customized memory states.
 pub struct DualPipesBuilder<B: FileBuilder> {
     cfg: Config,
     file_builder: Arc<B>,
     listeners: Vec<Arc<dyn EventListener>>,
 
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
     dir_lock: Option<File>,
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
     append_files: Vec<FileToRecover>,
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
     rewrite_files: Vec<FileToRecover>,
 }
 
 impl<B: FileBuilder> DualPipesBuilder<B> {
+    /// Creates a new builder.
     pub fn new(cfg: Config, file_builder: Arc<B>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
         Self {
             cfg,
@@ -66,6 +87,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         }
     }
 
+    /// Scans for all log files under the working directory. The directory will
+    /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
         let dir = &self.cfg.dir;
         let path = Path::new(dir);
@@ -140,6 +163,9 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
+    /// Reads through log items in all available log files, and replays them to
+    /// specific [`ReplayMachine`]s that can be constructed via
+    /// `machine_factory`.
     pub fn recover<M: ReplayMachine, F: Factory<M>>(
         &mut self,
         machine_factory: &F,
@@ -166,6 +192,9 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok((append?, rewrite?))
     }
 
+    /// Reads through log items in all available log files of the specified
+    /// queue, and replays them to specific [`ReplayMachine`]s that can be
+    /// constructed via `machine_factory`.
     pub fn recover_queue<M: ReplayMachine, F: Factory<M>>(
         &self,
         queue: LogQueue,
@@ -236,6 +265,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(sequential_replay_machine)
     }
 
+    /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {
         let files = match queue {
             LogQueue::Append => &self.append_files,
@@ -253,6 +283,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         )
     }
 
+    /// Builds a [`DualPipes`] that contains all available log files.
     pub fn finish(self) -> Result<DualPipes<B>> {
         let appender = self.build_pipe(LogQueue::Append)?;
         let rewriter = self.build_pipe(LogQueue::Rewrite)?;
@@ -260,7 +291,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
     }
 }
 
-pub fn lock_dir(dir: &str) -> Result<File> {
+/// Creates and exclusively locks a lock file under the given directory.
+pub(super) fn lock_dir(dir: &str) -> Result<File> {
     let lock_file = File::create(lock_file_path(dir))?;
     lock_file.try_lock_exclusive().map_err(|e| {
         Error::Other(box_err!(

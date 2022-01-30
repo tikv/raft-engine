@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use clap::{crate_authors, crate_version, AppSettings, Parser};
-use raft_engine::{Engine, Error, LogQueue, Result as EngineResult};
+use raft_engine::internals::LogQueue;
+use raft_engine::{Engine, Error, Result as EngineResult};
 
 #[derive(Debug, clap::Parser)]
 #[clap(
