@@ -75,6 +75,7 @@ impl PanicGuard {
     pub fn with_prompt(s: String) -> Self {
         let prev_hook = Box::into_raw(panic::take_hook());
         let sendable_prev_hook = PointerHolder(prev_hook);
+        // FIXME: Use thread local hook.
         panic::set_hook(Box::new(move |info| {
             eprintln!("{}", s);
             unsafe { (*sendable_prev_hook.0)(info) };

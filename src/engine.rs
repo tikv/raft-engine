@@ -564,6 +564,21 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_engine() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_empty_engine")
+            .tempdir()
+            .unwrap();
+        let mut sub_dir = PathBuf::from(dir.as_ref());
+        sub_dir.push("raft-engine");
+        let cfg = Config {
+            dir: sub_dir.to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        RaftLogEngine::open_with_file_builder(cfg, Arc::new(ObfuscatedFileBuilder)).unwrap();
+    }
+
+    #[test]
     fn test_get_entry() {
         let normal_batch_size = 10;
         let compressed_batch_size = 5120;
