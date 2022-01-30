@@ -73,8 +73,7 @@ impl FileBlockHandle {
     }
 }
 
-/// A log storage that serves reads and writes over multiple queues of log
-/// files.
+/// A `PipeLog` serves reads and writes over multiple queues of log files.
 pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;

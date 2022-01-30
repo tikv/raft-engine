@@ -21,7 +21,7 @@ const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 
-/// File name formatting extensions to [`FileId`].
+/// `FileNameExt` offers file name formatting extensions to [`FileId`].
 pub trait FileNameExt: Sized {
     fn parse_file_name(file_name: &str) -> Option<Self>;
 

@@ -2,7 +2,7 @@
 
 //! A [`PipeLog`] implementation that stores data in filesystem.
 //!
-//! [`PipeLog`]: ../trait.PipeLog.html
+//! [`PipeLog`]: crate::pipe_log::PipeLog
 
 mod format;
 mod log_file;

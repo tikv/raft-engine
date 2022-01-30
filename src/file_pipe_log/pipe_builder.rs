@@ -25,7 +25,8 @@ use super::log_file::{build_file_reader, LogFd};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 
-/// A type of deterministic state machine that obeys associative law.
+/// `ReplayMachine` is a type of deterministic state machine that obeys
+/// associative law.
 ///
 /// Sequentially arranged log items can be divided and replayed to several
 /// [`ReplayMachine`]s, and their merged state will be the same as when

@@ -15,6 +15,7 @@ use parking_lot::{Condvar, Mutex};
 
 type Ptr<T> = Option<NonNull<T>>;
 
+///
 pub struct Writer<P, O> {
     next: Cell<Ptr<Writer<P, O>>>,
     payload: *mut P,
@@ -41,14 +42,22 @@ impl<P, O> Writer<P, O> {
         }
     }
 
+    /// Returns an immutable reference to the payload.
     pub fn get_payload(&self) -> &P {
         unsafe { &*self.payload }
     }
 
+    /// Sets the output. This method is re-entrant.
     pub fn set_output(&mut self, output: O) {
         self.output = Some(output);
     }
 
+    /// Consumes itself and yields an output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before being processed by a [`WriteBarrier`] or setting
+    /// the output itself.
     pub fn finish(mut self) -> O {
         self.output.take().unwrap()
     }
@@ -134,7 +143,7 @@ impl<P, O> Default for WriteBarrierInner<P, O> {
     }
 }
 
-/// `WriteBarrier` synchronizes writes from multiple [`Writer`]s.
+/// A synchronizer of [`Writer`]s.
 pub struct WriteBarrier<P, O> {
     inner: Mutex<WriteBarrierInner<P, O>>,
     leader_cv: Condvar,
