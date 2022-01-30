@@ -294,7 +294,7 @@ struct ThreadSummary {
 impl ThreadSummary {
     fn new() -> Self {
         ThreadSummary {
-            hist: Histogram::new(3 /*significant figures*/).unwrap(),
+            hist: Histogram::new(3 /* significant figures */).unwrap(),
             first: None,
             last: None,
         }

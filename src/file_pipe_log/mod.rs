@@ -32,8 +32,8 @@ pub mod debug {
     use super::log_file::{LogFd, LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
 
-    /// Opens a log file for write. When `create` is true, the specified file will
-    /// be created first if not exists.
+    /// Opens a log file for write. When `create` is true, the specified file
+    /// will be created first if not exists.
     #[allow(dead_code)]
     pub fn build_file_writer<B: FileBuilder>(
         builder: &B,
@@ -206,12 +206,14 @@ pub mod debug {
                 let file_path = file_id.build_file_path(dir.path());
                 // Write a file.
                 let mut writer =
-                    build_file_writer(builder.as_ref(), &file_path, true /*create*/).unwrap();
+                    build_file_writer(builder.as_ref(), &file_path, true /* create */).unwrap();
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
-                    let len = batch.finish_populate(1 /*compression_threshold*/).unwrap();
+                    let len = batch
+                        .finish_populate(1 /* compression_threshold */)
+                        .unwrap();
                     writer
-                        .write(batch.encoded_bytes(), 0 /*target_file_hint*/)
+                        .write(batch.encoded_bytes(), 0 /* target_file_hint */)
                         .unwrap();
                     batch.finish_write(FileBlockHandle {
                         id: file_id,
@@ -262,7 +264,7 @@ pub mod debug {
             // An empty log file.
             let empty_file_path = FileId::dummy(LogQueue::Rewrite).build_file_path(dir.path());
             let mut writer =
-                build_file_writer(builder.as_ref(), &empty_file_path, true /*create*/).unwrap();
+                build_file_writer(builder.as_ref(), &empty_file_path, true /* create */).unwrap();
             writer.close().unwrap();
 
             assert!(LogItemReader::new_file_reader(builder.clone(), dir.path()).is_err());

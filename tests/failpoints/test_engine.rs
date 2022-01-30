@@ -151,7 +151,7 @@ fn test_pipe_log_listeners() {
     assert_eq!(hook.0[&LogQueue::Rewrite].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
-    let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";
+    let apply_memtable_region_3_fp = "memtable_accessor::apply_append_writes::region_3";
     fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
     let engine_clone = engine.clone();
     let data_clone = data.clone();
@@ -250,10 +250,10 @@ fn test_concurrent_write_empty_log_batch() {
     let mut entries = Vec::new();
     engine
         .fetch_entries_to::<MessageExtTyped>(
-            1,    /*region*/
-            0,    /*begin*/
-            2,    /*end*/
-            None, /*max_size*/
+            1,    /* region */
+            0,    /* begin */
+            2,    /* end */
+            None, /* max_size */
             &mut entries,
         )
         .unwrap();
@@ -261,10 +261,10 @@ fn test_concurrent_write_empty_log_batch() {
     entries.clear();
     engine
         .fetch_entries_to::<MessageExtTyped>(
-            2,    /*region*/
-            0,    /*begin*/
-            2,    /*end*/
-            None, /*max_size*/
+            2,    /* region */
+            0,    /* begin */
+            2,    /* end */
+            None, /* max_size */
             &mut entries,
         )
         .unwrap();

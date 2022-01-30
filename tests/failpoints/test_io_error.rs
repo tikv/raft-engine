@@ -107,7 +107,8 @@ fn test_file_write_error() {
         .is_err());
     }
 
-    // Internal states are consistent after panics. But outstanding writes are not reverted.
+    // Internal states are consistent after panics. But outstanding writes are not
+    // reverted.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
@@ -166,7 +167,8 @@ fn test_file_rotate_error() {
         .is_err());
     }
 
-    // Internal states are consistent after panics. But outstanding writes are not reverted.
+    // Internal states are consistent after panics. But outstanding writes are not
+    // reverted.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();

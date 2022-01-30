@@ -158,7 +158,7 @@ impl<B: FileBuilder> SinglePipe<B> {
                 self.file_builder.as_ref(),
                 &path,
                 fd.clone(),
-                true, /*create*/
+                true, /* create */
             )?,
         };
 

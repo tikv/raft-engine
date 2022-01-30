@@ -17,7 +17,6 @@ pub enum LogQueue {
 pub type FileSeq = u64;
 
 /// A unique identifier for a log file.
-/// only.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct FileId {
     pub queue: LogQueue,

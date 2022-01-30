@@ -6,17 +6,17 @@ pub trait EventListener: Sync + Send {
     /// Called *after* a new log file is created.
     fn post_new_log_file(&self, _file_id: FileId) {}
 
-    /// Called *before* a log batch has been appended into a log file.
+    /// Called *before* a [`LogBatch`] has been written into a log file.
     fn on_append_log_file(&self, _handle: FileBlockHandle) {}
 
-    /// Called *after* a log batch has been applied to memtables.
+    /// Called *after* a [`LogBatch`] has been applied to the [`MemTable`].
     fn post_apply_memtables(&self, _file_id: FileId) {}
 
-    /// Test whether a log file can be purged or not.
+    /// Returns the oldest file sequence number that are not ready to be purged.
     fn first_file_not_ready_for_purge(&self, _queue: LogQueue) -> Option<FileSeq> {
         None
     }
 
-    /// Called *after* a log file get purged.
+    /// Called *after* a log file is purged.
     fn post_purge(&self, _file_id: FileId) {}
 }

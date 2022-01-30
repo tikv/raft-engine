@@ -195,7 +195,8 @@ impl Drop for LogFd {
     }
 }
 
-/// A low-level file adapted for standard interfaces including [`Seek`], [`Write`] and [`Read`].
+/// A low-level file adapted for standard interfaces including [`Seek`],
+/// [`Write`] and [`Read`].
 pub(super) struct LogFile {
     inner: Arc<LogFd>,
     offset: usize,

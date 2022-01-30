@@ -145,8 +145,8 @@ impl Command {
 
     fn approximate_size(&self) -> usize {
         match &self {
-            Command::Clean => 1,              /*type*/
-            Command::Compact { .. } => 1 + 8, /*type + index*/
+            Command::Clean => 1,              /* type */
+            Command::Compact { .. } => 1 + 8, /* type + index */
         }
     }
 }
@@ -630,9 +630,9 @@ impl LogBatch {
         self.item_batch.items.is_empty()
     }
 
-    /// Called after user finishes populating this log batch. Encode and optionally
-    /// compress log entries. Set the compression type of entry indexes. Returns the
-    /// encoded size.
+    /// Called after user finishes populating this log batch. Encode and
+    /// optionally compress log entries. Set the compression type of entry
+    /// indexes. Returns the encoded size.
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
@@ -699,8 +699,8 @@ impl LogBatch {
         }
     }
 
-    /// Called after finishing writing encoded data to WAL. Set entries file location of
-    /// entry indexes.
+    /// Called after finishing writing encoded data to WAL. Set entries file
+    /// location of entry indexes.
     pub(crate) fn finish_write(&mut self, mut handle: FileBlockHandle) {
         debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
         if !self.is_empty() {
@@ -982,10 +982,10 @@ mod tests {
     fn test_log_item_batch_enc_dec() {
         let mut batches = vec![LogItemBatch::default()];
         let mut batch = LogItemBatch::default();
-        batch.add_entry_indexes(7, generate_entry_indexes_opt(1, 5, None /*file_id*/));
+        batch.add_entry_indexes(7, generate_entry_indexes_opt(1, 5, None /* file_id */));
         batch.add_entry_indexes(
             7 + 100,
-            generate_entry_indexes_opt(100, 105, None /*file_id*/),
+            generate_entry_indexes_opt(100, 105, None /* file_id */),
         );
         batch.add_command(7, Command::Clean);
         batch.put(7, b"key".to_vec(), b"value".to_vec());

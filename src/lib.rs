@@ -12,7 +12,6 @@
 // limitations under the License.
 
 //! # Raft Engine
-//!
 
 #![feature(shrink_to)]
 #![feature(btree_drain_filter)]
@@ -66,11 +65,11 @@ pub use util::ReadableSize;
 pub mod internals {
     //! A selective view of key components in Raft Engine. Exported under the
     //! `internals` feature only.
-    //!
     pub use crate::event_listener::*;
     pub use crate::file_pipe_log::*;
     pub use crate::memtable::*;
     pub use crate::pipe_log::*;
+    pub use crate::write_barrier::*;
 }
 
 use std::sync::atomic::{AtomicUsize, Ordering};

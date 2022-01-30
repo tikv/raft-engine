@@ -8,7 +8,8 @@ use crate::pipe_log::{FileId, LogQueue};
 use crate::Result;
 
 /// A `ConsistencyChecker` scans for log entry holes in a log queue. It will
-/// return a list of corrupted raft groups along with their last valid log index.
+/// return a list of corrupted raft groups along with their last valid log
+/// index.
 #[derive(Default)]
 pub struct ConsistencyChecker {
     // Mappings from raft group id to (first-index, last-index).
