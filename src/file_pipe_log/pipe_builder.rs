@@ -95,6 +95,7 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         if !path.exists() {
             info!("Create raft log directory: {}", dir);
             fs::create_dir(dir)?;
+            self.dir_lock = Some(lock_dir(dir)?);
             return Ok(());
         }
         if !path.is_dir() {
