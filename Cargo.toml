@@ -8,6 +8,9 @@ description = "A persistent storage engine for Multi-Raft logs"
 readme = "README.md"
 edition = "2018"
 
+[package.metadata.docs.rs]
+features = ["internals"]
+
 [[example]]
 name = "append-compact-purge"
 path = "examples/append_compact_purge.rs"
