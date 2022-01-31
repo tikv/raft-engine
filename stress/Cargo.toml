@@ -8,7 +8,7 @@ edition = "2018"
 clap = { version = "3.0.0-rc.0", features = ["derive", "cargo"] }
 const_format = "0.2.13"
 hdrhistogram = "7.4"
-parking_lot_core = "0.8"
+parking_lot_core = "0.9"
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 raft-engine = { path = "..", features = ["internals"] }
 rand = "0.8"
