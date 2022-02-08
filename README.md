@@ -74,7 +74,7 @@ cargo test --test failpoints --all-features -- --test-threads 1
 - For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.
 
 ```
-cargo bench --features all_except_nightly <bench-case-name>
+cargo bench --all-features <bench-case-name>
 cargo run --release --package stress --help
 ```
 
