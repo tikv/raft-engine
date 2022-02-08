@@ -16,11 +16,12 @@
 #![feature(shrink_to)]
 #![feature(btree_drain_filter)]
 #![feature(generic_associated_types)]
-#![feature(test)]
+#![cfg_attr(feature = "nightly", feature(test))]
 
 #[macro_use]
 extern crate lazy_static;
 extern crate scopeguard;
+#[cfg(feature = "nightly")]
 extern crate test;
 
 macro_rules! box_err {

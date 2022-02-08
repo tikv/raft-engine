@@ -42,7 +42,7 @@ nix = "0.23"
 num-derive = "0.3"
 num-traits = "0.2"
 parking_lot = "0.12"
-prometheus = { version = "0.13", features = ["nightly"] }
+prometheus = { version = "0.13" }
 prometheus-static-metric = "0.5"
 protobuf = "2"
 rayon = "1.5"
@@ -64,6 +64,9 @@ toml = "0.5"
 
 [features]
 internals = []
+nightly = [
+  "prometheus/nightly",
+]
 failpoints = [
   "fail/failpoints",
 ]
