@@ -77,7 +77,7 @@ scripting = [
 # Shortcuts
 all_except_failpoints = ["internals", "scripting", "nightly"]
 all_except_nightly = ["internals", "scripting", "failpoints"]
-all_except_failpoints_nightly = ["internals", "scripting", "failpoints"]
+all_except_failpoints_nightly = ["internals", "scripting"]
 
 [patch.crates-io]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
