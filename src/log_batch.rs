@@ -866,7 +866,6 @@ mod tests {
     use crate::pipe_log::LogQueue;
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use raft::eraftpb::Entry;
-    use rand::{thread_rng, Rng};
 
     fn decode_entries_from_bytes<M: MessageExt>(
         buf: &[u8],
@@ -1208,8 +1207,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nightly")]
     #[bench]
     fn bench_log_batch_add_entry_and_encode(b: &mut test::Bencher) {
+        use rand::{thread_rng, Rng};
         fn details(log_batch: &mut LogBatch, entries: &[Entry], regions: usize) {
             for _ in 0..regions {
                 log_batch

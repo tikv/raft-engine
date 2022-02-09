@@ -67,7 +67,7 @@ Contributions are always welcome! Here are a few tips for making a PR:
 ```
 cargo fmt --all -- --check
 cargo clippy --all --all-features --all-targets -- -D clippy::all
-cargo test --all --features scripting
+cargo test --all --features all_except_failpoints
 cargo test --test failpoints --all-features -- --test-threads 1
 ```
 

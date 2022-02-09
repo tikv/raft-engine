@@ -1,9 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-#![feature(test)]
-
 extern crate libc;
-extern crate test;
 
 use criterion::criterion_main;
 

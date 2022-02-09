@@ -1949,6 +1949,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "nightly")]
     #[bench]
     fn bench_memtable_single_put(b: &mut test::Bencher) {
         let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));
@@ -1959,6 +1960,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "nightly")]
     #[bench]
     fn bench_memtable_triple_puts(b: &mut test::Bencher) {
         let mut memtable = MemTable::new(0, Arc::new(GlobalStats::default()));

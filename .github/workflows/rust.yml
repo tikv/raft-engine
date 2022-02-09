@@ -38,14 +38,14 @@ jobs:
         run: cargo clippy --all --all-features --all-targets -- -D clippy::all
       - name: Run tests
         run: |
-          cargo test --all --features scripting --verbose -- --nocapture
+          cargo test --all --features all_except_failpoints --verbose -- --nocapture
           cargo test --test failpoints --all-features --verbose -- --test-threads 1 --nocapture
         env:
           RUST_BACKTRACE: 1
       - name: Run asan tests
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
-          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all --features scripting --verbose -- --nocapture
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all --features all_except_failpoints --verbose -- --nocapture
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test failpoints --all-features --verbose -- --test-threads 1 --nocapture
         env:
           RUST_BACKTRACE: 1
@@ -72,7 +72,7 @@ jobs:
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
       - name: Run tests
         run: |
-          cargo test --all --features scripting
+          cargo test --all --features all_except_failpoints
           cargo test --test failpoints --all-features -- --test-threads 1
         env:
           RUSTFLAGS: '-Zinstrument-coverage'
