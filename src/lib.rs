@@ -41,8 +41,8 @@ mod consistency;
 mod engine;
 mod errors;
 mod event_listener;
-mod file_builder;
 mod file_pipe_log;
+mod file_system;
 #[cfg(feature = "scripting")]
 mod filter;
 mod log_batch;
@@ -55,10 +55,11 @@ mod test_util;
 mod util;
 mod write_barrier;
 
+use crate::file_pipe_log::DefaultFileSystem;
 pub use config::{Config, RecoveryMode};
 pub use engine::Engine;
 pub use errors::{Error, Result};
-pub use file_builder::FileBuilder;
+pub use event_listener::EventListener;
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use util::ReadableSize;
 
