@@ -15,7 +15,6 @@
 
 #![feature(shrink_to)]
 #![feature(btree_drain_filter)]
-#![feature(generic_associated_types)]
 #![cfg_attr(feature = "nightly", feature(test))]
 
 #[macro_use]
@@ -39,9 +38,9 @@ mod codec;
 mod config;
 mod consistency;
 mod engine;
+mod env;
 mod errors;
 mod event_listener;
-mod file_builder;
 mod file_pipe_log;
 #[cfg(feature = "scripting")]
 mod filter;
@@ -58,7 +57,6 @@ mod write_barrier;
 pub use config::{Config, RecoveryMode};
 pub use engine::Engine;
 pub use errors::{Error, Result};
-pub use file_builder::FileBuilder;
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use util::ReadableSize;
 

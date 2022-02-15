@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::file_builder::FileBuilder;
+use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
@@ -9,9 +9,9 @@ use super::format::LogFileHeader;
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
-pub(super) struct LogItemBatchFileReader<B: FileBuilder> {
+pub(super) struct LogItemBatchFileReader<F: FileSystem> {
     file_id: Option<FileId>,
-    reader: Option<LogFileReader<B>>,
+    reader: Option<LogFileReader<F>>,
     size: usize,
 
     buffer: Vec<u8>,
@@ -24,7 +24,7 @@ pub(super) struct LogItemBatchFileReader<B: FileBuilder> {
     read_block_size: usize,
 }
 
-impl<B: FileBuilder> LogItemBatchFileReader<B> {
+impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Creates a new reader.
     pub fn new(read_block_size: usize) -> Self {
         Self {
@@ -41,7 +41,7 @@ impl<B: FileBuilder> LogItemBatchFileReader<B> {
     }
 
     /// Opens a file that can be accessed through the given reader.
-    pub fn open(&mut self, file_id: FileId, reader: LogFileReader<B>) -> Result<()> {
+    pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
         self.file_id = Some(file_id);
         self.size = reader.file_size()?;
         self.reader = Some(reader);

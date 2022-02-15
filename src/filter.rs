@@ -7,7 +7,7 @@ use hashbrown::HashMap;
 use rhai::{Engine, Scope, AST};
 use scopeguard::{guard, ScopeGuard};
 
-use crate::file_builder::FileBuilder;
+use crate::env::FileSystem;
 use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
 use crate::file_pipe_log::{FileNameExt, ReplayMachine};
 use crate::log_batch::{
@@ -247,7 +247,7 @@ impl RhaiFilterMachine {
     /// Writes out filtered log items and replaces existing log files. Always
     /// attempt to recover original log files on error. Panics if that recovery
     /// fails.
-    pub fn finish<B: FileBuilder>(self, builder: &B, path: &Path) -> Result<()> {
+    pub fn finish<F: FileSystem>(self, system: &F, path: &Path) -> Result<()> {
         let mut log_batch = LogBatch::default();
         let mut guards = Vec::new();
         for f in self.files.into_iter() {
@@ -274,8 +274,8 @@ impl RhaiFilterMachine {
                         }
                     }),
                 ));
-                let mut reader = build_file_reader(builder, &bak_path)?;
-                let mut writer = build_file_writer(builder, &target_path, true /* create */)?;
+                let mut reader = build_file_reader(system, &bak_path)?;
+                let mut writer = build_file_writer(system, &target_path, true /* create */)?;
                 // Write out new log file.
                 for item in f.items.into_iter() {
                     match item.content {
