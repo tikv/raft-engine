@@ -1,17 +1,20 @@
-use nix::unistd::{close, ftruncate, lseek, Whence};
-use nix::NixPath;
-use std::path::Path;
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::env::{FileSystem, Handle, WriteExt};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
+use std::os::unix::io::RawFd;
+use std::path::Path;
+use std::sync::Arc;
+
 use fail::fail_point;
 use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
-use std::os::unix::io::RawFd;
-use std::sync::Arc;
+use nix::unistd::{close, ftruncate, lseek, Whence};
+use nix::NixPath;
+
+use crate::env::{FileSystem, Handle, WriteExt};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();

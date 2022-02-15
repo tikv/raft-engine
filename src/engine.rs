@@ -471,7 +471,7 @@ mod tests {
             RaftLogEngine::open_with(cfg, file_system, listeners).unwrap()
         }
 
-        fn scan<F1: Fn(u64, LogQueue, &[u8])>(&self, rid: u64, start: u64, end: u64, reader: F1) {
+        fn scan<FR: Fn(u64, LogQueue, &[u8])>(&self, rid: u64, start: u64, end: u64, reader: FR) {
             let mut entries = Vec::new();
             self.fetch_entries_to::<Entry>(
                 rid,
