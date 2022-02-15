@@ -4,10 +4,16 @@ use std::io::{Read, Result, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+mod default;
+mod obfuscated;
+
+pub use default::DefaultFileSystem;
+pub use obfuscated::ObfuscatedFileSystem;
+
 /// FileSystem
 pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
-    type Reader: Seek + Read + Send + ReadExt;
+    type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
@@ -18,18 +24,12 @@ pub trait FileSystem: Send + Sync {
 
 pub trait Handle {
     fn truncate(&self, offset: usize) -> Result<()>;
-}
-/// LowExt is common low level api
-pub trait LowExt {
     fn file_size(&self) -> Result<usize>;
 }
 
 /// WriteExt is writer extension api
-pub trait WriteExt: LowExt {
+pub trait WriteExt {
     fn truncate(&self, offset: usize) -> Result<()>;
     fn sync(&self) -> Result<()>;
     fn allocate(&self, offset: usize, size: usize) -> Result<()>;
 }
-
-/// ReadExt is reader extension api
-pub trait ReadExt: LowExt {}

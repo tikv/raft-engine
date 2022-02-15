@@ -13,8 +13,8 @@ use log::{info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
+use crate::env::FileSystem;
 use crate::event_listener::EventListener;
-use crate::file_system::FileSystem;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
@@ -24,7 +24,7 @@ use super::format::{lock_file_path, FileNameExt};
 use super::log_file::build_file_reader;
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
-use crate::file_system::Handle;
+use crate::env::Handle;
 
 /// `ReplayMachine` is a type of deterministic state machine that obeys
 /// associative law.

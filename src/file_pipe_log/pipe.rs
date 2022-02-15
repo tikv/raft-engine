@@ -11,8 +11,8 @@ use log::{error, warn};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
+use crate::env::FileSystem;
 use crate::event_listener::EventListener;
-use crate::file_system::FileSystem;
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
@@ -369,12 +369,12 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 
 #[cfg(test)]
 mod tests {
-    use crate::DefaultFileSystem;
     use tempfile::Builder;
 
     use super::super::format::LogFileHeader;
     use super::super::pipe_builder::lock_dir;
     use super::*;
+    use crate::env::DefaultFileSystem;
     use crate::util::ReadableSize;
 
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {

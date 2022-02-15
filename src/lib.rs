@@ -15,7 +15,6 @@
 
 #![feature(shrink_to)]
 #![feature(btree_drain_filter)]
-#![feature(generic_associated_types)]
 #![cfg_attr(feature = "nightly", feature(test))]
 
 #[macro_use]
@@ -39,10 +38,10 @@ mod codec;
 mod config;
 mod consistency;
 mod engine;
+mod env;
 mod errors;
 mod event_listener;
 mod file_pipe_log;
-mod file_system;
 #[cfg(feature = "scripting")]
 mod filter;
 mod log_batch;
@@ -55,11 +54,9 @@ mod test_util;
 mod util;
 mod write_barrier;
 
-use crate::file_pipe_log::DefaultFileSystem;
 pub use config::{Config, RecoveryMode};
 pub use engine::Engine;
 pub use errors::{Error, Result};
-pub use event_listener::EventListener;
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use util::ReadableSize;
 

@@ -7,9 +7,9 @@ use hashbrown::HashMap;
 use rhai::{Engine, Scope, AST};
 use scopeguard::{guard, ScopeGuard};
 
+use crate::env::FileSystem;
 use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
 use crate::file_pipe_log::{FileNameExt, ReplayMachine};
-use crate::file_system::FileSystem;
 use crate::log_batch::{
     Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
 };
