@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use fs2::FileExt;
@@ -57,7 +57,6 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 
 struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
-    path: PathBuf,
     fd: Arc<F::Handle>,
 }
 
@@ -157,7 +156,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         files.clear();
                     } else {
                         let fd = Arc::new(self.file_system.open(&path)?);
-                        files.push(FileToRecover { seq, path, fd });
+                        files.push(FileToRecover { seq, fd });
                     }
                 }
             }
@@ -228,7 +227,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     reader.open(
                         FileId { queue, seq: f.seq },
-                        build_file_reader(self.file_system.as_ref(), &f.path, f.fd.clone())?,
+                        build_file_reader(self.file_system.as_ref(), f.fd.clone())?,
                     )?;
                     loop {
                         match reader.next() {

@@ -46,7 +46,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, path, fd, create)
+        super::log_file::build_file_writer(file_system, fd)
     }
 
     /// Opens a log file for read.
@@ -55,7 +55,7 @@ pub mod debug {
         path: &Path,
     ) -> Result<LogFileReader<F>> {
         let fd = Arc::new(file_system.open(path)?);
-        super::log_file::build_file_reader(file_system, path, fd)
+        super::log_file::build_file_reader(file_system, fd)
     }
 
     /// An iterator over the log items in log files.

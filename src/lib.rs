@@ -14,7 +14,6 @@
 //! # Raft Engine
 
 #![feature(shrink_to)]
-#![feature(btree_drain_filter)]
 #![cfg_attr(feature = "nightly", feature(test))]
 
 #[macro_use]

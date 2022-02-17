@@ -24,6 +24,8 @@ pub trait FileSystem: Send + Sync {
 
 pub trait Handle {
     fn truncate(&self, offset: usize) -> Result<()>;
+
+    /// Returns the current size of this file.
     fn file_size(&self) -> Result<usize>;
 }
 
