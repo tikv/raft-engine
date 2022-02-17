@@ -28,7 +28,6 @@ fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
 /// supported on *Unix*, and primarily optimized for *Linux*.
 ///
 /// All [`LogFd`] instances are opened with read and write permission.
-
 pub struct LogFd(RawFd);
 
 impl LogFd {
@@ -176,7 +175,6 @@ impl Handle for LogFd {
         ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
     }
 
-    /// Returns the current size of this file.
     fn file_size(&self) -> IoResult<usize> {
         fail_point!("log_fd::file_size::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))

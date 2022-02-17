@@ -109,8 +109,8 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        for (key, (value, file_id)) in rhs.kvs.drain_filter(|_, _| true) {
-            self.put(key, value, file_id);
+        for (key, (value, file_id)) in rhs.kvs.iter() {
+            self.put(key.clone(), value.clone(), *file_id);
         }
 
         let deleted = rhs.global_stats.deleted_rewrite_entries();
@@ -144,8 +144,8 @@ impl MemTable {
             self.entry_indexes.append(&mut rhs.entry_indexes);
         }
 
-        for (key, (value, file_id)) in rhs.kvs.drain_filter(|_, _| true) {
-            self.put(key, value, file_id);
+        for (key, (value, file_id)) in rhs.kvs.iter() {
+            self.put(key.clone(), value.clone(), *file_id);
         }
 
         let deleted = rhs.global_stats.deleted_rewrite_entries();

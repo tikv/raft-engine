@@ -3,7 +3,6 @@
 //! Log file types.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::metrics::*;
@@ -18,9 +17,7 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
-    path: &Path,
     handle: Arc<F::Handle>,
-    create: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
     LogFileWriter::open(handle, writer)
@@ -114,7 +111,6 @@ impl<F: FileSystem> LogFileWriter<F> {
 
 pub(super) fn build_file_reader<F: FileSystem>(
     system: &F,
-    path: &Path,
     handle: Arc<F::Handle>,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;

@@ -86,18 +86,9 @@ impl<F: FileSystem> SinglePipe<F> {
         }
 
         let active_fd = fds.back().unwrap().clone();
-        let file_id = FileId {
-            queue,
-            seq: active_seq,
-        };
         let active_file = ActiveFile {
             seq: active_seq,
-            writer: build_file_writer(
-                file_system.as_ref(),
-                &file_id.build_file_path(&cfg.dir),
-                active_fd,
-                create_file,
-            )?,
+            writer: build_file_writer(file_system.as_ref(), active_fd)?,
         };
 
         let total_files = fds.len();
@@ -154,12 +145,7 @@ impl<F: FileSystem> SinglePipe<F> {
         self.sync_dir()?;
         let new_file = ActiveFile {
             seq,
-            writer: build_file_writer(
-                self.file_system.as_ref(),
-                &path,
-                fd.clone(),
-                true, /* create */
-            )?,
+            writer: build_file_writer(self.file_system.as_ref(), fd.clone())?,
         };
 
         active_file.writer.close()?;
@@ -194,11 +180,7 @@ impl<F: FileSystem> SinglePipe<F> {
 impl<F: FileSystem> SinglePipe<F> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_fd(handle.id.seq)?;
-        let mut reader = build_file_reader(
-            self.file_system.as_ref(),
-            &handle.id.build_file_path(&self.dir),
-            fd,
-        )?;
+        let mut reader = build_file_reader(self.file_system.as_ref(), fd)?;
         reader.read(handle)
     }
 
