@@ -10,11 +10,15 @@ pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
 
 impl Read for ObfuscatedReader {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let len = self.0.read(buf)?;
-        for c in buf {
-            *c = c.wrapping_sub(1);
+        if !buf.is_empty() {
+            let len = self.0.read(&mut buf[..1])?;
+            if len == 1 {
+                buf[0] = buf[0].wrapping_sub(1);
+            }
+            Ok(len)
+        } else {
+            Ok(0)
         }
-        Ok(len)
     }
 }
 
@@ -28,11 +32,12 @@ pub struct ObfuscatedWriter(<DefaultFileSystem as FileSystem>::Writer);
 
 impl Write for ObfuscatedWriter {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        let mut new_buf = buf.to_owned();
-        for c in &mut new_buf {
-            *c = c.wrapping_add(1);
+        if !buf.is_empty() {
+            let tmp_vec = vec![buf[0].wrapping_add(1)];
+            self.0.write(&tmp_vec)
+        } else {
+            Ok(0)
         }
-        self.0.write(&new_buf)
     }
 
     fn flush(&mut self) -> IoResult<()> {

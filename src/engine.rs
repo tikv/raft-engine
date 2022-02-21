@@ -418,6 +418,7 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::fs::OpenOptions;
     use std::path::PathBuf;
 
     type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
@@ -1346,5 +1347,52 @@ mod tests {
             assert_eq!(engine.last_index(rid), None);
             assert_eq!(engine.decode_last_index(rid), Some(last_index));
         }
+    }
+
+    #[test]
+    fn test_tail_corruption() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 16];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            // One big file.
+            target_file_size: ReadableSize::gb(10),
+            ..Default::default()
+        };
+
+        let engine = RaftLogEngine::open_with_file_system(
+            cfg.clone(),
+            Arc::new(ObfuscatedFileSystem::new()),
+        )
+        .unwrap();
+        for rid in 1..=50 {
+            engine.append(rid, 1, 6, Some(&entry_data));
+        }
+        for rid in 25..=50 {
+            engine.append(rid, 6, 11, Some(&entry_data));
+        }
+        let (_, last_file_seq) = engine.file_span(LogQueue::Append);
+        drop(engine);
+
+        let last_file = FileId {
+            queue: LogQueue::Append,
+            seq: last_file_seq,
+        };
+        let f = OpenOptions::new()
+            .write(true)
+            .open(last_file.build_file_path(dir.path()))
+            .unwrap();
+
+        // Corrupt a log batch.
+        f.set_len(f.metadata().unwrap().len() - 1).unwrap();
+        RaftLogEngine::open_with_file_system(cfg.clone(), Arc::new(ObfuscatedFileSystem::new()))
+            .unwrap();
+
+        // Corrupt the file header.
+        f.set_len(1).unwrap();
+        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new())).unwrap();
     }
 }

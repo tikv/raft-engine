@@ -225,10 +225,22 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    reader.open(
+                    if let Err(e) = reader.open(
                         FileId { queue, seq: f.seq },
                         build_file_reader(self.file_system.as_ref(), f.fd.clone())?,
-                    )?;
+                    ) {
+                        if recovery_mode == RecoveryMode::TolerateAnyCorruption {
+                            warn!("File is corrupted but ignored: {}", e);
+                            f.fd.truncate(0)?;
+                        } else if recovery_mode == RecoveryMode::TolerateTailCorruption
+                            && is_last_file
+                        {
+                            warn!("The tail of raft log is corrupted but ignored: {}", e);
+                            f.fd.truncate(0)?;
+                        } else {
+                            return Err(e);
+                        }
+                    }
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
