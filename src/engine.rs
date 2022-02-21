@@ -1393,7 +1393,6 @@ mod tests {
 
         // Corrupt the file header.
         f.set_len(1).unwrap();
-        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
-            .unwrap();
+        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new())).unwrap();
     }
 }
