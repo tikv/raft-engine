@@ -398,6 +398,7 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::fs::OpenOptions;
     use std::path::PathBuf;
 
     type RaftLogEngine<B = DefaultFileBuilder> = Engine<B>;
@@ -1221,5 +1222,47 @@ mod tests {
         let mut not_exists_file = PathBuf::from(dir.as_ref());
         not_exists_file.push("not_exists_file");
         assert!(Engine::dump(not_exists_file.as_path()).is_err());
+    }
+
+    #[test]
+    fn test_tail_corruption() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 16];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            // One big file.
+            target_file_size: ReadableSize::gb(10),
+            ..Default::default()
+        };
+
+        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        for rid in 1..=50 {
+            engine.append(rid, 1, 6, Some(&entry_data));
+        }
+        for rid in 25..=50 {
+            engine.append(rid, 6, 11, Some(&entry_data));
+        }
+        let (_, last_file_seq) = engine.file_span(LogQueue::Append);
+        drop(engine);
+
+        let last_file = FileId {
+            queue: LogQueue::Append,
+            seq: last_file_seq,
+        };
+        let f = OpenOptions::new()
+            .write(true)
+            .open(last_file.build_file_path(dir.path()))
+            .unwrap();
+
+        // Corrupt a log batch.
+        f.set_len(f.metadata().unwrap().len() - 1).unwrap();
+        RaftLogEngine::open(cfg.clone()).unwrap();
+
+        // Corrupt the file header.
+        f.set_len(1).unwrap();
+        RaftLogEngine::open(cfg).unwrap();
     }
 }
