@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
-use crate::Result;
+use crate::{Error, Result};
 
 use super::format::LogFileHeader;
 use crate::env::{FileSystem, Handle, WriteExt};
@@ -122,7 +122,7 @@ pub struct LogFileReader<F: FileSystem> {
     handle: Arc<F::Handle>,
     reader: F::Reader,
 
-    offset: usize,
+    offset: u64,
 }
 
 impl<F: FileSystem> LogFileReader<F> {
@@ -131,7 +131,7 @@ impl<F: FileSystem> LogFileReader<F> {
             handle,
             reader,
             // Set to an invalid offset to force a reseek at first read.
-            offset: usize::MAX,
+            offset: u64::MAX,
         })
     }
 
@@ -142,14 +142,25 @@ impl<F: FileSystem> LogFileReader<F> {
         Ok(buf)
     }
 
-    pub fn read_to(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize> {
-        if offset != self.offset as u64 {
+    /// Polls bytes from the file. Stops only when the buffer is filled or
+    /// reaching the "end of file".
+    pub fn read_to(&mut self, offset: u64, mut buf: &mut [u8]) -> Result<usize> {
+        if offset != self.offset {
             self.reader.seek(SeekFrom::Start(offset))?;
-            self.offset = offset as usize;
+            self.offset = offset;
         }
-        let size = self.reader.read(buffer)?;
-        self.offset += size;
-        Ok(size)
+        loop {
+            match self.reader.read(buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.offset += n as u64;
+                    buf = &mut buf[n..];
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+        Ok((self.offset - offset) as usize)
     }
 
     #[inline]
