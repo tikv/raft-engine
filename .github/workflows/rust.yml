@@ -73,11 +73,11 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all --all-features --all-targets -- -D clippy::all
+        run: cargo clippy --all --features all_except_nightly --all-targets -- -D clippy::all
       - name: Run tests
         run: |
-          cargo test --all --features all_except_failpoints --verbose -- --nocapture
-          cargo test --test failpoints --all-features --verbose -- --test-threads 1 --nocapture
+          cargo test --all --features all_except_failpoints_nightly --verbose -- --nocapture
+          cargo test --test failpoints --features all_except_nightly --verbose -- --test-threads 1 --nocapture
         env:
           RUST_BACKTRACE: 1
   coverage:
