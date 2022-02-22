@@ -13,7 +13,6 @@
 
 //! # Raft Engine
 
-#![feature(shrink_to)]
 #![cfg_attr(feature = "nightly", feature(test))]
 
 #[macro_use]
