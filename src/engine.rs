@@ -1465,7 +1465,7 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine = RaftLogEngine::open(cfg.clone()).unwrap();
+        let engine = RaftLogEngine::open(cfg).unwrap();
         for i in 0..10 {
             for rid in 1..=100 {
                 engine.append(rid, 1 + i * 10, 1 + i * 10 + 10, Some(&entry_data));
