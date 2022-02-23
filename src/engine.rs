@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
@@ -390,23 +391,77 @@ where
     }
 }
 
-pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<M::Entry>
+struct BlockCache {
+    key: Cell<FileBlockHandle>,
+    block: RefCell<Vec<u8>>,
+}
+
+impl BlockCache {
+    fn new() -> Self {
+        BlockCache {
+            key: Cell::new(FileBlockHandle {
+                id: FileId::new(LogQueue::Append, 0),
+                offset: 0,
+                len: 0,
+            }),
+            block: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn insert(&self, key: FileBlockHandle, block: Vec<u8>) {
+        self.key.set(key);
+        self.block.replace(block);
+    }
+}
+
+thread_local! {
+    static BLOCK_CACHE: BlockCache = BlockCache::new();
+}
+
+pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
 where
     M: MessageExt,
     P: PipeLog,
 {
-    let buf = pipe_log.read_bytes(ent_idx.entries.unwrap())?;
-    let e = LogBatch::parse_entry::<M>(&buf, ent_idx)?;
-    assert_eq!(M::index(&e), ent_idx.index);
-    Ok(e)
+    BLOCK_CACHE.with(|cache| {
+        if cache.key.get() != idx.entries.unwrap() {
+            cache.insert(
+                idx.entries.unwrap(),
+                LogBatch::decode_entries_block(
+                    &pipe_log.read_bytes(idx.entries.unwrap())?,
+                    idx.entries.unwrap(),
+                    idx.compression_type,
+                )?,
+            );
+        }
+        let e = parse_from_bytes(
+            &cache.block.borrow()
+                [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
+        )?;
+        assert_eq!(M::index(&e), idx.index);
+        Ok(e)
+    })
 }
 
-pub(crate) fn read_entry_bytes_from_file<P>(pipe_log: &P, ent_idx: &EntryIndex) -> Result<Vec<u8>>
+pub(crate) fn read_entry_bytes_from_file<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Vec<u8>>
 where
     P: PipeLog,
 {
-    let entries_buf = pipe_log.read_bytes(ent_idx.entries.unwrap())?;
-    LogBatch::parse_entry_bytes(&entries_buf, ent_idx)
+    BLOCK_CACHE.with(|cache| {
+        if cache.key.get() != idx.entries.unwrap() {
+            cache.insert(
+                idx.entries.unwrap(),
+                LogBatch::decode_entries_block(
+                    &pipe_log.read_bytes(idx.entries.unwrap())?,
+                    idx.entries.unwrap(),
+                    idx.compression_type,
+                )?,
+            );
+        }
+        Ok(cache.block.borrow()
+            [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
+            .to_owned())
+    })
 }
 
 #[cfg(test)]
@@ -1394,5 +1449,35 @@ mod tests {
         // Corrupt the file header.
         f.set_len(1).unwrap();
         RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new())).unwrap();
+    }
+
+    #[cfg(feature = "nightly")]
+    #[bench]
+    fn bench_engine_fetch_entries(b: &mut test::Bencher) {
+        use rand::{thread_rng, Rng};
+
+        let dir = tempfile::Builder::new()
+            .prefix("bench_engine_fetch_entries")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 1024];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        for i in 0..10 {
+            for rid in 1..=100 {
+                engine.append(rid, 1 + i * 10, 1 + i * 10 + 10, Some(&entry_data));
+            }
+        }
+        let mut vec: Vec<Entry> = Vec::new();
+        b.iter(move || {
+            let region_id = thread_rng().gen_range(1..=100);
+            engine
+                .fetch_entries_to::<Entry>(region_id, 1, 101, None, &mut vec)
+                .unwrap();
+            vec.clear();
+        });
     }
 }
