@@ -583,6 +583,10 @@ impl MemTable {
         self.region_id
     }
 
+    pub(crate) fn rewrite_count(&self) -> usize {
+        self.rewrite_count
+    }
+
     /// Returns the log index of the first log entry.
     pub fn first_index(&self) -> Option<u64> {
         self.entry_indexes.front().map(|e| e.index)

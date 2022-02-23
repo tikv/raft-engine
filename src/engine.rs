@@ -442,12 +442,6 @@ mod tests {
             }
         }
 
-        fn compact(&self, rid: u64, index: u64) {
-            let mut batch = LogBatch::default();
-            batch.add_command(rid, Command::Compact { index });
-            self.write(&mut batch, true).unwrap();
-        }
-
         fn get(&self, rid: u64, key: &[u8]) -> Option<Vec<u8>> {
             if let Some(memtable) = self.memtables.get(rid) {
                 if let Some(value) = memtable.read().get(key) {
@@ -925,8 +919,8 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::kb(5),
-            purge_threshold: ReadableSize::kb(100),
+            target_file_size: ReadableSize::kb(1),
+            purge_threshold: ReadableSize::kb(10),
             ..Default::default()
         };
 
@@ -934,18 +928,22 @@ mod tests {
             RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
                 .unwrap();
         let data = vec![b'x'; 1024];
-        // write 50 small entries into region 1 and 2, it should trigger force compact
+        // write 50 small entries into region 1~3, it should trigger force compact
         // report.
-        for rid in 1..3 {
+        for rid in 1..4 {
             for index in 0..50 {
-                engine.append(rid, index, index + 1, Some(&data[..100]));
+                engine.append(rid, index, index + 1, Some(&data[..20]));
             }
         }
-
+        for rid in 4..20 {
+            for index in 0..25 {
+                engine.append(rid, index, index + 1, Some(&data[..50]));
+            }
+        }
         // write some small entries to trigger purge, some of the should trigger rewrite
         // but not compact.
-        for index in 0..100 {
-            engine.append(index + 3, 1, 2, Some(&data));
+        for rid in 21..100 {
+            engine.append(rid, 1, 2, Some(&data));
         }
 
         let check_purge = |pending_regions: Vec<u64>| {
@@ -958,16 +956,43 @@ mod tests {
         };
 
         // purge the 1st time.
-        check_purge(vec![1, 2]);
+        check_purge(vec![1, 2, 3]);
+        let span = engine.file_span(LogQueue::Append);
 
+        // clean 10 small regions, the file span should not change after purge.
+        for index in 4..8 {
+            engine.compact_to(index, 25);
+        }
         // compact region 2, then only region 1 still trigger compact.
-        engine.compact(2, 40);
-        check_purge(vec![1]);
+        engine.compact_to(3, 30);
+        engine.sync().unwrap();
+        check_purge(vec![1, 2]);
+        let span2 = engine.file_span(LogQueue::Append);
+        assert_eq!(span2, span);
+
         // purge 3rd.
-        check_purge(vec![1]);
-        // pruge the 4th time, it will trigger force write and thus the result should be
-        // empty!
+        check_purge(vec![1, 2]);
+        let span3 = engine.file_span(LogQueue::Append);
+        assert_eq!(span3, span);
+
+        // pruge the 4th time, it will trigger force rewrite and thus the result should
+        // be empty, and some log files should be purged.
         check_purge(vec![]);
+        let span4 = engine.file_span(LogQueue::Append);
+        assert!(span4.0 > span.0 + 5);
+
+        // compact some regions to trigger rewrite rewrite log.
+        engine.compact_to(2, 50);
+        engine.compact_to(3, 50);
+        for rid in 4..20 {
+            engine.compact_to(rid, 25);
+        }
+        engine.sync().unwrap();
+
+        // pruge the 5th time, region 1 should still trigger force compact.
+        check_purge(vec![1]);
+        let span5 = engine.file_span(LogQueue::Append);
+        assert!(span5.0 > span4.0);
     }
 
     #[test]
