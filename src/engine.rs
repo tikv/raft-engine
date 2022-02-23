@@ -953,7 +953,7 @@ mod tests {
             assert!(res.is_ok());
             let mut compact_regions = res.unwrap();
             // sort key in order.
-            compact_regions.sort();
+            compact_regions.sort_unstable();
             assert_eq!(compact_regions, pending_regions);
         };
 
