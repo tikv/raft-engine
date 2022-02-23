@@ -283,7 +283,16 @@ impl RhaiFilterMachine {
                             let mut entries = Vec::with_capacity(eis.len());
                             for ei in &eis {
                                 let entries_buf = reader.read(ei.entries.unwrap())?;
-                                entries.push(LogBatch::parse_entry_bytes(&entries_buf, ei)?);
+                                let block = LogBatch::decode_entries_block(
+                                    &entries_buf,
+                                    ei.entries.unwrap(),
+                                    ei.compression_type,
+                                )?;
+                                entries.push(
+                                    block[ei.entry_offset as usize
+                                        ..ei.entry_offset as usize + ei.entry_len]
+                                        .to_owned(),
+                                );
                             }
                             log_batch.add_raw_entries(item.raft_group_id, eis, entries)?;
                         }
