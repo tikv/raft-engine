@@ -24,7 +24,7 @@ const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
-const MAX_COUNT_BEFORE_FORCE_WRITE: u32 = 3;
+const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 3;
 
 pub struct PurgeManager<P>
 where
@@ -38,10 +38,9 @@ where
 
     // Only one thread can run `purge_expired_files` at a time.
     //
-    // the hashmap(raft_group --> count) records raft groups that should be force compact.
-    // if target reft_group are still in the oldest 20% logs after `MAX_COUNT_BEFORE_FORCE_WRITE`
-    // times purge, it will be force rewrite so the logs can be purged.
-    pending_regions: Arc<Mutex<HashMap<u64, u32>>>,
+    // This table records Raft Groups that should be force compacted before. Those that are not
+    // compacted in time (after `MAX_EPOCH_BEFORE_FORCE_REWRITE` epochs) will be force rewritten.
+    force_rewrite_candidates: Arc<Mutex<HashMap<u64, u32>>>,
 }
 
 impl<P> PurgeManager<P>
@@ -61,19 +60,19 @@ where
             pipe_log,
             global_stats,
             listeners,
-            pending_regions: Arc::new(Mutex::new(HashMap::default())),
+            force_rewrite_candidates: Arc::new(Mutex::new(HashMap::default())),
         }
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_PURGE_DURATION_HISTOGRAM);
-        let guard = self.pending_regions.try_lock();
+        let guard = self.force_rewrite_candidates.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
             warn!("Unable to purge expired files: locked");
             return Ok(should_compact);
         }
-        let mut pending_regions = guard.unwrap();
+        let mut rewrite_candidate_regions = guard.unwrap();
 
         if self.needs_rewrite_log_files(LogQueue::Rewrite) {
             self.rewrite_rewrite_queue()?;
@@ -105,7 +104,7 @@ where
                 should_compact = self.rewrite_or_compact_append_queue(
                     rewrite_watermark,
                     compact_watermark,
-                    &mut *pending_regions,
+                    &mut *rewrite_candidate_regions,
                 )?;
 
                 if append_queue_barrier == first_append && first_append < latest_append {
@@ -125,7 +124,7 @@ where
         watermark: Option<FileSeq>,
         exit_after_step: Option<u64>,
     ) {
-        let _lk = self.pending_regions.try_lock().unwrap();
+        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
@@ -149,7 +148,7 @@ where
 
     #[cfg(test)]
     pub fn must_rewrite_rewrite_queue(&self) {
-        let _lk = self.pending_regions.try_lock().unwrap();
+        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
         self.purge_to(
             LogQueue::Rewrite,
@@ -201,28 +200,28 @@ where
         &self,
         rewrite_watermark: FileSeq,
         compact_watermark: FileSeq,
-        pending_regions: &mut HashMap<u64, u32>,
+        rewrite_candidates: &mut HashMap<u64, u32>,
     ) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::with_capacity(16);
 
-        let mut new_compact_regions = HashMap::with_capacity(pending_regions.len());
+        let mut new_candidates = HashMap::with_capacity(rewrite_candidates.len());
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_seq(LogQueue::Append) {
                 let sparse = t
                     .entries_count_before(FileId::new(LogQueue::Append, rewrite_watermark))
                     < MAX_REWRITE_ENTRIES_PER_REGION;
                 // counter is the times that target region triggers force compact.
-                let compact_counter = pending_regions.get(&t.region_id()).unwrap_or(&0);
+                let compact_counter = rewrite_candidates.get(&t.region_id()).unwrap_or(&0);
                 if f < compact_watermark
                     && !sparse
-                    && *compact_counter < MAX_COUNT_BEFORE_FORCE_WRITE
+                    && *compact_counter < MAX_COUNT_BEFORE_FORCE_REWRITE
                 {
                     should_compact.push(t.region_id());
-                    new_compact_regions.insert(t.region_id(), *compact_counter + 1);
+                    new_candidates.insert(t.region_id(), *compact_counter + 1);
                 } else if f < rewrite_watermark {
-                    return sparse || *compact_counter >= MAX_COUNT_BEFORE_FORCE_WRITE;
+                    return sparse || *compact_counter >= MAX_COUNT_BEFORE_FORCE_REWRITE;
                 }
             }
             false
@@ -233,7 +232,7 @@ where
             MAX_REWRITE_ENTRIES_PER_REGION,
             Some(rewrite_watermark),
         )?;
-        *pending_regions = new_compact_regions;
+        *rewrite_candidates = new_candidates;
 
         Ok(should_compact)
     }
