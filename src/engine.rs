@@ -442,6 +442,12 @@ mod tests {
             }
         }
 
+        fn compact(&self, rid: u64, index: u64) {
+            let mut batch = LogBatch::default();
+            batch.add_command(rid, Command::Compact { index });
+            self.write(&mut batch, true).unwrap();
+        }
+
         fn get(&self, rid: u64, key: &[u8]) -> Option<Vec<u8>> {
             if let Some(memtable) = self.memtables.get(rid) {
                 if let Some(value) = memtable.read().get(key) {
@@ -909,6 +915,59 @@ mod tests {
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
         assert_eq!(will_force_compact[0], 1);
+    }
+
+    #[test]
+    fn test_purge_trigger_force_rewrite() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_purge_trigger_force_write")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(5),
+            purge_threshold: ReadableSize::kb(100),
+            ..Default::default()
+        };
+
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+                .unwrap();
+        let data = vec![b'x'; 1024];
+        // write 50 small entries into region 1 and 2, it should trigger force compact
+        // report.
+        for rid in 1..3 {
+            for index in 0..50 {
+                engine.append(rid, index, index + 1, Some(&data[..100]));
+            }
+        }
+
+        // write some small entries to trigger purge, some of the should trigger rewrite
+        // but not compact.
+        for index in 0..100 {
+            engine.append(index + 3, 1, 2, Some(&data));
+        }
+
+        let check_purge = |pending_regions: Vec<u64>| {
+            let res = engine.purge_expired_files();
+            assert!(res.is_ok());
+            let mut compact_regions = res.unwrap();
+            // sort key in order.
+            compact_regions.sort();
+            assert_eq!(compact_regions, pending_regions);
+        };
+
+        // purge the 1st time.
+        check_purge(vec![1, 2]);
+
+        // compact region 2, then only region 1 still trigger compact.
+        engine.compact(2, 40);
+        check_purge(vec![1]);
+        // purge 3rd.
+        check_purge(vec![1]);
+        // pruge the 4th time, it will trigger force write and thus the result should be
+        // empty!
+        check_purge(vec![]);
     }
 
     #[test]
