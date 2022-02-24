@@ -1,5 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! Synchronizer of writes.
+//!
+//! This module relies heavily on unsafe codes. Extra call site constraints are
+//! required to maintain memory safety. Use it with great caution.
+
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -10,6 +15,7 @@ use parking_lot::{Condvar, Mutex};
 
 type Ptr<T> = Option<NonNull<T>>;
 
+///
 pub struct Writer<P, O> {
     next: Cell<Ptr<Writer<P, O>>>,
     payload: *mut P,
@@ -20,7 +26,12 @@ pub struct Writer<P, O> {
 }
 
 impl<P, O> Writer<P, O> {
-    // SAFETY: Data pointed by `payload` is owned by this writer during its lifetime.
+    /// Creates a new writer.
+    ///
+    /// # Safety
+    ///
+    /// Data pointed by `payload` is mutably referenced by this writer. Do not
+    /// access the payload by its original name during this writer's lifetime.
     pub fn new(payload: &mut P, sync: bool, start_time: Instant) -> Self {
         Writer {
             next: Cell::new(None),
@@ -31,16 +42,22 @@ impl<P, O> Writer<P, O> {
         }
     }
 
+    /// Returns an immutable reference to the payload.
     pub fn get_payload(&self) -> &P {
         unsafe { &*self.payload }
     }
 
+    /// Sets the output. This method is re-entrant.
     pub fn set_output(&mut self, output: O) {
         self.output = Some(output);
     }
 
-    // SAFETY: Before `finish()` is called, `output` can only be accessed by leader
-    // through `WriterIter`.
+    /// Consumes itself and yields an output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before being processed by a [`WriteBarrier`] or setting
+    /// the output itself.
     pub fn finish(mut self) -> O {
         self.output.take().unwrap()
     }
@@ -54,8 +71,8 @@ impl<P, O> Writer<P, O> {
     }
 }
 
-/// A collection of writers. User thread (leader) that receives a `WriteGroup` is
-/// responsible for processing its containing writers.
+/// A collection of writers. User thread (leader) that receives a [`WriteGroup`]
+/// is responsible for processing its containing writers.
 pub struct WriteGroup<'a, 'b, P: 'a, O: 'a> {
     start: Ptr<Writer<P, O>>,
     back: Ptr<Writer<P, O>>,
@@ -80,7 +97,7 @@ impl<'a, 'b, P, O> Drop for WriteGroup<'a, 'b, P, O> {
     }
 }
 
-/// An iterator over the writers of a `WriteGroup`.
+/// An iterator over the [`Writer`]s in one [`WriteGroup`].
 pub struct WriterIter<'a, 'b, 'c, P: 'c, O: 'c> {
     start: Ptr<Writer<P, O>>,
     back: Ptr<Writer<P, O>>,
@@ -126,6 +143,7 @@ impl<P, O> Default for WriteBarrierInner<P, O> {
     }
 }
 
+/// A synchronizer of [`Writer`]s.
 pub struct WriteBarrier<P, O> {
     inner: Mutex<WriteBarrierInner<P, O>>,
     leader_cv: Condvar,
@@ -143,9 +161,9 @@ impl<P, O> Default for WriteBarrier<P, O> {
 }
 
 impl<P, O> WriteBarrier<P, O> {
-    /// Waits until the caller should perform some work. If `writer` has
-    /// become the leader of a set of writers, returns a `WriteGroup` that
-    /// contains them, `writer` included.
+    /// Waits until the caller should perform some work. If `writer` has become
+    /// the leader of a set of writers, returns a [`WriteGroup`] that contains
+    /// them, `writer` included.
     pub fn enter<'a>(&self, writer: &'a mut Writer<P, O>) -> Option<WriteGroup<'_, 'a, P, O>> {
         let node = unsafe { Some(NonNull::new_unchecked(writer)) };
         let mut inner = self.inner.lock();
@@ -184,8 +202,8 @@ impl<P, O> WriteBarrier<P, O> {
         })
     }
 
-    /// SAFETY: Must be called when write group leader finishes processing its
-    /// responsible writers, and next write group should be formed.
+    /// Must called when write group leader finishes processing its responsible
+    /// writers, and next write group should be formed.
     fn leader_exit(&self) {
         fail_point!("write_barrier::leader_exit", |_| {});
         let inner = self.inner.lock();

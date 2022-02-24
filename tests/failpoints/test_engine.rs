@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
+use raft_engine::internals::*;
 use raft_engine::*;
 
 use crate::util::*;
@@ -150,7 +151,7 @@ fn test_pipe_log_listeners() {
     assert_eq!(hook.0[&LogQueue::Rewrite].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
-    let apply_memtable_region_3_fp = "memtable_accessor::apply::region_3";
+    let apply_memtable_region_3_fp = "memtable_accessor::apply_append_writes::region_3";
     fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
     let engine_clone = engine.clone();
     let data_clone = data.clone();
@@ -249,10 +250,10 @@ fn test_concurrent_write_empty_log_batch() {
     let mut entries = Vec::new();
     engine
         .fetch_entries_to::<MessageExtTyped>(
-            1,    /*region*/
-            0,    /*begin*/
-            2,    /*end*/
-            None, /*max_size*/
+            1,    /* region */
+            0,    /* begin */
+            2,    /* end */
+            None, /* max_size */
             &mut entries,
         )
         .unwrap();
@@ -260,10 +261,10 @@ fn test_concurrent_write_empty_log_batch() {
     entries.clear();
     engine
         .fetch_entries_to::<MessageExtTyped>(
-            2,    /*region*/
-            0,    /*begin*/
-            2,    /*end*/
-            None, /*max_size*/
+            2,    /* region */
+            0,    /* begin */
+            2,    /* end */
+            None, /* max_size */
             &mut entries,
         )
         .unwrap();
@@ -285,23 +286,66 @@ fn test_consistency_tools() {
     let data = vec![b'x'; 128];
     for index in 1..=100 {
         for rid in 1..=10 {
-            if index == rid * rid {
-                fail::cfg("log_batch::corrupted_items", "return").unwrap();
-            }
+            let _f = if index == rid * rid {
+                Some(FailGuard::new("log_batch::corrupted_items", "return"))
+            } else {
+                None
+            };
             append(&engine, rid, index, index + 1, Some(&data));
-            if index == rid * rid {
-                fail::remove("log_batch::corrupted_items");
-            }
         }
     }
     drop(engine);
+    assert!(Engine::open(cfg.clone()).is_err());
 
     let ids = Engine::consistency_check(dir.path()).unwrap();
     for (id, index) in ids.iter() {
         assert_eq!(id * id, index + 1);
     }
 
+    // Panic instead of err because `consistency_check` also removes corruptions.
     assert!(catch_unwind_silent(|| Engine::open(cfg.clone())).is_err());
+}
+
+#[cfg(feature = "scripting")]
+#[test]
+fn test_repair_tool() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_repair_tool")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(128),
+        ..Default::default()
+    };
+    let engine = Arc::new(Engine::open(cfg.clone()).unwrap());
+    let data = vec![b'x'; 128];
+    for index in 1..=100 {
+        for rid in 1..=10 {
+            let _f = if index == rid * rid {
+                Some(FailGuard::new("log_batch::corrupted_items", "return"))
+            } else {
+                None
+            };
+            append(&engine, rid, index, index + 1, Some(&data));
+        }
+    }
+    drop(engine);
+
+    assert!(Engine::open(cfg.clone()).is_err());
+    let script = "".to_owned();
+    assert!(Engine::unsafe_repair(dir.path(), None, script).is_err());
+    let script = "
+        fn filter_append(id, first, count, rewrite_count, queue, ifirst, ilast) {
+            if first + count < ifirst {
+                return 2; // discard existing
+            }
+            0 // default
+        }
+    "
+    .to_owned();
+    Engine::unsafe_repair(dir.path(), None, script).unwrap();
+    Engine::open(cfg).unwrap();
 }
 
 #[test]

@@ -107,7 +107,8 @@ fn test_file_write_error() {
         .is_err());
     }
 
-    // Internal states are consistent after panics. But outstanding writes are not reverted.
+    // Internal states are consistent after panics. But outstanding writes are not
+    // reverted.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
@@ -166,7 +167,8 @@ fn test_file_rotate_error() {
         .is_err());
     }
 
-    // Internal states are consistent after panics. But outstanding writes are not reverted.
+    // Internal states are consistent after panics. But outstanding writes are not
+    // reverted.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
@@ -261,4 +263,47 @@ fn test_concurrent_write_error() {
             .fetch_entries_to::<MessageExtTyped>(1, 1, 21, None, &mut vec![])
             .unwrap()
     );
+}
+
+#[cfg(feature = "scripting")]
+#[test]
+fn test_error_during_repair() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_error_during_repair")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        ..Default::default()
+    };
+    let entry = vec![b'x'; 1024];
+
+    let engine = Engine::open(cfg.clone()).unwrap();
+    for rid in 1..=10 {
+        engine
+            .write(&mut generate_batch(rid, 1, 11, Some(&entry)), true)
+            .unwrap();
+    }
+    drop(engine);
+
+    let script = "
+        fn filter_append(id, first, count, rewrite_count, queue, ifirst, ilast) {
+            1 // discard incoming
+        }
+    "
+    .to_owned();
+    {
+        let _f = FailGuard::new("log_fd::write::err", "return");
+        assert!(Engine::unsafe_repair(dir.path(), None, script).is_err());
+    }
+    let engine = Engine::open(cfg).unwrap();
+    for rid in 1..=10 {
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 1, 11, None, &mut vec![])
+                .unwrap()
+        );
+    }
 }

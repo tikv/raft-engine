@@ -1,253 +1,40 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
-use std::os::unix::io::RawFd;
-use std::path::Path;
+//! Log file types.
+
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use fail::fail_point;
-use log::error;
-use nix::errno::Errno;
-use nix::fcntl::{self, OFlag};
-use nix::sys::stat::Mode;
-use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{close, ftruncate, lseek, Whence};
-use nix::NixPath;
-
-use crate::file_builder::FileBuilder;
 use crate::metrics::*;
-use crate::FileBlockHandle;
-use crate::Result;
+use crate::pipe_log::FileBlockHandle;
+use crate::{Error, Result};
 
 use super::format::LogFileHeader;
+use crate::env::{FileSystem, Handle, WriteExt};
 
+/// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
-/// A `LogFd` is a RAII file that provides basic I/O functionality.
-///
-/// This implementation is a thin wrapper around `RawFd`, and primarily targets
-/// UNIX-based systems.
-pub struct LogFd(RawFd);
-
-fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
-    let kind = std::io::Error::from(e).kind();
-    std::io::Error::new(kind, custom)
-}
-
-impl LogFd {
-    pub fn open<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
-        fail_point!("log_fd::open::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        let flags = OFlag::O_RDWR;
-        // Permission 644
-        let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
-        fail_point!("log_fd::open::fadvise_dontneed", |_| {
-            let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
-            #[cfg(target_os = "linux")]
-            unsafe {
-                extern crate libc;
-                libc::posix_fadvise64(fd.0, 0, fd.file_size()? as i64, libc::POSIX_FADV_DONTNEED);
-            }
-            Ok(fd)
-        });
-        Ok(LogFd(
-            fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?,
-        ))
-    }
-
-    pub fn create<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
-        fail_point!("log_fd::create::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        let flags = OFlag::O_RDWR | OFlag::O_CREAT;
-        // Permission 644
-        let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
-        let fd = fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?;
-        Ok(LogFd(fd))
-    }
-
-    pub fn close(&self) -> IoResult<()> {
-        fail_point!("log_fd::close::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        close(self.0).map_err(|e| from_nix_error(e, "close"))
-    }
-
-    pub fn sync(&self) -> IoResult<()> {
-        fail_point!("log_fd::sync::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        #[cfg(target_os = "linux")]
-        {
-            nix::unistd::fdatasync(self.0).map_err(|e| from_nix_error(e, "fdatasync"))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            nix::unistd::fsync(self.0).map_err(|e| from_nix_error(e, "fsync"))
-        }
-    }
-
-    pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
-        let mut readed = 0;
-        while readed < buf.len() {
-            fail_point!("log_fd::read::err", |_| {
-                Err(from_nix_error(nix::Error::EINVAL, "fp"))
-            });
-            let bytes = match pread(self.0, &mut buf[readed..], offset as i64) {
-                Ok(bytes) => bytes,
-                Err(e) if e == Errno::EAGAIN => continue,
-                Err(e) => return Err(from_nix_error(e, "pread")),
-            };
-            // EOF
-            if bytes == 0 {
-                break;
-            }
-            readed += bytes;
-            offset += bytes;
-        }
-        Ok(readed)
-    }
-
-    pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
-        fail_point!("log_fd::write::zero", |_| { Ok(0) });
-        let mut written = 0;
-        while written < content.len() {
-            let bytes = match pwrite(self.0, &content[written..], offset as i64) {
-                Ok(bytes) => bytes,
-                Err(e) if e == Errno::EAGAIN => continue,
-                Err(e) => return Err(from_nix_error(e, "pwrite")),
-            };
-            if bytes == 0 {
-                break;
-            }
-            written += bytes;
-            offset += bytes;
-        }
-        fail_point!("log_fd::write::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        Ok(written)
-    }
-
-    pub fn file_size(&self) -> IoResult<usize> {
-        fail_point!("log_fd::file_size::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        lseek(self.0, 0, Whence::SeekEnd)
-            .map(|n| n as usize)
-            .map_err(|e| from_nix_error(e, "lseek"))
-    }
-
-    pub fn truncate(&self, offset: usize) -> IoResult<()> {
-        fail_point!("log_fd::truncate::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
-    }
-
-    #[allow(unused_variables)]
-    pub fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
-        fail_point!("log_fd::allocate::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        #[cfg(target_os = "linux")]
-        {
-            fcntl::fallocate(
-                self.0,
-                fcntl::FallocateFlags::empty(),
-                offset as i64,
-                size as i64,
-            )
-            .map_err(|e| from_nix_error(e, "fallocate"))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for LogFd {
-    fn drop(&mut self) {
-        if let Err(e) = self.close() {
-            error!("error while closing file: {}", e);
-        }
-    }
-}
-
-/// A `LogFile` is a `LogFd` wrapper that implements `Seek`, `Write` and `Read`.
-pub struct LogFile {
-    inner: Arc<LogFd>,
-    offset: usize,
-}
-
-impl LogFile {
-    pub fn new(fd: Arc<LogFd>) -> Self {
-        Self {
-            inner: fd,
-            offset: 0,
-        }
-    }
-}
-
-impl Write for LogFile {
-    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        let len = self.inner.write(self.offset, buf)?;
-        self.offset += len;
-        Ok(len)
-    }
-
-    fn flush(&mut self) -> IoResult<()> {
-        Ok(())
-    }
-}
-
-impl Read for LogFile {
-    fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let len = self.inner.read(self.offset, buf)?;
-        self.offset += len;
-        Ok(len)
-    }
-}
-
-impl Seek for LogFile {
-    fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
-        match pos {
-            SeekFrom::Start(offset) => self.offset = offset as usize,
-            SeekFrom::Current(i) => self.offset = (self.offset as i64 + i) as usize,
-            SeekFrom::End(i) => self.offset = (self.inner.file_size()? as i64 + i) as usize,
-        }
-        Ok(self.offset as u64)
-    }
-}
-
-pub fn build_file_writer<B: FileBuilder>(
-    builder: &B,
-    path: &Path,
-    fd: Arc<LogFd>,
-    create: bool,
-) -> Result<LogFileWriter<B>> {
-    let raw_writer = LogFile::new(fd.clone());
-    let writer = builder.build_writer(path, raw_writer, create)?;
-    LogFileWriter::open(fd, writer)
+pub(super) fn build_file_writer<F: FileSystem>(
+    system: &F,
+    handle: Arc<F::Handle>,
+) -> Result<LogFileWriter<F>> {
+    let writer = system.new_writer(handle.clone())?;
+    LogFileWriter::open(handle, writer)
 }
 
 /// Append-only writer for log file.
-pub struct LogFileWriter<B: FileBuilder> {
-    fd: Arc<LogFd>,
-    writer: B::Writer<LogFile>,
-
+pub struct LogFileWriter<F: FileSystem> {
+    writer: F::Writer,
     written: usize,
     capacity: usize,
     last_sync: usize,
 }
 
-impl<B: FileBuilder> LogFileWriter<B> {
-    fn open(fd: Arc<LogFd>, writer: B::Writer<LogFile>) -> Result<Self> {
-        let file_size = fd.file_size()?;
+impl<F: FileSystem> LogFileWriter<F> {
+    fn open(handle: Arc<F::Handle>, writer: F::Writer) -> Result<Self> {
+        let file_size = handle.file_size()?;
         let mut f = Self {
-            fd,
             writer,
             written: file_size,
             capacity: file_size,
@@ -277,7 +64,7 @@ impl<B: FileBuilder> LogFileWriter<B> {
 
     pub fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
-            self.fd.truncate(self.written)?;
+            self.writer.truncate(self.written)?;
             self.capacity = self.written;
         }
         Ok(())
@@ -294,7 +81,7 @@ impl<B: FileBuilder> LogFileWriter<B> {
                     target_size_hint.saturating_sub(self.capacity),
                 ),
             );
-            self.fd.allocate(self.capacity, alloc)?;
+            self.writer.allocate(self.capacity, alloc)?;
             self.capacity += alloc;
         }
         self.writer.write_all(buf)?;
@@ -305,7 +92,7 @@ impl<B: FileBuilder> LogFileWriter<B> {
     pub fn sync(&mut self) -> Result<()> {
         if self.last_sync < self.written {
             let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
-            self.fd.sync()?;
+            self.writer.sync()?;
             self.last_sync = self.written;
         }
         Ok(())
@@ -322,31 +109,29 @@ impl<B: FileBuilder> LogFileWriter<B> {
     }
 }
 
-pub fn build_file_reader<B: FileBuilder>(
-    builder: &B,
-    path: &Path,
-    fd: Arc<LogFd>,
-) -> Result<LogFileReader<B>> {
-    let raw_reader = LogFile::new(fd.clone());
-    let reader = builder.build_reader(path, raw_reader)?;
-    LogFileReader::open(fd, reader)
+pub(super) fn build_file_reader<F: FileSystem>(
+    system: &F,
+    handle: Arc<F::Handle>,
+) -> Result<LogFileReader<F>> {
+    let reader = system.new_reader(handle.clone())?;
+    LogFileReader::open(handle, reader)
 }
 
 /// Random-access reader for log file.
-pub struct LogFileReader<B: FileBuilder> {
-    fd: Arc<LogFd>,
-    reader: B::Reader<LogFile>,
+pub struct LogFileReader<F: FileSystem> {
+    handle: Arc<F::Handle>,
+    reader: F::Reader,
 
-    offset: usize,
+    offset: u64,
 }
 
-impl<B: FileBuilder> LogFileReader<B> {
-    fn open(fd: Arc<LogFd>, reader: B::Reader<LogFile>) -> Result<Self> {
+impl<F: FileSystem> LogFileReader<F> {
+    fn open(handle: Arc<F::Handle>, reader: F::Reader) -> Result<Self> {
         Ok(Self {
-            fd,
+            handle,
             reader,
             // Set to an invalid offset to force a reseek at first read.
-            offset: usize::MAX,
+            offset: u64::MAX,
         })
     }
 
@@ -357,18 +142,29 @@ impl<B: FileBuilder> LogFileReader<B> {
         Ok(buf)
     }
 
-    pub fn read_to(&mut self, offset: u64, buffer: &mut [u8]) -> Result<usize> {
-        if offset != self.offset as u64 {
+    /// Polls bytes from the file. Stops only when the buffer is filled or
+    /// reaching the "end of file".
+    pub fn read_to(&mut self, offset: u64, mut buf: &mut [u8]) -> Result<usize> {
+        if offset != self.offset {
             self.reader.seek(SeekFrom::Start(offset))?;
-            self.offset = offset as usize;
+            self.offset = offset;
         }
-        let size = self.reader.read(buffer)?;
-        self.offset += size;
-        Ok(size)
+        loop {
+            match self.reader.read(buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.offset += n as u64;
+                    buf = &mut buf[n..];
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+        Ok((self.offset - offset) as usize)
     }
 
     #[inline]
     pub fn file_size(&self) -> Result<usize> {
-        Ok(self.fd.file_size()?)
+        Ok(self.handle.file_size()?)
     }
 }

@@ -36,7 +36,11 @@ pub fn generate_entry_indexes_opt(
     for idx in begin_idx..end_idx {
         let ent_idx = EntryIndex {
             index: idx,
-            entries: file_id.map(|id| FileBlockHandle::new(id, 0, 0)),
+            entries: file_id.map(|id| FileBlockHandle {
+                id,
+                offset: 0,
+                len: 0,
+            }),
             entry_len: 1,
             ..Default::default()
         };
@@ -71,6 +75,7 @@ impl PanicGuard {
     pub fn with_prompt(s: String) -> Self {
         let prev_hook = Box::into_raw(panic::take_hook());
         let sendable_prev_hook = PointerHolder(prev_hook);
+        // FIXME: Use thread local hook.
         panic::set_hook(Box::new(move |info| {
             eprintln!("{}", s);
             unsafe { (*sendable_prev_hook.0)(info) };

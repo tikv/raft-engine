@@ -1,5 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! Representations of objects in filesystem.
+
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -10,14 +12,16 @@ use crate::codec::{self, NumberEncoder};
 use crate::pipe_log::{FileId, LogQueue};
 use crate::{Error, Result};
 
-// File name.
-const LOG_NUM_LEN: usize = 16;
+/// Width to format log sequence number.
+const LOG_SEQ_WIDTH: usize = 16;
+/// Name suffix for Append queue files.
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
+/// Name suffix for Rewrite queue files.
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
-// File header.
+/// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-const LOG_FILE_HEADER_LEN: usize = LOG_FILE_MAGIC_HEADER.len() + std::mem::size_of::<Version>();
 
+/// `FileNameExt` offers file name formatting extensions to [`FileId`].
 pub trait FileNameExt: Sized {
     fn parse_file_name(file_name: &str) -> Option<Self>;
 
@@ -32,8 +36,8 @@ pub trait FileNameExt: Sized {
 
 impl FileNameExt for FileId {
     fn parse_file_name(file_name: &str) -> Option<FileId> {
-        if file_name.len() > LOG_NUM_LEN {
-            if let Ok(seq) = file_name[..LOG_NUM_LEN].parse::<u64>() {
+        if file_name.len() > LOG_SEQ_WIDTH {
+            if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
                 if file_name.ends_with(LOG_APPEND_SUFFIX) {
                     return Some(FileId {
                         queue: LogQueue::Append,
@@ -56,31 +60,34 @@ impl FileNameExt for FileId {
                 "{:0width$}{}",
                 self.seq,
                 LOG_APPEND_SUFFIX,
-                width = LOG_NUM_LEN
+                width = LOG_SEQ_WIDTH
             ),
             LogQueue::Rewrite => format!(
                 "{:0width$}{}",
                 self.seq,
                 LOG_REWRITE_SUFFIX,
-                width = LOG_NUM_LEN
+                width = LOG_SEQ_WIDTH
             ),
         }
     }
 }
 
-pub fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
+/// Path to the lock file under `dir`.
+pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut path = PathBuf::from(dir.as_ref());
     path.push("LOCK");
     path
 }
 
+/// Version of log file format.
 #[derive(Clone, Copy, FromPrimitive, ToPrimitive)]
 #[repr(u64)]
 enum Version {
     V1 = 1,
 }
 
-pub struct LogFileHeader {
+/// In-memory representation of the log file header.
+pub(super) struct LogFileHeader {
     version: Version,
 }
 
@@ -93,13 +100,14 @@ impl Default for LogFileHeader {
 }
 
 impl LogFileHeader {
-    #[inline]
-    pub fn len() -> usize {
-        LOG_FILE_HEADER_LEN
+    /// Length of header written on storage.
+    pub const fn len() -> usize {
+        LOG_FILE_MAGIC_HEADER.len() + std::mem::size_of::<Version>()
     }
 
+    /// Decodes a slice of bytes into a `LogFileHeader`.
     pub fn decode(buf: &mut &[u8]) -> Result<LogFileHeader> {
-        if buf.len() < LOG_FILE_HEADER_LEN {
+        if buf.len() < Self::len() {
             return Err(Error::Corruption("log file header too short".to_owned()));
         }
         if !buf.starts_with(LOG_FILE_MAGIC_HEADER) {
@@ -119,6 +127,7 @@ impl LogFileHeader {
         }
     }
 
+    /// Encodes this header and appends the bytes to the provided buffer.
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
         buf.encode_u64(self.version.to_u64().unwrap())?;

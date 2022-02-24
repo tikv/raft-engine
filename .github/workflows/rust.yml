@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  nightly:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -23,7 +23,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2022-01-17
+          toolchain: nightly-2022-01-07
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -35,25 +35,54 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --features failpoints --all --all-targets -- -D clippy::all
+        run: cargo clippy --all --all-features --all-targets -- -D clippy::all
       - name: Run tests
         run: |
-          cargo test --all --verbose -- --nocapture
-          cargo test --test failpoints --features failpoints --verbose -- --test-threads 1 --nocapture
+          cargo test --all --features all_except_failpoints --verbose -- --nocapture
+          cargo test --test failpoints --all-features --verbose -- --test-threads 1 --nocapture
         env:
           RUST_BACKTRACE: 1
       - name: Run asan tests
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
-          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all --verbose -- --nocapture
-          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test failpoints --features failpoints --verbose -- --test-threads 1 --nocapture
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --all --features all_except_failpoints --verbose -- --nocapture
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test failpoints --all-features --verbose -- --test-threads 1 --nocapture
         env:
           RUST_BACKTRACE: 1
           RUSTFLAGS: '-Zsanitizer=address'
           RUSTDOCFLAGS: '-Zsanitizer=address'
+  stable:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.56.0
+          override: true
+          components: rustfmt, clippy, rust-src
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: ${{ matrix.os }}-stable
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all --features all_except_nightly --all-targets -- -D clippy::all
+      - name: Run tests
+        run: |
+          cargo test --all --features all_except_failpoints_nightly --verbose -- --nocapture
+          cargo test --test failpoints --features all_except_nightly --verbose -- --test-threads 1 --nocapture
+        env:
+          RUST_BACKTRACE: 1
   coverage:
     runs-on: ubuntu-latest
-    needs: build
+    needs: nightly
     steps:
       - uses: actions/checkout@v2
         with:
@@ -62,7 +91,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2022-01-17
+          toolchain: nightly-2022-01-07
           override: true
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
@@ -72,8 +101,8 @@ jobs:
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
       - name: Run tests
         run: |
-          cargo test --all
-          cargo test --test failpoints --features failpoints -- --test-threads 1
+          cargo test --all --features all_except_failpoints
+          cargo test --test failpoints --all-features -- --test-threads 1
         env:
           RUSTFLAGS: '-Zinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'

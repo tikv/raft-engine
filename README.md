@@ -7,18 +7,18 @@ Raft Engine is a persistent embedded storage engine with a log-structured design
 
 ## Features
 
-- API for storing [protobuf](https://crates.io/crates/protobuf) log entries with consecutive indexes
-- Key-value storage for individual Raft group
+- APIs for storing and retrieving [protobuf](https://crates.io/crates/protobuf) log entries with consecutive indexes
+- Key-value storage for individual Raft Group
 - Minimum write amplification
 - Collaborative garbage collection
-- Support [lz4](http://www.lz4.org/) compression over log entries
-- Support file system extension
+- Supports [lz4](http://www.lz4.org/) compression over log entries
+- Supports file system extension
 
 ## Design
 
 Raft Engine consists of two basic constructs: memtable and log file.
 
-In memory, each Raft group holds its own memtable, containing all the key value pairs and the file locations of all log entries. On storage, user writes are sequentially written to the active log file, which is periodically rotated below a configurable threshold. Different Raft groups share the same log stream.
+In memory, each Raft Group holds its own memtable, containing all the key value pairs and the file locations of all log entries. On storage, user writes are sequentially written to the active log file, which is periodically rotated below a configurable threshold. Different Raft Groups share the same log stream.
 
 ### Write
 
@@ -38,13 +38,13 @@ After its data is written, each writing thread will proceed to apply the changes
 
 ### Garbage Collection
 
-After changes are applied to the local state machine, the corresponding log entries can be removed from Raft Engine, logically. Because multiple Raft groups share the same log stream, these truncated logs will punch holes in the log files. During garbage collection, Raft Engine scans for these holes and compacts log files to free up storage space. Only at this point, the unneeded log entries are deleted physically.
+After changes are applied to the local state machine, the corresponding log entries can be compacted from Raft Engine, logically. Because multiple Raft Groups share the same log stream, these truncated logs will punch holes in the log files. During garbage collection, Raft Engine scans for these holes and compacts log files to free up storage space. Only at this point, the unneeded log entries are deleted physically.
 
 Raft Engine carries out garbage collection in a collaborative manner.
 
-First, its timing is controlled by the user. Raft engine consolidates and removes its log files only when the user voluntarily calls the `purge_expired_files()` routine. For reference, [TiKV](https://github.com/tikv/tikv) calls it every 10 seconds by default.
+First, its timing is controlled by the user. Raft Engine consolidates and removes its log files only when the user voluntarily calls the `purge_expired_files()` routine. For reference, [TiKV](https://github.com/tikv/tikv) calls it every 10 seconds by default.
 
-Second, it sends useful feedback to the user. Each time the GC routine is called, Raft Engine will examine itself and return a list of Raft groups that hold particularly old log entries. Those Raft groups block the GC progress and should be compacted by the user.
+Second, it sends useful feedback to the user. Each time the GC routine is called, Raft Engine will examine itself and return a list of Raft Groups that hold particularly old log entries. Those log entries block the GC progress and should be compacted by the user.
 
 ## Using this crate
 
@@ -54,6 +54,13 @@ Put this in your Cargo.toml:
 [dependencies]
 raft-engine = { git = "https://github.com/tikv/raft-engine", branch = "master" }
 ```
+
+Available Cargo features:
+
+- `scripting`: Compiles with [Rhai](https://github.com/rhaiscript/rhai). This enables script debugging utilities including `unsafe_repair`.
+- `nightly`: Enables nightly-only features including `test`.
+- `internals`: Re-exports key componenets internal to Raft Engine. Enabled when building for docs.rs.
+- `failpoints`: Enables fail point testing powered by [tikv/fail-rs](https://github.com/tikv/fail-rs).
 
 See some basic use cases under the [examples](https://github.com/tikv/raft-engine/tree/master/examples) directory.
 
@@ -66,15 +73,15 @@ Contributions are always welcome! Here are a few tips for making a PR:
 
 ```
 cargo fmt --all -- --check
-cargo clippy --all --all-features --all-targets -- -D clippy::all
-cargo test --all
-cargo test --test failpoints --features failpoints -- --test-threads 1
+cargo +nightly clippy --all --all-features --all-targets -- -D clippy::all
+cargo +nightly test --all --features all_except_failpoints
+cargo +nightly test --test failpoints --all-features -- --test-threads 1
 ```
 
 - For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.
 
 ```
-cargo bench --features failpoints <bench-case-name>
+cargo +nightly bench --all-features <bench-case-name>
 cargo run --release --package stress --help
 ```
 

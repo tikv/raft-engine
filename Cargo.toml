@@ -1,8 +1,16 @@
 [package]
 name = "raft-engine"
 version = "0.1.0"
-authors = ["The TiKV Authors"]
+authors = ["The TiKV Project Developers"]
 edition = "2018"
+rust-version = "1.56"
+description = "A persistent storage engine for Multi-Raft logs"
+readme = "README.md"
+repository = "https://github.com/tikv/raft-engine"
+license = "Apache-2.0"
+
+[package.metadata.docs.rs]
+features = ["internals"]
 
 [[example]]
 name = "append-compact-purge"
@@ -11,7 +19,7 @@ path = "examples/append_compact_purge.rs"
 [[test]]
 name = "failpoints"
 path = "tests/failpoints/mod.rs"
-required-features = ["failpoints"]
+required-features = ["internals", "failpoints"]
 
 [[bench]]
 name = "benches"
@@ -34,11 +42,13 @@ lz4-sys = "1.9"
 nix = "0.23"
 num-derive = "0.3"
 num-traits = "0.2"
-parking_lot = "0.11"
-prometheus = { version = "0.13", features = ["nightly"] }
+parking_lot = "0.12"
+prometheus = { version = "0.13" }
 prometheus-static-metric = "0.5"
 protobuf = "2"
 rayon = "1.5"
+rhai = { version = "1.4", features = ["sync"], optional = true }
+scopeguard = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 
@@ -54,9 +64,21 @@ tempfile = "3.1"
 toml = "0.5"
 
 [features]
+internals = []
+nightly = [
+  "prometheus/nightly",
+]
 failpoints = [
   "fail/failpoints",
 ]
+scripting = [
+  "rhai",
+]
+
+# Shortcuts
+all_except_failpoints = ["internals", "scripting", "nightly"]
+all_except_nightly = ["internals", "scripting", "failpoints"]
+all_except_failpoints_nightly = ["internals", "scripting"]
 
 [patch.crates-io]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }

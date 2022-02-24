@@ -1,68 +1,107 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! Helper types to recover in-memory states from log files.
+
 use std::collections::VecDeque;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::marker::PhantomData;
+use std::path::Path;
 use std::sync::Arc;
 
+use fs2::FileExt;
 use log::{info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
+use crate::env::FileSystem;
 use crate::event_listener::EventListener;
-use crate::file_builder::FileBuilder;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::Result;
+use crate::util::Factory;
+use crate::{Error, Result};
 
-use super::format::FileNameExt;
-use super::log_file::{build_file_reader, LogFd};
+use super::format::{lock_file_path, FileNameExt};
+use super::log_file::build_file_reader;
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
+use crate::env::Handle;
 
-pub trait ReplayMachine: Send + Default {
+/// `ReplayMachine` is a type of deterministic state machine that obeys
+/// associative law.
+///
+/// Sequentially arranged log items can be divided and replayed to several
+/// [`ReplayMachine`]s, and their merged state will be the same as when
+/// replayed to one single [`ReplayMachine`].
+///
+/// This abstraction is useful for recovery in parallel: a set of log files can
+/// be replayed in a divide-and-conquer fashion.
+pub trait ReplayMachine: Send {
+    /// Inputs a batch of log items from the given file to this machine.
+    /// Returns whether the input sequence up till now is accepted.
     fn replay(&mut self, item_batch: LogItemBatch, file_id: FileId) -> Result<()>;
 
+    /// Merges with another [`ReplayMachine`] that has consumed newer log items
+    /// in the same input sequence.
     fn merge(&mut self, rhs: Self, queue: LogQueue) -> Result<()>;
 }
 
-struct FileToRecover {
-    seq: FileSeq,
-    path: PathBuf,
-    fd: Arc<LogFd>,
+/// A factory of [`ReplayMachine`]s that can be default constructed.
+#[derive(Clone, Default)]
+pub struct DefaultMachineFactory<M>(PhantomData<std::sync::Mutex<M>>);
+
+impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
+    fn new_target(&self) -> M {
+        M::default()
+    }
 }
 
-pub struct DualPipesBuilder<B: FileBuilder> {
+struct FileToRecover<F: FileSystem> {
+    seq: FileSeq,
+    fd: Arc<F::Handle>,
+}
+
+/// [`DualPipes`] factory that can also recover other customized memory states.
+pub struct DualPipesBuilder<F: FileSystem> {
     cfg: Config,
-    file_builder: Arc<B>,
+    file_system: Arc<F>,
     listeners: Vec<Arc<dyn EventListener>>,
 
-    append_files: Vec<FileToRecover>,
-    rewrite_files: Vec<FileToRecover>,
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
+    dir_lock: Option<File>,
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
+    append_files: Vec<FileToRecover<F>>,
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
+    rewrite_files: Vec<FileToRecover<F>>,
 }
 
-impl<B: FileBuilder> DualPipesBuilder<B> {
-    pub fn new(cfg: Config, file_builder: Arc<B>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
+impl<F: FileSystem> DualPipesBuilder<F> {
+    /// Creates a new builder.
+    pub fn new(cfg: Config, file_system: Arc<F>, listeners: Vec<Arc<dyn EventListener>>) -> Self {
         Self {
             cfg,
-            file_builder,
+            file_system,
             listeners,
+            dir_lock: None,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
         }
     }
 
+    /// Scans for all log files under the working directory. The directory will
+    /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
         let dir = &self.cfg.dir;
         let path = Path::new(dir);
         if !path.exists() {
             info!("Create raft log directory: {}", dir);
             fs::create_dir(dir)?;
+            self.dir_lock = Some(lock_dir(dir)?);
             return Ok(());
         }
         if !path.is_dir() {
             return Err(box_err!("Not directory: {}", dir));
         }
+        self.dir_lock = Some(lock_dir(dir)?);
 
         let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
@@ -116,8 +155,8 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                         );
                         files.clear();
                     } else {
-                        let fd = Arc::new(LogFd::open(&path)?);
-                        files.push(FileToRecover { seq, path, fd });
+                        let fd = Arc::new(self.file_system.open(&path)?);
+                        files.push(FileToRecover { seq, fd });
                     }
                 }
             }
@@ -125,7 +164,13 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         Ok(())
     }
 
-    pub fn recover<S: ReplayMachine>(&mut self) -> Result<(S, S)> {
+    /// Reads through log items in all available log files, and replays them to
+    /// specific [`ReplayMachine`]s that can be constructed via
+    /// `machine_factory`.
+    pub fn recover<M: ReplayMachine, FA: Factory<M>>(
+        &mut self,
+        machine_factory: &FA,
+    ) -> Result<(M, M)> {
         let threads = self.cfg.recovery_threads;
         let (append_concurrency, rewrite_concurrency) =
             match (self.append_files.len(), self.rewrite_files.len()) {
@@ -136,54 +181,37 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 }
                 _ => (threads, threads),
             };
-
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
         let (append, rewrite) = pool.join(
-            || {
-                Self::recover_queue(
-                    LogQueue::Append,
-                    self.file_builder.clone(),
-                    self.cfg.recovery_mode,
-                    append_concurrency,
-                    self.cfg.recovery_read_block_size.0 as usize,
-                    &self.append_files,
-                )
-            },
-            || {
-                Self::recover_queue(
-                    LogQueue::Rewrite,
-                    self.file_builder.clone(),
-                    self.cfg.recovery_mode,
-                    rewrite_concurrency,
-                    self.cfg.recovery_read_block_size.0 as usize,
-                    &self.rewrite_files,
-                )
-            },
+            || self.recover_queue(LogQueue::Append, machine_factory, append_concurrency),
+            || self.recover_queue(LogQueue::Rewrite, machine_factory, rewrite_concurrency),
         );
 
         Ok((append?, rewrite?))
     }
 
-    pub fn finish(self) -> Result<DualPipes<B>> {
-        let appender = self.build_pipe(LogQueue::Append)?;
-        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
-        DualPipes::open(&self.cfg.dir, appender, rewriter)
-    }
-
-    fn recover_queue<S: ReplayMachine>(
+    /// Reads through log items in all available log files of the specified
+    /// queue, and replays them to specific [`ReplayMachine`]s that can be
+    /// constructed via `machine_factory`.
+    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
+        &self,
         queue: LogQueue,
-        file_builder: Arc<B>,
-        recovery_mode: RecoveryMode,
+        replay_machine_factory: &FA,
         concurrency: usize,
-        read_block_size: usize,
-        files: &[FileToRecover],
-    ) -> Result<S> {
+    ) -> Result<M> {
+        let files = if queue == LogQueue::Append {
+            &self.append_files
+        } else {
+            &self.rewrite_files
+        };
         if concurrency == 0 || files.is_empty() {
-            return Ok(S::default());
+            return Ok(replay_machine_factory.new_target());
         }
+
+        let recovery_mode = self.cfg.recovery_mode;
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks(max_chunk_size);
         let chunk_count = chunks.len();
@@ -191,15 +219,28 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
         let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
-                let mut reader = LogItemBatchFileReader::new(read_block_size);
-                let mut sequential_replay_machine = S::default();
+                let mut reader =
+                    LogItemBatchFileReader::new(self.cfg.recovery_read_block_size.0 as usize);
+                let mut sequential_replay_machine = replay_machine_factory.new_target();
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    reader.open(
+                    if let Err(e) = reader.open(
                         FileId { queue, seq: f.seq },
-                        build_file_reader(file_builder.as_ref(), &f.path, f.fd.clone())?,
-                    )?;
+                        build_file_reader(self.file_system.as_ref(), f.fd.clone())?,
+                    ) {
+                        if recovery_mode == RecoveryMode::TolerateAnyCorruption {
+                            warn!("File is corrupted but ignored: {}", e);
+                            f.fd.truncate(0)?;
+                        } else if recovery_mode == RecoveryMode::TolerateTailCorruption
+                            && is_last_file
+                        {
+                            warn!("The tail of raft log is corrupted but ignored: {}", e);
+                            f.fd.truncate(0)?;
+                        } else {
+                            return Err(e);
+                        }
+                    }
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -227,29 +268,50 @@ impl<B: FileBuilder> DualPipesBuilder<B> {
                 Ok(sequential_replay_machine)
             })
             .try_reduce(
-                S::default,
+                || replay_machine_factory.new_target(),
                 |mut sequential_replay_machine_left, sequential_replay_machine_right| {
                     sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
                     Ok(sequential_replay_machine_left)
                 },
             )?;
+
         Ok(sequential_replay_machine)
     }
 
-    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<B>> {
+    /// Builds a new storage for the specified log queue.
+    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
         let files = match queue {
             LogQueue::Append => &self.append_files,
             LogQueue::Rewrite => &self.rewrite_files,
         };
         let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<Arc<LogFd>> = files.iter().map(|f| f.fd.clone()).collect();
+        let files: VecDeque<Arc<F::Handle>> = files.iter().map(|f| f.fd.clone()).collect();
         SinglePipe::open(
             &self.cfg,
-            self.file_builder.clone(),
+            self.file_system.clone(),
             self.listeners.clone(),
             queue,
             first_seq,
             files,
         )
     }
+
+    /// Builds a [`DualPipes`] that contains all available log files.
+    pub fn finish(self) -> Result<DualPipes<F>> {
+        let appender = self.build_pipe(LogQueue::Append)?;
+        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
+        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
+    }
+}
+
+/// Creates and exclusively locks a lock file under the given directory.
+pub(super) fn lock_dir(dir: &str) -> Result<File> {
+    let lock_file = File::create(lock_file_path(dir))?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        Error::Other(box_err!(
+            "Failed to lock file: {}, maybe another instance is using this directory.",
+            e
+        ))
+    })?;
+    Ok(lock_file)
 }

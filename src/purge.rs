@@ -4,13 +4,13 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use log::{error, info};
+use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
-use crate::log_batch::{Command, LogBatch, LogItemContent, OpType};
+use crate::log_batch::LogBatch;
 use crate::memtable::{MemTable, MemTableAccessor};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
@@ -64,7 +64,7 @@ where
         let guard = self.purge_mutex.try_lock();
         let mut should_compact = vec![];
         if guard.is_none() {
-            error!("Failed to purge expired files: locked");
+            warn!("Unable to purge expired files: locked");
             return Ok(should_compact);
         }
 
@@ -80,27 +80,35 @@ where
             if let (Some(rewrite_watermark), Some(compact_watermark)) =
                 self.append_queue_watermarks()
             {
-                should_compact =
-                    self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
                 let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
                 let append_queue_barrier =
                     self.listeners.iter().fold(latest_append, |barrier, l| {
                         l.first_file_not_ready_for_purge(LogQueue::Append)
                             .map_or(barrier, |f| std::cmp::min(f, barrier))
                     });
-                if append_queue_barrier == first_append && first_append < latest_append {
-                    error!("Failed to purge expired files: blocked by barrier");
-                }
-                // Ordering: make sure we rewrite all tombstones before `append_queue_barrier`.
+
+                // Ordering
+                // 1. Must rewrite tombstones AFTER acquiring
+                //    `append_queue_barrier`, or deletion marks might be lost
+                //    after restart.
+                // 2. Must rewrite tombstones BEFORE rewrite entries, or
+                //    entries from recreated region might be lost after
+                //    restart.
                 self.rewrite_append_queue_tombstones()?;
+                should_compact =
+                    self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
+
+                if append_queue_barrier == first_append && first_append < latest_append {
+                    warn!("Unable to purge expired files: blocked by barrier");
+                }
                 self.purge_to(LogQueue::Append, append_queue_barrier)?;
             }
         }
         Ok(should_compact)
     }
 
-    /// Rewrite append files with seqno no larger than `watermark`. When it's None,
-    /// rewrite the entire queue. Returns the number of purged files.
+    /// Rewrite append files with seqno no larger than `watermark`. When it's
+    /// None, rewrite the entire queue. Returns the number of purged files.
     #[cfg(test)]
     pub fn must_rewrite_append_queue(
         &self,
@@ -113,12 +121,12 @@ where
         if watermark == last {
             self.pipe_log.rotate(LogQueue::Append).unwrap();
         }
-        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
-            .unwrap();
+        self.rewrite_append_queue_tombstones().unwrap();
         if exit_after_step == Some(1) {
             return;
         }
-        self.rewrite_append_queue_tombstones().unwrap();
+        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
+            .unwrap();
         if exit_after_step == Some(2) {
             return;
         }
@@ -220,7 +228,7 @@ where
             .memtables
             .collect(|t| t.min_file_seq(LogQueue::Rewrite).is_some());
 
-        self.rewrite_memtables(memtables, 0 /*expect_rewrites_per_memtable*/, None)?;
+        self.rewrite_memtables(memtables, 0 /* expect_rewrites_per_memtable */, None)?;
         self.global_stats.reset_rewrite_counters();
         Ok(())
     }
@@ -229,8 +237,8 @@ where
         let mut log_batch = self.memtables.take_cleaned_region_logs();
         self.rewrite_impl(
             &mut log_batch,
-            None, /*rewrite_watermark*/
-            true, /*sync*/
+            None, /* rewrite_watermark */
+            true, /* sync */
         )
     }
 
@@ -280,6 +288,7 @@ where
                 m.region_id()
             };
 
+            // FIXME: This code makes my brain hurt.
             let mut cursor = 0;
             while cursor < entry_indexes.len() {
                 let entry =
@@ -324,27 +333,11 @@ where
             .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
         self.pipe_log.maybe_sync(LogQueue::Rewrite, sync)?;
         log_batch.finish_write(file_handle);
-        for item in log_batch.drain() {
-            let raft = item.raft_group_id;
-            let memtable = self.memtables.get_or_insert(raft);
-            match item.content {
-                LogItemContent::EntryIndexes(entries_to_add) => {
-                    let entry_indexes = entries_to_add.0;
-                    memtable.write().rewrite(entry_indexes, rewrite_watermark);
-                }
-                LogItemContent::Kv(kv) => match kv.op_type {
-                    OpType::Put => {
-                        let key = kv.key;
-                        memtable
-                            .write()
-                            .rewrite_key(key, rewrite_watermark, file_handle.id.seq);
-                    }
-                    _ => unreachable!(),
-                },
-                LogItemContent::Command(Command::Clean) => {}
-                _ => unreachable!(),
-            }
-        }
+        self.memtables.apply_rewrite_writes(
+            log_batch.drain(),
+            rewrite_watermark,
+            file_handle.id.seq,
+        );
         for listener in &self.listeners {
             listener.post_apply_memtables(file_handle.id);
         }
