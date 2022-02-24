@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use raft_engine_ctl::ControlOpt;
 use clap::Parser;
+use raft_engine_ctl::ControlOpt;
 
 fn main() {
     let opts: ControlOpt = ControlOpt::parse();
