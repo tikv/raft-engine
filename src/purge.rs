@@ -24,7 +24,7 @@ const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
-const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 3;
+const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
 
 pub struct PurgeManager<P>
 where
