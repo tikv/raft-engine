@@ -11,8 +11,8 @@ Raft Engine is a persistent embedded storage engine with a log-structured design
 - Key-value storage for individual Raft Group
 - Minimum write amplification
 - Collaborative garbage collection
-- Support [lz4](http://www.lz4.org/) compression over log entries
-- Support file system extension
+- Supports [lz4](http://www.lz4.org/) compression over log entries
+- Supports file system extension
 
 ## Design
 
@@ -54,6 +54,13 @@ Put this in your Cargo.toml:
 [dependencies]
 raft-engine = { git = "https://github.com/tikv/raft-engine", branch = "master" }
 ```
+
+Available Cargo features:
+
+- `scripting`: Compiles with [Rhai](https://github.com/rhaiscript/rhai). This enables script debugging utilities including `unsafe_repair`.
+- `nightly`: Enables nightly-only features including `test`.
+- `internals`: Re-exports key componenets internal to Raft Engine. Enabled when building for docs.rs.
+- `failpoints`: Enables fail point testing powered by [tikv/fail-rs](https://github.com/tikv/fail-rs).
 
 See some basic use cases under the [examples](https://github.com/tikv/raft-engine/tree/master/examples) directory.
 
