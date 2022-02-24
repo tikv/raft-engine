@@ -1,5 +1,5 @@
 [package]
-name = "ctl"
+name = "raft-engine-ctl"
 version = "0.1.0"
 edition = "2018"
 authors = ["The TiKV Authors"]
