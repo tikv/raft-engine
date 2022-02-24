@@ -6,7 +6,6 @@ use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
-use protobuf::parse_from_bytes;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
@@ -472,6 +471,8 @@ impl LogItemBatch {
         Ok(())
     }
 
+    /// Decodes a `LogItemBatch` from bytes of footer. `entries` is the block
+    /// location of encoded entries.
     pub fn decode(
         buf: &mut SliceReader,
         entries: FileBlockHandle,
@@ -797,45 +798,24 @@ impl LogBatch {
         Ok((offset, compression_type, len >> 8))
     }
 
-    /// Decodes a specific log entry from the bytes of a group of entries.
-    /// Assumes the specified entry belongs to the group.
-    pub(crate) fn parse_entry<M: MessageExt>(buf: &[u8], idx: &EntryIndex) -> Result<M::Entry> {
-        let len = idx.entries.unwrap().len;
-        if len > 0 {
-            // protobuf message can be serialized to empty string.
-            verify_checksum(&buf[0..len])?;
-        }
-        match idx.compression_type {
-            CompressionType::None => Ok(parse_from_bytes(
-                &buf[idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
-            )?),
-            CompressionType::Lz4 => {
-                let decompressed = lz4::decompress_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN])?;
-                Ok(parse_from_bytes(
-                    &decompressed
-                        [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
-                )?)
+    /// Unfolds bytes of multiple user entries from an encoded block.
+    pub(crate) fn decode_entries_block(
+        buf: &[u8],
+        handle: FileBlockHandle,
+        compression: CompressionType,
+    ) -> Result<Vec<u8>> {
+        if handle.len > 0 {
+            verify_checksum(&buf[0..handle.len])?;
+            match compression {
+                CompressionType::None => Ok(buf[..handle.len - LOG_BATCH_CHECKSUM_LEN].to_owned()),
+                CompressionType::Lz4 => {
+                    let decompressed =
+                        lz4::decompress_block(&buf[..handle.len - LOG_BATCH_CHECKSUM_LEN])?;
+                    Ok(decompressed)
+                }
             }
-        }
-    }
-
-    /// Decodes the bytes of a specific log entry from the bytes of a group of
-    /// entries. Assumes the specified entry belongs to the group.
-    pub(crate) fn parse_entry_bytes(buf: &[u8], idx: &EntryIndex) -> Result<Vec<u8>> {
-        let len = idx.entries.unwrap().len;
-        if len > 0 {
-            verify_checksum(&buf[0..len])?;
-        }
-        match idx.compression_type {
-            CompressionType::None => Ok(buf
-                [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
-                .to_owned()),
-            CompressionType::Lz4 => {
-                let decompressed = lz4::decompress_block(&buf[..len - LOG_BATCH_CHECKSUM_LEN])?;
-                Ok(decompressed
-                    [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
-                    .to_owned())
-            }
+        } else {
+            Ok(Vec::new())
         }
     }
 }
@@ -865,6 +845,7 @@ mod tests {
     use super::*;
     use crate::pipe_log::LogQueue;
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
+    use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
 
     fn decode_entries_from_bytes<M: MessageExt>(
@@ -874,7 +855,15 @@ mod tests {
     ) -> Vec<M::Entry> {
         let mut entries = Vec::with_capacity(entry_indexes.len());
         for ei in entry_indexes {
-            entries.push(LogBatch::parse_entry::<M>(buf, ei).unwrap());
+            let block =
+                LogBatch::decode_entries_block(buf, ei.entries.unwrap(), ei.compression_type)
+                    .unwrap();
+            entries.push(
+                parse_from_bytes(
+                    &block[ei.entry_offset as usize..ei.entry_offset as usize + ei.entry_len],
+                )
+                .unwrap(),
+            );
         }
         entries
     }
@@ -1182,7 +1171,11 @@ mod tests {
         assert_eq!(encoded.len(), len);
         let decoded_item_batch = LogItemBatch::decode(
             &mut &encoded[offset..],
-            FileBlockHandle::dummy(LogQueue::Append),
+            FileBlockHandle {
+                id: FileId::dummy(LogQueue::Append),
+                offset: 0,
+                len: offset - LOG_BATCH_HEADER_LEN,
+            },
             compression_type,
         )
         .unwrap();

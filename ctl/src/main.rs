@@ -21,27 +21,26 @@ struct ControlOpt {
 
 #[derive(Debug, Parser)]
 pub enum Cmd {
-    /// dump out all operations in log files
+    /// Dump log entries in data file(s).
     Dump {
-        #[clap(
-            short,
-            long = "path",
-            help = "Path of log file directory or specific log file"
-        )]
+        /// Path of Raft Engine directory or specific log file.
+        #[clap(short, long)]
         path: String,
 
         #[clap(short, long, use_delimiter = true)]
         raft_groups: Vec<u64>,
     },
 
-    /// check log files for logical errors
+    /// Check data files for logical errors.
     Check {
+        /// Path of Raft Engine directory.
         #[clap(short, long)]
         path: String,
     },
 
-    /// run scripts to repair log files
+    /// Run Rhai script to repair data files.
     Repair {
+        /// Path of Raft Engine directory.
         #[clap(short, long)]
         path: String,
 
@@ -52,8 +51,16 @@ pub enum Cmd {
         )]
         queue: String,
 
-        #[clap(short, long, use_delimiter = true, help = "Path of Rhai script file")]
+        /// Path of Rhai script file.
+        #[clap(short, long)]
         script: String,
+    },
+
+    /// Try running `purge_expired_files` on existing data directory.
+    TryPurge {
+        /// Path of Raft Engine directory.
+        #[clap(short, long)]
+        path: String,
     },
 }
 
@@ -101,6 +108,16 @@ impl ControlOpt {
                     println!("Corrupted info are as follows:\nraft_group_id, last_intact_index\n");
                     r.iter().for_each(|(x, y)| println!("{:?}, {:?}", x, y))
                 }
+            }
+            Cmd::TryPurge { path } => {
+                let e = Engine::open(raft_engine::Config {
+                    dir: path,
+                    ..Default::default()
+                })?;
+                println!(
+                    "purge_expired_files() returns {:?}",
+                    e.purge_expired_files()?
+                );
             }
         }
         Ok(())

@@ -154,10 +154,10 @@ fn bench_recovery(c: &mut Criterion) {
         println!("config-{}: [{}] {}", i, name, cfg);
     }
 
+    fail::cfg("log_fd::open::fadvise_dontneed", "return").unwrap();
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
         let dir = generate(cfg).unwrap();
         let path = dir.path().to_str().unwrap().to_owned();
-        fail::cfg("log_fd::open::fadvise_dontneed", "return").unwrap();
         let ecfg = EngineConfig {
             dir: path.clone(),
             batch_compression_threshold: cfg.batch_compression_threshold,
@@ -176,6 +176,7 @@ fn bench_recovery(c: &mut Criterion) {
             },
         );
     }
+    fail::remove("log_fd::open::fadvise_dontneed");
 }
 
 criterion_group! {
