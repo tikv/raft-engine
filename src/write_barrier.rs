@@ -226,7 +226,7 @@ impl<P, O> WriteBarrier<P, O> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread::{self, Builder as ThreadBuilder};
     use std::time::Duration;
 
@@ -257,21 +257,21 @@ mod tests {
     struct ConcurrentWriteContext {
         barrier: Arc<WriteBarrier<u32, u32>>,
 
-        writer_seq: u32,
+        seq: u32,
         ths: Vec<thread::JoinHandle<()>>,
-        tx: mpsc::SyncSender<()>,
-        rx: mpsc::Receiver<()>,
+        leader_exit_tx: mpsc::SyncSender<()>,
+        leader_exit_rx: mpsc::Receiver<()>,
     }
 
     impl ConcurrentWriteContext {
         fn new() -> Self {
-            let (tx, rx) = mpsc::sync_channel(0);
+            let (leader_exit_tx, leader_exit_rx) = mpsc::sync_channel(0);
             Self {
                 barrier: Default::default(),
-                writer_seq: 0,
+                seq: 0,
                 ths: Vec::new(),
-                tx,
-                rx,
+                leader_exit_tx,
+                leader_exit_rx,
             }
         }
 
@@ -279,74 +279,81 @@ mod tests {
         // 2) current active write group finishes writing and exits
         // 3) the new write group enters writing phrase
         fn step(&mut self, n: usize) {
-            let (ready_tx, ready_rx) = mpsc::channel();
             if self.ths.is_empty() {
-                // ensure there is one active write group.
-                self.writer_seq += 1;
-                let barrier_clone = self.barrier.clone();
-                let tx_clone = self.tx.clone();
-                let ready_tx_clone = ready_tx.clone();
-                let mut seq = self.writer_seq;
+                // ensure there is at least one active writer.
+                self.seq += 1;
+                let (leader_enter_tx, leader_enter_rx) = mpsc::channel();
+
+                let barrier = self.barrier.clone();
+                let leader_exit_tx = self.leader_exit_tx.clone();
+                let mut seq = self.seq;
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
                             let mut writer = Writer::new(&mut seq, false, Instant::now());
-                            ready_tx_clone.send(()).unwrap();
                             {
-                                let mut wg = barrier_clone.enter(&mut writer).unwrap();
-                                let mut idx = 0;
+                                let mut wg = barrier.enter(&mut writer).unwrap();
+                                leader_enter_tx.send(()).unwrap();
+                                let mut n = 0;
                                 for w in wg.iter_mut() {
                                     w.set_output(*w.get_payload());
-                                    idx += 1;
+                                    n += 1;
                                 }
-                                assert_eq!(idx, 1);
-                                tx_clone.send(()).unwrap();
+                                assert_eq!(n, 1);
+                                leader_exit_tx.send(()).unwrap();
                             }
                             assert_eq!(writer.finish(), seq);
                         })
                         .unwrap(),
                 );
-                ready_rx.recv().unwrap();
+
+                leader_enter_rx.recv().unwrap();
             }
+
             let prev_writers = self.ths.len();
+            let (leader_enter_tx, leader_enter_rx) = mpsc::channel();
+            let start_thread = Arc::new(Barrier::new(n + 1));
             for _ in 0..n {
-                self.writer_seq += 1;
-                let barrier_clone = self.barrier.clone();
-                let tx_clone = self.tx.clone();
-                let ready_tx_clone = ready_tx.clone();
-                let mut seq = self.writer_seq;
+                self.seq += 1;
+
+                let barrier = self.barrier.clone();
+                let start_thread = start_thread.clone();
+                let leader_enter_tx_clone = leader_enter_tx.clone();
+                let leader_exit_tx = self.leader_exit_tx.clone();
+                let mut seq = self.seq;
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
                             let mut writer = Writer::new(&mut seq, false, Instant::now());
-                            ready_tx_clone.send(()).unwrap();
-                            if let Some(mut wg) = barrier_clone.enter(&mut writer) {
+                            start_thread.wait();
+                            if let Some(mut wg) = barrier.enter(&mut writer) {
+                                leader_enter_tx_clone.send(()).unwrap();
                                 let mut idx = 0;
                                 for w in wg.iter_mut() {
                                     w.set_output(*w.get_payload());
                                     idx += 1;
                                 }
                                 assert_eq!(idx, n as u32);
-                                tx_clone.send(()).unwrap();
+                                leader_exit_tx.send(()).unwrap();
                             }
                             assert_eq!(writer.finish(), seq);
                         })
                         .unwrap(),
                 );
             }
-            for _ in 0..n {
-                ready_rx.recv().unwrap();
-            }
-            std::thread::sleep(Duration::from_millis(5));
+            start_thread.wait();
+            std::thread::sleep(Duration::from_millis(100));
             // unblock current leader
-            self.rx.recv().unwrap();
+            self.leader_exit_rx.recv().unwrap();
             for th in self.ths.drain(0..prev_writers) {
                 th.join().unwrap();
             }
+            // make sure new leader is ready
+            leader_enter_rx.recv().unwrap();
         }
 
         fn join(&mut self) {
-            self.rx.recv().unwrap();
+            self.leader_exit_rx.recv().unwrap();
             for th in self.ths.drain(..) {
                 th.join().unwrap();
             }
