@@ -924,6 +924,56 @@ mod tests {
     }
 
     #[test]
+    fn test_purge_trigger_force_rewrite() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_purge_trigger_force_write")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(1),
+            purge_threshold: ReadableSize::kb(10),
+            ..Default::default()
+        };
+
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; 1024];
+        // write 50 small entries into region 1~3, it should trigger force compact.
+        for rid in 1..=3 {
+            for index in 0..50 {
+                engine.append(rid, index, index + 1, Some(&data[..10]));
+            }
+        }
+        // write some small entries to trigger purge.
+        for rid in 4..=50 {
+            engine.append(rid, 1, 2, Some(&data));
+        }
+
+        let check_purge = |pending_regions: Vec<u64>| {
+            let mut compact_regions = engine.purge_expired_files().unwrap();
+            // sort key in order.
+            compact_regions.sort_unstable();
+            assert_eq!(compact_regions, pending_regions);
+        };
+
+        for _ in 0..9 {
+            check_purge(vec![1, 2, 3]);
+        }
+
+        // 10th, rewrited
+        check_purge(vec![]);
+
+        // compact and write some new data to trigger compact again.
+        for rid in 2..=50 {
+            let last_idx = engine.last_index(rid).unwrap();
+            engine.compact_to(rid, last_idx);
+            engine.append(rid, last_idx, last_idx + 1, Some(&data));
+        }
+        // after write, region 1 can trigger compact again.
+        check_purge(vec![1]);
+    }
+
+    #[test]
     fn test_rewrite_and_recover() {
         let dir = tempfile::Builder::new()
             .prefix("test_rewrite_and_recover")
