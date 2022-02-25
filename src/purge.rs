@@ -1,6 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
+const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
 
 pub struct PurgeManager<P>
 where
@@ -35,7 +37,10 @@ where
     listeners: Vec<Arc<dyn EventListener>>,
 
     // Only one thread can run `purge_expired_files` at a time.
-    purge_mutex: Arc<Mutex<()>>,
+    //
+    // This table records Raft Groups that should be force compacted before. Those that are not
+    // compacted in time (after `MAX_EPOCH_BEFORE_FORCE_REWRITE` epochs) will be force rewritten.
+    force_rewrite_candidates: Arc<Mutex<HashMap<u64, u32>>>,
 }
 
 impl<P> PurgeManager<P>
@@ -55,21 +60,22 @@ where
             pipe_log,
             global_stats,
             listeners,
-            purge_mutex: Arc::new(Mutex::new(())),
+            force_rewrite_candidates: Arc::new(Mutex::new(HashMap::default())),
         }
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_PURGE_DURATION_HISTOGRAM);
-        let guard = self.purge_mutex.try_lock();
-        let mut should_compact = vec![];
+        let guard = self.force_rewrite_candidates.try_lock();
         if guard.is_none() {
             warn!("Unable to purge expired files: locked");
-            return Ok(should_compact);
+            return Ok(vec![]);
         }
+        let mut rewrite_candidate_regions = guard.unwrap();
 
+        let mut should_compact = HashSet::new();
         if self.needs_rewrite_log_files(LogQueue::Rewrite) {
-            self.rewrite_rewrite_queue()?;
+            should_compact.extend(self.rewrite_rewrite_queue()?);
             self.purge_to(
                 LogQueue::Rewrite,
                 self.pipe_log.file_span(LogQueue::Rewrite).1,
@@ -95,8 +101,11 @@ where
                 //    entries from recreated region might be lost after
                 //    restart.
                 self.rewrite_append_queue_tombstones()?;
-                should_compact =
-                    self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?;
+                should_compact.extend(self.rewrite_or_compact_append_queue(
+                    rewrite_watermark,
+                    compact_watermark,
+                    &mut *rewrite_candidate_regions,
+                )?);
 
                 if append_queue_barrier == first_append && first_append < latest_append {
                     warn!("Unable to purge expired files: blocked by barrier");
@@ -104,7 +113,7 @@ where
                 self.purge_to(LogQueue::Append, append_queue_barrier)?;
             }
         }
-        Ok(should_compact)
+        Ok(should_compact.into_iter().collect())
     }
 
     /// Rewrite append files with seqno no larger than `watermark`. When it's
@@ -115,7 +124,7 @@ where
         watermark: Option<FileSeq>,
         exit_after_step: Option<u64>,
     ) {
-        let _lk = self.purge_mutex.try_lock().unwrap();
+        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
@@ -139,7 +148,7 @@ where
 
     #[cfg(test)]
     pub fn must_rewrite_rewrite_queue(&self) {
-        let _lk = self.purge_mutex.try_lock().unwrap();
+        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
         self.purge_to(
             LogQueue::Rewrite,
@@ -191,20 +200,28 @@ where
         &self,
         rewrite_watermark: FileSeq,
         compact_watermark: FileSeq,
+        rewrite_candidates: &mut HashMap<u64, u32>,
     ) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::with_capacity(16);
 
+        let mut new_candidates = HashMap::with_capacity(rewrite_candidates.len());
         let memtables = self.memtables.collect(|t| {
             if let Some(f) = t.min_file_seq(LogQueue::Append) {
                 let sparse = t
                     .entries_count_before(FileId::new(LogQueue::Append, rewrite_watermark))
                     < MAX_REWRITE_ENTRIES_PER_REGION;
-                if f < compact_watermark && !sparse {
+                // counter is the times that target region triggers force compact.
+                let compact_counter = rewrite_candidates.get(&t.region_id()).unwrap_or(&0);
+                if f < compact_watermark
+                    && !sparse
+                    && *compact_counter < MAX_COUNT_BEFORE_FORCE_REWRITE
+                {
                     should_compact.push(t.region_id());
+                    new_candidates.insert(t.region_id(), *compact_counter + 1);
                 } else if f < rewrite_watermark {
-                    return sparse;
+                    return sparse || *compact_counter >= MAX_COUNT_BEFORE_FORCE_REWRITE;
                 }
             }
             false
@@ -215,22 +232,28 @@ where
             MAX_REWRITE_ENTRIES_PER_REGION,
             Some(rewrite_watermark),
         )?;
+        *rewrite_candidates = new_candidates;
 
         Ok(should_compact)
     }
 
     // Rewrites the entire rewrite queue into new log files.
-    fn rewrite_rewrite_queue(&self) -> Result<()> {
+    fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
-        let memtables = self
-            .memtables
-            .collect(|t| t.min_file_seq(LogQueue::Rewrite).is_some());
+        let mut force_compact_regions = vec![];
+        let memtables = self.memtables.collect(|t| {
+            // if the region is force rewritten, we should also trigger compact.
+            if t.rewrite_count() > MAX_REWRITE_ENTRIES_PER_REGION {
+                force_compact_regions.push(t.region_id());
+            }
+            t.min_file_seq(LogQueue::Rewrite).is_some()
+        });
 
         self.rewrite_memtables(memtables, 0 /* expect_rewrites_per_memtable */, None)?;
         self.global_stats.reset_rewrite_counters();
-        Ok(())
+        Ok(force_compact_regions)
     }
 
     fn rewrite_append_queue_tombstones(&self) -> Result<()> {
