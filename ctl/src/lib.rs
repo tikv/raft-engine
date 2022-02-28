@@ -111,6 +111,7 @@ impl ControlOpt {
                 queue,
                 script,
             } => {
+                let script = std::fs::read_to_string(script)?;
                 Engine::unsafe_repair(Path::new(&path), convert_queue(&queue), script)?;
             }
             Cmd::Check { path } => {
