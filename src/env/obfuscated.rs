@@ -67,9 +67,8 @@ impl WriteExt for ObfuscatedWriter {
 
 pub struct ObfuscatedFileSystem(DefaultFileSystem);
 
-impl ObfuscatedFileSystem {
-    #[allow(dead_code)]
-    pub fn new() -> ObfuscatedFileSystem {
+impl Default for ObfuscatedFileSystem {
+    fn default() -> Self {
         ObfuscatedFileSystem(DefaultFileSystem)
     }
 }

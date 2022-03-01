@@ -569,7 +569,8 @@ mod tests {
             dir: sub_dir.to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new())).unwrap();
+        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+            .unwrap();
     }
 
     #[test]
@@ -589,7 +590,7 @@ mod tests {
 
             let engine = RaftLogEngine::open_with_file_system(
                 cfg.clone(),
-                Arc::new(ObfuscatedFileSystem::new()),
+                Arc::new(ObfuscatedFileSystem::default()),
             )
             .unwrap();
             let data = vec![b'x'; entry_size];
@@ -643,7 +644,7 @@ mod tests {
                     };
                     let engine = RaftLogEngine::open_with_file_system(
                         cfg.clone(),
-                        Arc::new(ObfuscatedFileSystem::new()),
+                        Arc::new(ObfuscatedFileSystem::default()),
                     )
                     .unwrap();
 
@@ -713,7 +714,7 @@ mod tests {
         // put | delete
         //     ^ rewrite
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.purge_manager.must_rewrite_append_queue(None, None);
@@ -810,7 +811,7 @@ mod tests {
             ..Default::default()
         };
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let data = vec![b'x'; 1024];
 
@@ -919,7 +920,7 @@ mod tests {
         };
 
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let data = vec![b'x'; 1024];
         for index in 0..100 {
@@ -980,7 +981,7 @@ mod tests {
         };
 
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let data = vec![b'x'; 1024];
         // write 50 small entries into region 1~3, it should trigger force compact.
@@ -1031,7 +1032,7 @@ mod tests {
             ..Default::default()
         };
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let data = vec![b'x'; 1024];
 
@@ -1095,7 +1096,7 @@ mod tests {
             ..Default::default()
         };
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
 
         let mut log_batch = LogBatch::default();
@@ -1155,7 +1156,7 @@ mod tests {
             ..Default::default()
         };
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let data = vec![b'x'; 1024];
 
@@ -1188,7 +1189,7 @@ mod tests {
             ..Default::default()
         };
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let data = vec![b'x'; 2 * 1024 * 1024];
 
@@ -1243,7 +1244,7 @@ mod tests {
         };
 
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         for bs in batches.iter_mut() {
             for batch in bs.iter_mut() {
@@ -1257,7 +1258,7 @@ mod tests {
         //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft
         // groups 8
         let dump_it =
-            Engine::dump_with_file_system(dir.path(), Arc::new(ObfuscatedFileSystem::new()))
+            Engine::dump_with_file_system(dir.path(), Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         let total = dump_it
             .inspect(|i| {
@@ -1273,7 +1274,7 @@ mod tests {
         };
         let dump_it = Engine::dump_with_file_system(
             file_id.build_file_path(dir.path()).as_path(),
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
         let total = dump_it
@@ -1286,7 +1287,7 @@ mod tests {
         //dump dir that does not exists
         assert!(Engine::dump_with_file_system(
             Path::new("/not_exists_dir"),
-            Arc::new(ObfuscatedFileSystem::new())
+            Arc::new(ObfuscatedFileSystem::default())
         )
         .is_err());
 
@@ -1295,7 +1296,7 @@ mod tests {
         not_exists_file.push("not_exists_file");
         assert!(Engine::dump_with_file_system(
             not_exists_file.as_path(),
-            Arc::new(ObfuscatedFileSystem::new())
+            Arc::new(ObfuscatedFileSystem::default())
         )
         .is_err());
     }
@@ -1316,7 +1317,7 @@ mod tests {
 
         let engine = RaftLogEngine::open_with_file_system(
             cfg.clone(),
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
         for rid in 1..=50 {
@@ -1332,7 +1333,7 @@ mod tests {
             dir.path(),
             None, /* queue */
             script1,
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
         let script2 = "
@@ -1351,12 +1352,12 @@ mod tests {
             dir.path(),
             None, /* queue */
             script2,
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
 
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         for rid in 1..25 {
             engine.scan(rid, 1, 6, |_, _, d| {
@@ -1386,7 +1387,7 @@ mod tests {
 
         let engine = RaftLogEngine::open_with_file_system(
             cfg.clone(),
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
         for rid in 1..=50 {
@@ -1418,12 +1419,12 @@ mod tests {
             dir.path(),
             None, /* queue */
             script,
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
 
         let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new()))
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
         for rid in 1..25 {
             if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
@@ -1472,7 +1473,7 @@ mod tests {
 
         let engine = RaftLogEngine::open_with_file_system(
             cfg.clone(),
-            Arc::new(ObfuscatedFileSystem::new()),
+            Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
         for rid in 1..=50 {
@@ -1495,12 +1496,16 @@ mod tests {
 
         // Corrupt a log batch.
         f.set_len(f.metadata().unwrap().len() - 1).unwrap();
-        RaftLogEngine::open_with_file_system(cfg.clone(), Arc::new(ObfuscatedFileSystem::new()))
-            .unwrap();
+        RaftLogEngine::open_with_file_system(
+            cfg.clone(),
+            Arc::new(ObfuscatedFileSystem::default()),
+        )
+        .unwrap();
 
         // Corrupt the file header.
         f.set_len(1).unwrap();
-        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::new())).unwrap();
+        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+            .unwrap();
     }
 
     #[cfg(feature = "nightly")]
