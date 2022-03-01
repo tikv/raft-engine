@@ -36,7 +36,6 @@ mod codec;
 mod config;
 mod consistency;
 mod engine;
-mod env;
 mod errors;
 mod event_listener;
 mod file_pipe_log;
@@ -51,6 +50,8 @@ mod purge;
 mod test_util;
 mod util;
 mod write_barrier;
+
+pub mod env;
 
 pub use config::{Config, RecoveryMode};
 pub use engine::Engine;
