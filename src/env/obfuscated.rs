@@ -52,15 +52,15 @@ impl Seek for ObfuscatedWriter {
 }
 
 impl WriteExt for ObfuscatedWriter {
-    fn truncate(&self, offset: usize) -> IoResult<()> {
+    fn truncate(&mut self, offset: usize) -> IoResult<()> {
         self.0.truncate(offset)
     }
 
-    fn sync(&self) -> IoResult<()> {
+    fn sync(&mut self) -> IoResult<()> {
         self.0.sync()
     }
 
-    fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
+    fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {
         self.0.allocate(offset, size)
     }
 }

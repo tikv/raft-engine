@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fs2::FileExt;
-use log::{info, warn};
+use log::{error, info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
@@ -20,7 +20,7 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt};
+use super::format::{lock_file_path, FileNameExt, LogFileHeader};
 use super::log_file::build_file_reader;
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
@@ -57,7 +57,7 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 
 struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
-    fd: Arc<F::Handle>,
+    handle: Arc<F::Handle>,
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
@@ -155,8 +155,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         );
                         files.clear();
                     } else {
-                        let fd = Arc::new(self.file_system.open(&path)?);
-                        files.push(FileToRecover { seq, fd });
+                        let handle = Arc::new(self.file_system.open(&path)?);
+                        files.push(FileToRecover { seq, handle });
                     }
                 }
             }
@@ -227,16 +227,29 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     if let Err(e) = reader.open(
                         FileId { queue, seq: f.seq },
-                        build_file_reader(self.file_system.as_ref(), f.fd.clone())?,
+                        build_file_reader(self.file_system.as_ref(), f.handle.clone())?,
                     ) {
+                        if f.handle.file_size()? > LogFileHeader::len() {
+                            error!(
+                                "Failed to open log file for recovery: {:?}:{}",
+                                queue, f.seq
+                            );
+                            return Err(e);
+                        }
                         if recovery_mode == RecoveryMode::TolerateAnyCorruption {
-                            warn!("File is corrupted but ignored: {}", e);
-                            f.fd.truncate(0)?;
+                            warn!(
+                                "File is corrupted but ignored: {:?}:{}, {}",
+                                queue, f.seq, e
+                            );
+                            f.handle.truncate(0)?;
                         } else if recovery_mode == RecoveryMode::TolerateTailCorruption
                             && is_last_file
                         {
-                            warn!("The tail of raft log is corrupted but ignored: {}", e);
-                            f.fd.truncate(0)?;
+                            warn!(
+                                "The tail of raft log is corrupted but ignored: {:?}:{}, {}",
+                                queue, f.seq, e
+                            );
+                            f.handle.truncate(0)?;
                         } else {
                             return Err(e);
                         }
@@ -252,13 +265,19 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 if recovery_mode == RecoveryMode::TolerateTailCorruption
                                     && is_last_file =>
                             {
-                                warn!("The tail of raft log is corrupted but ignored: {}", e);
-                                f.fd.truncate(reader.valid_offset())?;
+                                warn!(
+                                    "The tail of raft log is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(reader.valid_offset())?;
                                 break;
                             }
                             Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
-                                warn!("File is corrupted but ignored: {}", e);
-                                f.fd.truncate(reader.valid_offset())?;
+                                warn!(
+                                    "File is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(reader.valid_offset())?;
                                 break;
                             }
                             Err(e) => return Err(e),
@@ -285,7 +304,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             LogQueue::Rewrite => &self.rewrite_files,
         };
         let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<Arc<F::Handle>> = files.iter().map(|f| f.fd.clone()).collect();
+        let files: VecDeque<Arc<F::Handle>> = files.iter().map(|f| f.handle.clone()).collect();
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),

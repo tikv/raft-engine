@@ -31,7 +31,7 @@ pub trait Handle {
 
 /// WriteExt is writer extension api
 pub trait WriteExt {
-    fn truncate(&self, offset: usize) -> Result<()>;
-    fn sync(&self) -> Result<()>;
-    fn allocate(&self, offset: usize, size: usize) -> Result<()>;
+    fn truncate(&mut self, offset: usize) -> Result<()>;
+    fn sync(&mut self) -> Result<()>;
+    fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
 }
