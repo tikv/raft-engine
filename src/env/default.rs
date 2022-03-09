@@ -242,15 +242,17 @@ impl Seek for LogFile {
 }
 
 impl WriteExt for LogFile {
-    fn truncate(&self, offset: usize) -> IoResult<()> {
-        self.inner.truncate(offset)
+    fn truncate(&mut self, offset: usize) -> IoResult<()> {
+        self.inner.truncate(offset)?;
+        self.offset = offset;
+        Ok(())
     }
 
-    fn sync(&self) -> IoResult<()> {
+    fn sync(&mut self) -> IoResult<()> {
         self.inner.sync()
     }
 
-    fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
+    fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {
         self.inner.allocate(offset, size)
     }
 }

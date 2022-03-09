@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use raft::eraftpb::Entry;
+use raft_engine::env::ObfuscatedFileSystem;
 use raft_engine::{Config, Engine, LogBatch, ReadableSize};
 
 use crate::util::*;
@@ -17,16 +18,17 @@ fn test_file_open_error() {
         dir: dir.path().to_str().unwrap().to_owned(),
         ..Default::default()
     };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
 
     {
         let _f = FailGuard::new("log_fd::create::err", "return");
-        assert!(Engine::open(cfg.clone()).is_err());
+        assert!(Engine::open_with_file_system(cfg.clone(), fs.clone()).is_err());
     }
 
     {
         let _f = FailGuard::new("log_fd::open::err", "return");
-        let _ = Engine::open(cfg.clone()).unwrap();
-        assert!(Engine::open(cfg).is_err());
+        let _ = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        assert!(Engine::open_with_file_system(cfg, fs).is_err());
     }
 }
 
@@ -40,9 +42,10 @@ fn test_file_read_error() {
         dir: dir.path().to_str().unwrap().to_owned(),
         ..Default::default()
     };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
 
-    let engine = Engine::open(cfg).unwrap();
+    let engine = Engine::open_with_file_system(cfg, fs).unwrap();
     // Writing an empty message.
     engine
         .write(&mut generate_batch(1, 0, 1, None), true)
@@ -84,9 +87,10 @@ fn test_file_write_error() {
         target_file_size: ReadableSize::kb(1024),
         ..Default::default()
     };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
 
-    let engine = Engine::open(cfg.clone()).unwrap();
+    let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     engine
         .write(&mut generate_batch(1, 1, 2, Some(&entry)), false)
         .unwrap();
@@ -113,7 +117,7 @@ fn test_file_write_error() {
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
     drop(engine);
-    let engine = Engine::open(cfg).unwrap();
+    let engine = Engine::open_with_file_system(cfg, fs).unwrap();
     assert_eq!(engine.first_index(1).unwrap(), 1);
     assert_eq!(engine.last_index(1).unwrap(), 3);
     assert_eq!(engine.first_index(2).unwrap(), 1);
@@ -132,9 +136,10 @@ fn test_file_rotate_error() {
         target_file_size: ReadableSize::kb(4),
         ..Default::default()
     };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
 
-    let engine = Engine::open(cfg.clone()).unwrap();
+    let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     engine
         .write(&mut generate_batch(1, 1, 2, Some(&entry)), false)
         .unwrap();
@@ -173,7 +178,7 @@ fn test_file_rotate_error() {
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
     drop(engine);
-    let engine = Engine::open(cfg).unwrap();
+    let engine = Engine::open_with_file_system(cfg, fs).unwrap();
     assert_eq!(engine.first_index(1).unwrap(), 1);
     assert_eq!(engine.last_index(1).unwrap(), 4);
     assert_eq!(engine.first_index(2).unwrap(), 1);
@@ -277,9 +282,10 @@ fn test_error_during_repair() {
         target_file_size: ReadableSize(1),
         ..Default::default()
     };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
 
-    let engine = Engine::open(cfg.clone()).unwrap();
+    let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     for rid in 1..=10 {
         engine
             .write(&mut generate_batch(rid, 1, 11, Some(&entry)), true)
@@ -295,9 +301,11 @@ fn test_error_during_repair() {
     .to_owned();
     {
         let _f = FailGuard::new("log_fd::write::err", "return");
-        assert!(Engine::unsafe_repair(dir.path(), None, script).is_err());
+        assert!(
+            Engine::unsafe_repair_with_file_system(dir.path(), None, script, fs.clone()).is_err()
+        );
     }
-    let engine = Engine::open(cfg).unwrap();
+    let engine = Engine::open_with_file_system(cfg, fs).unwrap();
     for rid in 1..=10 {
         assert_eq!(
             10,

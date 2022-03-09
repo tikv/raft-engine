@@ -4,6 +4,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{mpsc, Arc};
 
 use raft::eraftpb::Entry;
+use raft_engine::env::FileSystem;
 use raft_engine::{Engine, LogBatch, MessageExt};
 
 #[derive(Clone)]
@@ -71,13 +72,13 @@ impl Drop for FailGuard {
     }
 }
 
-pub struct ConcurrentWriteContext {
-    engine: Arc<Engine>,
+pub struct ConcurrentWriteContext<FS: 'static + FileSystem> {
+    engine: Arc<Engine<FS>>,
     ths: Vec<std::thread::JoinHandle<()>>,
 }
 
-impl ConcurrentWriteContext {
-    pub fn new(engine: Arc<Engine>) -> Self {
+impl<FS: 'static + FileSystem> ConcurrentWriteContext<FS> {
+    pub fn new(engine: Arc<Engine<FS>>) -> Self {
         Self {
             engine,
             ths: Vec::new(),
@@ -92,7 +93,7 @@ impl ConcurrentWriteContext {
 
     pub fn write_ext<F>(&mut self, f: F)
     where
-        F: FnOnce(&Engine) + Send + Sync + 'static,
+        F: FnOnce(&Engine<FS>) + Send + Sync + 'static,
     {
         let (ready_tx, ready_rx) = mpsc::channel();
         if self.ths.is_empty() {
@@ -103,7 +104,7 @@ impl ConcurrentWriteContext {
                 std::thread::Builder::new()
                     .spawn(move || {
                         ready_tx_clone.send(()).unwrap();
-                        // Noop.
+                        // No-op.
                         engine_clone.write(&mut LogBatch::default(), false).unwrap();
                     })
                     .unwrap(),
