@@ -25,7 +25,7 @@ const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
 const DEFAULT_LOG_ITEM_BATCH_CAP: usize = 64;
-const MAX_LOG_BATCH_BUFFER_CAP: usize = 4 * 1024 * 1024; // 4MB
+const MAX_LOG_BATCH_BUFFER_CAP: usize = 8 * 1024 * 1024; // 8MB
 
 /// `MessageExt` trait allows for probing log index from a specific type of
 /// protobuf messages.

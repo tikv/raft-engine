@@ -1,9 +1,11 @@
 [package]
 name = "raft-engine-ctl"
 version = "0.1.0"
+authors = ["The TiKV Project Developers"]
 edition = "2018"
-authors = ["The TiKV Authors"]
+rust-version = "1.56"
+license = "Apache-2.0"
 
 [dependencies]
 clap = { version = "3.0.0-rc.0", features = ["derive", "cargo"] }
-raft-engine = { path = "..", features = ["scripting", "internals"] }
+raft-engine = { path = "..", version = "0.1.0", features = ["scripting", "internals"] }
