@@ -1,8 +1,12 @@
 [package]
 name = "raft-engine"
-version = "0.1.0"
-authors = ["The TiKV Authors"]
+version = "0.1.0-pre-alpha"
+authors = ["The TiKV Project Developers"]
 edition = "2018"
+description = "A persistent storage engine for Multi-Raft logs"
+readme = "README.md"
+repository = "https://github.com/tikv/raft-engine"
+license = "Apache-2.0"
 
 [[example]]
 name = "append-compact-purge"
