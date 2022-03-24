@@ -643,7 +643,7 @@ impl Drop for MemTable {
     fn drop(&mut self) {
         let mut append_kvs = 0;
         let mut rewrite_kvs = 0;
-        for (_k, (_v, id)) in &self.kvs {
+        for (_v, id) in self.kvs.values() {
             match id.queue {
                 LogQueue::Rewrite => rewrite_kvs += 1,
                 LogQueue::Append => append_kvs += 1,
