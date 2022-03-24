@@ -107,6 +107,7 @@ impl MemTable {
             );
             self.rewrite_count += rhs.rewrite_count;
             self.entry_indexes.append(&mut rhs.entry_indexes);
+            rhs.rewrite_count = 0;
         }
 
         for (key, (value, file_id)) in rhs.kvs.iter() {
@@ -638,6 +639,26 @@ impl MemTable {
     }
 }
 
+impl Drop for MemTable {
+    fn drop(&mut self) {
+        let mut append_kvs = 0;
+        let mut rewrite_kvs = 0;
+        for (_v, id) in self.kvs.values() {
+            match id.queue {
+                LogQueue::Rewrite => rewrite_kvs += 1,
+                LogQueue::Append => append_kvs += 1,
+            }
+        }
+
+        self.global_stats
+            .delete(LogQueue::Rewrite, self.rewrite_count + rewrite_kvs);
+        self.global_stats.delete(
+            LogQueue::Append,
+            self.entry_indexes.len() - self.rewrite_count + append_kvs,
+        );
+    }
+}
+
 type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 
 /// A collection of [`MemTable`]s.
@@ -1055,6 +1076,10 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 2);
         memtable.consistency_check();
+        assert_eq!(
+            memtable.global_stats.live_entries(LogQueue::Append),
+            memtable.entries_size()
+        );
 
         // Partial overlap Appending.
         // Append entries [25, 35) file_num = 3.
@@ -1071,6 +1096,10 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
         memtable.consistency_check();
+        assert_eq!(
+            memtable.global_stats.live_entries(LogQueue::Append),
+            memtable.entries_size()
+        );
 
         // Full overlap Appending.
         // Append entries [10, 40) file_num = 4.
@@ -1085,6 +1114,14 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         memtable.consistency_check();
+        assert_eq!(
+            memtable.global_stats.live_entries(LogQueue::Append),
+            memtable.entries_size()
+        );
+
+        let global_stats = Arc::clone(&memtable.global_stats);
+        drop(memtable);
+        assert_eq!(global_stats.live_entries(LogQueue::Append), 0);
     }
 
     #[test]
@@ -1122,6 +1159,10 @@ mod tests {
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
+        assert_eq!(
+            memtable.global_stats.live_entries(LogQueue::Append),
+            memtable.entries_size()
+        );
         memtable.consistency_check();
 
         // Compact to 5.
@@ -1132,6 +1173,10 @@ mod tests {
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
+        assert_eq!(
+            memtable.global_stats.live_entries(LogQueue::Append),
+            memtable.entries_size()
+        );
         // Can't override compacted entries.
         assert!(
             catch_unwind_silent(|| memtable.append(generate_entry_indexes(
@@ -1150,6 +1195,10 @@ mod tests {
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
+        assert_eq!(
+            memtable.global_stats.live_entries(LogQueue::Append),
+            memtable.entries_size()
+        );
         memtable.consistency_check();
 
         // Compact to 20 or smaller index, nothing happens.
@@ -1661,6 +1710,11 @@ mod tests {
             expected_deleted_rewrite
         );
         memtable.consistency_check();
+
+        let global_stats = Arc::clone(&memtable.global_stats);
+        drop(memtable);
+        assert_eq!(global_stats.live_entries(LogQueue::Append), 0);
+        assert_eq!(global_stats.live_entries(LogQueue::Rewrite), 0);
     }
 
     #[test]

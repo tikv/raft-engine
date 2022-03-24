@@ -831,6 +831,7 @@ mod tests {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
+        assert_eq!(engine.stats.live_entries(LogQueue::Append), 6); // 5 entries + 1 kv
 
         // rewrite:   [20..25]
         // append: [10   ..25]
@@ -854,6 +855,9 @@ mod tests {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
+        assert_eq!(engine.stats.live_entries(LogQueue::Append), 22); // 20 entries + 2 kv
+        engine.clean(rid - 1);
+        assert_eq!(engine.stats.live_entries(LogQueue::Append), 16);
         // rewrite: [20..25][10..25]
         // append: [10..25]
         engine
