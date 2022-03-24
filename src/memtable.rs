@@ -643,8 +643,7 @@ impl Drop for MemTable {
     fn drop(&mut self) {
         let mut append_kvs = 0;
         let mut rewrite_kvs = 0;
-        let kvs = std::mem::replace(&mut self.kvs, BTreeMap::default());
-        for (_k, (_v, id)) in kvs.into_iter() {
+        for (_k, (_v, id)) in &self.kvs {
             match id.queue {
                 LogQueue::Rewrite => rewrite_kvs += 1,
                 LogQueue::Append => append_kvs += 1,
