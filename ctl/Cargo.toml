@@ -4,6 +4,8 @@ version = "0.1.0"
 authors = ["The TiKV Project Developers"]
 edition = "2018"
 rust-version = "1.56"
+description = "A control tool for Raft Engine"
+repository = "https://github.com/tikv/raft-engine"
 license = "Apache-2.0"
 
 [dependencies]
