@@ -36,9 +36,9 @@ pub struct EntryIndex {
     pub compression_type: CompressionType,
 
     /// The relative offset within its group of entries.
-    pub entry_offset: u64,
+    pub entry_offset: u32,
     /// The encoded length within its group of entries.
-    pub entry_len: usize,
+    pub entry_len: u32,
 }
 
 impl Default for EntryIndex {
@@ -2031,5 +2031,11 @@ mod tests {
             memtable.put(key1.clone(), value.clone(), FileId::dummy(LogQueue::Append));
             memtable.put(key2.clone(), value.clone(), FileId::dummy(LogQueue::Append));
         });
+    }
+
+    #[test]
+    fn test_entry_index_size() {
+        println!("{}", std::mem::size_of::<FileBlockHandle>());
+        println!("{}", std::mem::size_of::<EntryIndex>());
     }
 }
