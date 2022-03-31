@@ -53,6 +53,59 @@ impl Default for EntryIndex {
     }
 }
 
+impl EntryIndex {
+    fn from_thin(index: u64, e: ThinEntryIndex) -> Self {
+        Self {
+            index,
+            entries: e.entries,
+            compression_type: e.compression_type,
+            entry_offset: e.entry_offset,
+            entry_len: e.entry_len,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct ThinEntryIndex {
+    entries: Option<FileBlockHandle>,
+    compression_type: CompressionType,
+    entry_offset: u32,
+    entry_len: u32,
+}
+
+impl Default for ThinEntryIndex {
+    fn default() -> ThinEntryIndex {
+        ThinEntryIndex {
+            entries: None,
+            compression_type: CompressionType::None,
+            entry_offset: 0,
+            entry_len: 0,
+        }
+    }
+}
+
+impl From<EntryIndex> for ThinEntryIndex {
+    fn from(e: EntryIndex) -> Self {
+        Self {
+            entries: e.entries,
+            compression_type: e.compression_type,
+            entry_offset: e.entry_offset,
+            entry_len: e.entry_len,
+        }
+    }
+}
+
+impl From<&EntryIndex> for ThinEntryIndex {
+    fn from(e: &EntryIndex) -> Self {
+        Self {
+            entries: e.entries,
+            compression_type: e.compression_type,
+            entry_offset: e.entry_offset,
+            entry_len: e.entry_len,
+        }
+    }
+}
+
 /// In-memory storage for Raft Groups.
 ///
 /// Each Raft Group has its own `MemTable` to store all key value pairs and the
@@ -63,7 +116,9 @@ pub struct MemTable {
 
     /// Container of entries. Incoming entries are pushed to the back with
     /// ascending log indexes.
-    entry_indexes: VecDeque<EntryIndex>,
+    entry_indexes: VecDeque<ThinEntryIndex>,
+    /// The log index of the first entry.
+    first_index: u64,
     /// The amount of rewritten entries. Rewritten entries are the oldest
     /// entries and stored at the front of the container.
     rewrite_count: usize,
@@ -80,6 +135,7 @@ impl MemTable {
         MemTable {
             region_id,
             entry_indexes: VecDeque::with_capacity(SHRINK_CAPACITY_TARGET),
+            first_index: 0,
             rewrite_count: 0,
             kvs: BTreeMap::default(),
             global_stats,
@@ -211,7 +267,7 @@ impl MemTable {
 
             let ioffset = (index - first) as usize;
             let entry_index = self.entry_indexes[ioffset];
-            Some(entry_index)
+            Some(EntryIndex::from_thin(index, entry_index))
         } else {
             None
         }
@@ -237,8 +293,9 @@ impl MemTable {
                 false, /* allow_overwrite */
             );
             self.global_stats.add(LogQueue::Append, len);
-            // TODO: Optimize this.
-            self.entry_indexes.extend(entry_indexes);
+            for ei in entry_indexes.into_iter() {
+                self.entry_indexes.push_back(ei.into());
+            }
         }
     }
 
@@ -260,7 +317,9 @@ impl MemTable {
                 true, /* allow_overwrite */
             );
             self.global_stats.add(LogQueue::Rewrite, len);
-            self.entry_indexes.extend(entry_indexes);
+            for ei in entry_indexes.into_iter() {
+                self.entry_indexes.push_back(ei.into());
+            }
             self.rewrite_count = self.entry_indexes.len();
         }
     }
@@ -288,8 +347,8 @@ impl MemTable {
             return;
         }
 
-        let first = self.entry_indexes[0].index;
-        let last = self.entry_indexes[len - 1].index;
+        let first = self.first_index;
+        let last = self.first_index + len as u64 - 1;
         let rewrite_first = std::cmp::max(rewrite_indexes[0].index, first);
         let rewrite_last = std::cmp::min(rewrite_indexes[rewrite_indexes.len() - 1].index, last);
         let mut rewrite_len = (rewrite_last + 1).saturating_sub(rewrite_first) as usize;
@@ -324,7 +383,7 @@ impl MemTable {
                 break;
             }
 
-            *index = *rindex;
+            *index = rindex.into();
         }
 
         if gate.is_none() {
@@ -345,7 +404,7 @@ impl MemTable {
         if self.entry_indexes.is_empty() {
             return 0;
         }
-        let first = self.entry_indexes[0].index;
+        let first = self.first_index;
         if index <= first {
             return 0;
         }
@@ -455,11 +514,11 @@ impl MemTable {
         if len == 0 {
             return Err(Error::EntryNotFound);
         }
-        let first = self.entry_indexes[0].index;
+        let first = self.first_index;
         if begin < first {
             return Err(Error::EntryCompacted);
         }
-        let last = self.entry_indexes[len - 1].index;
+        let last = self.first_index + len as u64 - 1;
         if end > last + 1 {
             return Err(Error::EntryNotFound);
         }
@@ -468,19 +527,18 @@ impl MemTable {
         let end_pos = (end - begin) as usize + start_pos;
 
         let (first, second) = slices_in_range(&self.entry_indexes, start_pos, end_pos);
-        if let Some(max_size) = max_size {
-            let mut total_size = 0;
-            for idx in first.iter().chain(second) {
-                total_size += idx.entry_len;
-                // No matter max_size's value, fetch one entry at least.
+        let mut total_size = 0;
+        let mut index = begin;
+        for idx in first.iter().chain(second) {
+            total_size += idx.entry_len;
+            // No matter max_size's value, fetch one entry at least.
+            if let Some(max_size) = max_size {
                 if total_size as usize > max_size && total_size > idx.entry_len {
                     break;
                 }
-                vec_idx.push(*idx);
             }
-        } else {
-            vec_idx.extend_from_slice(first);
-            vec_idx.extend_from_slice(second);
+            vec_idx.push(EntryIndex::from_thin(index, *idx));
+            index += 1;
         }
         Ok(())
     }
@@ -492,18 +550,31 @@ impl MemTable {
         gate: FileSeq,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
-        let begin = self
-            .entry_indexes
-            .iter()
-            .find(|e| e.entries.unwrap().id.queue == LogQueue::Append);
-        let end = self
-            .entry_indexes
-            .iter()
-            .rev()
-            .find(|e| e.entries.unwrap().id.seq <= gate);
-        if let (Some(begin), Some(end)) = (begin, end) {
-            if begin.index <= end.index {
-                return self.fetch_entries_to(begin.index, end.index + 1, None, vec_idx);
+        if let Some((first, last)) = self.span() {
+            let mut index = first;
+            let mut front = None;
+            for ei in &self.entry_indexes {
+                if ei.entries.unwrap().id.queue == LogQueue::Append {
+                    front = Some(index);
+                    break;
+                }
+                index += 1;
+            }
+            let mut back = None;
+            if front.is_some() {
+                index = last;
+                for ei in self.entry_indexes.iter().rev() {
+                    if ei.entries.unwrap().id.seq <= gate {
+                        back = Some(index);
+                        break;
+                    }
+                    index -= 1;
+                }
+            };
+            if let (Some(front), Some(back)) = (front, back) {
+                if front <= back {
+                    return self.fetch_entries_to(front, back + 1, None, vec_idx);
+                }
             }
         }
         Ok(())
@@ -512,8 +583,8 @@ impl MemTable {
     /// Pulls all rewrite entries to the provided buffer.
     pub fn fetch_rewritten_entry_indexes(&self, vec_idx: &mut Vec<EntryIndex>) -> Result<()> {
         if self.rewrite_count > 0 {
-            let first = self.entry_indexes[0].index;
-            let end = self.entry_indexes[self.rewrite_count - 1].index + 1;
+            let first = self.first_index;
+            let end = self.first_index + self.rewrite_count as u64 - 1;
             self.fetch_entries_to(first, end, None, vec_idx)
         } else {
             Ok(())
@@ -590,12 +661,12 @@ impl MemTable {
 
     /// Returns the log index of the first log entry.
     pub fn first_index(&self) -> Option<u64> {
-        self.entry_indexes.front().map(|e| e.index)
+        self.span().map(|s| s.0)
     }
 
     /// Returns the log index of the last log entry.
     pub fn last_index(&self) -> Option<u64> {
-        self.entry_indexes.back().map(|e| e.index)
+        self.span().map(|s| s.1)
     }
 
     /// Returns the first and last log index of the entries in this table.
@@ -603,10 +674,7 @@ impl MemTable {
     fn span(&self) -> Option<(u64, u64)> {
         let len = self.entry_indexes.len();
         if len > 0 {
-            Some((
-                self.entry_indexes[0].index,
-                self.entry_indexes[len - 1].index,
-            ))
+            Some((self.first_index, self.first_index + len as u64 - 1))
         } else {
             None
         }
@@ -615,13 +683,13 @@ impl MemTable {
     #[cfg(test)]
     fn consistency_check(&self) {
         let mut seen_append = false;
-        let mut last_index = None;
+        // let mut last_index = None;
         for idx in self.entry_indexes.iter() {
             // Check 1: indexes are contiguous.
-            if let Some(last_index) = last_index {
-                assert_eq!(idx.index, last_index + 1);
-            }
-            last_index = Some(idx.index);
+            // if let Some(last_index) = last_index {
+            //     assert_eq!(idx.index, last_index + 1);
+            // }
+            // last_index = Some(idx.index);
             // Check 2: rewrites are at the front.
             let queue = idx.entries.unwrap().id.queue;
             if queue == LogQueue::Append {
@@ -1015,13 +1083,10 @@ mod tests {
         }
 
         pub fn fetch_all(&self, vec_idx: &mut Vec<EntryIndex>) {
-            if self.entry_indexes.is_empty() {
-                return;
+            if let Some((first, last)) = self.span() {
+                self.fetch_entries_to(first, last + 1, None, vec_idx)
+                    .unwrap();
             }
-
-            let begin = self.entry_indexes.front().unwrap().index;
-            let end = self.entry_indexes.back().unwrap().index + 1;
-            self.fetch_entries_to(begin, end, None, vec_idx).unwrap();
         }
 
         fn entries_size(&self) -> usize {
@@ -2036,6 +2101,6 @@ mod tests {
     #[test]
     fn test_entry_index_size() {
         println!("{}", std::mem::size_of::<FileBlockHandle>());
-        println!("{}", std::mem::size_of::<EntryIndex>());
+        println!("{}", std::mem::size_of::<ThinEntryIndex>());
     }
 }
