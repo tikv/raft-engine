@@ -103,10 +103,11 @@ where
         let memtables_clone = memtables.clone();
         let metrics_flusher = ThreadBuilder::new()
             .name("raft-engine-metrics".into())
-            .spawn(move || {
-                while rx.recv_timeout(METRICS_FLUSH_INTERVAL).is_err() {
-                    stats_clone.flush_metrics();
-                    memtables_clone.flush_metrics();
+            .spawn(move || loop {
+                stats_clone.flush_metrics();
+                memtables_clone.flush_metrics();
+                if rx.recv_timeout(METRICS_FLUSH_INTERVAL).is_ok() {
+                    break;
                 }
             })?;
 
