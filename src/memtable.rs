@@ -83,17 +83,6 @@ impl Default for ThinEntryIndex {
     }
 }
 
-impl From<EntryIndex> for ThinEntryIndex {
-    fn from(e: EntryIndex) -> Self {
-        Self {
-            entries: e.entries,
-            compression_type: e.compression_type,
-            entry_offset: e.entry_offset,
-            entry_len: e.entry_len,
-        }
-    }
-}
-
 impl From<&EntryIndex> for ThinEntryIndex {
     fn from(e: &EntryIndex) -> Self {
         Self {
@@ -292,7 +281,7 @@ impl MemTable {
                 false, /* allow_overwrite */
             );
             self.global_stats.add(LogQueue::Append, len);
-            for ei in entry_indexes.into_iter() {
+            for ei in &entry_indexes {
                 self.entry_indexes.push_back(ei.into());
             }
         }
@@ -316,7 +305,7 @@ impl MemTable {
                 true, /* allow_overwrite */
             );
             self.global_stats.add(LogQueue::Rewrite, len);
-            for ei in entry_indexes.into_iter() {
+            for ei in &entry_indexes {
                 self.entry_indexes.push_back(ei.into());
             }
             self.rewrite_count = self.entry_indexes.len();
@@ -2081,11 +2070,5 @@ mod tests {
             memtable.put(key1.clone(), value.clone(), FileId::dummy(LogQueue::Append));
             memtable.put(key2.clone(), value.clone(), FileId::dummy(LogQueue::Append));
         });
-    }
-
-    #[test]
-    fn test_entry_index_size() {
-        println!("{}", std::mem::size_of::<FileBlockHandle>());
-        println!("{}", std::mem::size_of::<ThinEntryIndex>());
     }
 }
