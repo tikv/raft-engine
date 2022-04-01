@@ -3,9 +3,9 @@
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
@@ -24,6 +24,8 @@ use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
+const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
     F: FileSystem,
@@ -39,7 +41,8 @@ where
 
     write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
 
-    _metrics_flusher: JoinHandle<()>,
+    tx: Mutex<mpsc::Sender<()>>,
+    metrics_flusher: Option<JoinHandle<()>>,
 
     _phantom: PhantomData<F>,
 }
@@ -95,13 +98,16 @@ where
             listeners.clone(),
         );
 
+        let (tx, rx) = mpsc::channel();
         let stats_clone = stats.clone();
         let memtables_clone = memtables.clone();
-        let _metrics_flusher = ThreadBuilder::new()
+        let metrics_flusher = ThreadBuilder::new()
             .name("raft-engine-metrics".into())
             .spawn(move || {
-                stats_clone.flush_metrics();
-                memtables_clone.flush_metrics();
+                while rx.recv_timeout(METRICS_FLUSH_INTERVAL).is_err() {
+                    stats_clone.flush_metrics();
+                    memtables_clone.flush_metrics();
+                }
             })?;
 
         Ok(Self {
@@ -112,7 +118,8 @@ where
             pipe_log,
             purge_manager,
             write_barrier: Default::default(),
-            _metrics_flusher,
+            tx: Mutex::new(tx),
+            metrics_flusher: Some(metrics_flusher),
             _phantom: PhantomData,
         })
     }
@@ -291,6 +298,19 @@ where
 
     pub fn get_used_size(&self) -> usize {
         self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
+    }
+}
+
+impl<F, P> Drop for Engine<F, P>
+where
+    F: FileSystem,
+    P: PipeLog,
+{
+    fn drop(&mut self) {
+        self.tx.lock().unwrap().send(()).unwrap();
+        if let Some(t) = self.metrics_flusher.take() {
+            t.join().unwrap();
+        }
     }
 }
 
