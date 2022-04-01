@@ -17,10 +17,9 @@ use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 use crate::util::slices_in_range;
 use crate::{Error, GlobalStats, Result};
 
-/// Attempt to shrink entry container if its capacity exceeds the threshold.
-const SHRINK_CAPACITY_THRESHOLD: usize = 512;
-/// Target capacity to shrink entry container.
-const SHRINK_CAPACITY_TARGET: usize = 64;
+/// Attempt to shrink entry container if its capacity reaches the threshold.
+const CAPACITY_SHRINK_THRESHOLD: usize = 1024 - 1;
+const CAPACITY_INIT: usize = 32 - 1;
 /// Number of hash table to store [`MemTable`].
 const MEMTABLE_SLOT_COUNT: usize = 128;
 
@@ -134,7 +133,7 @@ impl MemTable {
     pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable {
         MemTable {
             region_id,
-            entry_indexes: VecDeque::with_capacity(SHRINK_CAPACITY_TARGET),
+            entry_indexes: VecDeque::with_capacity(CAPACITY_INIT),
             first_index: 0,
             rewrite_count: 0,
             kvs: BTreeMap::default(),
@@ -493,10 +492,8 @@ impl MemTable {
 
     #[inline]
     fn maybe_shrink_entry_indexes(&mut self) {
-        if self.entry_indexes.capacity() > SHRINK_CAPACITY_THRESHOLD
-            && self.entry_indexes.len() <= SHRINK_CAPACITY_TARGET
-        {
-            self.entry_indexes.shrink_to(SHRINK_CAPACITY_TARGET);
+        if self.entry_indexes.capacity() >= CAPACITY_SHRINK_THRESHOLD {
+            self.entry_indexes.shrink_to_fit();
         }
     }
 
