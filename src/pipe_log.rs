@@ -4,11 +4,13 @@
 
 use std::cmp::Ordering;
 
+use strum::EnumCount;
+
 use crate::Result;
 
 /// The type of log queue.
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, EnumCount)]
 pub enum LogQueue {
     Append = 0,
     Rewrite = 1,

@@ -50,6 +50,7 @@ rayon = "1.5"
 rhai = { version = "1.4", features = ["sync"], optional = true }
 scopeguard = "1.1"
 serde = { version = "1.0", features = ["derive"] }
+strum = { version = "0.20", features = ["derive"] }
 thiserror = "1.0"
 
 [dev-dependencies]

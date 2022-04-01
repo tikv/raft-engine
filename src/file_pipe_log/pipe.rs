@@ -9,6 +9,7 @@ use crossbeam::utils::CachePadded;
 use fail::fail_point;
 use log::{error, warn};
 use parking_lot::{Mutex, MutexGuard, RwLock};
+use strum::EnumCount;
 
 use crate::config::Config;
 use crate::env::FileSystem;
@@ -283,7 +284,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
 /// A [`PipeLog`] implementation that stores data in filesystem.
 pub struct DualPipes<F: FileSystem> {
-    pipes: [SinglePipe<F>; 2],
+    pipes: [SinglePipe<F>; LogQueue::COUNT],
 
     _dir_lock: File,
 }
