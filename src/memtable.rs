@@ -13,6 +13,7 @@ use crate::log_batch::{
     Command, CompressionType, KeyValue, LogBatch, LogItemBatch, LogItemContent, LogItemDrain,
     OpType,
 };
+use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 use crate::util::slices_in_range;
 use crate::{Error, GlobalStats, Result};
@@ -598,6 +599,11 @@ impl MemTable {
         self.entry_indexes.back().map(|e| e.index)
     }
 
+    fn heap_size(&self) -> usize {
+        // FIXME: cover the map of kvs.
+        self.entry_indexes.capacity() * std::mem::size_of::<EntryIndex>()
+    }
+
     /// Returns the first and last log index of the entries in this table.
     #[inline]
     fn span(&self) -> Option<(u64, u64)> {
@@ -900,6 +906,16 @@ impl MemTableAccessor {
                 },
             }
         }
+    }
+
+    pub(crate) fn flush_metrics(&self) {
+        let mut total = 0;
+        for tables in &self.slots {
+            tables.read().values().for_each(|t| {
+                total += t.read().heap_size();
+            });
+        }
+        MEMORY_USAGE.set(total as i64);
     }
 
     #[inline]

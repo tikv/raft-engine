@@ -163,4 +163,9 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "raft_engine_memory_usage",
+        "Memory in bytes used by Raft engine",
+    )
+    .unwrap();
 }

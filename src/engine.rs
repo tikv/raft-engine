@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::Instant;
 
 use log::{error, info};
@@ -37,6 +38,8 @@ where
     purge_manager: PurgeManager<P>,
 
     write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
+
+    _metrics_flusher: JoinHandle<()>,
 
     _phantom: PhantomData<F>,
 }
@@ -92,6 +95,15 @@ where
             listeners.clone(),
         );
 
+        let stats_clone = stats.clone();
+        let memtables_clone = memtables.clone();
+        let _metrics_flusher = ThreadBuilder::new()
+            .name("raft-engine-metrics".into())
+            .spawn(move || {
+                stats_clone.flush_metrics();
+                memtables_clone.flush_metrics();
+            })?;
+
         Ok(Self {
             cfg,
             listeners,
@@ -100,6 +112,7 @@ where
             pipe_log,
             purge_manager,
             write_barrier: Default::default(),
+            _metrics_flusher,
             _phantom: PhantomData,
         })
     }
@@ -206,8 +219,6 @@ where
     /// Purges expired logs files and returns a set of Raft group ids that need
     /// to be compacted.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        // TODO: Move this to a dedicated thread.
-        self.stats.flush_metrics();
         self.purge_manager.purge_expired_files()
     }
 
