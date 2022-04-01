@@ -72,17 +72,6 @@ struct ThinEntryIndex {
     entry_len: u32,
 }
 
-impl Default for ThinEntryIndex {
-    fn default() -> ThinEntryIndex {
-        ThinEntryIndex {
-            entries: None,
-            compression_type: CompressionType::None,
-            entry_offset: 0,
-            entry_len: 0,
-        }
-    }
-}
-
 impl From<&EntryIndex> for ThinEntryIndex {
     fn from(e: &EntryIndex) -> Self {
         Self {
@@ -657,14 +646,8 @@ impl MemTable {
     #[cfg(test)]
     fn consistency_check(&self) {
         let mut seen_append = false;
-        // let mut last_index = None;
         for idx in self.entry_indexes.iter() {
-            // Check 1: indexes are contiguous.
-            // if let Some(last_index) = last_index {
-            //     assert_eq!(idx.index, last_index + 1);
-            // }
-            // last_index = Some(idx.index);
-            // Check 2: rewrites are at the front.
+            // rewrites are at the front.
             let queue = idx.entries.unwrap().id.queue;
             if queue == LogQueue::Append {
                 seen_append = true;
