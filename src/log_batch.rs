@@ -570,7 +570,7 @@ impl LogBatch {
     pub fn merge(&mut self, rhs: &mut Self) -> Result<()> {
         debug_assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
         if !rhs.buf.is_empty() {
-            if rhs.buf.len() + self.buf.len() - LOG_BATCH_HEADER_LEN > i32::MAX as usize {
+            if rhs.buf.len() + self.buf.len() > i32::MAX as usize + LOG_BATCH_HEADER_LEN * 2 {
                 return Err(Error::Full);
             }
             self.buf_state = BufState::Incomplete;
@@ -599,7 +599,7 @@ impl LogBatch {
         for e in entries {
             let buf_offset = self.buf.len();
             e.write_to_vec(&mut self.buf)?;
-            if self.buf.len() > i32::MAX as usize {
+            if self.buf.len() > i32::MAX as usize + LOG_BATCH_HEADER_LEN {
                 self.buf.truncate(old_buf_len);
                 self.buf_state = BufState::Open;
                 return Err(Error::Full);
@@ -630,7 +630,7 @@ impl LogBatch {
         self.buf_state = BufState::Incomplete;
         let old_buf_len = self.buf.len();
         for (ei, e) in entry_indexes.iter_mut().zip(entries.iter()) {
-            if e.len() + self.buf.len() > i32::MAX as usize {
+            if e.len() + self.buf.len() > i32::MAX as usize + LOG_BATCH_HEADER_LEN {
                 self.buf.truncate(old_buf_len);
                 self.buf_state = BufState::Open;
                 return Err(Error::Full);

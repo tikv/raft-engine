@@ -409,6 +409,7 @@ impl MemTable {
             return 0;
         }
         let count = std::cmp::min((index - first) as usize, self.entry_indexes.len());
+        self.first_index = index;
         self.entry_indexes.drain(..count);
         self.maybe_shrink_entry_indexes();
 
@@ -474,15 +475,19 @@ impl MemTable {
                         self.region_id
                     );
                 }
+                self.first_index = first_index_to_add;
             } else if last + 1 < first_index_to_add {
                 if allow_hole {
                     self.unsafe_truncate_back(first, 0, last);
                 } else {
                     panic!("memtable {} has a hole", self.region_id);
                 }
+                self.first_index = first_index_to_add;
             } else if first_index_to_add != last + 1 {
                 self.unsafe_truncate_back(first, first_index_to_add, last);
             }
+        } else {
+            self.first_index = first_index_to_add;
         }
     }
 
@@ -518,8 +523,7 @@ impl MemTable {
         if begin < first {
             return Err(Error::EntryCompacted);
         }
-        let last = self.first_index + len as u64 - 1;
-        if end > last + 1 {
+        if end > self.first_index + len as u64 {
             return Err(Error::EntryNotFound);
         }
 
@@ -551,30 +555,14 @@ impl MemTable {
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         if let Some((first, last)) = self.span() {
-            let mut index = first;
-            let mut front = None;
-            for ei in &self.entry_indexes {
-                if ei.entries.unwrap().id.queue == LogQueue::Append {
-                    front = Some(index);
-                    break;
-                }
-                index += 1;
-            }
-            let mut back = None;
-            if front.is_some() {
-                index = last;
-                for ei in self.entry_indexes.iter().rev() {
-                    if ei.entries.unwrap().id.seq <= gate {
-                        back = Some(index);
-                        break;
-                    }
-                    index -= 1;
-                }
-            };
-            if let (Some(front), Some(back)) = (front, back) {
-                if front <= back {
-                    return self.fetch_entries_to(front, back + 1, None, vec_idx);
-                }
+            let mut i = self.rewrite_count;
+            while first + i as u64 <= last && self.entry_indexes[i].entries.unwrap().id.seq <= gate
+            {
+                vec_idx.push(EntryIndex::from_thin(
+                    first + i as u64,
+                    self.entry_indexes[i],
+                ));
+                i += 1;
             }
         }
         Ok(())
@@ -584,7 +572,7 @@ impl MemTable {
     pub fn fetch_rewritten_entry_indexes(&self, vec_idx: &mut Vec<EntryIndex>) -> Result<()> {
         if self.rewrite_count > 0 {
             let first = self.first_index;
-            let end = self.first_index + self.rewrite_count as u64 - 1;
+            let end = self.first_index + self.rewrite_count as u64;
             self.fetch_entries_to(first, end, None, vec_idx)
         } else {
             Ok(())

@@ -537,6 +537,7 @@ mod tests {
                 &mut entries,
             )
             .unwrap();
+            assert_eq!(entries.len(), (end - start) as usize);
             assert_eq!(entries.first().unwrap().index, start);
             assert_eq!(
                 entries.last().unwrap().index,
