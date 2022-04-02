@@ -115,7 +115,7 @@ impl<T: std::cmp::PartialEq> StableVecDeque<T> {
             inner: VecDeque::with_capacity(capacity),
             // Test overflow handling.
             #[cfg(test)]
-            start_addr: StableAddress(0),
+            start_addr: StableAddress(u32::MAX),
             #[cfg(not(test))]
             start_addr: StableAddress(0),
         }
