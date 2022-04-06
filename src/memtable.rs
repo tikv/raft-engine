@@ -600,7 +600,7 @@ impl MemTable {
     }
 
     fn heap_size(&self) -> usize {
-        // FIXME: cover the map of kvs.
+        // TODO: cover the map of kvs.
         self.entry_indexes.capacity() * std::mem::size_of::<EntryIndex>()
     }
 
