@@ -64,7 +64,7 @@ impl EntryIndex {
         }
     }
 
-    fn get_entries(&self) -> EntriesHandle {
+    fn get_entries_handle(&self) -> EntriesHandle {
         EntriesHandle {
             block: self.entries.unwrap(),
             compression_type: self.compression_type,
@@ -75,9 +75,9 @@ impl EntryIndex {
 /// Location of a group of entries.
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct EntriesHandle {
-    // File location of the group of entries that this entry belongs to.
+    /// File location of the group of entries that this entry belongs to.
     block: FileBlockHandle,
-    // How its group of entries is compressed.
+    /// How its group of entries is compressed.
     compression_type: CompressionType,
 }
 
@@ -95,10 +95,10 @@ struct EntryHandle {
     queue: LogQueue,
 }
 
-/// `VecDeque` with twists:
+/// [`VecDeque`] with a few twists:
+///
 /// - All items are indexed by [`StableAddress`], i.e. the addresses for
-///   existing
-/// items will not be changed unless otherwise noticed.
+/// existing items will not be changed unless otherwise noticed.
 /// - Only unique items will be stored. Adding a duplicate item will return an
 /// address to the previous existing one.
 struct StableVecDeque<T> {
@@ -106,6 +106,7 @@ struct StableVecDeque<T> {
     start_addr: StableAddress,
 }
 
+/// The address used to locate an item in [`StableVecDeque`].
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct StableAddress(u32);
 
@@ -203,9 +204,9 @@ pub struct MemTable {
     /// The ID of current Raft Group.
     region_id: u64,
 
-    /// Containers of [`EntriesHandle`], indexes by [`LogQueue`].
+    /// Containers of [`EntriesHandle`]s, indexes by [`LogQueue`].
     entries_handles: [StableVecDeque<EntriesHandle>; LogQueue::COUNT],
-    /// Container of [`EntryHandle`]. Incoming entries are pushed to the back
+    /// Container of [`EntryHandle`]s. Incoming entries are pushed to the back
     /// with ascending log indexes.
     entry_handles: VecDeque<EntryHandle>,
     /// The log index of the first entry.
@@ -260,10 +261,11 @@ impl MemTable {
             self.global_stats.add(queue, rhs.entry_handles.len());
             self.rewrite_count += rhs.rewrite_count;
 
-            let rhs_len = rhs.entry_handles.len();
-            self.entry_handles.append(&mut rhs.entry_handles);
             let diff = self.entries_handles[queue as usize]
                 .unsafe_append(&mut rhs.entries_handles[queue as usize]);
+
+            let rhs_len = rhs.entry_handles.len();
+            self.entry_handles.append(&mut rhs.entry_handles);
             for entry in self.entry_handles.iter_mut().rev().take(rhs_len) {
                 entry.entries_addr = entry.entries_addr + diff;
             }
@@ -307,10 +309,12 @@ impl MemTable {
             );
             self.global_stats
                 .add(rhs.entry_handles[0].queue, rhs.entry_handles.len());
+
             std::mem::swap(
                 &mut self.entries_handles[LogQueue::Append as usize],
                 &mut rhs.entries_handles[LogQueue::Append as usize],
             );
+
             self.entry_handles.append(&mut rhs.entry_handles);
         }
 
@@ -382,7 +386,7 @@ impl MemTable {
             let entry_handle = &self.entry_handles[ioffset];
             Some(EntryIndex::new_with(
                 index,
-                self.entries_handles[entry_handle.queue as usize].at(entry_handle.entries_addr),
+                self.get_entries_handle(entry_handle),
                 entry_handle,
             ))
         } else {
@@ -410,11 +414,11 @@ impl MemTable {
                 false, /* allow_overwrite */
             );
             self.global_stats.add(LogQueue::Append, len);
-            let entries_handle = entry_indexes[0].get_entries();
+            let entries_handle = entry_indexes[0].get_entries_handle();
             let queue = entries_handle.block.id.queue;
             let addr = self.entries_handles[queue as usize].push_back(entries_handle);
             for ei in &mut entry_indexes {
-                debug_assert_eq!(entries_handle, ei.get_entries());
+                debug_assert_eq!(entries_handle, ei.get_entries_handle());
                 self.entry_handles.push_back(EntryHandle {
                     offset: ei.entry_offset,
                     len: ei.entry_len,
@@ -443,11 +447,11 @@ impl MemTable {
                 true, /* allow_overwrite */
             );
             self.global_stats.add(LogQueue::Rewrite, len);
-            let entries_handle = entry_indexes[0].get_entries();
+            let entries_handle = entry_indexes[0].get_entries_handle();
             let queue = entries_handle.block.id.queue;
             let addr = self.entries_handles[queue as usize].push_back(entries_handle);
             for ei in &mut entry_indexes {
-                debug_assert_eq!(entries_handle, ei.get_entries());
+                debug_assert_eq!(entries_handle, ei.get_entries_handle());
                 self.entry_handles.push_back(EntryHandle {
                     offset: ei.entry_offset,
                     len: ei.entry_len,
@@ -494,24 +498,22 @@ impl MemTable {
         let pos = (rewrite_first - first) as usize;
         // Adjacent to rewrite entries.
         assert!(pos == 0 || self.entry_handles[pos - 1].queue == LogQueue::Rewrite);
-        // For rewrite append operation, to-be-rewritten entries must be in append
-        // queue.
+        // For rewrite-append operation, only oldest append entries will be rewritten.
         assert!(
             gate.is_none()
                 || self.entry_handles[pos].queue == LogQueue::Append && self.rewrite_count == pos
         );
         let rewrite_pos = (rewrite_first - rewrite_indexes[0].index) as usize;
-        let entries = rewrite_indexes[0].get_entries();
+        let entries = rewrite_indexes[0].get_entries_handle();
         let addr = self.entries_handles[LogQueue::Rewrite as usize].push_back(entries);
         for (i, rindex) in rewrite_indexes[rewrite_pos..rewrite_pos + rewrite_len]
             .iter_mut()
             .enumerate()
         {
-            debug_assert_eq!(entries, rindex.get_entries());
-            let entry_handle = &mut self.entry_handles[i + pos];
+            debug_assert_eq!(entries, rindex.get_entries_handle());
+            let entry_handle = &self.entry_handles[i + pos];
             let old_queue = entry_handle.queue;
-            let entries_handle =
-                self.entries_handles[entry_handle.queue as usize].at(entry_handle.entries_addr);
+            let entries_handle = self.get_entries_handle(entry_handle);
             if let Some(gate) = gate {
                 debug_assert_eq!(old_queue, LogQueue::Append);
                 if entries_handle.block.id.seq > gate {
@@ -525,7 +527,7 @@ impl MemTable {
                 break;
             }
 
-            *entry_handle = EntryHandle {
+            self.entry_handles[i + pos] = EntryHandle {
                 offset: rindex.entry_offset,
                 len: rindex.entry_len,
                 entries_addr: addr,
@@ -533,16 +535,19 @@ impl MemTable {
             };
         }
 
+        // Update statistics and clean up dangling EntriesHandle-s.
         if gate.is_none() {
             // Squeeze operation.
             let next_rewrite_idx = pos + rewrite_len;
             if next_rewrite_idx == self.rewrite_count {
+                // All rewrite entries are renewed.
                 self.entries_handles[LogQueue::Rewrite as usize]
                     .pop_before(self.entry_handles[0].entries_addr);
             } else {
                 // Squeeze operation can not modify `rewrite_count`.
                 assert!(next_rewrite_idx < self.rewrite_count);
                 // Entries smaller than `next_rewrite_idx` are newly rewritten.
+                // `next_rewrite_idx` is the oldest remaining entry.
                 // TODO: add test case for a squeeze operation split into several writes.
                 self.entries_handles[LogQueue::Rewrite as usize]
                     .pop_before(self.entry_handles[next_rewrite_idx].entries_addr);
@@ -550,9 +555,10 @@ impl MemTable {
             self.global_stats
                 .delete(LogQueue::Rewrite, rewrite_indexes.len());
         } else {
-            // Rewrite append entries.
+            // Rewrite-append operation.
             self.rewrite_count += rewrite_len;
             if self.rewrite_count == len {
+                // All append entries are rewritten.
                 self.entries_handles[LogQueue::Append as usize].clear();
             } else {
                 self.entries_handles[LogQueue::Append as usize]
@@ -613,6 +619,7 @@ impl MemTable {
         let truncated = len - new_len;
 
         if self.rewrite_count >= new_len {
+            // All append entries are truncated.
             let truncated_rewrite = self.rewrite_count - new_len;
             self.rewrite_count = new_len;
             self.global_stats
@@ -621,6 +628,7 @@ impl MemTable {
                 .delete(LogQueue::Append, truncated - truncated_rewrite);
             self.entries_handles[LogQueue::Append as usize].clear();
         } else {
+            // No rewrite entry is truncated.
             self.global_stats.delete(LogQueue::Append, truncated);
         }
         if let Some(last) = self.entry_handles.back() {
@@ -725,8 +733,8 @@ impl MemTable {
                     break;
                 }
             }
-            let entries = self.entries_handles[entry.queue as usize].at(entry.entries_addr);
-            vec_idx.push(EntryIndex::new_with(index, entries, entry));
+            let entries_handle = self.get_entries_handle(entry);
+            vec_idx.push(EntryIndex::new_with(index, entries_handle, entry));
             index += 1;
         }
         Ok(())
@@ -743,9 +751,13 @@ impl MemTable {
             let mut i = self.rewrite_count;
             while first + i as u64 <= last {
                 let entry = &self.entry_handles[i];
-                let entries = self.entries_handles[entry.queue as usize].at(entry.entries_addr);
-                if entries.block.id.seq <= gate {
-                    vec_idx.push(EntryIndex::new_with(first + i as u64, entries, entry));
+                let entries_handle = self.get_entries_handle(entry);
+                if entries_handle.block.id.seq <= gate {
+                    vec_idx.push(EntryIndex::new_with(
+                        first + i as u64,
+                        entries_handle,
+                        entry,
+                    ));
                     i += 1;
                 } else {
                     break;
@@ -793,13 +805,7 @@ impl MemTable {
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
             LogQueue::Rewrite => self.entry_handles.front(),
         };
-        let ents_min = entry.map(|e| {
-            self.entries_handles[e.queue as usize]
-                .at(e.entries_addr)
-                .block
-                .id
-                .seq
-        });
+        let ents_min = entry.map(|e| self.get_entries_handle(e).block.id.seq);
         let kvs_min = self
             .kvs
             .values()
@@ -822,12 +828,9 @@ impl MemTable {
     /// Returns the number of entries smaller than or equal to `gate`.
     pub fn entries_count_before(&self, mut gate: FileId) -> usize {
         gate.seq += 1;
-        let idx = self.entry_handles.binary_search_by_key(&gate, |ei| {
-            self.entries_handles[ei.queue as usize]
-                .at(ei.entries_addr)
-                .block
-                .id
-        });
+        let idx = self
+            .entry_handles
+            .binary_search_by_key(&gate, |ei| self.get_entries_handle(ei).block.id);
         match idx {
             Ok(idx) => idx,
             Err(idx) => idx,
@@ -864,19 +867,17 @@ impl MemTable {
         }
     }
 
+    #[inline]
+    fn get_entries_handle(&self, entry_handle: &EntryHandle) -> &EntriesHandle {
+        &self.entries_handles[entry_handle.queue as usize].at(entry_handle.entries_addr)
+    }
+
     #[cfg(test)]
     fn consistency_check(&self) {
         let mut seen_append = false;
         for idx in self.entry_handles.iter() {
             // Entry handles are consistent with entries handles.
-            assert_eq!(
-                self.entries_handles[idx.queue as usize]
-                    .at(idx.entries_addr)
-                    .block
-                    .id
-                    .queue,
-                idx.queue
-            );
+            assert_eq!(self.get_entries_handle(idx).block.id.queue, idx.queue);
             // Rewrites are at the front.
             if idx.queue == LogQueue::Append {
                 seen_append = true;
@@ -1273,13 +1274,7 @@ mod tests {
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
                 LogQueue::Rewrite => self.entry_handles.get(self.rewrite_count - 1),
             };
-            let ents_max = entry.map(|e| {
-                self.entries_handles[e.queue as usize]
-                    .at(e.entries_addr)
-                    .block
-                    .id
-                    .seq
-            });
+            let ents_max = entry.map(|e| self.get_entries_handle(e).block.id.seq);
 
             let kvs_max = self.kvs_max_file_seq(queue);
             match (ents_max, kvs_max) {
