@@ -146,17 +146,13 @@ impl<T: std::cmp::PartialEq> StableVecDeque<T> {
         self.inner.truncate(count + 1);
     }
 
-    /// Appends all items from `rhs`, leaving it empty. Will change address for
-    /// `rhs`. Returns the address change (difference, addition) of `rhs`.
+    /// Appends all items from `rhs`, leaving it empty. Returns the address
+    /// change for all items in `rhs`.
     #[inline]
-    fn unsafe_append(&mut self, rhs: &mut Self) -> Option<(usize, bool)> {
+    fn unsafe_append(&mut self, rhs: &mut Self) -> usize {
         let self_len = self.inner.len();
         self.inner.append(&mut rhs.inner);
-        match (rhs.start_addr, self.start_addr + self_len) {
-            (a, b) if a.0 > b.0 => Some((a - b, false)),
-            (a, b) if a.0 < b.0 => Some((b - a, true)),
-            _ => None,
-        }
+        (self.start_addr + self_len) - rhs.start_addr
     }
 
     #[inline]
@@ -266,16 +262,10 @@ impl MemTable {
 
             let rhs_len = rhs.entry_handles.len();
             self.entry_handles.append(&mut rhs.entry_handles);
-            if let Some((diff, add)) = self.entries_handles[queue as usize]
-                .unsafe_append(&mut rhs.entries_handles[queue as usize])
-            {
-                for entry in self.entry_handles.iter_mut().rev().take(rhs_len) {
-                    entry.entries_addr = if add {
-                        entry.entries_addr + diff
-                    } else {
-                        entry.entries_addr - diff
-                    };
-                }
+            let diff = self.entries_handles[queue as usize]
+                .unsafe_append(&mut rhs.entries_handles[queue as usize]);
+            for entry in self.entry_handles.iter_mut().rev().take(rhs_len) {
+                entry.entries_addr = entry.entries_addr + diff;
             }
 
             rhs.rewrite_count = 0;
