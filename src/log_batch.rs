@@ -584,10 +584,10 @@ impl LogBatch {
             self.buf.extend_from_slice(&rhs.buf[LOG_BATCH_HEADER_LEN..]);
             rhs.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
             rhs.buf.truncate(LOG_BATCH_HEADER_LEN);
-            self.buf_state = BufState::Open;
-            rhs.buf_state = BufState::Open;
         }
         self.item_batch.merge(&mut rhs.item_batch);
+        self.buf_state = BufState::Open;
+        rhs.buf_state = BufState::Open;
         Ok(())
     }
 
@@ -653,8 +653,8 @@ impl LogBatch {
             self.buf.extend(e);
             ei.entry_len = (self.buf.len() - buf_offset) as u32;
         }
-        self.buf_state = BufState::Open;
         self.item_batch.add_entry_indexes(region_id, entry_indexes);
+        self.buf_state = BufState::Open;
         Ok(())
     }
 
