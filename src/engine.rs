@@ -436,7 +436,7 @@ where
         }
         let e = parse_from_bytes(
             &cache.block.borrow()
-                [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len],
+                [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
         )?;
         assert_eq!(M::index(&e), idx.index);
         Ok(e)
@@ -459,7 +459,7 @@ where
             );
         }
         Ok(cache.block.borrow()
-            [idx.entry_offset as usize..idx.entry_offset as usize + idx.entry_len]
+            [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize]
             .to_owned())
     })
 }
@@ -537,6 +537,7 @@ mod tests {
                 &mut entries,
             )
             .unwrap();
+            assert_eq!(entries.len(), (end - start) as usize);
             assert_eq!(entries.first().unwrap().index, start);
             assert_eq!(
                 entries.last().unwrap().index,

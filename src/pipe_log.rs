@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use crate::Result;
 
 /// The type of log queue.
+#[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LogQueue {
     Append = 0,

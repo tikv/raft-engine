@@ -23,6 +23,8 @@ pub enum Error {
     EntryCompacted,
     #[error("Entry Not Found")]
     EntryNotFound,
+    #[error("Full")]
+    Full,
     #[error("Other Error: {0}")]
     Other(#[from] Box<dyn error::Error + Send + Sync>),
 }
