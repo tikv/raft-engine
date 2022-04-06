@@ -25,7 +25,9 @@ const CMD_CLEAN: u8 = 0x01;
 const CMD_COMPACT: u8 = 0x02;
 
 const DEFAULT_LOG_ITEM_BATCH_CAP: usize = 64;
-const MAX_LOG_BATCH_BUFFER_CAP: usize = 8 * 1024 * 1024; // 8MB
+const MAX_LOG_BATCH_BUFFER_CAP: usize = 8 * 1024 * 1024;
+// 2GiB, The maximum content length accepted by lz4 compression.
+const MAX_LOG_ENTRIES_SIZE_PER_BATCH: usize = i32::MAX as usize;
 
 /// `MessageExt` trait allows for probing log index from a specific type of
 /// protobuf messages.
@@ -540,7 +542,7 @@ enum BufState {
 /// limits.
 // Calling protocol:
 // Insert log items -> [`finish_populate`] -> [`finish_write`]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct LogBatch {
     item_batch: LogItemBatch,
     buf_state: BufState,
@@ -569,8 +571,12 @@ impl LogBatch {
     /// Moves all log items of `rhs` into `Self`, leaving `rhs` empty.
     pub fn merge(&mut self, rhs: &mut Self) -> Result<()> {
         debug_assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
+        let max_entries_size = (|| {
+            fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
+            MAX_LOG_ENTRIES_SIZE_PER_BATCH
+        })();
         if !rhs.buf.is_empty() {
-            if rhs.buf.len() + self.buf.len() > i32::MAX as usize + LOG_BATCH_HEADER_LEN * 2 {
+            if rhs.buf.len() + self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN * 2 {
                 return Err(Error::Full);
             }
             self.buf_state = BufState::Incomplete;
@@ -596,10 +602,14 @@ impl LogBatch {
         let mut entry_indexes = Vec::with_capacity(entries.len());
         self.buf_state = BufState::Incomplete;
         let old_buf_len = self.buf.len();
+        let max_entries_size = (|| {
+            fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
+            MAX_LOG_ENTRIES_SIZE_PER_BATCH
+        })();
         for e in entries {
             let buf_offset = self.buf.len();
             e.write_to_vec(&mut self.buf)?;
-            if self.buf.len() > i32::MAX as usize + LOG_BATCH_HEADER_LEN {
+            if self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN {
                 self.buf.truncate(old_buf_len);
                 self.buf_state = BufState::Open;
                 return Err(Error::Full);
@@ -629,8 +639,12 @@ impl LogBatch {
 
         self.buf_state = BufState::Incomplete;
         let old_buf_len = self.buf.len();
+        let max_entries_size = (|| {
+            fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
+            MAX_LOG_ENTRIES_SIZE_PER_BATCH
+        })();
         for (ei, e) in entry_indexes.iter_mut().zip(entries.iter()) {
-            if e.len() + self.buf.len() > i32::MAX as usize + LOG_BATCH_HEADER_LEN {
+            if e.len() + self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN {
                 self.buf.truncate(old_buf_len);
                 self.buf_state = BufState::Open;
                 return Err(Error::Full);
