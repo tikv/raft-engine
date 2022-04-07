@@ -174,6 +174,11 @@ impl<T: std::cmp::PartialEq> StableVecDeque<T> {
             self.inner.shrink_to_fit();
         }
     }
+
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.inner.capacity() * std::mem::size_of::<T>()
+    }
 }
 
 impl std::ops::Add<usize> for StableAddress {
@@ -859,7 +864,11 @@ impl MemTable {
 
     fn heap_size(&self) -> usize {
         // FIXME: cover the map of kvs.
-        self.entry_indexes.capacity() * std::mem::size_of::<EntryIndex>()
+        let mut total = self.entry_handles.capacity() * std::mem::size_of::<EntryIndex>();
+        for i in 0..LogQueue::COUNT {
+            total += self.entries_handles[i].heap_size();
+        }
+        total
     }
 
     /// Returns the first and last log index of the entries in this table.
