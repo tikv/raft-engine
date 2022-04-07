@@ -54,7 +54,7 @@ Put this in your Cargo.toml:
 
 ```rust
 [dependencies]
-raft-engine = { git = "https://github.com/tikv/raft-engine", branch = "master" }
+raft-engine = "0.1.0"
 ```
 
 Available Cargo features:
