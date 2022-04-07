@@ -102,7 +102,7 @@ where
         let stats_clone = stats.clone();
         let memtables_clone = memtables.clone();
         let metrics_flusher = ThreadBuilder::new()
-            .name("raft-engine-metrics".into())
+            .name("re-metrics".into())
             .spawn(move || loop {
                 stats_clone.flush_metrics();
                 memtables_clone.flush_metrics();
