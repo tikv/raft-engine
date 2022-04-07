@@ -869,7 +869,7 @@ impl MemTable {
 
     #[inline]
     fn get_entries_handle(&self, entry_handle: &EntryHandle) -> &EntriesHandle {
-        &self.entries_handles[entry_handle.queue as usize].at(entry_handle.entries_addr)
+        self.entries_handles[entry_handle.queue as usize].at(entry_handle.entries_addr)
     }
 
     #[cfg(test)]
