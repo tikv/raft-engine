@@ -290,7 +290,7 @@ impl RhaiFilterMachine {
                                 )?;
                                 entries.push(
                                     block[ei.entry_offset as usize
-                                        ..ei.entry_offset as usize + ei.entry_len]
+                                        ..(ei.entry_offset + ei.entry_len) as usize]
                                         .to_owned(),
                                 );
                             }
