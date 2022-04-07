@@ -3,8 +3,9 @@
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{Builder as ThreadBuilder, JoinHandle};
+use std::time::{Duration, Instant};
 
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
@@ -23,6 +24,8 @@ use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
+const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
     F: FileSystem,
@@ -37,6 +40,9 @@ where
     purge_manager: PurgeManager<P>,
 
     write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
+
+    tx: Mutex<mpsc::Sender<()>>,
+    metrics_flusher: Option<JoinHandle<()>>,
 
     _phantom: PhantomData<F>,
 }
@@ -92,6 +98,19 @@ where
             listeners.clone(),
         );
 
+        let (tx, rx) = mpsc::channel();
+        let stats_clone = stats.clone();
+        let memtables_clone = memtables.clone();
+        let metrics_flusher = ThreadBuilder::new()
+            .name("re-metrics".into())
+            .spawn(move || loop {
+                stats_clone.flush_metrics();
+                memtables_clone.flush_metrics();
+                if rx.recv_timeout(METRICS_FLUSH_INTERVAL).is_ok() {
+                    break;
+                }
+            })?;
+
         Ok(Self {
             cfg,
             listeners,
@@ -100,6 +119,8 @@ where
             pipe_log,
             purge_manager,
             write_barrier: Default::default(),
+            tx: Mutex::new(tx),
+            metrics_flusher: Some(metrics_flusher),
             _phantom: PhantomData,
         })
     }
@@ -206,8 +227,6 @@ where
     /// Purges expired logs files and returns a set of Raft group ids that need
     /// to be compacted.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        // TODO: Move this to a dedicated thread.
-        self.stats.flush_metrics();
         self.purge_manager.purge_expired_files()
     }
 
@@ -280,6 +299,19 @@ where
 
     pub fn get_used_size(&self) -> usize {
         self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
+    }
+}
+
+impl<F, P> Drop for Engine<F, P>
+where
+    F: FileSystem,
+    P: PipeLog,
+{
+    fn drop(&mut self) {
+        self.tx.lock().unwrap().send(()).unwrap();
+        if let Some(t) = self.metrics_flusher.take() {
+            t.join().unwrap();
+        }
     }
 }
 

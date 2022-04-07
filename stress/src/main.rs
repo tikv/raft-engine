@@ -16,7 +16,7 @@ use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::internals::{EventListener, FileBlockHandle};
 use raft_engine::{Command, Config, Engine, LogBatch, MessageExt, ReadableSize};
-use rand::{thread_rng, Rng};
+use rand::{thread_rng, Rng, RngCore};
 
 type WriteBatch = LogBatch;
 
@@ -395,8 +395,10 @@ fn spawn_write(
                 None
             };
             for _ in 0..args.write_entry_count {
+                let mut data = vec![0; args.entry_size];
+                thread_rng().fill_bytes(&mut data);
                 entry_batch.push(Entry {
-                    data: vec![thread_rng().gen::<u8>(); args.entry_size].into(),
+                    data: data.into(),
                     ..Default::default()
                 });
             }

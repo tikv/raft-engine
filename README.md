@@ -2,6 +2,8 @@
 
 [![Rust](https://github.com/tikv/raft-engine/workflows/Rust/badge.svg?branch=master)](https://github.com/tikv/raft-engine/actions/workflows/rust.yml)
 [![codecov](https://codecov.io/gh/tikv/raft-engine/branch/master/graph/badge.svg)](https://app.codecov.io/gh/tikv/raft-engine)
+[![Docs](https://docs.rs/raft-engine/badge.svg)](https://docs.rs/raft-engine)
+[![crates.io](https://img.shields.io/crates/v/raft-engine.svg)](https://crates.io/crates/raft-engine)
 
 Raft Engine is a persistent embedded storage engine with a log-structured design similar to [bitcask](https://github.com/basho/bitcask). It is built for [TiKV](https://github.com/tikv/tikv) to store [Multi-Raft](https://raft.github.io/) logs.
 
@@ -52,7 +54,7 @@ Put this in your Cargo.toml:
 
 ```rust
 [dependencies]
-raft-engine = { git = "https://github.com/tikv/raft-engine", branch = "master" }
+raft-engine = "0.1.0"
 ```
 
 Available Cargo features:
