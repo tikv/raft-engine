@@ -188,13 +188,6 @@ impl std::ops::Add<usize> for StableAddress {
     }
 }
 
-impl std::ops::Sub<usize> for StableAddress {
-    type Output = StableAddress;
-    fn sub(self, rhs: usize) -> Self::Output {
-        StableAddress(self.0.wrapping_sub(rhs as u32))
-    }
-}
-
 impl std::ops::Sub<StableAddress> for StableAddress {
     type Output = usize;
     fn sub(self, rhs: StableAddress) -> Self::Output {
