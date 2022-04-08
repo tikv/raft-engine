@@ -15,7 +15,7 @@ use crate::log_batch::{
 };
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-use crate::util::slices_in_range;
+use crate::util::{hash_u64, slices_in_range};
 use crate::{Error, GlobalStats, Result};
 
 /// Attempt to shrink entry container if its capacity reaches the threshold.
@@ -946,10 +946,7 @@ impl MemTableAccessor {
     #[inline]
     fn slot_index(mut id: u64) -> usize {
         debug_assert!(MEMTABLE_SLOT_COUNT.is_power_of_two());
-        id = (id ^ (id >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        id = (id ^ (id >> 27)).wrapping_mul(0x94d049bb133111eb);
-        // Assuming slot count is power of two.
-        (id ^ (id >> 31)) as usize & (MEMTABLE_SLOT_COUNT - 1)
+        hash_u64(id) as usize & (MEMTABLE_SLOT_COUNT - 1)
     }
 }
 

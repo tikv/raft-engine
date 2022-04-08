@@ -46,6 +46,8 @@ mod memtable;
 mod metrics;
 mod pipe_log;
 mod purge;
+#[cfg(feature = "nightly")]
+mod swappy_allocator;
 #[cfg(test)]
 mod test_util;
 mod util;

@@ -233,6 +233,20 @@ pub fn crc32(data: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+#[inline]
+pub fn hash_u64(mut i: u64) -> u64 {
+    i = (i ^ (i >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    i = (i ^ (i >> 27)).wrapping_mul(0x94d049bb133111eb);
+    i ^ (i >> 31)
+}
+
+#[inline]
+pub fn unhash_u64(mut i: u64) -> u64 {
+    i = (i ^ (i >> 31) ^ (i >> 62)).wrapping_mul(0x319642b2d24d8ec3);
+    i = (i ^ (i >> 27) ^ (i >> 54)).wrapping_mul(0x96de1b173f119089);
+    i ^ (i >> 30) ^ (i >> 60)
+}
+
 pub mod lz4 {
     use crate::{Error, Result};
     use std::{i32, ptr};
