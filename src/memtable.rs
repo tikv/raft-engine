@@ -83,7 +83,6 @@ struct EntriesHandle {
 }
 
 /// Relative location of one single entry.
-#[derive(Debug, Copy, Clone, PartialEq)]
 struct EntryHandle {
     /// The relative offset within its group of entries.
     offset: u32,
