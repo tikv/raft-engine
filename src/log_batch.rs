@@ -598,6 +598,9 @@ impl LogBatch {
         entries: &[M::Entry],
     ) -> Result<()> {
         debug_assert!(self.buf_state == BufState::Open);
+        if entries.is_empty() {
+            return Ok(());
+        }
 
         let mut entry_indexes = Vec::with_capacity(entries.len());
         self.buf_state = BufState::Incomplete;
@@ -636,6 +639,9 @@ impl LogBatch {
     ) -> Result<()> {
         debug_assert!(entry_indexes.len() == entries.len());
         debug_assert!(self.buf_state == BufState::Open);
+        if entry_indexes.is_empty() {
+            return Ok(());
+        }
 
         self.buf_state = BufState::Incomplete;
         let old_buf_len = self.buf.len();
@@ -1234,6 +1240,16 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn test_empty_log_batch() {
+        let mut batch = LogBatch::default();
+        assert!(batch.is_empty());
+        batch.add_entries::<Entry>(0, &Vec::new()).unwrap();
+        assert!(batch.is_empty());
+        batch.add_raw_entries(0, Vec::new(), Vec::new()).unwrap();
+        assert!(batch.is_empty());
     }
 
     #[cfg(feature = "nightly")]
