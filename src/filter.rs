@@ -289,8 +289,7 @@ impl RhaiFilterMachine {
                                     ei.compression_type,
                                 )?;
                                 entries.push(
-                                    block[ei.entry_offset as usize
-                                        ..(ei.entry_offset + ei.entry_len) as usize]
+                                    LogBatch::decode_entry_block(&block, ei.entry_offset as usize)?
                                         .to_owned(),
                                 );
                             }
