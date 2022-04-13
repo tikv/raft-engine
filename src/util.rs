@@ -240,6 +240,7 @@ pub fn hash_u64(mut i: u64) -> u64 {
     i ^ (i >> 31)
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn unhash_u64(mut i: u64) -> u64 {
     i = (i ^ (i >> 31) ^ (i >> 62)).wrapping_mul(0x319642b2d24d8ec3);

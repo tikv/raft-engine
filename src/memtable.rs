@@ -944,7 +944,7 @@ impl MemTableAccessor {
     }
 
     #[inline]
-    fn slot_index(mut id: u64) -> usize {
+    fn slot_index(id: u64) -> usize {
         debug_assert!(MEMTABLE_SLOT_COUNT.is_power_of_two());
         hash_u64(id) as usize & (MEMTABLE_SLOT_COUNT - 1)
     }

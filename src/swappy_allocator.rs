@@ -4,16 +4,18 @@
 //! swapped out.
 
 use std::alloc::{AllocError, Allocator, Global, Layout};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 use memmap2::MmapMut;
 
-pub struct SwappyAllocator<A = Global>
+const DEFAULT_PAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB
+
+pub struct SwappyAllocatorCore<A = Global>
 where
     A: Allocator,
 {
@@ -23,21 +25,54 @@ where
     mem_usage: AtomicUsize,
     mem_allocator: A,
 
-    need_check_page: AtomicBool,
+    maybe_swapped: AtomicBool,
     page_seq: AtomicU32,
     pages: Mutex<Vec<Page>>,
 }
 
+#[derive(Clone)]
+pub struct SwappyAllocator<A: Allocator>(Arc<SwappyAllocatorCore<A>>);
+
 impl<A: Allocator> SwappyAllocator<A> {
     pub fn new_over(path: &Path, budget: usize, alloc: A) -> SwappyAllocator<A> {
-        SwappyAllocator {
+        let core = SwappyAllocatorCore {
             budget,
             path: path.into(),
             mem_usage: AtomicUsize::new(0),
             mem_allocator: alloc,
-            need_check_page: AtomicBool::new(false),
+            maybe_swapped: AtomicBool::new(false),
             page_seq: AtomicU32::new(0),
             pages: Mutex::new(Vec::new()),
+        };
+        SwappyAllocator(Arc::new(core))
+    }
+
+    #[inline]
+    pub fn memory_usage(&self) -> usize {
+        self.0.mem_usage.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn allocate_swapped(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let mut pages = self.0.pages.lock().unwrap();
+        if pages.is_empty() {
+            self.0.maybe_swapped.store(true, Ordering::Release);
+            pages.push(Page::new(
+                &self.0.path,
+                self.0.page_seq.fetch_add(1, Ordering::Relaxed),
+                std::cmp::max(DEFAULT_PAGE_SIZE, layout.size()),
+            ));
+        }
+        match pages.last_mut().unwrap().allocate(layout) {
+            None => {
+                pages.push(Page::new(
+                    &self.0.path,
+                    self.0.page_seq.fetch_add(1, Ordering::Relaxed),
+                    std::cmp::max(DEFAULT_PAGE_SIZE, layout.size()),
+                ));
+                pages.last_mut().unwrap().allocate(layout).ok_or(AllocError)
+            }
+            Some(r) => Ok(r),
         }
     }
 }
@@ -48,58 +83,131 @@ impl SwappyAllocator<Global> {
     }
 }
 
-unsafe impl Allocator for SwappyAllocator {
+unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
     #[inline]
-    fn allocate(&self, mut layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        let mem_usage = self.mem_usage.fetch_add(layout.size(), Ordering::Relaxed);
-        if mem_usage >= self.budget {
-            self.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-            let mut pages = self.pages.lock().unwrap();
-            if pages.is_empty() {
-                self.need_check_page.store(true, Ordering::Release);
-                pages.push(Page::new(
-                    &self.path,
-                    self.page_seq.fetch_add(1, Ordering::Relaxed),
-                    1,
-                ));
-            }
-            match pages.last_mut().unwrap().allocate(layout) {
-                None => {
-                    pages.push(Page::new(
-                        &self.path,
-                        self.page_seq.fetch_add(1, Ordering::Relaxed),
-                        1,
-                    ));
-                    pages.last_mut().unwrap().allocate(layout).ok_or(AllocError)
-                }
-                Some(r) => Ok(r),
-            }
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let mem_usage = self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed);
+        if mem_usage >= self.0.budget {
+            self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
+            self.allocate_swapped(layout)
         } else {
-            self.mem_allocator.allocate(layout)
+            self.0.mem_allocator.allocate(layout)
         }
     }
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        if self.need_check_page.load(Ordering::Acquire) {
-            let mut pages = self.pages.lock().unwrap();
+        if self.0.maybe_swapped.load(Ordering::Acquire) {
+            let mut pages = self.0.pages.lock().unwrap();
             for i in 0..pages.len() {
                 if pages[i].contains(ptr) {
                     if pages[i].deallocate(ptr) {
-                        pages[i].release(&self.path);
+                        pages[i].release(&self.0.path);
                         pages.remove(i);
                     }
                     return;
                 }
             }
         }
-        self.mem_allocator.deallocate(ptr, layout)
+        self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
+        self.0.mem_allocator.deallocate(ptr, layout)
+    }
+
+    #[inline]
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let ptr = self.allocate(layout)?;
+        unsafe { ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len()) }
+        Ok(ptr)
+    }
+
+    #[inline]
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let diff = new_layout.size() - old_layout.size();
+        let mem_usage = self.0.mem_usage.fetch_add(diff, Ordering::Relaxed);
+        if mem_usage >= self.0.budget || self.0.maybe_swapped.load(Ordering::Acquire) {
+            self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
+            // Copied from std's blanket implementation.
+            debug_assert!(
+                new_layout.size() >= old_layout.size(),
+                "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
+            );
+
+            let new_ptr = self.allocate_swapped(new_layout)?;
+
+            // SAFETY: because `new_layout.size()` must be greater than or equal to
+            // `old_layout.size()`, both the old and new memory allocation are valid for
+            // reads and writes for `old_layout.size()` bytes. Also, because the
+            // old allocation wasn't yet deallocated, it cannot overlap
+            // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+            // safe. The safety contract for `dealloc` must be upheld by the caller.
+            unsafe {
+                ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
+                self.deallocate(ptr, old_layout);
+            }
+
+            Ok(new_ptr)
+        } else {
+            self.0.mem_allocator.grow(ptr, old_layout, new_layout)
+        }
+    }
+
+    #[inline]
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let ptr = self.grow(ptr, old_layout, new_layout)?;
+        unsafe { ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len()) }
+        Ok(ptr)
+    }
+
+    #[inline]
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        if self.0.maybe_swapped.load(Ordering::Acquire) {
+            // Copied from std's blanket implementation.
+            debug_assert!(
+                new_layout.size() <= old_layout.size(),
+                "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
+            );
+
+            let new_ptr = self.allocate(new_layout)?;
+
+            // SAFETY: because `new_layout.size()` must be lower than or equal to
+            // `old_layout.size()`, both the old and new memory allocation are valid for
+            // reads and writes for `new_layout.size()` bytes. Also, because the
+            // old allocation wasn't yet deallocated, it cannot overlap
+            // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+            // safe. The safety contract for `dealloc` must be upheld by the caller.
+            unsafe {
+                ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
+                self.deallocate(ptr, old_layout);
+            }
+
+            Ok(new_ptr)
+        } else {
+            self.0
+                .mem_usage
+                .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
+            self.0.mem_allocator.shrink(ptr, old_layout, new_layout)
+        }
     }
 }
 
 struct Page {
     seq: u32,
-    f: File,
+    _f: File,
     mmap: MmapMut,
     used: usize,
     ref_counter: usize,
@@ -108,12 +216,17 @@ struct Page {
 impl Page {
     fn new(root: &Path, seq: u32, size: usize) -> Page {
         let path = root.join(format!("{}.swap", seq));
-        let f = File::create(&path).unwrap();
-        f.set_len(size as u64);
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .unwrap();
+        f.set_len(size as u64).unwrap();
         let mmap = unsafe { MmapMut::map_mut(&f).unwrap() };
         Self {
             seq,
-            f,
+            _f: f,
             mmap,
             used: 0,
             ref_counter: 0,
@@ -142,7 +255,7 @@ impl Page {
     }
 
     // Returns whether the page can be retired.
-    fn deallocate(&mut self, ptr: NonNull<u8>) -> bool {
+    fn deallocate(&mut self, _ptr: NonNull<u8>) -> bool {
         self.ref_counter -= 1;
         self.ref_counter == 0
     }
@@ -159,5 +272,32 @@ impl Page {
             let ptr = ptr.as_ptr() as *const u8;
             ptr >= start && ptr < end
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_swappy_vec() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_swappy_vec")
+            .tempdir()
+            .unwrap();
+
+        let allocator = SwappyAllocator::new(dir.path(), 1024);
+        let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+        assert_eq!(allocator.memory_usage(), 0);
+        vec.resize(1024, 0);
+        assert_eq!(allocator.memory_usage(), 1024);
+        vec.resize(2048, 0);
+        assert_eq!(allocator.memory_usage(), 0);
+        vec.truncate(4);
+        vec.shrink_to_fit();
+        assert_eq!(allocator.memory_usage(), 4);
+        let mut files = 0;
+        dir.path().read_dir().unwrap().for_each(|_| files += 1);
+        assert_eq!(files, 0);
     }
 }
