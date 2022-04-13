@@ -46,10 +46,6 @@ fn test_file_read_error() {
     let entry = vec![b'x'; 1024];
 
     let engine = Engine::open_with_file_system(cfg, fs).unwrap();
-    // Writing an empty message.
-    engine
-        .write(&mut generate_batch(1, 0, 1, None), true)
-        .unwrap();
     engine
         .write(&mut generate_batch(2, 1, 10, Some(&entry)), true)
         .unwrap();
@@ -66,9 +62,6 @@ fn test_file_read_error() {
 
     let mut entries = Vec::new();
     let _f = FailGuard::new("log_fd::read::err", "return");
-    engine
-        .fetch_entries_to::<MessageExtTyped>(1, 0, 1, None, &mut entries)
-        .unwrap();
     engine.get_message::<Entry>(1, b"k".as_ref()).unwrap();
     engine
         .fetch_entries_to::<MessageExtTyped>(2, 1, 10, None, &mut entries)
