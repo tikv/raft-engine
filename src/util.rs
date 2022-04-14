@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::VecDeque;
 use std::fmt::{self, Display, Write};
 use std::ops::{Div, Mul};
 use std::str::FromStr;
@@ -207,22 +206,6 @@ impl InstantExt for Instant {
     #[inline]
     fn saturating_elapsed(&self) -> Duration {
         Instant::now().saturating_duration_since(*self)
-    }
-}
-
-/// Take slices in the range.
-///
-/// ### Panics
-///
-/// if [low, high) is out of bound.
-pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T], &[T]) {
-    let (first, second) = entry.as_slices();
-    if low >= first.len() {
-        (&second[low - first.len()..high - first.len()], &[])
-    } else if high <= first.len() {
-        (&first[low..high], &[])
-    } else {
-        (&first[low..], &second[..high - first.len()])
     }
 }
 
@@ -445,5 +428,10 @@ mod tests {
             let src_str = format!("s = {:?}", src);
             assert!(toml::from_str::<SizeHolder>(&src_str).is_err(), "{}", src);
         }
+    }
+
+    #[test]
+    fn test_unhash() {
+        assert_eq!(unhash_u64(hash_u64(777)), 777);
     }
 }

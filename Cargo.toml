@@ -75,6 +75,9 @@ failpoints = [
 scripting = [
   "rhai",
 ]
+swap = [
+  "nightly",
+]
 
 # Shortcuts
 all_except_failpoints = ["internals", "scripting", "nightly"]

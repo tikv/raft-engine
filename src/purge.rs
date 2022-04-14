@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogBatch;
-use crate::memtable::{MemTable, MemTableAccessor};
+use crate::memtable::{MemTableAccessor, MemTableHandle};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};
@@ -289,7 +289,7 @@ where
 
     fn rewrite_memtables(
         &self,
-        memtables: Vec<Arc<RwLock<MemTable>>>,
+        memtables: Vec<MemTableHandle>,
         expect_rewrites_per_memtable: usize,
         rewrite: Option<FileSeq>,
     ) -> Result<()> {

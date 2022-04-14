@@ -2,12 +2,14 @@
 
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use fail::fail_point;
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
+use crate::config::Config;
 use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::{
     Command, CompressionType, KeyValue, LogBatch, LogItemBatch, LogItemContent, LogItemDrain,
@@ -15,8 +17,44 @@ use crate::log_batch::{
 };
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-use crate::util::{hash_u64, slices_in_range};
+use crate::util::{hash_u64, Factory};
 use crate::{Error, GlobalStats, Result};
+
+#[cfg(feature = "swap")]
+mod swap_conditional_imports {
+    use std::convert::TryFrom;
+    use std::path::Path;
+
+    pub trait AllocatorTrait: std::alloc::Allocator + Clone {}
+    impl<T: std::alloc::Allocator + Clone> AllocatorTrait for T {}
+
+    pub type SwappyAllocator = crate::swappy_allocator::SwappyAllocator<std::alloc::Global>;
+    pub type SelectedAllocator = SwappyAllocator;
+    pub type VacantAllocator = std::alloc::Global;
+
+    pub fn new_vacant_allocator() -> VacantAllocator {
+        std::alloc::Global
+    }
+    pub fn new_allocator(cfg: &crate::Config) -> SelectedAllocator {
+        let memory_limit =
+            usize::try_from(cfg.memory_limit.map_or(u64::MAX, |l| l.0)).unwrap_or(usize::MAX);
+        SwappyAllocator::new(&Path::new(&cfg.dir).join("swap"), memory_limit)
+    }
+}
+
+#[cfg(not(feature = "swap"))]
+mod swap_conditional_imports {
+    pub trait AllocatorTrait {}
+    impl AllocatorTrait for () {}
+
+    pub type SelectedAllocator = ();
+    pub type VacantAllocator = ();
+
+    pub fn new_vacant_allocator() -> VacantAllocator {}
+    pub fn new_allocator(_: &crate::Config) -> SelectedAllocator {}
+}
+
+use swap_conditional_imports::*;
 
 /// Attempt to shrink entry container if its capacity reaches the threshold.
 const CAPACITY_SHRINK_THRESHOLD: usize = 1024 - 1;
@@ -88,12 +126,15 @@ impl From<&EntryIndex> for ThinEntryIndex {
 ///
 /// Each Raft Group has its own `MemTable` to store all key value pairs and the
 /// file locations of all log entries.
-pub struct MemTable {
+pub struct MemTable<A: AllocatorTrait> {
     /// The ID of current Raft Group.
     region_id: u64,
 
     /// Container of entries. Incoming entries are pushed to the back with
     /// ascending log indexes.
+    #[cfg(feature = "swap")]
+    entry_indexes: VecDeque<ThinEntryIndex, A>,
+    #[cfg(not(feature = "swap"))]
     entry_indexes: VecDeque<ThinEntryIndex>,
     /// The log index of the first entry.
     first_index: u64,
@@ -106,17 +147,34 @@ pub struct MemTable {
 
     /// Shared statistics.
     global_stats: Arc<GlobalStats>,
+
+    _phantom: PhantomData<A>,
 }
 
-impl MemTable {
-    pub fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable {
+impl MemTable<VacantAllocator> {
+    #[allow(dead_code)]
+    fn new(region_id: u64, global_stats: Arc<GlobalStats>) -> MemTable<VacantAllocator> {
+        Self::with_allocator(region_id, global_stats, &new_vacant_allocator())
+    }
+}
+
+impl<A: AllocatorTrait> MemTable<A> {
+    fn with_allocator(
+        region_id: u64,
+        global_stats: Arc<GlobalStats>,
+        _allocator: &A,
+    ) -> MemTable<A> {
         MemTable {
             region_id,
+            #[cfg(feature = "swap")]
+            entry_indexes: VecDeque::with_capacity_in(CAPACITY_INIT, _allocator.clone()),
+            #[cfg(not(feature = "swap"))]
             entry_indexes: VecDeque::with_capacity(CAPACITY_INIT),
             first_index: 0,
             rewrite_count: 0,
             kvs: BTreeMap::default(),
             global_stats,
+            _phantom: PhantomData,
         }
     }
 
@@ -506,10 +564,9 @@ impl MemTable {
         let start_pos = (begin - first) as usize;
         let end_pos = (end - begin) as usize + start_pos;
 
-        let (first, second) = slices_in_range(&self.entry_indexes, start_pos, end_pos);
         let mut total_size = 0;
         let mut index = begin;
-        for idx in first.iter().chain(second) {
+        for idx in self.entry_indexes.range(start_pos..end_pos) {
             total_size += idx.entry_len;
             // No matter max_size's value, fetch one entry at least.
             if let Some(max_size) = max_size {
@@ -670,7 +727,7 @@ impl MemTable {
     }
 }
 
-impl Drop for MemTable {
+impl<A: AllocatorTrait> Drop for MemTable<A> {
     fn drop(&mut self) {
         let mut append_kvs = 0;
         let mut rewrite_kvs = 0;
@@ -690,7 +747,8 @@ impl Drop for MemTable {
     }
 }
 
-type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
+type MemTables = HashMap<u64, Arc<RwLock<MemTable<SelectedAllocator>>>>;
+pub type MemTableHandle = Arc<RwLock<MemTable<SelectedAllocator>>>;
 
 /// A collection of [`MemTable`]s.
 ///
@@ -699,6 +757,7 @@ type MemTables = HashMap<u64, Arc<RwLock<MemTable>>>;
 #[derive(Clone)]
 pub struct MemTableAccessor {
     global_stats: Arc<GlobalStats>,
+    allocator: SelectedAllocator,
 
     /// A fixed-size array of maps of [`MemTable`]s.
     slots: Vec<Arc<RwLock<MemTables>>>,
@@ -707,35 +766,38 @@ pub struct MemTableAccessor {
 }
 
 impl MemTableAccessor {
-    pub fn new(global_stats: Arc<GlobalStats>) -> MemTableAccessor {
+    pub fn new(global_stats: Arc<GlobalStats>, cfg: &Config) -> MemTableAccessor {
         let mut slots = Vec::with_capacity(MEMTABLE_SLOT_COUNT);
         for _ in 0..MEMTABLE_SLOT_COUNT {
             slots.push(Arc::new(RwLock::new(MemTables::default())));
         }
         MemTableAccessor {
             global_stats,
+            allocator: new_allocator(cfg),
             slots,
             removed_memtables: Default::default(),
         }
     }
 
-    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable>> {
+    pub fn get_or_insert(&self, raft_group_id: u64) -> MemTableHandle {
         let global_stats = self.global_stats.clone();
         let mut memtables = self.slots[Self::slot_index(raft_group_id)].write();
-        let memtable = memtables
-            .entry(raft_group_id)
-            .or_insert_with(|| Arc::new(RwLock::new(MemTable::new(raft_group_id, global_stats))));
+        let memtable = memtables.entry(raft_group_id).or_insert_with(|| {
+            let memtable =
+                MemTable::with_allocator(raft_group_id, global_stats.clone(), &self.allocator);
+            Arc::new(RwLock::new(memtable))
+        });
         memtable.clone()
     }
 
-    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable>>> {
+    pub fn get(&self, raft_group_id: u64) -> Option<MemTableHandle> {
         self.slots[Self::slot_index(raft_group_id)]
             .read()
             .get(&raft_group_id)
             .cloned()
     }
 
-    pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable>>) {
+    pub fn insert(&self, raft_group_id: u64, memtable: MemTableHandle) {
         self.slots[Self::slot_index(raft_group_id)]
             .write()
             .insert(raft_group_id, memtable);
@@ -751,7 +813,7 @@ impl MemTableAccessor {
         }
     }
 
-    pub fn fold<B, F: Fn(B, &MemTable) -> B>(&self, mut init: B, fold: F) -> B {
+    pub fn fold<B, F: Fn(B, &MemTable<SelectedAllocator>) -> B>(&self, mut init: B, fold: F) -> B {
         for tables in &self.slots {
             for memtable in tables.read().values() {
                 init = fold(init, &*memtable.read());
@@ -760,10 +822,10 @@ impl MemTableAccessor {
         init
     }
 
-    pub fn collect<F: FnMut(&MemTable) -> bool>(
+    pub fn collect<F: FnMut(&MemTable<SelectedAllocator>) -> bool>(
         &self,
         mut condition: F,
-    ) -> Vec<Arc<RwLock<MemTable>>> {
+    ) -> Vec<MemTableHandle> {
         let mut memtables = Vec::new();
         for tables in &self.slots {
             memtables.extend(tables.read().values().filter_map(|t| {
@@ -957,6 +1019,15 @@ pub struct MemTableRecoverContext {
 }
 
 impl MemTableRecoverContext {
+    fn new(cfg: &Config) -> Self {
+        let stats = Arc::new(GlobalStats::default());
+        Self {
+            stats: stats.clone(),
+            log_batch: LogItemBatch::default(),
+            memtables: MemTableAccessor::new(stats, cfg),
+        }
+    }
+
     pub fn finish(self) -> (MemTableAccessor, Arc<GlobalStats>) {
         (self.memtables, self.stats)
     }
@@ -970,12 +1041,7 @@ impl MemTableRecoverContext {
 
 impl Default for MemTableRecoverContext {
     fn default() -> Self {
-        let stats = Arc::new(GlobalStats::default());
-        Self {
-            stats: stats.clone(),
-            log_batch: LogItemBatch::default(),
-            memtables: MemTableAccessor::new(stats),
-        }
+        Self::new(&Config::default())
     }
 }
 
@@ -1015,12 +1081,28 @@ impl ReplayMachine for MemTableRecoverContext {
     }
 }
 
+pub struct MemTableRecoverContextFactory {
+    cfg: Config,
+}
+
+impl MemTableRecoverContextFactory {
+    pub fn new(cfg: Config) -> Self {
+        Self { cfg }
+    }
+}
+
+impl Factory<MemTableRecoverContext> for MemTableRecoverContextFactory {
+    fn new_target(&self) -> MemTableRecoverContext {
+        MemTableRecoverContext::new(&self.cfg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{catch_unwind_silent, generate_entry_indexes};
 
-    impl MemTable {
+    impl<A: AllocatorTrait> MemTable<A> {
         pub fn max_file_seq(&self, queue: LogQueue) -> Option<FileSeq> {
             let entry = match queue {
                 LogQueue::Append if self.rewrite_count == self.entry_indexes.len() => None,
@@ -1754,11 +1836,12 @@ mod tests {
 
     #[test]
     fn test_memtable_merge_append() {
-        fn empty_table(id: u64) -> MemTable {
+        type TestMemTable = MemTable<VacantAllocator>;
+        fn empty_table(id: u64) -> TestMemTable {
             MemTable::new(id, Arc::new(GlobalStats::default()))
         }
         let cases = [
-            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+            |mut memtable: TestMemTable, on: Option<LogQueue>| -> TestMemTable {
                 match on {
                     None => {
                         memtable.append(generate_entry_indexes(
@@ -1799,7 +1882,7 @@ mod tests {
                 }
                 memtable
             },
-            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+            |mut memtable: TestMemTable, on: Option<LogQueue>| -> TestMemTable {
                 match on {
                     None => {
                         memtable.append(generate_entry_indexes(
@@ -1843,7 +1926,7 @@ mod tests {
                 }
                 memtable
             },
-            |mut memtable: MemTable, on: Option<LogQueue>| -> MemTable {
+            |mut memtable: TestMemTable, on: Option<LogQueue>| -> TestMemTable {
                 match on {
                     None => {
                         memtable.append(generate_entry_indexes(
@@ -1985,7 +2068,8 @@ mod tests {
 
         // sequential apply
         let sequential_global_stats = Arc::new(GlobalStats::default());
-        let sequential_memtables = MemTableAccessor::new(sequential_global_stats.clone());
+        let sequential_memtables =
+            MemTableAccessor::new(sequential_global_stats.clone(), &Config::default());
         for mut batch in batches.clone() {
             sequential_memtables.apply_append_writes(batch.drain());
         }

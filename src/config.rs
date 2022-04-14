@@ -70,6 +70,13 @@ pub struct Config {
     ///
     /// Default: "0.6"
     pub purge_rewrite_garbage_ratio: f64,
+
+    #[cfg(feature = "swap")]
+    /// Nightly-only field.
+    /// Maximum memory bytes allowed for the in-memory index.
+    ///
+    /// Default: None
+    pub memory_limit: Option<ReadableSize>,
 }
 
 impl Default for Config {
@@ -85,6 +92,8 @@ impl Default for Config {
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
+            #[cfg(feature = "swap")]
+            memory_limit: None,
         }
     }
 }

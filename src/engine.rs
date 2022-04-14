@@ -17,7 +17,7 @@ use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
-use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContext};
+use crate::memtable::{EntryIndex, MemTableAccessor, MemTableRecoverContextFactory};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
@@ -34,6 +34,7 @@ where
     cfg: Arc<Config>,
     listeners: Vec<Arc<dyn EventListener>>,
 
+    #[allow(dead_code)]
     stats: Arc<GlobalStats>,
     memtables: MemTableAccessor,
     pipe_log: Arc<P>,
@@ -82,8 +83,8 @@ where
         let start = Instant::now();
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_system, listeners.clone());
         builder.scan()?;
-        let (append, rewrite) =
-            builder.recover(&DefaultMachineFactory::<MemTableRecoverContext>::default())?;
+        let factory = MemTableRecoverContextFactory::new(cfg.clone());
+        let (append, rewrite) = builder.recover(&factory)?;
         let pipe_log = Arc::new(builder.finish()?);
         rewrite.merge_append_context(append);
         let (memtables, stats) = rewrite.finish();

@@ -1,7 +1,9 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-//! # An [`Allocator`] implementation that has a memory budget and can be
-//! swapped out.
+//! # Swappy Allocator
+//!
+//! An [`Allocator`] implementation that has a memory budget and can be swapped
+//! out.
 
 use std::alloc::{AllocError, Allocator, Global, Layout};
 use std::fs::{File, OpenOptions};
@@ -153,6 +155,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
             // old allocation wasn't yet deallocated, it cannot overlap
             // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
             // safe. The safety contract for `dealloc` must be upheld by the caller.
+            #[allow(unused_unsafe)]
             unsafe {
                 ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
                 self.deallocate(ptr, old_layout);
@@ -172,7 +175,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let ptr = self.grow(ptr, old_layout, new_layout)?;
-        unsafe { ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len()) }
+        ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len());
         Ok(ptr)
     }
 
@@ -198,6 +201,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
             // old allocation wasn't yet deallocated, it cannot overlap
             // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
             // safe. The safety contract for `dealloc` must be upheld by the caller.
+            #[allow(unused_unsafe)]
             unsafe {
                 ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
                 self.deallocate(ptr, old_layout);
@@ -420,7 +424,7 @@ mod tests {
     #[bench]
     fn bench_allocator_fast_path(b: &mut test::Bencher) {
         let dir = tempfile::Builder::new()
-            .prefix("bench_fast_path")
+            .prefix("bench_allocator_fast_path")
             .tempdir()
             .unwrap();
         let allocator = SwappyAllocator::new(dir.path(), usize::MAX);
@@ -432,7 +436,7 @@ mod tests {
     #[bench]
     fn bench_allocator_slow_path(b: &mut test::Bencher) {
         let dir = tempfile::Builder::new()
-            .prefix("bench_fast_path")
+            .prefix("bench_allocator_slow_path")
             .tempdir()
             .unwrap();
         let allocator = SwappyAllocator::new(dir.path(), 0);

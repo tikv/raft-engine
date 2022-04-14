@@ -15,11 +15,11 @@
 
 #![cfg_attr(feature = "nightly", feature(test))]
 // For swappy_allocator
-#![cfg_attr(feature = "nightly", feature(allocator_api))]
-#![cfg_attr(feature = "nightly", feature(slice_ptr_get))]
-#![cfg_attr(feature = "nightly", feature(nonnull_slice_from_raw_parts))]
-#![cfg_attr(feature = "nightly", feature(slice_ptr_len))]
-#![cfg_attr(feature = "nightly", feature(alloc_layout_extra))]
+#![cfg_attr(feature = "swap", feature(allocator_api))]
+#![cfg_attr(feature = "swap", feature(slice_ptr_get))]
+#![cfg_attr(feature = "swap", feature(nonnull_slice_from_raw_parts))]
+#![cfg_attr(feature = "swap", feature(slice_ptr_len))]
+#![cfg_attr(feature = "swap", feature(alloc_layout_extra))]
 
 #[macro_use]
 extern crate lazy_static;
@@ -52,7 +52,7 @@ mod memtable;
 mod metrics;
 mod pipe_log;
 mod purge;
-#[cfg(feature = "nightly")]
+#[cfg(feature = "swap")]
 mod swappy_allocator;
 #[cfg(test)]
 mod test_util;
