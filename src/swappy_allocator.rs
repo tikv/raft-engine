@@ -8,10 +8,11 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::vec::Vec;
 
 use memmap2::MmapMut;
+use parking_lot::Mutex;
 
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
@@ -54,9 +55,9 @@ impl<A: Allocator> SwappyAllocator<A> {
 
     #[inline]
     fn allocate_swapped(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        let mut pages = self.0.pages.lock().unwrap();
+        let mut pages = self.0.pages.lock();
         if pages.is_empty() {
-            self.0.maybe_swapped.store(true, Ordering::Release);
+            self.0.maybe_swapped.store(true, Ordering::Relaxed);
             pages.push(Page::new(
                 &self.0.path,
                 self.0.page_seq.fetch_add(1, Ordering::Relaxed),
@@ -101,8 +102,8 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        if self.0.maybe_swapped.load(Ordering::Acquire) {
-            let mut pages = self.0.pages.lock().unwrap();
+        if self.0.maybe_swapped.load(Ordering::Relaxed) {
+            let mut pages = self.0.pages.lock();
             for i in 0..pages.len() {
                 if pages[i].contains(ptr) {
                     if pages[i].deallocate(ptr) {
@@ -110,7 +111,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
                         pages.remove(i);
                     }
                     if pages.is_empty() {
-                        self.0.maybe_swapped.store(false, Ordering::Release);
+                        self.0.maybe_swapped.store(false, Ordering::Relaxed);
                     }
                     return;
                 }
@@ -136,7 +137,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let diff = new_layout.size() - old_layout.size();
         let mem_usage = self.0.mem_usage.fetch_add(diff, Ordering::Relaxed);
-        if mem_usage >= self.0.budget || self.0.maybe_swapped.load(Ordering::Acquire) {
+        if mem_usage >= self.0.budget || self.0.maybe_swapped.load(Ordering::Relaxed) {
             self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
             // Copied from std's blanket implementation.
             debug_assert!(
@@ -182,7 +183,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        if self.0.maybe_swapped.load(Ordering::Acquire) {
+        if self.0.maybe_swapped.load(Ordering::Relaxed) {
             // Copied from std's blanket implementation.
             debug_assert!(
                 new_layout.size() <= old_layout.size(),
