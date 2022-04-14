@@ -99,6 +99,8 @@ jobs:
         run: |
           cargo test --all --features all_except_failpoints
           cargo test --test failpoints --all-features -- --test-threads 1
+          cargo test --all --features all_stable_except_failpoints --verbose -- --nocapture
+          cargo test --test failpoints --features all_stable --verbose -- --test-threads 1 --nocapture
         env:
           RUSTFLAGS: '-Zinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'
