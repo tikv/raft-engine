@@ -72,8 +72,8 @@ pub struct Config {
     pub purge_rewrite_garbage_ratio: f64,
 
     #[cfg(feature = "swap")]
-    /// Nightly-only field.
     /// Maximum memory bytes allowed for the in-memory index.
+    /// Available under the `swap` feature only.
     ///
     /// Default: None
     pub memory_limit: Option<ReadableSize>,

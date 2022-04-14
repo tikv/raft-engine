@@ -14,7 +14,6 @@
 //! # Raft Engine
 
 #![cfg_attr(feature = "nightly", feature(test))]
-// For swappy_allocator
 #![cfg_attr(feature = "swap", feature(allocator_api))]
 #![cfg_attr(feature = "swap", feature(slice_ptr_get))]
 #![cfg_attr(feature = "swap", feature(nonnull_slice_from_raw_parts))]

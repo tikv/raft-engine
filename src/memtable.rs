@@ -995,14 +995,25 @@ impl MemTableAccessor {
         }
     }
 
-    pub(crate) fn flush_metrics(&self) {
-        let mut total = 0;
-        for tables in &self.slots {
-            tables.read().values().for_each(|t| {
-                total += t.read().heap_size();
-            });
+    pub fn memory_usage(&self) -> usize {
+        #[cfg(not(feature = "swap"))]
+        {
+            let mut total = 0;
+            for tables in &self.slots {
+                tables.read().values().for_each(|t| {
+                    total += t.read().heap_size();
+                });
+            }
+            total
         }
-        MEMORY_USAGE.set(total as i64);
+        #[cfg(feature = "swap")]
+        {
+            self.allocator.memory_usage()
+        }
+    }
+
+    pub(crate) fn flush_metrics(&self) {
+        MEMORY_USAGE.set(self.memory_usage() as i64);
     }
 
     #[inline]
