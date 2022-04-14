@@ -19,6 +19,7 @@
 #![cfg_attr(feature = "nightly", feature(slice_ptr_get))]
 #![cfg_attr(feature = "nightly", feature(nonnull_slice_from_raw_parts))]
 #![cfg_attr(feature = "nightly", feature(slice_ptr_len))]
+#![cfg_attr(feature = "nightly", feature(alloc_layout_extra))]
 
 #[macro_use]
 extern crate lazy_static;

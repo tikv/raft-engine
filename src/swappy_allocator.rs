@@ -89,7 +89,11 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         let mem_usage = self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed);
         if mem_usage >= self.0.budget {
             self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-            self.allocate_swapped(layout)
+            if layout.size() == 0 {
+                Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0))
+            } else {
+                self.allocate_swapped(layout)
+            }
         } else {
             self.0.mem_allocator.allocate(layout)
         }
@@ -104,6 +108,9 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
                     if pages[i].deallocate(ptr) {
                         pages[i].release(&self.0.path);
                         pages.remove(i);
+                    }
+                    if pages.is_empty() {
+                        self.0.maybe_swapped.store(false, Ordering::Release);
                     }
                     return;
                 }
@@ -137,7 +144,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
                 "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
             );
 
-            let new_ptr = self.allocate_swapped(new_layout)?;
+            let new_ptr = self.allocate(new_layout)?;
 
             // SAFETY: because `new_layout.size()` must be greater than or equal to
             // `old_layout.size()`, both the old and new memory allocation are valid for
@@ -279,6 +286,12 @@ impl Page {
 mod tests {
     use super::*;
 
+    fn file_count(p: &Path) -> usize {
+        let mut files = 0;
+        p.read_dir().unwrap().for_each(|_| files += 1);
+        files
+    }
+
     #[test]
     fn test_swappy_vec() {
         let dir = tempfile::Builder::new()
@@ -287,17 +300,143 @@ mod tests {
             .unwrap();
 
         let allocator = SwappyAllocator::new(dir.path(), 1024);
+        let mut vec1: Vec<u8, _> = Vec::new_in(allocator.clone());
+        assert_eq!(allocator.memory_usage(), 0);
+        vec1.resize(1024, 0);
+        assert_eq!(allocator.memory_usage(), 1024);
+        // Small vec that uses swap.
+        let mut vec2: Vec<u8, _> = Vec::new_in(allocator.clone());
+        vec2.resize(16, 0);
+        assert_eq!(allocator.memory_usage(), 1024);
+        // Grow large vec to swap.
+        vec1.resize(2048, 0);
+        assert_eq!(allocator.memory_usage(), 0);
+        // Shrink large vec to free up memory.
+        vec1.truncate(4);
+        vec1.shrink_to_fit();
+        assert_eq!(allocator.memory_usage(), 4);
+        // Grow small vec, should be in memory.
+        vec2.resize(32, 0);
+        assert_eq!(allocator.memory_usage(), 4 + 32);
+
+        assert_eq!(file_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn test_page_refill() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_page_refill")
+            .tempdir()
+            .unwrap();
+
+        let allocator = SwappyAllocator::new(dir.path(), 0);
+
         let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
         assert_eq!(allocator.memory_usage(), 0);
-        vec.resize(1024, 0);
-        assert_eq!(allocator.memory_usage(), 1024);
-        vec.resize(2048, 0);
+        vec.resize(DEFAULT_PAGE_SIZE, 0);
         assert_eq!(allocator.memory_usage(), 0);
-        vec.truncate(4);
+        assert_eq!(file_count(dir.path()), 1);
+        vec.resize(DEFAULT_PAGE_SIZE * 2, 0);
+        assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(file_count(dir.path()), 1);
+        vec.resize(DEFAULT_PAGE_SIZE * 3, 0);
+        assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(file_count(dir.path()), 1);
+        vec.clear();
         vec.shrink_to_fit();
-        assert_eq!(allocator.memory_usage(), 4);
-        let mut files = 0;
-        dir.path().read_dir().unwrap().for_each(|_| files += 1);
-        assert_eq!(files, 0);
+        assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(file_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn test_empty_pointer() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_empty_pointer")
+            .tempdir()
+            .unwrap();
+        let allocator = SwappyAllocator::new(dir.path(), 0);
+        let _ = allocator
+            .allocate(Layout::from_size_align(0, 1).unwrap())
+            .unwrap();
+        assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(file_count(dir.path()), 0);
+    }
+
+    fn bench_allocator<A: Allocator>(a: &A) {
+        unsafe {
+            let ptr = a
+                .allocate_zeroed(Layout::from_size_align(8, 8).unwrap())
+                .unwrap();
+            let ptr = a
+                .grow_zeroed(
+                    NonNull::new_unchecked(ptr.as_ptr().as_mut_ptr()),
+                    Layout::from_size_align(8, 8).unwrap(),
+                    Layout::from_size_align(16, 8).unwrap(),
+                )
+                .unwrap();
+            let ptr = a
+                .grow_zeroed(
+                    NonNull::new_unchecked(ptr.as_ptr().as_mut_ptr()),
+                    Layout::from_size_align(16, 8).unwrap(),
+                    Layout::from_size_align(32, 8).unwrap(),
+                )
+                .unwrap();
+            let ptr = a
+                .grow_zeroed(
+                    NonNull::new_unchecked(ptr.as_ptr().as_mut_ptr()),
+                    Layout::from_size_align(32, 8).unwrap(),
+                    Layout::from_size_align(64, 8).unwrap(),
+                )
+                .unwrap();
+            let ptr = a
+                .grow_zeroed(
+                    NonNull::new_unchecked(ptr.as_ptr().as_mut_ptr()),
+                    Layout::from_size_align(64, 8).unwrap(),
+                    Layout::from_size_align(128, 8).unwrap(),
+                )
+                .unwrap();
+            let ptr = a
+                .shrink(
+                    NonNull::new_unchecked(ptr.as_ptr().as_mut_ptr()),
+                    Layout::from_size_align(128, 8).unwrap(),
+                    Layout::from_size_align(8, 8).unwrap(),
+                )
+                .unwrap();
+            a.deallocate(
+                NonNull::new_unchecked(ptr.as_ptr().as_mut_ptr()),
+                Layout::from_size_align(8, 8).unwrap(),
+            );
+        }
+    }
+
+    #[bench]
+    fn bench_allocator_std_global(b: &mut test::Bencher) {
+        b.iter(move || {
+            bench_allocator(&std::alloc::Global);
+        });
+    }
+
+    #[bench]
+    fn bench_allocator_fast_path(b: &mut test::Bencher) {
+        let dir = tempfile::Builder::new()
+            .prefix("bench_fast_path")
+            .tempdir()
+            .unwrap();
+        let allocator = SwappyAllocator::new(dir.path(), usize::MAX);
+        b.iter(move || {
+            bench_allocator(&allocator);
+        });
+    }
+
+    #[bench]
+    fn bench_allocator_slow_path(b: &mut test::Bencher) {
+        let dir = tempfile::Builder::new()
+            .prefix("bench_fast_path")
+            .tempdir()
+            .unwrap();
+        let allocator = SwappyAllocator::new(dir.path(), 0);
+        b.iter(move || {
+            bench_allocator(&allocator);
+        });
     }
 }
