@@ -18,6 +18,11 @@ use parking_lot::Mutex;
 
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
+/// An [`Allocator`] implementation that has a memory budget and can be swapped
+/// out.
+///
+/// The allocations of its internal metadata are not managed (i.e. allocated via
+/// `std::alloc::Global`). Do NOT use it as the global allocator.
 pub struct SwappyAllocatorCore<A = Global>
 where
     A: Allocator,
@@ -109,11 +114,12 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         if self.0.maybe_swapped.load(Ordering::Relaxed) {
             let mut pages = self.0.pages.lock();
+            // Find the page it belongs to, then deallocate itself.
             for i in 0..pages.len() {
                 if pages[i].contains(ptr) {
                     if pages[i].deallocate(ptr) {
-                        pages[i].release(&self.0.path);
-                        pages.remove(i);
+                        let page = pages.remove(i);
+                        page.release(&self.0.path);
                     }
                     if pages.is_empty() {
                         self.0.maybe_swapped.store(false, Ordering::Relaxed);
@@ -144,7 +150,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         let mem_usage = self.0.mem_usage.fetch_add(diff, Ordering::Relaxed);
         if mem_usage >= self.0.budget || self.0.maybe_swapped.load(Ordering::Relaxed) {
             self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
-            // Copied from std's blanket implementation.
+            // Copied from std's blanket implementation //
             debug_assert!(
                 new_layout.size() >= old_layout.size(),
                 "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
@@ -192,10 +198,10 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         if self.0.maybe_swapped.load(Ordering::Relaxed)
             && self.0.pages.lock().iter().any(|page| page.contains(ptr))
         {
-            // A swapped page.
+            // This is a swapped page.
             if self.0.mem_usage.load(Ordering::Relaxed) + new_layout.size() <= self.0.budget {
                 // It's probably okay to reallocate to memory.
-                // Copied from std's blanket implementation.
+                // Copied from std's blanket implementation //
                 debug_assert!(
                     new_layout.size() <= old_layout.size(),
                     "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
@@ -217,7 +223,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
 
                 Ok(new_ptr)
             } else {
-                // Reuse old pointer.
+                // The new layout should still be mapped to disk. Reuse old pointer.
                 Ok(NonNull::slice_from_raw_parts(
                     NonNull::new_unchecked(ptr.as_ptr()),
                     new_layout.size(),
@@ -232,17 +238,20 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
     }
 }
 
+/// A page of memory that is backed by an owned file.
 struct Page {
     seq: u32,
     _f: File,
     mmap: MmapMut,
-    used: usize,
+    /// The start offset of bytes that are free to use.
+    tail: usize,
+    /// Number of active pointers to this page.
     ref_counter: usize,
 }
 
 impl Page {
     fn new(root: &Path, seq: u32, size: usize) -> Page {
-        let path = root.join(format!("{}.swap", seq));
+        let path = root.join(Self::page_file_name(seq));
         let f = OpenOptions::new()
             .read(true)
             .write(true)
@@ -255,23 +264,24 @@ impl Page {
             seq,
             _f: f,
             mmap,
-            used: 0,
+            tail: 0,
             ref_counter: 0,
         }
     }
 
+    #[inline]
     fn allocate(&mut self, layout: Layout) -> Option<NonNull<[u8]>> {
         unsafe {
             let offset = self
                 .mmap
                 .as_ptr()
-                .add(self.used)
+                .add(self.tail)
                 .align_offset(layout.align());
-            if self.used + offset + layout.size() > self.mmap.len() {
+            if self.tail + offset + layout.size() > self.mmap.len() {
                 None
             } else {
-                let p = self.mmap.as_ptr().add(self.used + offset);
-                self.used += offset + layout.size();
+                let p = self.mmap.as_ptr().add(self.tail + offset);
+                self.tail += offset + layout.size();
                 self.ref_counter += 1;
                 Some(NonNull::slice_from_raw_parts(
                     NonNull::new_unchecked(p as *mut u8),
@@ -281,17 +291,22 @@ impl Page {
         }
     }
 
-    // Returns whether the page can be retired.
+    /// Returns whether the page can be retired.
+    #[inline]
     fn deallocate(&mut self, _ptr: NonNull<u8>) -> bool {
         self.ref_counter -= 1;
         self.ref_counter == 0
     }
 
-    fn release(&mut self, root: &Path) {
-        let path = root.join(format!("{}.swap", self.seq));
+    /// Deletes this page and cleans up owned resources.
+    #[inline]
+    fn release(self, root: &Path) {
+        let path = root.join(Self::page_file_name(self.seq));
         std::fs::remove_file(&path).unwrap();
     }
 
+    /// Returns whether the pointer is contained in this page.
+    #[inline]
     fn contains(&self, ptr: NonNull<u8>) -> bool {
         unsafe {
             let start = self.mmap.as_ptr();
@@ -299,6 +314,11 @@ impl Page {
             let ptr = ptr.as_ptr() as *const u8;
             ptr >= start && ptr < end
         }
+    }
+
+    #[inline]
+    fn page_file_name(seq: u32) -> String {
+        seq.to_string()
     }
 }
 
