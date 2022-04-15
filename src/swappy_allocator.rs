@@ -57,9 +57,12 @@ impl<A: Allocator> SwappyAllocator<A> {
 
     #[inline]
     fn allocate_swapped(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        // Ordering:
+        // 1. `maybe_swapped` must be set before page is created.
+        // 2. Page is created before pointer is deallocated. (address dependency)
+        self.0.maybe_swapped.store(true, Ordering::Relaxed);
         let mut pages = self.0.pages.lock();
         if pages.is_empty() {
-            self.0.maybe_swapped.store(true, Ordering::Relaxed);
             pages.push(Page::new(
                 &self.0.path,
                 self.0.page_seq.fetch_add(1, Ordering::Relaxed),
@@ -186,28 +189,40 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        if self.0.maybe_swapped.load(Ordering::Relaxed) {
-            // Copied from std's blanket implementation.
-            debug_assert!(
-                new_layout.size() <= old_layout.size(),
-                "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
-            );
+        if self.0.maybe_swapped.load(Ordering::Relaxed)
+            && self.0.pages.lock().iter().any(|page| page.contains(ptr))
+        {
+            // A swapped page.
+            if self.0.mem_usage.load(Ordering::Relaxed) + new_layout.size() <= self.0.budget {
+                // It's probably okay to reallocate to memory.
+                // Copied from std's blanket implementation.
+                debug_assert!(
+                    new_layout.size() <= old_layout.size(),
+                    "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
+                );
 
-            let new_ptr = self.allocate(new_layout)?;
+                let new_ptr = self.allocate(new_layout)?;
 
-            // SAFETY: because `new_layout.size()` must be lower than or equal to
-            // `old_layout.size()`, both the old and new memory allocation are valid for
-            // reads and writes for `new_layout.size()` bytes. Also, because the
-            // old allocation wasn't yet deallocated, it cannot overlap
-            // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
-            // safe. The safety contract for `dealloc` must be upheld by the caller.
-            #[allow(unused_unsafe)]
-            unsafe {
-                ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
-                self.deallocate(ptr, old_layout);
+                // SAFETY: because `new_layout.size()` must be lower than or equal to
+                // `old_layout.size()`, both the old and new memory allocation are valid for
+                // reads and writes for `new_layout.size()` bytes. Also, because the
+                // old allocation wasn't yet deallocated, it cannot overlap
+                // `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+                // safe. The safety contract for `dealloc` must be upheld by the caller.
+                #[allow(unused_unsafe)]
+                unsafe {
+                    ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
+                    self.deallocate(ptr, old_layout);
+                }
+
+                Ok(new_ptr)
+            } else {
+                // Reuse old pointer.
+                Ok(NonNull::slice_from_raw_parts(
+                    NonNull::new_unchecked(ptr.as_ptr()),
+                    new_layout.size(),
+                ))
             }
-
-            Ok(new_ptr)
         } else {
             self.0
                 .mem_usage

@@ -690,6 +690,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         self.span().map(|s| s.1)
     }
 
+    #[allow(dead_code)]
     fn heap_size(&self) -> usize {
         // FIXME: cover the map of kvs.
         self.entry_indexes.capacity() * std::mem::size_of::<EntryIndex>()
