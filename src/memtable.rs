@@ -57,14 +57,21 @@ mod swap_conditional_imports {
 
 #[cfg(not(feature = "swap"))]
 mod swap_conditional_imports {
+    #[derive(Clone)]
+    pub struct DummyAllocator;
+
     pub trait AllocatorTrait: Clone + Send + Sync {}
-    impl AllocatorTrait for () {}
+    impl AllocatorTrait for DummyAllocator {}
 
-    pub type SelectedAllocator = ();
-    pub type VacantAllocator = ();
+    pub type SelectedAllocator = DummyAllocator;
+    pub type VacantAllocator = DummyAllocator;
 
-    pub fn new_vacant_allocator() -> VacantAllocator {}
-    pub fn new_allocator(_: &crate::Config) -> SelectedAllocator {}
+    pub fn new_vacant_allocator() -> VacantAllocator {
+        DummyAllocator
+    }
+    pub fn new_allocator(_: &crate::Config) -> SelectedAllocator {
+        DummyAllocator
+    }
 }
 
 use swap_conditional_imports::*;
