@@ -1,9 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 //! # Swappy Allocator
-//!
-//! An [`Allocator`] implementation that has a memory budget and can be swapped
-//! out.
 
 use std::alloc::{AllocError, Allocator, Global, Layout};
 use std::fs::{File, OpenOptions};
@@ -61,13 +58,20 @@ impl<A: Allocator> SwappyAllocator<A> {
     }
 
     #[inline]
+    fn is_swapped(&self, ptr: NonNull<u8>, exaustive_check: bool) -> bool {
+        // Ordering: `maybe_swapped` must be read after the pointer is available.
+        std::sync::atomic::fence(Ordering::Acquire);
+        self.0.maybe_swapped.load(Ordering::Relaxed)
+            && (!exaustive_check || self.0.pages.lock().iter().any(|page| page.contains(ptr)))
+    }
+
+    #[inline]
     fn allocate_swapped(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        // Ordering:
-        // 1. `maybe_swapped` must be set before page is created.
-        // 2. Page is created before pointer is deallocated. (address dependency)
-        self.0.maybe_swapped.store(true, Ordering::Relaxed);
         let mut pages = self.0.pages.lock();
         if pages.is_empty() {
+            self.0.maybe_swapped.store(true, Ordering::Relaxed);
+            // Ordering: `maybe_swapped` must be set before the page is created.
+            std::sync::atomic::fence(Ordering::Release);
             pages.push(Page::new(
                 &self.0.path,
                 self.0.page_seq.fetch_add(1, Ordering::Relaxed),
@@ -97,8 +101,9 @@ impl SwappyAllocator<Global> {
 unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        let mem_usage = self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed);
-        if mem_usage >= self.0.budget {
+        let mem_usage =
+            self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+        if mem_usage > self.0.budget {
             self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
             if layout.size() == 0 {
                 Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0))
@@ -112,7 +117,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        if self.0.maybe_swapped.load(Ordering::Relaxed) {
+        if self.is_swapped(ptr, false) {
             let mut pages = self.0.pages.lock();
             // Find the page it belongs to, then deallocate itself.
             for i in 0..pages.len() {
@@ -147,8 +152,8 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let diff = new_layout.size() - old_layout.size();
-        let mem_usage = self.0.mem_usage.fetch_add(diff, Ordering::Relaxed);
-        if mem_usage >= self.0.budget || self.0.maybe_swapped.load(Ordering::Relaxed) {
+        let mem_usage = self.0.mem_usage.fetch_add(diff, Ordering::Relaxed) + diff;
+        if mem_usage > self.0.budget || self.is_swapped(ptr, false) {
             self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
             // Copied from std's blanket implementation //
             debug_assert!(
@@ -195,9 +200,7 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        if self.0.maybe_swapped.load(Ordering::Relaxed)
-            && self.0.pages.lock().iter().any(|page| page.contains(ptr))
-        {
+        if self.is_swapped(ptr, true) {
             // This is a swapped page.
             if self.0.mem_usage.load(Ordering::Relaxed) + new_layout.size() <= self.0.budget {
                 // It's probably okay to reallocate to memory.
@@ -325,6 +328,68 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::catch_unwind_silent;
+
+    #[derive(Default, Clone)]
+    struct WrappedGlobal {
+        alloc: Arc<AtomicUsize>,
+        dealloc: Arc<AtomicUsize>,
+        grow: Arc<AtomicUsize>,
+        shrink: Arc<AtomicUsize>,
+    }
+    impl WrappedGlobal {
+        fn stats(&self) -> (usize, usize, usize, usize) {
+            (
+                self.alloc.load(Ordering::Relaxed),
+                self.dealloc.load(Ordering::Relaxed),
+                self.grow.load(Ordering::Relaxed),
+                self.shrink.load(Ordering::Relaxed),
+            )
+        }
+    }
+    unsafe impl Allocator for WrappedGlobal {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            self.alloc.fetch_add(1, Ordering::Relaxed);
+            std::alloc::Global.allocate(layout)
+        }
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            self.dealloc.fetch_add(1, Ordering::Relaxed);
+            std::alloc::Global.deallocate(ptr, layout)
+        }
+        fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            self.alloc.fetch_add(1, Ordering::Relaxed);
+            std::alloc::Global.allocate_zeroed(layout)
+        }
+        unsafe fn grow(
+            &self,
+            ptr: NonNull<u8>,
+            old_layout: Layout,
+            new_layout: Layout,
+        ) -> Result<NonNull<[u8]>, AllocError> {
+            self.grow.fetch_add(1, Ordering::Relaxed);
+            std::alloc::Global.grow(ptr, old_layout, new_layout)
+        }
+        unsafe fn grow_zeroed(
+            &self,
+            ptr: NonNull<u8>,
+            old_layout: Layout,
+            new_layout: Layout,
+        ) -> Result<NonNull<[u8]>, AllocError> {
+            self.grow.fetch_add(1, Ordering::Relaxed);
+            std::alloc::Global.grow_zeroed(ptr, old_layout, new_layout)
+        }
+        unsafe fn shrink(
+            &self,
+            ptr: NonNull<u8>,
+            old_layout: Layout,
+            new_layout: Layout,
+        ) -> Result<NonNull<[u8]>, AllocError> {
+            self.shrink.fetch_add(1, Ordering::Relaxed);
+            std::alloc::Global.shrink(ptr, old_layout, new_layout)
+        }
+    }
+
+    type TestAllocator = SwappyAllocator<WrappedGlobal>;
 
     fn file_count(p: &Path) -> usize {
         let mut files = 0;
@@ -339,7 +404,8 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let allocator = SwappyAllocator::new(dir.path(), 1024);
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), 1024, global);
         let mut vec1: Vec<u8, _> = Vec::new_in(allocator.clone());
         assert_eq!(allocator.memory_usage(), 0);
         vec1.resize(1024, 0);
@@ -369,7 +435,8 @@ mod tests {
             .tempdir()
             .unwrap();
 
-        let allocator = SwappyAllocator::new(dir.path(), 0);
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), 0, global);
 
         let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
         assert_eq!(allocator.memory_usage(), 0);
@@ -394,11 +461,561 @@ mod tests {
             .prefix("test_empty_pointer")
             .tempdir()
             .unwrap();
-        let allocator = SwappyAllocator::new(dir.path(), 0);
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), 0, global);
         let _ = allocator
             .allocate(Layout::from_size_align(0, 1).unwrap())
             .unwrap();
         assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(file_count(dir.path()), 0);
+    }
+
+    #[test]
+    fn test_shrink_reuse() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_shrink_reuse")
+            .tempdir()
+            .unwrap();
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), 16, global);
+        let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+        vec.resize(DEFAULT_PAGE_SIZE, 0);
+        assert_eq!(file_count(dir.path()), 1);
+        vec.resize(DEFAULT_PAGE_SIZE / 2, 0);
+        // Didn't allocate new page.
+        assert_eq!(file_count(dir.path()), 1);
+        // Switch to memory.
+        vec.resize(4, 0);
+        vec.shrink_to_fit();
+        assert_eq!(allocator.memory_usage(), 4);
+        assert_eq!(file_count(dir.path()), 0);
+        vec.clear();
+        vec.shrink_to_fit();
+        assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(file_count(dir.path()), 0);
+    }
+
+    // Test that some grows are not routed to the underlying allocator.
+    #[test]
+    fn test_grow_regression() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_grow_regression")
+            .tempdir()
+            .unwrap();
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), 100, global.clone());
+        let mut disk_vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+        assert_eq!(allocator.memory_usage(), 0);
+        disk_vec.resize(400, 0);
+        assert_eq!(global.stats(), (0, 0, 0, 0));
+        assert_eq!(allocator.memory_usage(), 0);
+        assert_eq!(global.stats(), (0, 0, 0, 0));
+        let mut mem_vec: Vec<u8, _> = Vec::with_capacity_in(8, allocator.clone());
+        assert_eq!(allocator.memory_usage(), 8);
+        assert_eq!(global.stats(), (1, 0, 0, 0));
+        // Grow calls <allocate and deallocate>.
+        mem_vec.resize(16, 0);
+        assert_eq!(allocator.memory_usage(), 16);
+        assert_eq!(global.stats(), (2, 1, 0, 0));
+        // Deallocate all pages, calls <allocate and deallocate> when memory use is low.
+        disk_vec.clear();
+        disk_vec.shrink_to_fit();
+        assert_eq!(allocator.memory_usage(), 16);
+        assert_eq!(global.stats(), (3, 1, 0, 0));
+        assert_eq!(file_count(dir.path()), 0);
+        // Grow calls <grow> now.
+        mem_vec.resize(32, 0);
+        assert_eq!(allocator.memory_usage(), 32);
+        assert_eq!(global.stats(), (3, 1, 1, 0));
+    }
+
+    // Mashup of tests from std::alloc.
+    #[test]
+    fn test_swappy_vec_deque() {
+        type VecDeque<T> = std::collections::VecDeque<T, TestAllocator>;
+
+        fn collect<T, A>(iter: T, a: TestAllocator) -> VecDeque<A>
+        where
+            T: std::iter::IntoIterator<Item = A>,
+        {
+            let mut vec = VecDeque::new_in(a);
+            for i in iter {
+                vec.push_back(i);
+            }
+            vec
+        }
+
+        fn collect_v<T, A>(iter: T, a: TestAllocator) -> Vec<A, TestAllocator>
+        where
+            T: std::iter::IntoIterator<Item = A>,
+        {
+            let mut vec = Vec::new_in(a);
+            for i in iter {
+                vec.push(i);
+            }
+            vec
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("test_swappy_vec_deque")
+            .tempdir()
+            .unwrap();
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), 0, global);
+
+        {
+            // test_with_capacity_non_power_two
+            let mut d3 = VecDeque::with_capacity_in(3, allocator.clone());
+            d3.push_back(1);
+
+            // X = None, | = lo
+            // [|1, X, X]
+            assert_eq!(d3.pop_front(), Some(1));
+            // [X, |X, X]
+            assert_eq!(d3.front(), None);
+
+            // [X, |3, X]
+            d3.push_back(3);
+            // [X, |3, 6]
+            d3.push_back(6);
+            // [X, X, |6]
+            assert_eq!(d3.pop_front(), Some(3));
+
+            // Pushing the lo past half way point to trigger
+            // the 'B' scenario for growth
+            // [9, X, |6]
+            d3.push_back(9);
+            // [9, 12, |6]
+            d3.push_back(12);
+
+            d3.push_back(15);
+            // There used to be a bug here about how the
+            // VecDeque made growth assumptions about the
+            // underlying Vec which didn't hold and lead
+            // to corruption.
+            // (Vec grows to next power of two)
+            // good- [9, 12, 15, X, X, X, X, |6]
+            // bug-  [15, 12, X, X, X, |6, X, X]
+            assert_eq!(d3.pop_front(), Some(6));
+
+            // Which leads us to the following state which
+            // would be a failure case.
+            // bug-  [15, 12, X, X, X, X, |X, X]
+            assert_eq!(d3.front(), Some(&9));
+        }
+        {
+            // test_into_iter
+            // Empty iter
+            {
+                let d: VecDeque<i32> = VecDeque::new_in(allocator.clone());
+                let mut iter = d.into_iter();
+
+                assert_eq!(iter.size_hint(), (0, Some(0)));
+                assert_eq!(iter.next(), None);
+                assert_eq!(iter.size_hint(), (0, Some(0)));
+            }
+
+            // simple iter
+            {
+                let mut d = VecDeque::new_in(allocator.clone());
+                for i in 0..5 {
+                    d.push_back(i);
+                }
+
+                let b = vec![0, 1, 2, 3, 4];
+                assert_eq!(d.into_iter().collect::<Vec<_>>(), b);
+            }
+
+            // wrapped iter
+            {
+                let mut d = VecDeque::new_in(allocator.clone());
+                for i in 0..5 {
+                    d.push_back(i);
+                }
+                for i in 6..9 {
+                    d.push_front(i);
+                }
+
+                let b = vec![8, 7, 6, 0, 1, 2, 3, 4];
+                assert_eq!(d.into_iter().collect::<Vec<_>>(), b);
+            }
+
+            // partially used
+            {
+                let mut d = VecDeque::new_in(allocator.clone());
+                for i in 0..5 {
+                    d.push_back(i);
+                }
+                for i in 6..9 {
+                    d.push_front(i);
+                }
+
+                let mut it = d.into_iter();
+                assert_eq!(it.size_hint(), (8, Some(8)));
+                assert_eq!(it.next(), Some(8));
+                assert_eq!(it.size_hint(), (7, Some(7)));
+                assert_eq!(it.next_back(), Some(4));
+                assert_eq!(it.size_hint(), (6, Some(6)));
+                assert_eq!(it.next(), Some(7));
+                assert_eq!(it.size_hint(), (5, Some(5)));
+            }
+        }
+        {
+            // test_eq_after_rotation
+            // test that two deques are equal even if elements are laid out differently
+            let len = 28;
+            let mut ring: VecDeque<i32> = collect(0..len as i32, allocator.clone());
+            let mut shifted = ring.clone();
+            for _ in 0..10 {
+                // shift values 1 step to the right by pop, sub one, push
+                ring.pop_front();
+                for elt in &mut ring {
+                    *elt -= 1;
+                }
+                ring.push_back(len - 1);
+            }
+
+            // try every shift
+            for _ in 0..shifted.capacity() {
+                shifted.pop_front();
+                for elt in &mut shifted {
+                    *elt -= 1;
+                }
+                shifted.push_back(len - 1);
+                assert_eq!(shifted, ring);
+                assert_eq!(ring, shifted);
+            }
+        }
+        {
+            // test_drop_with_pop
+            static mut DROPS: i32 = 0;
+            struct Elem;
+            impl Drop for Elem {
+                fn drop(&mut self) {
+                    unsafe {
+                        DROPS += 1;
+                    }
+                }
+            }
+
+            let mut ring = VecDeque::new_in(allocator.clone());
+            ring.push_back(Elem);
+            ring.push_front(Elem);
+            ring.push_back(Elem);
+            ring.push_front(Elem);
+
+            drop(ring.pop_back());
+            drop(ring.pop_front());
+            assert_eq!(unsafe { DROPS }, 2);
+
+            drop(ring);
+            assert_eq!(unsafe { DROPS }, 4);
+        }
+        {
+            // test_reserve_grow
+            // test growth path A
+            // [T o o H] -> [T o o H . . . . ]
+            let mut ring = VecDeque::with_capacity_in(4, allocator.clone());
+            for i in 0..3 {
+                ring.push_back(i);
+            }
+            ring.reserve(7);
+            for i in 0..3 {
+                assert_eq!(ring.pop_front(), Some(i));
+            }
+
+            // test growth path B
+            // [H T o o] -> [. T o o H . . . ]
+            let mut ring = VecDeque::with_capacity_in(4, allocator.clone());
+            for i in 0..1 {
+                ring.push_back(i);
+                assert_eq!(ring.pop_front(), Some(i));
+            }
+            for i in 0..3 {
+                ring.push_back(i);
+            }
+            ring.reserve(7);
+            for i in 0..3 {
+                assert_eq!(ring.pop_front(), Some(i));
+            }
+
+            // test growth path C
+            // [o o H T] -> [o o H . . . . T ]
+            let mut ring = VecDeque::with_capacity_in(4, allocator.clone());
+            for i in 0..3 {
+                ring.push_back(i);
+                assert_eq!(ring.pop_front(), Some(i));
+            }
+            for i in 0..3 {
+                ring.push_back(i);
+            }
+            ring.reserve(7);
+            for i in 0..3 {
+                assert_eq!(ring.pop_front(), Some(i));
+            }
+        }
+        {
+            // test_append_permutations
+            fn construct_vec_deque(
+                push_back: usize,
+                pop_back: usize,
+                push_front: usize,
+                pop_front: usize,
+                allocator: TestAllocator,
+            ) -> VecDeque<usize> {
+                let mut out = VecDeque::new_in(allocator);
+                for a in 0..push_back {
+                    out.push_back(a);
+                }
+                for b in 0..push_front {
+                    out.push_front(push_back + b);
+                }
+                for _ in 0..pop_back {
+                    out.pop_back();
+                }
+                for _ in 0..pop_front {
+                    out.pop_front();
+                }
+                out
+            }
+
+            // Miri is too slow
+            let max = if cfg!(miri) { 3 } else { 5 };
+
+            // Many different permutations of both the `VecDeque` getting appended to
+            // and the one getting appended are generated to check `append`.
+            // This ensures all 6 code paths of `append` are tested.
+            for src_push_back in 0..max {
+                for src_push_front in 0..max {
+                    // doesn't pop more values than are pushed
+                    for src_pop_back in 0..(src_push_back + src_push_front) {
+                        for src_pop_front in 0..(src_push_back + src_push_front - src_pop_back) {
+                            let src = construct_vec_deque(
+                                src_push_back,
+                                src_pop_back,
+                                src_push_front,
+                                src_pop_front,
+                                allocator.clone(),
+                            );
+
+                            for dst_push_back in 0..max {
+                                for dst_push_front in 0..max {
+                                    for dst_pop_back in 0..(dst_push_back + dst_push_front) {
+                                        for dst_pop_front in
+                                            0..(dst_push_back + dst_push_front - dst_pop_back)
+                                        {
+                                            let mut dst = construct_vec_deque(
+                                                dst_push_back,
+                                                dst_pop_back,
+                                                dst_push_front,
+                                                dst_pop_front,
+                                                allocator.clone(),
+                                            );
+                                            let mut src = src.clone();
+
+                                            // Assert that appending `src` to `dst` gives the same
+                                            // order
+                                            // of values as iterating over both in sequence.
+                                            let correct = collect_v(
+                                                dst.iter().chain(src.iter()).cloned(),
+                                                allocator.clone(),
+                                            );
+                                            dst.append(&mut src);
+                                            assert_eq!(dst, correct);
+                                            assert!(src.is_empty());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        {
+            // test_append_double_drop
+            struct DropCounter<'a> {
+                count: &'a mut u32,
+            }
+
+            impl Drop for DropCounter<'_> {
+                fn drop(&mut self) {
+                    *self.count += 1;
+                }
+            }
+            let (mut count_a, mut count_b) = (0, 0);
+            {
+                let mut a = VecDeque::new_in(allocator.clone());
+                let mut b = VecDeque::new_in(allocator.clone());
+                a.push_back(DropCounter {
+                    count: &mut count_a,
+                });
+                b.push_back(DropCounter {
+                    count: &mut count_b,
+                });
+
+                a.append(&mut b);
+            }
+            assert_eq!(count_a, 1);
+            assert_eq!(count_b, 1);
+        }
+        {
+            // test_extend_ref
+            let mut v = VecDeque::new_in(allocator.clone());
+            v.push_back(1);
+            v.extend(&[2, 3, 4]);
+
+            assert_eq!(v.len(), 4);
+            assert_eq!(v[0], 1);
+            assert_eq!(v[1], 2);
+            assert_eq!(v[2], 3);
+            assert_eq!(v[3], 4);
+
+            let mut w = VecDeque::new_in(allocator.clone());
+            w.push_back(5);
+            w.push_back(6);
+            v.extend(&w);
+
+            assert_eq!(v.len(), 6);
+            assert_eq!(v[0], 1);
+            assert_eq!(v[1], 2);
+            assert_eq!(v[2], 3);
+            assert_eq!(v[3], 4);
+            assert_eq!(v[4], 5);
+            assert_eq!(v[5], 6);
+        }
+        {
+            // test_rotate_left_random
+            let shifts = [
+                6, 1, 0, 11, 12, 1, 11, 7, 9, 3, 6, 1, 4, 0, 5, 1, 3, 1, 12, 8, 3, 1, 11, 11, 9, 4,
+                12, 3, 12, 9, 11, 1, 7, 9, 7, 2,
+            ];
+            let n = 12;
+            let mut v: VecDeque<_> = collect(0..n, allocator.clone());
+            let mut total_shift = 0;
+            for shift in shifts.iter().cloned() {
+                v.rotate_left(shift);
+                total_shift += shift;
+                #[allow(clippy::needless_range_loop)]
+                for i in 0..n {
+                    assert_eq!(v[i], (i + total_shift) % n);
+                }
+            }
+        }
+        {
+            // test_drain_leak
+            static mut DROPS: i32 = 0;
+
+            #[derive(Debug, PartialEq)]
+            struct D(u32, bool);
+
+            impl Drop for D {
+                fn drop(&mut self) {
+                    unsafe {
+                        DROPS += 1;
+                    }
+
+                    if self.1 {
+                        panic!("panic in `drop`");
+                    }
+                }
+            }
+
+            let mut v = VecDeque::new_in(allocator.clone());
+            v.push_back(D(4, false));
+            v.push_back(D(5, false));
+            v.push_back(D(6, false));
+            v.push_front(D(3, false));
+            v.push_front(D(2, true));
+            v.push_front(D(1, false));
+            v.push_front(D(0, false));
+
+            assert!(catch_unwind_silent(|| {
+                v.drain(1..=4);
+            })
+            .is_err());
+
+            assert_eq!(unsafe { DROPS }, 4);
+            assert_eq!(v.len(), 3);
+            drop(v);
+            assert_eq!(unsafe { DROPS }, 7);
+        }
+        {
+            // test_zero_sized_push
+            const N: usize = 8;
+
+            // Zero sized type
+            struct Zst;
+
+            // Test that for all possible sequences of push_front / push_back,
+            // we end up with a deque of the correct size
+
+            for len in 0..N {
+                let mut tester = VecDeque::with_capacity_in(len, allocator.clone());
+                assert_eq!(tester.len(), 0);
+                assert!(tester.capacity() >= len);
+                for case in 0..(1 << len) {
+                    assert_eq!(tester.len(), 0);
+                    for bit in 0..len {
+                        if case & (1 << bit) != 0 {
+                            tester.push_front(Zst);
+                        } else {
+                            tester.push_back(Zst);
+                        }
+                    }
+                    assert_eq!(tester.len(), len);
+                    #[allow(clippy::iter_count)]
+                    let iter_len = tester.iter().count();
+                    assert_eq!(iter_len, len);
+                    tester.clear();
+                }
+            }
+        }
+        {
+            // issue-58952
+            let c = 2;
+            let bv = vec![2];
+            let b = bv.iter().filter(|a| **a == c);
+
+            let _a = collect(
+                vec![1, 2, 3]
+                    .into_iter()
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a))
+                    .filter(|a| b.clone().any(|b| *b == *a)),
+                allocator.clone(),
+            );
+        }
+        {
+            // issue-54477
+            let mut vecdeque_13 = collect(vec![].into_iter(), allocator.clone());
+            let mut vecdeque_29 = collect(vec![0].into_iter(), allocator.clone());
+            vecdeque_29.insert(0, 30);
+            vecdeque_29.insert(1, 31);
+            vecdeque_29.insert(2, 32);
+            vecdeque_29.insert(3, 33);
+            vecdeque_29.insert(4, 34);
+            vecdeque_29.insert(5, 35);
+
+            vecdeque_13.append(&mut vecdeque_29);
+
+            assert_eq!(
+                vecdeque_13,
+                collect(vec![30, 31, 32, 33, 34, 35, 0].into_iter(), allocator,)
+            );
+        }
+
         assert_eq!(file_count(dir.path()), 0);
     }
 
