@@ -1,5 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+#![cfg_attr(feature = "swap", feature(allocator_api))]
+
 mod util;
 
 mod test_engine;

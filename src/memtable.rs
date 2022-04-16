@@ -22,11 +22,12 @@ use crate::{Error, GlobalStats, Result};
 
 #[cfg(feature = "swap")]
 mod swap_conditional_imports {
+    use log::error;
     use std::convert::TryFrom;
     use std::path::Path;
 
-    pub trait AllocatorTrait: std::alloc::Allocator + Clone {}
-    impl<T: std::alloc::Allocator + Clone> AllocatorTrait for T {}
+    pub trait AllocatorTrait: std::alloc::Allocator + Clone + Send + Sync {}
+    impl<T: std::alloc::Allocator + Clone + Send + Sync> AllocatorTrait for T {}
 
     pub type SwappyAllocator = crate::swappy_allocator::SwappyAllocator<std::alloc::Global>;
     pub type SelectedAllocator = SwappyAllocator;
@@ -38,13 +39,25 @@ mod swap_conditional_imports {
     pub fn new_allocator(cfg: &crate::Config) -> SelectedAllocator {
         let memory_limit =
             usize::try_from(cfg.memory_limit.map_or(u64::MAX, |l| l.0)).unwrap_or(usize::MAX);
-        SwappyAllocator::new(&Path::new(&cfg.dir).join("swap"), memory_limit)
+        let path = Path::new(&cfg.dir).join("swap");
+        // Deletes the path if it exists.
+        if path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                error!(
+                    "Failed to clean up old swap directory: {:?}. \
+                    There might be obsolete swap files left in {}.",
+                    e,
+                    path.display()
+                );
+            }
+        }
+        SwappyAllocator::new(&path, memory_limit)
     }
 }
 
 #[cfg(not(feature = "swap"))]
 mod swap_conditional_imports {
-    pub trait AllocatorTrait {}
+    pub trait AllocatorTrait: Clone + Send + Sync {}
     impl AllocatorTrait for () {}
 
     pub type SelectedAllocator = ();
@@ -748,39 +761,78 @@ impl<A: AllocatorTrait> Drop for MemTable<A> {
     }
 }
 
-type MemTables = HashMap<u64, Arc<RwLock<MemTable<SelectedAllocator>>>>;
+type MemTableMap<A> = HashMap<u64, Arc<RwLock<MemTable<A>>>>;
 pub type MemTableHandle = Arc<RwLock<MemTable<SelectedAllocator>>>;
+pub type MemTables = MemTableAccessor<SelectedAllocator>;
 
 /// A collection of [`MemTable`]s.
 ///
 /// Internally, they are stored in multiple [`HashMap`]s, which are indexed by
 /// hashed region IDs.
 #[derive(Clone)]
-pub struct MemTableAccessor {
+pub struct MemTableAccessor<A: AllocatorTrait> {
     global_stats: Arc<GlobalStats>,
-    allocator: SelectedAllocator,
+    allocator: A,
 
     /// A fixed-size array of maps of [`MemTable`]s.
-    slots: Vec<Arc<RwLock<MemTables>>>,
+    slots: Vec<Arc<RwLock<MemTableMap<A>>>>,
     /// Deleted [`MemTable`]s that are not yet rewritten.
     removed_memtables: Arc<Mutex<VecDeque<u64>>>,
 }
 
-impl MemTableAccessor {
-    pub fn new(global_stats: Arc<GlobalStats>, cfg: &Config) -> MemTableAccessor {
+impl MemTableAccessor<VacantAllocator> {
+    pub fn new(global_stats: Arc<GlobalStats>) -> MemTableAccessor<VacantAllocator> {
         let mut slots = Vec::with_capacity(MEMTABLE_SLOT_COUNT);
         for _ in 0..MEMTABLE_SLOT_COUNT {
-            slots.push(Arc::new(RwLock::new(MemTables::default())));
+            slots.push(Arc::new(RwLock::new(MemTableMap::default())));
         }
         MemTableAccessor {
             global_stats,
-            allocator: new_allocator(cfg),
+            allocator: new_vacant_allocator(),
+            slots,
+            removed_memtables: Default::default(),
+        }
+    }
+}
+
+impl MemTableAccessor<SelectedAllocator> {
+    pub fn memory_usage(&self) -> usize {
+        #[cfg(not(feature = "swap"))]
+        {
+            let mut total = 0;
+            for tables in &self.slots {
+                tables.read().values().for_each(|t| {
+                    total += t.read().heap_size();
+                });
+            }
+            total
+        }
+        #[cfg(feature = "swap")]
+        {
+            self.allocator.memory_usage()
+        }
+    }
+
+    pub(crate) fn flush_metrics(&self) {
+        MEMORY_USAGE.set(self.memory_usage() as i64);
+    }
+}
+
+impl<A: AllocatorTrait> MemTableAccessor<A> {
+    pub fn new_with_allocator(global_stats: Arc<GlobalStats>, allocator: A) -> MemTableAccessor<A> {
+        let mut slots = Vec::with_capacity(MEMTABLE_SLOT_COUNT);
+        for _ in 0..MEMTABLE_SLOT_COUNT {
+            slots.push(Arc::new(RwLock::new(MemTableMap::default())));
+        }
+        MemTableAccessor {
+            global_stats,
+            allocator,
             slots,
             removed_memtables: Default::default(),
         }
     }
 
-    pub fn get_or_insert(&self, raft_group_id: u64) -> MemTableHandle {
+    pub fn get_or_insert(&self, raft_group_id: u64) -> Arc<RwLock<MemTable<A>>> {
         let global_stats = self.global_stats.clone();
         let mut memtables = self.slots[Self::slot_index(raft_group_id)].write();
         let memtable = memtables.entry(raft_group_id).or_insert_with(|| {
@@ -791,14 +843,14 @@ impl MemTableAccessor {
         memtable.clone()
     }
 
-    pub fn get(&self, raft_group_id: u64) -> Option<MemTableHandle> {
+    pub fn get(&self, raft_group_id: u64) -> Option<Arc<RwLock<MemTable<A>>>> {
         self.slots[Self::slot_index(raft_group_id)]
             .read()
             .get(&raft_group_id)
             .cloned()
     }
 
-    pub fn insert(&self, raft_group_id: u64, memtable: MemTableHandle) {
+    pub fn insert(&self, raft_group_id: u64, memtable: Arc<RwLock<MemTable<A>>>) {
         self.slots[Self::slot_index(raft_group_id)]
             .write()
             .insert(raft_group_id, memtable);
@@ -814,7 +866,7 @@ impl MemTableAccessor {
         }
     }
 
-    pub fn fold<B, F: Fn(B, &MemTable<SelectedAllocator>) -> B>(&self, mut init: B, fold: F) -> B {
+    pub fn fold<B, F: Fn(B, &MemTable<A>) -> B>(&self, mut init: B, fold: F) -> B {
         for tables in &self.slots {
             for memtable in tables.read().values() {
                 init = fold(init, &*memtable.read());
@@ -823,10 +875,10 @@ impl MemTableAccessor {
         init
     }
 
-    pub fn collect<F: FnMut(&MemTable<SelectedAllocator>) -> bool>(
+    pub fn collect<F: FnMut(&MemTable<A>) -> bool>(
         &self,
         mut condition: F,
-    ) -> Vec<MemTableHandle> {
+    ) -> Vec<Arc<RwLock<MemTable<A>>>> {
         let mut memtables = Vec::new();
         for tables in &self.slots {
             memtables.extend(tables.read().values().filter_map(|t| {
@@ -996,27 +1048,6 @@ impl MemTableAccessor {
         }
     }
 
-    pub fn memory_usage(&self) -> usize {
-        #[cfg(not(feature = "swap"))]
-        {
-            let mut total = 0;
-            for tables in &self.slots {
-                tables.read().values().for_each(|t| {
-                    total += t.read().heap_size();
-                });
-            }
-            total
-        }
-        #[cfg(feature = "swap")]
-        {
-            self.allocator.memory_usage()
-        }
-    }
-
-    pub(crate) fn flush_metrics(&self) {
-        MEMORY_USAGE.set(self.memory_usage() as i64);
-    }
-
     #[inline]
     fn slot_index(id: u64) -> usize {
         debug_assert!(MEMTABLE_SLOT_COUNT.is_power_of_two());
@@ -1024,40 +1055,51 @@ impl MemTableAccessor {
     }
 }
 
-pub struct MemTableRecoverContext {
+pub struct MemTableRecoverContext<A: AllocatorTrait> {
     stats: Arc<GlobalStats>,
     log_batch: LogItemBatch,
-    memtables: MemTableAccessor,
+    memtables: MemTableAccessor<A>,
 }
 
-impl MemTableRecoverContext {
-    fn new(cfg: &Config) -> Self {
+impl MemTableRecoverContext<VacantAllocator> {
+    fn new() -> Self {
         let stats = Arc::new(GlobalStats::default());
         Self {
             stats: stats.clone(),
             log_batch: LogItemBatch::default(),
-            memtables: MemTableAccessor::new(stats, cfg),
+            memtables: MemTableAccessor::new(stats),
+        }
+    }
+}
+
+impl<A: AllocatorTrait> MemTableRecoverContext<A> {
+    fn new_with_allocator(allocator: A) -> Self {
+        let stats = Arc::new(GlobalStats::default());
+        Self {
+            stats: stats.clone(),
+            log_batch: LogItemBatch::default(),
+            memtables: MemTableAccessor::new_with_allocator(stats, allocator),
         }
     }
 
-    pub fn finish(self) -> (MemTableAccessor, Arc<GlobalStats>) {
+    pub fn finish(self) -> (MemTableAccessor<A>, Arc<GlobalStats>) {
         (self.memtables, self.stats)
     }
 
-    pub fn merge_append_context(&self, append: MemTableRecoverContext) {
+    pub fn merge_append_context(&self, append: MemTableRecoverContext<A>) {
         self.memtables
             .apply_append_writes(append.log_batch.clone().drain());
         self.memtables.merge_append_table(append.memtables);
     }
 }
 
-impl Default for MemTableRecoverContext {
+impl Default for MemTableRecoverContext<VacantAllocator> {
     fn default() -> Self {
-        Self::new(&Config::default())
+        Self::new()
     }
 }
 
-impl ReplayMachine for MemTableRecoverContext {
+impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
     fn replay(&mut self, mut item_batch: LogItemBatch, file_id: FileId) -> Result<()> {
         for item in item_batch.iter() {
             match &item.content {
@@ -1094,18 +1136,20 @@ impl ReplayMachine for MemTableRecoverContext {
 }
 
 pub struct MemTableRecoverContextFactory {
-    cfg: Config,
+    allocator: SelectedAllocator,
 }
 
 impl MemTableRecoverContextFactory {
-    pub fn new(cfg: Config) -> Self {
-        Self { cfg }
+    pub fn new(cfg: &Config) -> Self {
+        Self {
+            allocator: new_allocator(cfg),
+        }
     }
 }
 
-impl Factory<MemTableRecoverContext> for MemTableRecoverContextFactory {
-    fn new_target(&self) -> MemTableRecoverContext {
-        MemTableRecoverContext::new(&self.cfg)
+impl Factory<MemTableRecoverContext<SelectedAllocator>> for MemTableRecoverContextFactory {
+    fn new_target(&self) -> MemTableRecoverContext<SelectedAllocator> {
+        MemTableRecoverContext::new_with_allocator(self.allocator.clone())
     }
 }
 
@@ -2080,8 +2124,7 @@ mod tests {
 
         // sequential apply
         let sequential_global_stats = Arc::new(GlobalStats::default());
-        let sequential_memtables =
-            MemTableAccessor::new(sequential_global_stats.clone(), &Config::default());
+        let sequential_memtables = MemTableAccessor::new(sequential_global_stats.clone());
         for mut batch in batches.clone() {
             sequential_memtables.apply_append_writes(batch.drain());
         }

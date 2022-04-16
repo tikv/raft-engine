@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::vec::Vec;
 
+use log::{error, warn};
 use memmap2::MmapMut;
 use parking_lot::Mutex;
 
@@ -40,6 +41,16 @@ pub struct SwappyAllocator<A: Allocator>(Arc<SwappyAllocatorCore<A>>);
 
 impl<A: Allocator> SwappyAllocator<A> {
     pub fn new_over(path: &Path, budget: usize, alloc: A) -> SwappyAllocator<A> {
+        if path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                error!(
+                    "Failed to clean up old swap directory: {:?}. \
+                    There might be obsolete swap files left in {}.",
+                    e,
+                    path.display()
+                );
+            }
+        }
         let core = SwappyAllocatorCore {
             budget,
             path: path.into(),
@@ -72,19 +83,25 @@ impl<A: Allocator> SwappyAllocator<A> {
             self.0.maybe_swapped.store(true, Ordering::Relaxed);
             // Ordering: `maybe_swapped` must be set before the page is created.
             std::sync::atomic::fence(Ordering::Release);
-            pages.push(Page::new(
-                &self.0.path,
-                self.0.page_seq.fetch_add(1, Ordering::Relaxed),
-                std::cmp::max(DEFAULT_PAGE_SIZE, layout.size()),
-            ));
-        }
-        match pages.last_mut().unwrap().allocate(layout) {
-            None => {
-                pages.push(Page::new(
+            pages.push(
+                Page::new(
                     &self.0.path,
                     self.0.page_seq.fetch_add(1, Ordering::Relaxed),
                     std::cmp::max(DEFAULT_PAGE_SIZE, layout.size()),
-                ));
+                )
+                .ok_or(AllocError)?,
+            );
+        }
+        match pages.last_mut().unwrap().allocate(layout) {
+            None => {
+                pages.push(
+                    Page::new(
+                        &self.0.path,
+                        self.0.page_seq.fetch_add(1, Ordering::Relaxed),
+                        std::cmp::max(DEFAULT_PAGE_SIZE, layout.size()),
+                    )
+                    .ok_or(AllocError)?,
+                );
                 pages.last_mut().unwrap().allocate(layout).ok_or(AllocError)
             }
             Some(r) => Ok(r),
@@ -104,11 +121,16 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
         let mem_usage =
             self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
         if mem_usage > self.0.budget {
-            self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
             if layout.size() == 0 {
                 Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0))
             } else {
-                self.allocate_swapped(layout)
+                match self.allocate_swapped(layout) {
+                    r @ Ok(_) => {
+                        self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
+                        r
+                    }
+                    _ => self.0.mem_allocator.allocate(layout),
+                }
             }
         } else {
             self.0.mem_allocator.allocate(layout)
@@ -253,23 +275,37 @@ struct Page {
 }
 
 impl Page {
-    fn new(root: &Path, seq: u32, size: usize) -> Page {
+    fn new(root: &Path, seq: u32, size: usize) -> Option<Page> {
+        fail::fail_point!("swappy::page::new_failure", |_| None);
+        if !root.exists() {
+            // Create directory only when it's needed.
+            std::fs::create_dir_all(&root)
+                .map_err(|e| error!("Failed to create swap directory: {:?}.", e))
+                .ok()?;
+        }
         let path = root.join(Self::page_file_name(seq));
         let f = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(&path)
-            .unwrap();
-        f.set_len(size as u64).unwrap();
-        let mmap = unsafe { MmapMut::map_mut(&f).unwrap() };
-        Self {
+            .map_err(|e| error!("Failed to open swap file: {}", e))
+            .ok()?;
+        f.set_len(size as u64)
+            .map_err(|e| error!("Failed to extend swap file: {}", e))
+            .ok()?;
+        let mmap = unsafe {
+            MmapMut::map_mut(&f)
+                .map_err(|e| error!("Failed to mmap swap file: {}", e))
+                .ok()?
+        };
+        Some(Self {
             seq,
             _f: f,
             mmap,
             tail: 0,
             ref_counter: 0,
-        }
+        })
     }
 
     #[inline]
@@ -304,8 +340,11 @@ impl Page {
     /// Deletes this page and cleans up owned resources.
     #[inline]
     fn release(self, root: &Path) {
+        debug_assert_eq!(self.ref_counter, 0);
         let path = root.join(Self::page_file_name(self.seq));
-        std::fs::remove_file(&path).unwrap();
+        if let Err(e) = std::fs::remove_file(&path) {
+            warn!("Failed to delete swap file: {}", e);
+        }
     }
 
     /// Returns whether the pointer is contained in this page.
@@ -393,7 +432,9 @@ mod tests {
 
     fn file_count(p: &Path) -> usize {
         let mut files = 0;
-        p.read_dir().unwrap().for_each(|_| files += 1);
+        if let Ok(iter) = p.read_dir() {
+            iter.for_each(|_| files += 1);
+        }
         files
     }
 

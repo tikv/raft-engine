@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogBatch;
-use crate::memtable::{MemTableAccessor, MemTableHandle};
+use crate::memtable::{MemTableHandle, MemTables};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};
@@ -31,7 +31,7 @@ where
     P: PipeLog,
 {
     cfg: Arc<Config>,
-    memtables: MemTableAccessor,
+    memtables: MemTables,
     pipe_log: Arc<P>,
     global_stats: Arc<GlobalStats>,
     listeners: Vec<Arc<dyn EventListener>>,
@@ -49,7 +49,7 @@ where
 {
     pub fn new(
         cfg: Arc<Config>,
-        memtables: MemTableAccessor,
+        memtables: MemTables,
         pipe_log: Arc<P>,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
