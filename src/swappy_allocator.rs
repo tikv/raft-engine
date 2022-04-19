@@ -14,14 +14,9 @@ use log::{error, warn};
 use memmap2::MmapMut;
 use parking_lot::Mutex;
 
-const DEFAULT_PAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB
+const DEFAULT_PAGE_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
-/// An [`Allocator`] implementation that has a memory budget and can be swapped
-/// out.
-///
-/// The allocations of its internal metadata are not managed (i.e. allocated via
-/// `std::alloc::Global`). Do NOT use it as the global allocator.
-pub struct SwappyAllocatorCore<A = Global>
+struct SwappyAllocatorCore<A = Global>
 where
     A: Allocator,
 {
@@ -36,6 +31,11 @@ where
     pages: Mutex<Vec<Page>>,
 }
 
+/// An [`Allocator`] implementation that has a memory budget and can be swapped
+/// out.
+///
+/// The allocations of its internal metadata are not managed (i.e. allocated via
+/// `std::alloc::Global`). Do NOT use it as the global allocator.
 #[derive(Clone)]
 pub struct SwappyAllocator<A: Allocator>(Arc<SwappyAllocatorCore<A>>);
 
@@ -44,7 +44,7 @@ impl<A: Allocator> SwappyAllocator<A> {
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(&path) {
                 error!(
-                    "Failed to clean up old swap directory: {:?}. \
+                    "Failed to clean up old swap directory: {}. \
                     There might be obsolete swap files left in {}.",
                     e,
                     path.display()
@@ -92,6 +92,7 @@ impl<A: Allocator> SwappyAllocator<A> {
                 .ok_or(AllocError)?,
             );
         }
+        debug_assert!(self.0.maybe_swapped.load(Ordering::Relaxed));
         match pages.last_mut().unwrap().allocate(layout) {
             None => {
                 pages.push(
@@ -118,9 +119,11 @@ impl SwappyAllocator<Global> {
 unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        let mem_usage =
-            self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-        if mem_usage > self.0.budget {
+        // Always use mem_allocator to allocate empty pointer.
+        if layout.size() > 0
+            && self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed) + layout.size()
+                > self.0.budget
+        {
             if layout.size() == 0 {
                 Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0))
             } else {
@@ -280,7 +283,7 @@ impl Page {
         if !root.exists() {
             // Create directory only when it's needed.
             std::fs::create_dir_all(&root)
-                .map_err(|e| error!("Failed to create swap directory: {:?}.", e))
+                .map_err(|e| error!("Failed to create swap directory: {}.", e))
                 .ok()?;
         }
         let path = root.join(Self::page_file_name(seq));
@@ -430,6 +433,32 @@ mod tests {
 
     type TestAllocator = SwappyAllocator<WrappedGlobal>;
 
+    /// Borrows some memory temporarily.
+    struct BorrowMemory {
+        allocator: TestAllocator,
+        borrowed: usize,
+    }
+
+    impl Drop for BorrowMemory {
+        fn drop(&mut self) {
+            self.allocator
+                .0
+                .mem_usage
+                .fetch_sub(self.borrowed, Ordering::Relaxed);
+        }
+    }
+
+    impl TestAllocator {
+        fn borrow_memory(&self, size: usize) -> BorrowMemory {
+            let allocator = SwappyAllocator(self.0.clone());
+            allocator.0.mem_usage.fetch_add(size, Ordering::Relaxed);
+            BorrowMemory {
+                allocator,
+                borrowed: size,
+            }
+        }
+    }
+
     fn file_count(p: &Path) -> usize {
         let mut files = 0;
         if let Ok(iter) = p.read_dir() {
@@ -503,12 +532,38 @@ mod tests {
             .tempdir()
             .unwrap();
         let global = WrappedGlobal::default();
-        let allocator = TestAllocator::new_over(dir.path(), 0, global);
-        let _ = allocator
+        let allocator = TestAllocator::new_over(dir.path(), 4, global.clone());
+        let empty_p_1 = allocator
             .allocate(Layout::from_size_align(0, 1).unwrap())
             .unwrap();
         assert_eq!(allocator.memory_usage(), 0);
         assert_eq!(file_count(dir.path()), 0);
+        assert_eq!(global.stats(), (1, 0, 0, 0));
+
+        let borrow = allocator.borrow_memory(8);
+
+        let empty_p_2 = allocator
+            .allocate(Layout::from_size_align(0, 1).unwrap())
+            .unwrap();
+        assert_eq!(allocator.memory_usage(), 8);
+        assert_eq!(file_count(dir.path()), 0);
+        assert_eq!(global.stats(), (2, 0, 0, 0));
+        unsafe {
+            allocator.deallocate(
+                NonNull::new_unchecked(empty_p_1.as_ptr().as_mut_ptr()),
+                Layout::from_size_align(0, 1).unwrap(),
+            );
+            assert_eq!(allocator.memory_usage(), 8);
+            assert_eq!(global.stats(), (2, 1, 0, 0));
+            std::mem::drop(borrow);
+            assert_eq!(allocator.memory_usage(), 0);
+            allocator.deallocate(
+                NonNull::new_unchecked(empty_p_2.as_ptr().as_mut_ptr()),
+                Layout::from_size_align(0, 1).unwrap(),
+            );
+            assert_eq!(allocator.memory_usage(), 0);
+            assert_eq!(global.stats(), (2, 2, 0, 0));
+        }
     }
 
     #[test]
