@@ -991,10 +991,7 @@ impl ReplayMachine for MemTableRecoverContext {
     }
 
     fn merge(&mut self, mut rhs: Self, queue: LogQueue) -> Result<()> {
-        self.log_batch.merge(
-            &mut rhs.log_batch.clone(),
-            0, /* entry_offset_increment */
-        );
+        self.log_batch.merge(&mut rhs.log_batch.clone());
         match queue {
             LogQueue::Append => self.memtables.apply_append_writes(rhs.log_batch.drain()),
             LogQueue::Rewrite => self

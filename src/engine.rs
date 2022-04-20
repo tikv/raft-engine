@@ -468,13 +468,15 @@ where
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
-                    idx.entries.unwrap(),
                     idx.compression_type,
                 )?,
             );
         }
         let entries_block = cache.block.borrow();
-        let e = LogBatch::decode_entry::<M>(&entries_block, idx.entry_offset as usize)?;
+        let e = LogBatch::decode_entry_from_entries_block::<M>(
+            &entries_block,
+            idx.entry_offset as usize,
+        )?;
         assert_eq!(M::index(&e), idx.index);
         Ok(e)
     })
@@ -490,15 +492,15 @@ where
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
-                    idx.entries.unwrap(),
                     idx.compression_type,
                 )?,
             );
         }
-        Ok(
-            LogBatch::decode_entry_block(&cache.block.borrow(), idx.entry_offset as usize)?
-                .to_owned(),
-        )
+        Ok(LogBatch::decode_entry_bytes_from_entries_block(
+            &cache.block.borrow(),
+            idx.entry_offset as usize,
+        )?
+        .to_owned())
     })
 }
 
