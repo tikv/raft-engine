@@ -66,7 +66,7 @@ impl CompressionType {
     }
 }
 
-/// Format: u64 `count` | var_u64 `first_index` | [ u32 `entry_offset` ]
+/// Format: u32 `count` | var_u64 `first_index` | [ u32 `entry_offset` ]
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntryIndexes(pub Vec<EntryIndex>);
 
