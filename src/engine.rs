@@ -245,9 +245,16 @@ where
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
             memtable
                 .read()
-                .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
+                .fetch_entries_to(begin, end, &mut ents_idx)?;
+            let mut total_size = 0;
             for i in ents_idx.iter() {
-                vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?);
+                let e = read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?;
+                total_size += e.compute_size() as usize;
+                vec.push(e);
+                if max_size.map_or(false, |s| total_size >= s) {
+                    // At least return one entry regardless of size limit.
+                    break;
+                }
             }
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
             return Ok(ents_idx.len());
@@ -462,14 +469,14 @@ where
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
-                    idx.entries.unwrap(),
                     idx.compression_type,
                 )?,
             );
         }
-        let e = parse_from_bytes(
-            &cache.block.borrow()
-                [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
+        let entries_block = cache.block.borrow();
+        let e = LogBatch::decode_entry_from_entries_block::<M>(
+            &entries_block,
+            idx.entry_offset as usize,
         )?;
         assert_eq!(M::index(&e), idx.index);
         Ok(e)
@@ -486,14 +493,15 @@ where
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
-                    idx.entries.unwrap(),
                     idx.compression_type,
                 )?,
             );
         }
-        Ok(cache.block.borrow()
-            [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize]
-            .to_owned())
+        Ok(LogBatch::decode_entry_bytes_from_entries_block(
+            &cache.block.borrow(),
+            idx.entry_offset as usize,
+        )?
+        .to_owned())
     })
 }
 
@@ -653,6 +661,40 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn test_fetch_with_size_limit() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_fetch_with_size_limit")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+                .unwrap();
+        let data = vec![b'x'; 10];
+        let rid = 1;
+        // Writes 10 entries.
+        for i in 0..10 {
+            engine.append(rid, i, i + 1, Some(&data));
+        }
+        let mut entries = Vec::new();
+        // Fetch with size limit.
+        engine
+            .fetch_entries_to::<Entry>(rid, 0, 10, Some(10 * 5), &mut entries)
+            .unwrap();
+        assert_eq!(entries.len(), 4);
+        // Fetch at least one.
+        entries.clear();
+        engine
+            .fetch_entries_to::<Entry>(rid, 0, 10, Some(1), &mut entries)
+            .unwrap();
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
