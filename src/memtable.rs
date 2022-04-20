@@ -22,6 +22,7 @@ use crate::{Error, GlobalStats, Result};
 
 #[cfg(feature = "swap")]
 mod swap_conditional_imports {
+    use crate::swappy_allocator::SwappyAllocator;
     use log::error;
     use std::convert::TryFrom;
     use std::path::Path;
@@ -29,9 +30,8 @@ mod swap_conditional_imports {
     pub trait AllocatorTrait: std::alloc::Allocator + Clone + Send + Sync {}
     impl<T: std::alloc::Allocator + Clone + Send + Sync> AllocatorTrait for T {}
 
-    pub type SwappyAllocator = crate::swappy_allocator::SwappyAllocator<std::alloc::Global>;
-    pub type SelectedAllocator = SwappyAllocator;
     pub type VacantAllocator = std::alloc::Global;
+    pub type SelectedAllocator = SwappyAllocator<std::alloc::Global>;
 
     pub fn new_vacant_allocator() -> VacantAllocator {
         std::alloc::Global
@@ -40,31 +40,20 @@ mod swap_conditional_imports {
         let memory_limit =
             usize::try_from(cfg.memory_limit.map_or(u64::MAX, |l| l.0)).unwrap_or(usize::MAX);
         let path = Path::new(&cfg.dir).join("swap");
-        // Deletes the path if it exists.
-        if path.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&path) {
-                error!(
-                    "Failed to clean up old swap directory: {:?}. \
-                    There might be obsolete swap files left in {}.",
-                    e,
-                    path.display()
-                );
-            }
-        }
         SwappyAllocator::new(&path, memory_limit)
     }
 }
 
 #[cfg(not(feature = "swap"))]
 mod swap_conditional_imports {
+    pub trait AllocatorTrait: Clone + Send + Sync {}
+
     #[derive(Clone)]
     pub struct DummyAllocator;
-
-    pub trait AllocatorTrait: Clone + Send + Sync {}
     impl AllocatorTrait for DummyAllocator {}
 
-    pub type SelectedAllocator = DummyAllocator;
     pub type VacantAllocator = DummyAllocator;
+    pub type SelectedAllocator = DummyAllocator;
 
     pub fn new_vacant_allocator() -> VacantAllocator {
         DummyAllocator
