@@ -635,6 +635,8 @@ mod tests {
         assert_eq!(global.stats(), (3, 1, 1, 0));
     }
 
+    // alloc_error_hook doesn't work well with asan.
+    #[cfg(not(sanitize = "address"))]
     #[test]
     fn test_mem_allocator_failure() {
         let dir = tempfile::Builder::new()

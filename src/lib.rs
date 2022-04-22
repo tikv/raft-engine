@@ -19,7 +19,9 @@
 #![cfg_attr(feature = "swap", feature(nonnull_slice_from_raw_parts))]
 #![cfg_attr(feature = "swap", feature(slice_ptr_len))]
 #![cfg_attr(feature = "swap", feature(alloc_layout_extra))]
+// For testing only.
 #![cfg_attr(feature = "swap", feature(alloc_error_hook))]
+#![cfg_attr(feature = "swap", feature(cfg_sanitize))]
 
 #[macro_use]
 extern crate lazy_static;
