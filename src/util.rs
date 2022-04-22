@@ -216,6 +216,7 @@ pub fn crc32(data: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+// Credit: [splitmix64 algorithm](https://xorshift.di.unimi.it/splitmix64.c)
 #[inline]
 pub fn hash_u64(mut i: u64) -> u64 {
     i = (i ^ (i >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);

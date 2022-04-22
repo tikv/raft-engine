@@ -23,7 +23,6 @@ use crate::{Error, GlobalStats, Result};
 #[cfg(feature = "swap")]
 mod swap_conditional_imports {
     use crate::swappy_allocator::SwappyAllocator;
-    use log::error;
     use std::convert::TryFrom;
     use std::path::Path;
 

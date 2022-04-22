@@ -69,11 +69,11 @@ impl<A: Allocator> SwappyAllocator<A> {
     }
 
     #[inline]
-    fn is_swapped(&self, ptr: NonNull<u8>, exaustive_check: bool) -> bool {
+    fn is_swapped(&self, ptr: NonNull<u8>, exhaustive_check: bool) -> bool {
         // Ordering: `maybe_swapped` must be read after the pointer is available.
         std::sync::atomic::fence(Ordering::Acquire);
         self.0.maybe_swapped.load(Ordering::Relaxed)
-            && (!exaustive_check || self.0.pages.lock().iter().any(|page| page.contains(ptr)))
+            && (!exhaustive_check || self.0.pages.lock().iter().any(|page| page.contains(ptr)))
     }
 
     #[inline]
@@ -124,20 +124,16 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
             && self.0.mem_usage.fetch_add(layout.size(), Ordering::Relaxed) + layout.size()
                 > self.0.budget
         {
-            if layout.size() == 0 {
-                Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0))
-            } else {
-                match self.allocate_swapped(layout) {
-                    r @ Ok(_) => {
-                        self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-                        r
-                    }
-                    _ => self.0.mem_allocator.allocate(layout),
-                }
+            let swap_r = self.allocate_swapped(layout);
+            if swap_r.is_ok() {
+                self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
+                return swap_r;
             }
-        } else {
-            self.0.mem_allocator.allocate(layout)
         }
+        self.0.mem_allocator.allocate(layout).map_err(|e| {
+            self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
+            e
+        })
     }
 
     #[inline]
@@ -202,7 +198,13 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
 
             Ok(new_ptr)
         } else {
-            self.0.mem_allocator.grow(ptr, old_layout, new_layout)
+            self.0
+                .mem_allocator
+                .grow(ptr, old_layout, new_layout)
+                .map_err(|e| {
+                    self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
+                    e
+                })
         }
     }
 
@@ -259,9 +261,14 @@ unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
             }
         } else {
             self.0
-                .mem_usage
-                .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
-            self.0.mem_allocator.shrink(ptr, old_layout, new_layout)
+                .mem_allocator
+                .shrink(ptr, old_layout, new_layout)
+                .map(|p| {
+                    self.0
+                        .mem_usage
+                        .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
+                    p
+                })
         }
     }
 }
@@ -374,6 +381,7 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct WrappedGlobal {
+        err_mode: Arc<AtomicBool>,
         alloc: Arc<AtomicUsize>,
         dealloc: Arc<AtomicUsize>,
         grow: Arc<AtomicUsize>,
@@ -388,19 +396,22 @@ mod tests {
                 self.shrink.load(Ordering::Relaxed),
             )
         }
+        fn set_err_mode(&self, e: bool) {
+            self.err_mode.store(e, Ordering::Relaxed);
+        }
     }
     unsafe impl Allocator for WrappedGlobal {
         fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
             self.alloc.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.allocate(layout)
+            if self.err_mode.load(Ordering::Relaxed) {
+                Err(AllocError)
+            } else {
+                std::alloc::Global.allocate(layout)
+            }
         }
         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
             self.dealloc.fetch_add(1, Ordering::Relaxed);
             std::alloc::Global.deallocate(ptr, layout)
-        }
-        fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-            self.alloc.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.allocate_zeroed(layout)
         }
         unsafe fn grow(
             &self,
@@ -409,16 +420,11 @@ mod tests {
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
             self.grow.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.grow(ptr, old_layout, new_layout)
-        }
-        unsafe fn grow_zeroed(
-            &self,
-            ptr: NonNull<u8>,
-            old_layout: Layout,
-            new_layout: Layout,
-        ) -> Result<NonNull<[u8]>, AllocError> {
-            self.grow.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.grow_zeroed(ptr, old_layout, new_layout)
+            if self.err_mode.load(Ordering::Relaxed) {
+                Err(AllocError)
+            } else {
+                std::alloc::Global.grow(ptr, old_layout, new_layout)
+            }
         }
         unsafe fn shrink(
             &self,
@@ -427,7 +433,11 @@ mod tests {
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
             self.shrink.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.shrink(ptr, old_layout, new_layout)
+            if self.err_mode.load(Ordering::Relaxed) {
+                Err(AllocError)
+            } else {
+                std::alloc::Global.shrink(ptr, old_layout, new_layout)
+            }
         }
     }
 
@@ -623,6 +633,66 @@ mod tests {
         mem_vec.resize(32, 0);
         assert_eq!(allocator.memory_usage(), 32);
         assert_eq!(global.stats(), (3, 1, 1, 0));
+    }
+
+    #[test]
+    fn test_mem_allocator_failure() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_mem_allocator_failure")
+            .tempdir()
+            .unwrap();
+        let global = WrappedGlobal::default();
+        let allocator = TestAllocator::new_over(dir.path(), usize::MAX, global.clone());
+        // Replace std hook because it will abort.
+        let std_hook = std::alloc::take_alloc_error_hook();
+        std::alloc::set_alloc_error_hook(|_| {
+            panic!("oom");
+        });
+        // allocate failure
+        {
+            let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+            global.set_err_mode(true);
+            assert!(catch_unwind_silent(|| {
+                vec.resize(16, 0);
+            })
+            .is_err());
+            assert_eq!(allocator.memory_usage(), 0);
+            global.set_err_mode(false);
+            vec.resize(16, 0);
+            assert_eq!(allocator.memory_usage(), 16);
+        }
+        // grow failure
+        {
+            let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+            vec.resize(16, 0);
+            assert_eq!(allocator.memory_usage(), 16);
+            global.set_err_mode(true);
+            assert!(catch_unwind_silent(|| {
+                vec.resize(32, 0);
+            })
+            .is_err());
+            assert_eq!(allocator.memory_usage(), 16);
+            global.set_err_mode(false);
+            vec.resize(32, 0);
+            assert_eq!(allocator.memory_usage(), 32);
+        }
+        // shrink failure
+        {
+            let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+            vec.resize(32, 0);
+            assert_eq!(allocator.memory_usage(), 32);
+            global.set_err_mode(true);
+            vec.resize(16, 0);
+            assert!(catch_unwind_silent(|| {
+                vec.shrink_to_fit();
+            })
+            .is_err());
+            assert_eq!(allocator.memory_usage(), 32);
+            global.set_err_mode(false);
+            vec.shrink_to_fit();
+            assert_eq!(allocator.memory_usage(), 16);
+        }
+        std::alloc::set_alloc_error_hook(std_hook);
     }
 
     // Mashup of tests from std::alloc.
