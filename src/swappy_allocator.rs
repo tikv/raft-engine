@@ -81,7 +81,7 @@ impl<A: Allocator> SwappyAllocator<A> {
     #[inline]
     fn allocate_swapped(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let mut pages = self.0.pages.lock();
-        match pages.last_mut().map(|p| p.allocate(layout)).flatten() {
+        match pages.last_mut().and_then(|p| p.allocate(layout)) {
             None => {
                 self.0.maybe_swapped.store(true, Ordering::Relaxed);
                 // Ordering: `maybe_swapped` must be set before the page is created.
