@@ -14,6 +14,8 @@ use log::{error, warn};
 use memmap2::MmapMut;
 use parking_lot::Mutex;
 
+use crate::metrics::SWAP_FILE_COUNT;
+
 const DEFAULT_PAGE_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
 struct SwappyAllocatorCore<A = Global>
@@ -79,22 +81,11 @@ impl<A: Allocator> SwappyAllocator<A> {
     #[inline]
     fn allocate_swapped(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let mut pages = self.0.pages.lock();
-        if pages.is_empty() {
-            self.0.maybe_swapped.store(true, Ordering::Relaxed);
-            // Ordering: `maybe_swapped` must be set before the page is created.
-            std::sync::atomic::fence(Ordering::Release);
-            pages.push(
-                Page::new(
-                    &self.0.path,
-                    self.0.page_seq.fetch_add(1, Ordering::Relaxed),
-                    std::cmp::max(DEFAULT_PAGE_SIZE, layout.size()),
-                )
-                .ok_or(AllocError)?,
-            );
-        }
-        debug_assert!(self.0.maybe_swapped.load(Ordering::Relaxed));
-        match pages.last_mut().unwrap().allocate(layout) {
+        match pages.last_mut().map(|p| p.allocate(layout)).flatten() {
             None => {
+                self.0.maybe_swapped.store(true, Ordering::Relaxed);
+                // Ordering: `maybe_swapped` must be set before the page is created.
+                std::sync::atomic::fence(Ordering::Release);
                 pages.push(
                     Page::new(
                         &self.0.path,
@@ -309,6 +300,7 @@ impl Page {
                 .map_err(|e| error!("Failed to mmap swap file: {}", e))
                 .ok()?
         };
+        SWAP_FILE_COUNT.inc();
         Some(Self {
             seq,
             _f: f,
@@ -355,6 +347,7 @@ impl Page {
         if let Err(e) = std::fs::remove_file(&path) {
             warn!("Failed to delete swap file: {}", e);
         }
+        SWAP_FILE_COUNT.dec();
     }
 
     /// Returns whether the pointer is contained in this page.
