@@ -308,3 +308,24 @@ fn test_error_during_repair() {
         );
     }
 }
+
+#[cfg(all(feature = "swap", feature = "internals"))]
+#[test]
+fn test_swappy_page_create_error() {
+    use raft_engine::internals::SwappyAllocator;
+    let dir = tempfile::Builder::new()
+        .prefix("test_swappy_page_create_error")
+        .tempdir()
+        .unwrap();
+
+    let allocator = SwappyAllocator::new(dir.path(), 0);
+
+    let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
+    {
+        let _f = FailGuard::new("swappy::page::new_failure", "return");
+        vec.resize(128, 0);
+        assert_eq!(allocator.memory_usage(), 128);
+    }
+    vec.resize(1024, 0);
+    assert_eq!(allocator.memory_usage(), 0);
+}

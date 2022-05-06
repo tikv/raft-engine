@@ -63,6 +63,7 @@ Available Cargo features:
 - `nightly`: Enables nightly-only features including `test`.
 - `internals`: Re-exports key components internal to Raft Engine. Enabled when building for docs.rs.
 - `failpoints`: Enables fail point testing powered by [tikv/fail-rs](https://github.com/tikv/fail-rs).
+- `swap`: Use `SwappyAllocator` to limit the memory usage of Raft Engine. The memory budget can be configured with "memory-limit". Depending on the `nightly` feature.
 
 See some basic use cases under the [examples](https://github.com/tikv/raft-engine/tree/master/examples) directory.
 
