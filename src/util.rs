@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::VecDeque;
 use std::fmt::{self, Display, Write};
 use std::ops::{Div, Mul};
 use std::str::FromStr;
@@ -210,27 +209,27 @@ impl InstantExt for Instant {
     }
 }
 
-/// Take slices in the range.
-///
-/// ### Panics
-///
-/// if [low, high) is out of bound.
-pub fn slices_in_range<T>(entry: &VecDeque<T>, low: usize, high: usize) -> (&[T], &[T]) {
-    let (first, second) = entry.as_slices();
-    if low >= first.len() {
-        (&second[low - first.len()..high - first.len()], &[])
-    } else if high <= first.len() {
-        (&first[low..high], &[])
-    } else {
-        (&first[low..], &second[..high - first.len()])
-    }
-}
-
 #[inline]
 pub fn crc32(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize()
+}
+
+// Credit: [splitmix64 algorithm](https://xorshift.di.unimi.it/splitmix64.c)
+#[inline]
+pub fn hash_u64(mut i: u64) -> u64 {
+    i = (i ^ (i >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    i = (i ^ (i >> 27)).wrapping_mul(0x94d049bb133111eb);
+    i ^ (i >> 31)
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn unhash_u64(mut i: u64) -> u64 {
+    i = (i ^ (i >> 31) ^ (i >> 62)).wrapping_mul(0x319642b2d24d8ec3);
+    i = (i ^ (i >> 27) ^ (i >> 54)).wrapping_mul(0x96de1b173f119089);
+    i ^ (i >> 30) ^ (i >> 60)
 }
 
 pub mod lz4 {
@@ -430,5 +429,10 @@ mod tests {
             let src_str = format!("s = {:?}", src);
             assert!(toml::from_str::<SizeHolder>(&src_str).is_err(), "{}", src);
         }
+    }
+
+    #[test]
+    fn test_unhash() {
+        assert_eq!(unhash_u64(hash_u64(777)), 777);
     }
 }

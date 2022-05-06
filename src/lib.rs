@@ -14,6 +14,14 @@
 //! # Raft Engine
 
 #![cfg_attr(feature = "nightly", feature(test))]
+#![cfg_attr(feature = "swap", feature(allocator_api))]
+#![cfg_attr(feature = "swap", feature(slice_ptr_get))]
+#![cfg_attr(feature = "swap", feature(nonnull_slice_from_raw_parts))]
+#![cfg_attr(feature = "swap", feature(slice_ptr_len))]
+#![cfg_attr(feature = "swap", feature(alloc_layout_extra))]
+// For testing only.
+#![cfg_attr(feature = "swap", feature(alloc_error_hook))]
+#![cfg_attr(feature = "swap", feature(cfg_sanitize))]
 
 #[macro_use]
 extern crate lazy_static;
@@ -46,6 +54,8 @@ mod memtable;
 mod metrics;
 mod pipe_log;
 mod purge;
+#[cfg(feature = "swap")]
+mod swappy_allocator;
 #[cfg(test)]
 mod test_util;
 mod util;
@@ -67,6 +77,8 @@ pub mod internals {
     pub use crate::file_pipe_log::*;
     pub use crate::memtable::*;
     pub use crate::pipe_log::*;
+    #[cfg(feature = "swap")]
+    pub use crate::swappy_allocator::*;
     pub use crate::write_barrier::*;
 }
 

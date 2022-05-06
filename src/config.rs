@@ -70,11 +70,18 @@ pub struct Config {
     ///
     /// Default: "0.6"
     pub purge_rewrite_garbage_ratio: f64,
+
+    /// Maximum memory bytes allowed for the in-memory index.
+    /// Effective under the `swap` feature only.
+    ///
+    /// Default: None
+    pub memory_limit: Option<ReadableSize>,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config {
+        #[allow(unused_mut)]
+        let mut cfg = Config {
             dir: "".to_owned(),
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
@@ -85,7 +92,14 @@ impl Default for Config {
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
+            memory_limit: None,
+        };
+        // Test-specific configurations.
+        #[cfg(test)]
+        {
+            cfg.memory_limit = Some(ReadableSize(0));
         }
+        cfg
     }
 }
 
@@ -117,6 +131,10 @@ impl Config {
                 self.recovery_threads, MIN_RECOVERY_THREADS
             );
             self.recovery_threads = MIN_RECOVERY_THREADS;
+        }
+        #[cfg(not(feature = "swap"))]
+        if self.memory_limit.is_some() {
+            warn!("memory-limit will be ignored because swap feature is not enabled");
         }
         Ok(())
     }
