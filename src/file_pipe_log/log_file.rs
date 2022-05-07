@@ -50,6 +50,7 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     fn write_header(&mut self) -> Result<()> {
         self.writer.seek(SeekFrom::Start(0))?;
+        self.last_sync = 0;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileHeader::len());
         LogFileHeader::default().encode(&mut buf)?;
