@@ -6,7 +6,6 @@ use std::{mem, u64};
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
-use protobuf::parse_from_bytes;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
@@ -27,7 +26,7 @@ const CMD_COMPACT: u8 = 0x02;
 
 const DEFAULT_LOG_ITEM_BATCH_CAP: usize = 64;
 const MAX_LOG_BATCH_BUFFER_CAP: usize = 8 * 1024 * 1024;
-/// 2GiB, The maximum content length accepted by lz4 compression.
+// 2GiB, The maximum content length accepted by lz4 compression.
 const MAX_LOG_ENTRIES_SIZE_PER_BATCH: usize = i32::MAX as usize;
 
 /// `MessageExt` trait allows for probing log index from a specific type of
@@ -38,10 +37,7 @@ pub trait MessageExt: Send + Sync {
     fn index(e: &Self::Entry) -> u64;
 }
 
-type SliceReader<'a> = &'a [u8];
-
 /// Types of compression.
-/// Format: u8 `type`
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CompressionType {
@@ -66,47 +62,57 @@ impl CompressionType {
     }
 }
 
-/// Format: u32 `count` | var_u64 `first_index` | [ u32 `entry_offset` ]
+type SliceReader<'a> = &'a [u8];
+
+// Format:
+// { count | first index | [ tail offsets ] }
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntryIndexes(pub Vec<EntryIndex>);
 
 impl EntryIndexes {
-    pub fn decode(buf: &mut SliceReader) -> Result<Self> {
-        let count = codec::decode_u32(buf)? as u64;
+    pub fn decode(buf: &mut SliceReader, entries_size: &mut u32) -> Result<Self> {
+        let mut count = codec::decode_var_u64(buf)?;
         let mut entry_indexes = Vec::with_capacity(count as usize);
+        let mut index = 0;
         if count > 0 {
-            let first_index = codec::decode_var_u64(buf)?;
-            for index in first_index..first_index + count {
-                let entry_offset = codec::decode_u32(buf)?;
-                let entry_index = EntryIndex {
-                    index,
-                    entry_offset,
-                    ..Default::default()
-                };
-                entry_indexes.push(entry_index);
-            }
+            index = codec::decode_var_u64(buf)?;
+        }
+        while count > 0 {
+            let t = codec::decode_var_u64(buf)?;
+            let entry_len = (t as u32) - *entries_size;
+            let entry_index = EntryIndex {
+                index,
+                entry_offset: *entries_size as u32,
+                entry_len,
+                ..Default::default()
+            };
+            *entries_size += entry_len;
+            entry_indexes.push(entry_index);
+            index += 1;
+            count -= 1;
         }
         Ok(Self(entry_indexes))
     }
 
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
-        let count = self.0.len() as u32;
-        buf.encode_u32(count)?;
+        let count = self.0.len() as u64;
+        buf.encode_var_u64(count)?;
         if count > 0 {
             buf.encode_var_u64(self.0[0].index)?;
         }
         for ei in self.0.iter() {
-            buf.encode_u32(ei.entry_offset)?;
+            buf.encode_var_u64((ei.entry_offset + ei.entry_len) as u64)?;
         }
         Ok(())
     }
 
     fn approximate_size(&self) -> usize {
-        4 /*count*/ + if self.0.is_empty() { 0 } else { 8 } /*first index*/ + 4 /*offset*/ * self.0.len()
+        8 /*count*/ + if self.0.is_empty() { 0 } else { 8 } /*first index*/ + 8 /*tail offset*/ * self.0.len()
     }
 }
 
-/// Format: u8 `type` | ( var_u64 `index` )
+// Format:
+// { type | (index) }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Clean,
@@ -170,8 +176,8 @@ impl OpType {
     }
 }
 
-/// Format: u8 `op_type` | var_u64 `key_len` | varchar `key` | ( var_u64
-/// `value_len` | varchar `value` )
+// Format:
+// { op_type | key len | key | ( value len | value ) }
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyValue {
     pub op_type: OpType,
@@ -229,7 +235,8 @@ impl KeyValue {
     }
 }
 
-/// Format: u64 `region_id` | u8 `type` | `content`
+// Format:
+// { 8 byte region id | 1 byte type | item }
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogItem {
     pub raft_group_id: u64,
@@ -289,12 +296,12 @@ impl LogItem {
         Ok(())
     }
 
-    pub fn decode(buf: &mut SliceReader) -> Result<LogItem> {
+    pub fn decode(buf: &mut SliceReader, entries_size: &mut u32) -> Result<LogItem> {
         let raft_group_id = codec::decode_var_u64(buf)?;
         let item_type = buf.read_u8()?;
         let content = match item_type {
             TYPE_ENTRIES => {
-                let entry_indexes = EntryIndexes::decode(buf)?;
+                let entry_indexes = EntryIndexes::decode(buf, entries_size)?;
                 LogItemContent::EntryIndexes(entry_indexes)
             }
             TYPE_COMMAND => {
@@ -331,13 +338,20 @@ impl LogItem {
 
 pub(crate) type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
 
-/// A lean batch of log items, without entry data.
-///
-/// Format: var_u64 `count` | [ item ] | u32 `checksum`
-#[derive(Clone, Debug, PartialEq, Default)]
+/// A lean batch of log item, without entry data.
+// Format:
+// { item count | [items] | crc32 }
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
+    entries_size: u32,
+}
+
+impl Default for LogItemBatch {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl LogItemBatch {
@@ -345,47 +359,8 @@ impl LogItemBatch {
         Self {
             items: Vec::with_capacity(cap),
             item_size: 0,
+            entries_size: 0,
         }
-    }
-
-    pub fn add_entry_indexes(&mut self, region_id: u64, entry_indexes: Vec<EntryIndex>) {
-        let item = LogItem::new_entry_indexes(region_id, entry_indexes);
-        self.item_size += item.approximate_size();
-        self.items.push(item);
-    }
-
-    pub fn add_command(&mut self, region_id: u64, cmd: Command) {
-        let item = LogItem::new_command(region_id, cmd);
-        self.item_size += item.approximate_size();
-        self.items.push(item);
-    }
-
-    pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
-        let item = LogItem::new_kv(region_id, OpType::Del, key, None);
-        self.item_size += item.approximate_size();
-        self.items.push(item);
-    }
-
-    pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
-        self.put(region_id, key, s.write_to_bytes()?);
-        Ok(())
-    }
-
-    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
-        let item = LogItem::new_kv(region_id, OpType::Put, key, Some(value));
-        self.item_size += item.approximate_size();
-        self.items.push(item);
-    }
-
-    pub fn merge(&mut self, rhs: &mut LogItemBatch) {
-        self.item_size += rhs.item_size;
-        rhs.item_size = 0;
-        self.items.append(&mut rhs.items);
-    }
-
-    pub fn push(&mut self, item: LogItem) {
-        self.item_size += item.approximate_size();
-        self.items.push(item);
     }
 
     // TODO: Clean up these interfaces.
@@ -399,17 +374,28 @@ impl LogItemBatch {
 
     pub fn drain(&mut self) -> LogItemDrain {
         self.item_size = 0;
+        self.entries_size = 0;
         self.items.drain(..)
     }
 
-    fn relocate_entries(&mut self, offset_increment: u32) {
-        for item in &mut self.items {
+    pub fn push(&mut self, item: LogItem) {
+        self.item_size += item.approximate_size();
+        self.items.push(item);
+    }
+
+    pub fn merge(&mut self, rhs: &mut LogItemBatch) {
+        for item in &mut rhs.items {
             if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
                 for ei in entry_indexes.0.iter_mut() {
-                    ei.entry_offset += offset_increment;
+                    ei.entry_offset += self.entries_size;
                 }
             }
         }
+        self.item_size += rhs.item_size;
+        rhs.item_size = 0;
+        self.entries_size += rhs.entries_size;
+        rhs.entries_size = 0;
+        self.items.append(&mut rhs.items);
     }
 
     pub(crate) fn finish_populate(&mut self, compression_type: CompressionType) {
@@ -442,6 +428,39 @@ impl LogItemBatch {
         }
     }
 
+    pub fn add_entry_indexes(&mut self, region_id: u64, mut entry_indexes: Vec<EntryIndex>) {
+        for ei in entry_indexes.iter_mut() {
+            ei.entry_offset = self.entries_size;
+            self.entries_size += ei.entry_len;
+        }
+        let item = LogItem::new_entry_indexes(region_id, entry_indexes);
+        self.item_size += item.approximate_size();
+        self.items.push(item);
+    }
+
+    pub fn add_command(&mut self, region_id: u64, cmd: Command) {
+        let item = LogItem::new_command(region_id, cmd);
+        self.item_size += item.approximate_size();
+        self.items.push(item);
+    }
+
+    pub fn delete(&mut self, region_id: u64, key: Vec<u8>) {
+        let item = LogItem::new_kv(region_id, OpType::Del, key, None);
+        self.item_size += item.approximate_size();
+        self.items.push(item);
+    }
+
+    pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
+        self.put(region_id, key, s.write_to_bytes()?);
+        Ok(())
+    }
+
+    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
+        let item = LogItem::new_kv(region_id, OpType::Put, key, Some(value));
+        self.item_size += item.approximate_size();
+        self.items.push(item);
+    }
+
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         let offset = buf.len();
         let count = self.items.len() as u64;
@@ -465,11 +484,13 @@ impl LogItemBatch {
         *buf = &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
         let mut items = LogItemBatch::with_capacity(count as usize);
+        let mut entries_size = 0;
         for _ in 0..count {
-            let item = LogItem::decode(buf)?;
+            let item = LogItem::decode(buf, &mut entries_size)?;
             items.item_size += item.approximate_size();
             items.items.push(item);
         }
+        items.entries_size = entries_size;
 
         for item in items.items.iter_mut() {
             if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
@@ -509,11 +530,10 @@ enum BufState {
 
 /// A batch of log items.
 ///
-/// Format: `header` | `entries` | `footer`
-///
-/// - `header`: u56 `len` | u8 `compression_type` | u64 `items_offset` }
-/// - `entries` = [ u32 `len` | varchar `entry` ] | crc32
-/// - `footer` = `log_item_batch`
+/// Encoding format:
+/// - header = { u56 len | u8 compression type | u64 item offset }
+/// - entries = { [entry..] (optionally compressed) | crc32 }
+/// - footer = { item batch }
 ///
 /// Size restriction:
 /// - The total size of log entries must not exceed 2GiB.
@@ -521,7 +541,7 @@ enum BufState {
 /// Error will be raised if a to-be-added log item cannot fit within those
 /// limits.
 // Calling protocol:
-// Adding log items -> [`finish_populate`] -> [`finish_write`]
+// Insert log items -> [`finish_populate`] -> [`finish_write`]
 #[derive(Clone, PartialEq, Debug)]
 pub struct LogBatch {
     item_batch: LogItemBatch,
@@ -548,6 +568,29 @@ impl LogBatch {
         }
     }
 
+    /// Moves all log items of `rhs` into `Self`, leaving `rhs` empty.
+    pub fn merge(&mut self, rhs: &mut Self) -> Result<()> {
+        debug_assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
+        let max_entries_size = (|| {
+            fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
+            MAX_LOG_ENTRIES_SIZE_PER_BATCH
+        })();
+        if !rhs.buf.is_empty() {
+            if rhs.buf.len() + self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN * 2 {
+                return Err(Error::Full);
+            }
+            self.buf_state = BufState::Incomplete;
+            rhs.buf_state = BufState::Incomplete;
+            self.buf.extend_from_slice(&rhs.buf[LOG_BATCH_HEADER_LEN..]);
+            rhs.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
+            rhs.buf.truncate(LOG_BATCH_HEADER_LEN);
+        }
+        self.item_batch.merge(&mut rhs.item_batch);
+        self.buf_state = BufState::Open;
+        rhs.buf_state = BufState::Open;
+        Ok(())
+    }
+
     /// Adds some protobuf log entries into the log batch.
     pub fn add_entries<M: MessageExt>(
         &mut self,
@@ -559,47 +602,33 @@ impl LogBatch {
             return Ok(());
         }
 
+        let mut entry_indexes = Vec::with_capacity(entries.len());
+        self.buf_state = BufState::Incomplete;
+        let old_buf_len = self.buf.len();
         let max_entries_size = (|| {
             fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
             MAX_LOG_ENTRIES_SIZE_PER_BATCH
         })();
-
-        // Prepare to rollback in case of recoverable errors.
-        let old_buf_len = self.buf.len();
-
-        self.buf_state = BufState::Incomplete;
-
-        let mut entry_indexes = Vec::with_capacity(entries.len());
         for e in entries {
             let buf_offset = self.buf.len();
-            // Reserve space to write entry len.
-            let entry_len_size = std::mem::size_of::<u32>();
-            self.buf.resize(self.buf.len() + entry_len_size, 0);
-            // Write entry.
             e.write_to_vec(&mut self.buf)?;
             if self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN {
                 self.buf.truncate(old_buf_len);
                 self.buf_state = BufState::Open;
                 return Err(Error::Full);
             }
-            // Write entry len.
-            let entry_len = (self.buf.len() - buf_offset - entry_len_size) as u32;
-            (&mut self.buf[buf_offset..buf_offset + entry_len_size]).encode_u32(entry_len)?;
             entry_indexes.push(EntryIndex {
                 index: M::index(e),
-                entry_offset: (buf_offset - LOG_BATCH_HEADER_LEN) as u32,
+                entry_len: (self.buf.len() - buf_offset) as u32,
                 ..Default::default()
             });
         }
         self.item_batch.add_entry_indexes(region_id, entry_indexes);
-
         self.buf_state = BufState::Open;
         Ok(())
     }
 
     /// Adds some log entries with specified encoded data into the log batch.
-    /// Entry length is included in those encoded data.
-    ///
     /// Assumes there are the same amount of entry indexes as the encoded data
     /// vectors.
     pub(crate) fn add_raw_entries(
@@ -628,7 +657,7 @@ impl LogBatch {
             }
             let buf_offset = self.buf.len();
             self.buf.extend(e);
-            ei.entry_offset = (buf_offset - LOG_BATCH_HEADER_LEN) as u32;
+            ei.entry_len = (self.buf.len() - buf_offset) as u32;
         }
         self.item_batch.add_entry_indexes(region_id, entry_indexes);
         self.buf_state = BufState::Open;
@@ -655,39 +684,9 @@ impl LogBatch {
         self.item_batch.put(region_id, key, value)
     }
 
-    /// Moves all log items of `rhs` into `Self`, leaving `rhs` empty.
-    pub fn merge(&mut self, rhs: &mut Self) -> Result<()> {
-        debug_assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
-        let max_entries_size = (|| {
-            fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
-            MAX_LOG_ENTRIES_SIZE_PER_BATCH
-        })();
-        let rhs_entry_offset_increment = (self.buf.len() - LOG_BATCH_HEADER_LEN) as u32;
-        if !rhs.buf.is_empty() {
-            if rhs.buf.len() + self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN * 2 {
-                return Err(Error::Full);
-            }
-            self.buf_state = BufState::Incomplete;
-            rhs.buf_state = BufState::Incomplete;
-            self.buf.extend_from_slice(&rhs.buf[LOG_BATCH_HEADER_LEN..]);
-            rhs.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
-            rhs.buf.truncate(LOG_BATCH_HEADER_LEN);
-        }
-        rhs.item_batch.relocate_entries(rhs_entry_offset_increment);
-        self.item_batch.merge(&mut rhs.item_batch);
-        self.buf_state = BufState::Open;
-        rhs.buf_state = BufState::Open;
-        Ok(())
-    }
-
-    /// Consumes log items into an iterator.
-    pub(crate) fn drain(&mut self) -> LogItemDrain {
-        debug_assert!(!matches!(self.buf_state, BufState::Incomplete));
-
-        self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
-        self.buf.truncate(LOG_BATCH_HEADER_LEN);
-        self.buf_state = BufState::Open;
-        self.item_batch.drain()
+    /// Returns true if the log batch contains no log item.
+    pub fn is_empty(&self) -> bool {
+        self.item_batch.items.is_empty()
     }
 
     /// Notifies the completion of log item population. User must not add any
@@ -782,6 +781,16 @@ impl LogBatch {
         self.item_batch.finish_write(handle);
     }
 
+    /// Consumes log items into an iterator.
+    pub(crate) fn drain(&mut self) -> LogItemDrain {
+        debug_assert!(!matches!(self.buf_state, BufState::Incomplete));
+
+        self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
+        self.buf.truncate(LOG_BATCH_HEADER_LEN);
+        self.buf_state = BufState::Open;
+        self.item_batch.drain()
+    }
+
     /// Returns approximate encoded size of this log batch. Might be larger
     /// than the actual size.
     pub fn approximate_size(&self) -> usize {
@@ -801,14 +810,13 @@ impl LogBatch {
         }
     }
 
-    /// Returns header information from some bytes. Input bytes can be larger
-    /// than the actual header.
+    /// Returns header information from some bytes.
     ///
     /// The information includes:
     ///
-    /// * The offset of log items
-    /// * The compression type of entries
-    /// * The total length of this log batch.
+    /// + The offset of log items
+    /// + The compression type of entries
+    /// + The total length of this log batch.
     pub(crate) fn decode_header(buf: &mut SliceReader) -> Result<(usize, CompressionType, usize)> {
         if buf.len() < LOG_BATCH_HEADER_LEN {
             return Err(Error::Corruption(format!(
@@ -832,50 +840,25 @@ impl LogBatch {
         Ok((offset, compression_type, len >> 8))
     }
 
-    /// Unfolds bytes of multiple user entries from an encoded block of entries.
+    /// Unfolds bytes of multiple user entries from an encoded block.
     pub(crate) fn decode_entries_block(
         buf: &[u8],
+        handle: FileBlockHandle,
         compression: CompressionType,
     ) -> Result<Vec<u8>> {
-        if !buf.is_empty() {
-            verify_checksum(buf)?;
+        if handle.len > 0 {
+            verify_checksum(&buf[0..handle.len])?;
             match compression {
-                CompressionType::None => Ok(buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN].to_owned()),
+                CompressionType::None => Ok(buf[..handle.len - LOG_BATCH_CHECKSUM_LEN].to_owned()),
                 CompressionType::Lz4 => {
                     let decompressed =
-                        lz4::decompress_block(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN])?;
+                        lz4::decompress_block(&buf[..handle.len - LOG_BATCH_CHECKSUM_LEN])?;
                     Ok(decompressed)
                 }
             }
         } else {
             Ok(Vec::new())
         }
-    }
-
-    /// Extracts a specific entry from an encoded block of entries.
-    pub(crate) fn decode_entry_from_entries_block<M>(buf: &[u8], offset: usize) -> Result<M::Entry>
-    where
-        M: MessageExt,
-    {
-        let buf = &mut &buf[offset..];
-        let len = codec::decode_u32(buf)? as usize;
-        let e = parse_from_bytes(&buf[..len])?;
-        Ok(e)
-    }
-
-    /// Extracts encoded bytes of a specific entry from a block of entries. The
-    /// output can then be used in [`add_raw_entries`].
-    pub(crate) fn decode_entry_bytes_from_entries_block(
-        buf: &[u8],
-        offset: usize,
-    ) -> Result<&[u8]> {
-        let len = codec::decode_u32(&mut &buf[offset..])? as usize;
-        Ok(&buf[offset..offset + std::mem::size_of::<u32>() + len])
-    }
-
-    /// Returns true if the log batch contains no log item.
-    pub fn is_empty(&self) -> bool {
-        self.item_batch.items.is_empty()
     }
 }
 
@@ -904,6 +887,7 @@ mod tests {
     use super::*;
     use crate::pipe_log::LogQueue;
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
+    use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
 
     fn decode_entries_from_bytes<M: MessageExt>(
@@ -913,10 +897,14 @@ mod tests {
     ) -> Vec<M::Entry> {
         let mut entries = Vec::with_capacity(entry_indexes.len());
         for ei in entry_indexes {
-            let block = LogBatch::decode_entries_block(buf, ei.compression_type).unwrap();
+            let block =
+                LogBatch::decode_entries_block(buf, ei.entries.unwrap(), ei.compression_type)
+                    .unwrap();
             entries.push(
-                LogBatch::decode_entry_from_entries_block::<M>(&block, ei.entry_offset as usize)
-                    .unwrap(),
+                parse_from_bytes(
+                    &block[ei.entry_offset as usize..(ei.entry_offset + ei.entry_len) as usize],
+                )
+                .unwrap(),
             );
         }
         entries
@@ -925,14 +913,22 @@ mod tests {
     #[test]
     fn test_entry_indexes_enc_dec() {
         fn encode_and_decode(entry_indexes: &mut Vec<EntryIndex>) -> EntryIndexes {
+            let mut entries_size = 0;
+            for idx in entry_indexes.iter_mut() {
+                idx.entry_offset = entries_size;
+                entries_size += idx.entry_len;
+            }
             let entry_indexes = EntryIndexes(entry_indexes.clone());
 
             let mut encoded = vec![];
             entry_indexes.encode(&mut encoded).unwrap();
             let mut bytes_slice = encoded.as_slice();
-            let decoded_indexes = EntryIndexes::decode(&mut bytes_slice).unwrap();
+            let mut decoded_entries_size = 0;
+            let decoded_indexes =
+                EntryIndexes::decode(&mut bytes_slice, &mut decoded_entries_size).unwrap();
             assert_eq!(bytes_slice.len(), 0);
             assert!(decoded_indexes.approximate_size() >= encoded.len());
+            assert_eq!(decoded_entries_size, entries_size);
             decoded_indexes
         }
 
@@ -1015,12 +1011,22 @@ mod tests {
             LogItem::new_kv(27, OpType::Put, b"key".to_vec(), Some(b"value".to_vec())),
         ];
         let invalid_log_item_type = 7;
-        for item in items.into_iter() {
+        for mut item in items.into_iter() {
+            let mut entries_size = 0;
+            if let LogItemContent::EntryIndexes(EntryIndexes(indexes)) = &mut item.content {
+                for index in indexes.iter_mut() {
+                    index.entry_offset = entries_size;
+                    entries_size += index.entry_len;
+                }
+            }
             let mut encoded = vec![];
             item.encode(&mut encoded).unwrap();
             let mut bytes_slice = encoded.as_slice();
-            let decoded_item = LogItem::decode(&mut bytes_slice).unwrap();
+            let mut decoded_entries_size = 0;
+            let decoded_item =
+                LogItem::decode(&mut bytes_slice, &mut decoded_entries_size).unwrap();
             assert_eq!(bytes_slice.len(), 0);
+            assert_eq!(decoded_entries_size, entries_size);
             assert!(decoded_item.approximate_size() >= encoded.len());
             assert_eq!(item, decoded_item);
 
@@ -1031,7 +1037,7 @@ mod tests {
             encoded[next_u8] = invalid_log_item_type;
             let expected = format!("Unrecognized log item type: {}", invalid_log_item_type);
             assert!(matches!(
-                LogItem::decode(&mut encoded.as_slice()),
+                LogItem::decode(&mut encoded.as_slice(), &mut decoded_entries_size),
                 Err(Error::Corruption(m)) if m == expected
             ));
         }
@@ -1080,19 +1086,15 @@ mod tests {
             )
             .is_err());
 
-            // Approximate size should be no smaller than actual size.
             let old_approximate_size = batch.approximate_size();
             let len = batch.finish_populate(if compress { 1 } else { 0 }).unwrap();
             assert!(old_approximate_size >= len);
             assert_eq!(batch.approximate_size(), len);
-
-            // Simulate disk write.
             let mut batch_handle = FileBlockHandle::dummy(LogQueue::Append);
             batch_handle.len = len;
             batch.finish_write(batch_handle);
             let encoded = batch.encoded_bytes();
             assert_eq!(encoded.len(), len);
-
             if len < LOG_BATCH_HEADER_LEN {
                 assert_eq!(len, 0);
                 let expected = "Log batch header too short: 0";
@@ -1104,7 +1106,7 @@ mod tests {
             }
 
             let item_batch = batch.item_batch.clone();
-            // Decode item batch.
+            // decode item batch
             let mut bytes_slice = &*encoded;
             let (offset, compression_type, len) =
                 LogBatch::decode_header(&mut bytes_slice).unwrap();
@@ -1119,7 +1121,6 @@ mod tests {
             assert_eq!(decoded_item_batch, item_batch);
             assert!(decoded_item_batch.approximate_size() >= len - offset);
 
-            // Decode entries.
             let entries = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
             for item in decoded_item_batch.items.iter() {
                 if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
@@ -1135,41 +1136,6 @@ mod tests {
                     }
                 }
             }
-
-            // Reassemble the batch with raw bytes.
-            let mut log_batch_from_raw_bytes = LogBatch::default();
-            for item in decoded_item_batch.items.iter() {
-                if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
-                    let bytes = entry_indexes
-                        .0
-                        .iter()
-                        .map(|ei| {
-                            let handle = ei.entries.unwrap();
-                            let block = LogBatch::decode_entries_block(
-                                &encoded
-                                    [handle.offset as usize..handle.offset as usize + handle.len],
-                                ei.compression_type,
-                            )
-                            .unwrap();
-                            let bytes = LogBatch::decode_entry_bytes_from_entries_block(
-                                &block,
-                                ei.entry_offset as usize,
-                            )
-                            .unwrap();
-                            bytes.to_owned()
-                        })
-                        .collect();
-                    log_batch_from_raw_bytes
-                        .add_raw_entries(item.raft_group_id, entry_indexes.0.clone(), bytes)
-                        .unwrap();
-                } else {
-                    log_batch_from_raw_bytes.item_batch.push(item.clone());
-                }
-            }
-            log_batch_from_raw_bytes
-                .finish_populate(if compress { 1 } else { 0 })
-                .unwrap();
-            assert_eq!(log_batch_from_raw_bytes.encoded_bytes(), encoded);
         }
 
         let mut batches = vec![(LogBatch::default(), Vec::new())];

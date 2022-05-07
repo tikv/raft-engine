@@ -41,6 +41,7 @@ pub fn generate_entry_indexes_opt(
                 offset: 0,
                 len: 0,
             }),
+            entry_len: 1,
             ..Default::default()
         };
 
