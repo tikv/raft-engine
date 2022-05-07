@@ -4,6 +4,7 @@ use clap::Parser;
 use raft_engine_ctl::ControlOpt;
 
 fn main() {
+    env_logger::init();
     let opts: ControlOpt = ControlOpt::parse();
 
     if let Err(e) = opts.validate_and_execute() {
