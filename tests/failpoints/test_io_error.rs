@@ -192,6 +192,7 @@ fn test_concurrent_write_error() {
     };
     let entry = vec![b'x'; 1024];
 
+    // Don't use ObfuscatedFileSystem. It will split IO.
     let engine = Arc::new(Engine::open(cfg.clone()).unwrap());
     let mut ctx = ConcurrentWriteContext::new(engine.clone());
 

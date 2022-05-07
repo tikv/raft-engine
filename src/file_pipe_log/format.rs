@@ -131,6 +131,13 @@ impl LogFileHeader {
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
         buf.encode_u64(self.version.to_u64().unwrap())?;
+        let corrupted = || {
+            fail::fail_point!("log_file_header::corrupted", |_| true);
+            false
+        };
+        if corrupted() {
+            buf[0] += 1;
+        }
         Ok(())
     }
 }
