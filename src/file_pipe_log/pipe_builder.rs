@@ -230,15 +230,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         build_file_reader(self.file_system.as_ref(), f.handle.clone())?,
                     ) {
                         if f.handle.file_size()? > LogFileHeader::len() {
+                            // This file contains some entries.
                             error!(
-                                "Failed to open log file for recovery: {:?}:{}",
+                                "Failed to open last log file due to broken header: {:?}:{}",
                                 queue, f.seq
                             );
                             return Err(e);
                         }
                         if recovery_mode == RecoveryMode::TolerateAnyCorruption {
                             warn!(
-                                "File is corrupted but ignored: {:?}:{}, {}",
+                                "File header is corrupted but ignored: {:?}:{}, {}",
                                 queue, f.seq, e
                             );
                             f.handle.truncate(0)?;
@@ -246,11 +247,15 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             && is_last_file
                         {
                             warn!(
-                                "The tail of raft log is corrupted but ignored: {:?}:{}, {}",
+                                "The last log file is corrupted but ignored: {:?}:{}, {}",
                                 queue, f.seq, e
                             );
                             f.handle.truncate(0)?;
                         } else {
+                            error!(
+                                "Failed to open log file due to broken header: {:?}:{}",
+                                queue, f.seq
+                            );
                             return Err(e);
                         }
                     }
@@ -266,7 +271,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     && is_last_file =>
                             {
                                 warn!(
-                                    "The tail of raft log is corrupted but ignored: {:?}:{}, {}",
+                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
@@ -280,7 +285,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 f.handle.truncate(reader.valid_offset())?;
                                 break;
                             }
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                error!(
+                                    "Failed to open log file due to broken entry: {:?}:{} offset={}",
+                                    queue, f.seq, reader.valid_offset()
+                                );
+                                return Err(e);
+                            }
                         }
                     }
                 }

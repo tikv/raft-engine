@@ -136,19 +136,23 @@ impl<F: FileSystem> SinglePipe<F> {
         let seq = active_file.seq + 1;
         debug_assert!(seq > 1);
 
+        active_file.writer.close()?;
+
         let file_id = FileId {
             queue: self.queue,
             seq,
         };
         let path = file_id.build_file_path(&self.dir);
         let fd = Arc::new(self.file_system.create(&path)?);
-        self.sync_dir()?;
-        let new_file = ActiveFile {
+        let mut new_file = ActiveFile {
             seq,
             writer: build_file_writer(self.file_system.as_ref(), fd.clone())?,
         };
+        // File header must be persisted. This way we can recover gracefully if power
+        // loss before a new entry is written.
+        new_file.writer.sync()?;
+        self.sync_dir()?;
 
-        active_file.writer.close()?;
         **active_file = new_file;
 
         let len = {
