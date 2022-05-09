@@ -83,6 +83,8 @@ pub struct EntryIndex {
 
     /// The relative offset within its group of entries.
     pub entry_offset: u32,
+    /// The encoded length within its group of entries.
+    pub entry_len: u32,
 }
 
 impl Default for EntryIndex {
@@ -92,6 +94,7 @@ impl Default for EntryIndex {
             entries: None,
             compression_type: CompressionType::None,
             entry_offset: 0,
+            entry_len: 0,
         }
     }
 }
@@ -103,6 +106,7 @@ impl EntryIndex {
             entries: e.entries,
             compression_type: e.compression_type,
             entry_offset: e.entry_offset,
+            entry_len: e.entry_len,
         }
     }
 }
@@ -112,6 +116,7 @@ struct ThinEntryIndex {
     entries: Option<FileBlockHandle>,
     compression_type: CompressionType,
     entry_offset: u32,
+    entry_len: u32,
 }
 
 impl From<&EntryIndex> for ThinEntryIndex {
@@ -120,6 +125,7 @@ impl From<&EntryIndex> for ThinEntryIndex {
             entries: e.entries,
             compression_type: e.compression_type,
             entry_offset: e.entry_offset,
+            entry_len: e.entry_len,
         }
     }
 }
@@ -545,6 +551,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         &self,
         begin: u64,
         end: u64,
+        max_size: Option<usize>,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         if end <= begin {
@@ -565,8 +572,16 @@ impl<A: AllocatorTrait> MemTable<A> {
         let start_pos = (begin - first) as usize;
         let end_pos = (end - begin) as usize + start_pos;
 
+        let mut total_size = 0;
         let mut index = begin;
         for idx in self.entry_indexes.range(start_pos..end_pos) {
+            total_size += idx.entry_len;
+            // No matter max_size's value, fetch one entry at least.
+            if let Some(max_size) = max_size {
+                if total_size as usize > max_size && total_size > idx.entry_len {
+                    break;
+                }
+            }
             vec_idx.push(EntryIndex::from_thin(index, *idx));
             index += 1;
         }
@@ -599,7 +614,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         if self.rewrite_count > 0 {
             let first = self.first_index;
             let end = self.first_index + self.rewrite_count as u64;
-            self.fetch_entries_to(first, end, vec_idx)
+            self.fetch_entries_to(first, end, None, vec_idx)
         } else {
             Ok(())
         }
@@ -1157,7 +1172,7 @@ mod tests {
             }
         }
 
-        fn kvs_max_file_seq(&self, queue: LogQueue) -> Option<FileSeq> {
+        pub fn kvs_max_file_seq(&self, queue: LogQueue) -> Option<FileSeq> {
             self.kvs
                 .values()
                 .filter(|v| v.1.queue == queue)
@@ -1170,14 +1185,17 @@ mod tests {
                 })
         }
 
-        fn fetch_all(&self, vec_idx: &mut Vec<EntryIndex>) {
+        pub fn fetch_all(&self, vec_idx: &mut Vec<EntryIndex>) {
             if let Some((first, last)) = self.span() {
-                self.fetch_entries_to(first, last + 1, vec_idx).unwrap();
+                self.fetch_entries_to(first, last + 1, None, vec_idx)
+                    .unwrap();
             }
         }
 
-        fn entries_count(&self) -> usize {
-            self.entry_indexes.len()
+        fn entries_size(&self) -> usize {
+            self.entry_indexes
+                .iter()
+                .fold(0, |acc, e| acc + e.entry_len) as usize
         }
     }
 
@@ -1194,7 +1212,7 @@ mod tests {
             20,
             FileId::new(LogQueue::Append, 1),
         ));
-        assert_eq!(memtable.entries_count(), 10);
+        assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 1);
         memtable.consistency_check();
@@ -1222,13 +1240,13 @@ mod tests {
             30,
             FileId::new(LogQueue::Append, 2),
         ));
-        assert_eq!(memtable.entries_count(), 20);
+        assert_eq!(memtable.entries_size(), 20);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 2);
         memtable.consistency_check();
         assert_eq!(
             memtable.global_stats.live_entries(LogQueue::Append),
-            memtable.entries_count()
+            memtable.entries_size()
         );
 
         // Partial overlap Appending.
@@ -1242,13 +1260,13 @@ mod tests {
             35,
             FileId::new(LogQueue::Append, 3),
         ));
-        assert_eq!(memtable.entries_count(), 25);
+        assert_eq!(memtable.entries_size(), 25);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
         memtable.consistency_check();
         assert_eq!(
             memtable.global_stats.live_entries(LogQueue::Append),
-            memtable.entries_count()
+            memtable.entries_size()
         );
 
         // Full overlap Appending.
@@ -1260,13 +1278,13 @@ mod tests {
             40,
             FileId::new(LogQueue::Append, 4),
         ));
-        assert_eq!(memtable.entries_count(), 30);
+        assert_eq!(memtable.entries_size(), 30);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         memtable.consistency_check();
         assert_eq!(
             memtable.global_stats.live_entries(LogQueue::Append),
-            memtable.entries_count()
+            memtable.entries_size()
         );
 
         let global_stats = Arc::clone(&memtable.global_stats);
@@ -1304,28 +1322,28 @@ mod tests {
             FileId::new(LogQueue::Append, 3),
         ));
 
-        assert_eq!(memtable.entries_count(), 25);
+        assert_eq!(memtable.entries_size(), 25);
         assert_eq!(memtable.first_index().unwrap(), 0);
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(
             memtable.global_stats.live_entries(LogQueue::Append),
-            memtable.entries_count()
+            memtable.entries_size()
         );
         memtable.consistency_check();
 
         // Compact to 5.
         // Only index is needed to compact.
         assert_eq!(memtable.compact_to(5), 5);
-        assert_eq!(memtable.entries_count(), 20);
+        assert_eq!(memtable.entries_size(), 20);
         assert_eq!(memtable.first_index().unwrap(), 5);
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(
             memtable.global_stats.live_entries(LogQueue::Append),
-            memtable.entries_count()
+            memtable.entries_size()
         );
         // Can't override compacted entries.
         assert!(
@@ -1340,21 +1358,21 @@ mod tests {
 
         // Compact to 20.
         assert_eq!(memtable.compact_to(20), 15);
-        assert_eq!(memtable.entries_count(), 5);
+        assert_eq!(memtable.entries_size(), 5);
         assert_eq!(memtable.first_index().unwrap(), 20);
         assert_eq!(memtable.last_index().unwrap(), 24);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 3);
         assert_eq!(
             memtable.global_stats.live_entries(LogQueue::Append),
-            memtable.entries_count()
+            memtable.entries_size()
         );
         memtable.consistency_check();
 
         // Compact to 20 or smaller index, nothing happens.
         assert_eq!(memtable.compact_to(20), 0);
         assert_eq!(memtable.compact_to(15), 0);
-        assert_eq!(memtable.entries_count(), 5);
+        assert_eq!(memtable.entries_size(), 5);
         assert_eq!(memtable.first_index().unwrap(), 20);
         assert_eq!(memtable.last_index().unwrap(), 24);
         memtable.consistency_check();
@@ -1370,9 +1388,13 @@ mod tests {
         // Fetch empty.
         memtable.fetch_all(&mut ents_idx);
         assert!(ents_idx.is_empty());
-        memtable.fetch_entries_to(0, 0, &mut ents_idx).unwrap();
+        memtable
+            .fetch_entries_to(0, 0, None, &mut ents_idx)
+            .unwrap();
         assert!(matches!(
-            memtable.fetch_entries_to(0, 1, &mut ents_idx).unwrap_err(),
+            memtable
+                .fetch_entries_to(0, 1, None, &mut ents_idx)
+                .unwrap_err(),
             Error::EntryNotFound
         ));
 
@@ -1412,7 +1434,9 @@ mod tests {
         // Out of range fetching.
         ents_idx.clear();
         assert!(matches!(
-            memtable.fetch_entries_to(5, 15, &mut ents_idx).unwrap_err(),
+            memtable
+                .fetch_entries_to(5, 15, None, &mut ents_idx)
+                .unwrap_err(),
             Error::EntryCompacted
         ));
 
@@ -1420,28 +1444,53 @@ mod tests {
         ents_idx.clear();
         assert!(matches!(
             memtable
-                .fetch_entries_to(20, 30, &mut ents_idx)
+                .fetch_entries_to(20, 30, None, &mut ents_idx)
                 .unwrap_err(),
             Error::EntryNotFound
         ));
 
         ents_idx.clear();
-        memtable.fetch_entries_to(20, 25, &mut ents_idx).unwrap();
+        memtable
+            .fetch_entries_to(20, 25, None, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 20);
         assert_eq!(ents_idx[4].index, 24);
 
         ents_idx.clear();
-        memtable.fetch_entries_to(10, 15, &mut ents_idx).unwrap();
+        memtable
+            .fetch_entries_to(10, 15, None, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents_idx.len(), 5);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[4].index, 14);
 
         ents_idx.clear();
-        memtable.fetch_entries_to(10, 25, &mut ents_idx).unwrap();
+        memtable
+            .fetch_entries_to(10, 25, None, &mut ents_idx)
+            .unwrap();
         assert_eq!(ents_idx.len(), 15);
         assert_eq!(ents_idx[0].index, 10);
         assert_eq!(ents_idx[14].index, 24);
+
+        // Max size limitation range fetching.
+        // Only can fetch [10, 20) because of size limitation,
+        ents_idx.clear();
+        let max_size = Some(10);
+        memtable
+            .fetch_entries_to(10, 25, max_size, &mut ents_idx)
+            .unwrap();
+        assert_eq!(ents_idx.len(), 10);
+        assert_eq!(ents_idx[0].index, 10);
+        assert_eq!(ents_idx[9].index, 19);
+
+        // Even max size limitation is 0, at least fetch one entry.
+        ents_idx.clear();
+        memtable
+            .fetch_entries_to(20, 25, Some(0), &mut ents_idx)
+            .unwrap();
+        assert_eq!(ents_idx.len(), 1);
+        assert_eq!(ents_idx[0].index, 20);
     }
 
     #[test]
@@ -1514,7 +1563,7 @@ mod tests {
         // [20, 25) file_num = 3
         let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::Rewrite, 1));
         memtable.rewrite(ents_idx, Some(1));
-        assert_eq!(memtable.entries_count(), 25);
+        assert_eq!(memtable.entries_size(), 25);
         memtable.consistency_check();
 
         let mut ents_idx = vec![];
@@ -1673,7 +1722,7 @@ mod tests {
         expected_append += 4 * 10 + 3;
         memtable.compact_to(10);
         expected_append -= 10;
-        assert_eq!(memtable.entries_count(), 30);
+        assert_eq!(memtable.entries_size(), 30);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 4);
         assert_eq!(
