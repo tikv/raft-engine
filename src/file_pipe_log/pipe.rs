@@ -301,11 +301,8 @@ impl<F: FileSystem> SinglePipe<F> {
     fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
         let fd = self.get_fd(file_id.seq)?;
         match build_file_header(self.file_system.as_ref(), fd) {
-            Some(header) => Ok(header.version()),
-            None => {
-                Ok(Version::V1)
-                // Err(Error::Corruption("invalid header format.".to_owned())),
-            }
+            Ok(header) => Ok(header.version()),
+            Err(_) => Err(Error::Corruption("invalid header format.".to_owned())),
         }
     }
 

@@ -22,21 +22,21 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 pub(super) fn build_file_header<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-) -> Option<LogFileHeader> {
+) -> Result<LogFileHeader> {
     let file_size: usize = match handle.file_size() {
         Ok(size) => size,
         Err(_) => {
-            return None; // invalid file
+            return Err(Error::Corruption("Corrupted file!".to_owned())); // invalid file
         }
     };
     // [1] If the file was a new file, we just return the default `LogFileHeader`.
     if file_size == 0 {
-        return Some(LogFileHeader::default());
+        return Ok(LogFileHeader::default());
     }
     // [2] If the length lessed than the standard `LogFileHeader::len()`.
     let header_len = LogFileHeader::len();
     if file_size < header_len {
-        return None;
+        return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
     }
     // [3] Parse the header of the file.
     let parse_file_header = |handle: Arc<F::Handle>, header_len: usize| -> Result<LogFileHeader> {
@@ -59,10 +59,7 @@ pub(super) fn build_file_header<F: FileSystem>(
         }
         LogFileHeader::decode(&mut container.as_slice())
     };
-    match parse_file_header(handle, header_len) {
-        Ok(header) => Some(header),
-        Err(_) => None,
-    }
+    parse_file_header(handle, header_len)
 }
 
 /// Build a file writer.
@@ -79,7 +76,7 @@ pub(super) fn build_file_writer<F: FileSystem>(
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
     let header = if expected_hdr.is_none() || !rewrite_flag {
-        build_file_header(system, handle.clone())
+        Some(build_file_header(system, handle.clone())?)
     } else {
         expected_hdr
     };
@@ -204,7 +201,7 @@ pub(super) fn build_file_reader<F: FileSystem>(
     handle: Arc<F::Handle>,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
-    let header = build_file_header(system, handle.clone());
+    let header = Some(build_file_header(system, handle.clone())?);
     LogFileReader::open(
         handle,
         reader,
