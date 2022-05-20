@@ -4,6 +4,7 @@
 
 use std::cmp::Ordering;
 
+use crate::file_pipe_log::Version;
 use crate::Result;
 
 /// The type of log queue.
@@ -120,4 +121,12 @@ pub trait PipeLog: Sized {
     ///
     /// Returns the number of deleted files.
     fn purge_to(&self, file_id: FileId) -> Result<usize>;
+
+    /// Returns the `[Version]` of the specific file.
+    fn fetch_file_version(&self, file_id: FileId) -> Result<Version>;
+
+    /// Returns the active `[FileId]` and related `[Version]` of the specific log queue.
+    ///
+    /// Returns the `[Version]` and `[FileId]` of the related file.
+    fn fetch_active_file(&self, queue: LogQueue) -> (Version, FileId);
 }

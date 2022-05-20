@@ -15,7 +15,7 @@ use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
+use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, Version};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
@@ -149,8 +149,14 @@ where
                             .as_secs_f64(),
                     );
                     sync |= writer.sync;
-                    let log_batch = writer.get_payload();
+                    let log_batch = writer.get_mut_payload();
                     let res = if !log_batch.is_empty() {
+                        let (file_version, file_id) =
+                            self.pipe_log.fetch_active_file(LogQueue::Append);
+                        // Signs a checksum, so-called `[signature]`, into the LogBatch. The `[signature]` is both generated
+                        // by the given `[Version]` and `[FileId]`. That is, the final checksum of each LogBatch consists of
+                        // this signature and the checksum of the contents.
+                        log_batch.sign_checksum(file_version, file_id);
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -458,12 +464,17 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
+            let version = match idx.entries.as_ref() {
+                Some(handle) => pipe_log.fetch_file_version(handle.id),
+                None => Ok(Version::V1),
+            };
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
+                    version?,
                 )?,
             );
         }
@@ -482,12 +493,17 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
+            let version = match idx.entries.as_ref() {
+                Some(handle) => pipe_log.fetch_file_version(handle.id),
+                None => Ok(Version::V1),
+            };
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
+                    version?,
                 )?,
             );
         }

@@ -53,6 +53,12 @@ pub struct Config {
     ///
     /// Default: "4MB"
     pub bytes_per_sync: ReadableSize,
+
+    /// Version of the log file.
+    ///
+    /// Default: "V1"
+    pub file_version: String,
+
     /// Target file size for rotating log files.
     ///
     /// Default: "128MB"
@@ -88,6 +94,7 @@ impl Default for Config {
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
+            file_version: "V1".to_owned(),
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
@@ -160,6 +167,7 @@ mod tests {
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
+            file-version = "V1"
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -167,6 +175,7 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
+        assert_eq!(load.file_version, "V1");
     }
 
     #[test]

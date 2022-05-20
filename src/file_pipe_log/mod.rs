@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::FileNameExt;
+pub use format::{FileNameExt, Header, Version};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
@@ -46,7 +46,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd)
+        super::log_file::build_file_writer(file_system, fd, None, false)
     }
 
     /// Opens a log file for read.
@@ -171,6 +171,7 @@ pub mod debug {
     mod tests {
         use super::*;
         use crate::env::DefaultFileSystem;
+        use crate::file_pipe_log::format::{Header, Version};
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogQueue};
         use crate::test_util::generate_entries;
@@ -225,6 +226,11 @@ pub mod debug {
                     });
                 }
                 writer.close().unwrap();
+                let writer_header = writer.get_file_header();
+                assert_eq!(
+                    Version::to_str(writer_header.version()),
+                    Some(String::from("V1"))
+                );
                 // Read and verify.
                 let mut reader =
                     LogItemReader::new_file_reader(file_system.clone(), &file_path).unwrap();

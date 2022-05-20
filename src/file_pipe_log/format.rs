@@ -80,15 +80,57 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 /// Version of log file format.
-#[derive(Clone, Copy, FromPrimitive, ToPrimitive)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive)]
 #[repr(u64)]
-enum Version {
+pub enum Version {
     V1 = 1,
 }
 
+impl Version {
+    pub fn new(version: &str) -> Version {
+        match version {
+            "V1" => Version::V1,
+            _ => Version::V1, // default
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn to_str(version: Version) -> Option<String> {
+        match version {
+            Version::V1 => Some(String::from("V1")),
+        }
+    }
+}
+
 /// In-memory representation of the log file header.
-pub(super) struct LogFileHeader {
+#[derive(Clone)]
+pub struct LogFileHeader {
     version: Version,
+}
+
+impl LogFileHeader {
+    #[allow(dead_code)]
+    pub fn new(version: u64) -> Self {
+        if let Some(v) = Version::from_u64(version) {
+            Self { version: v }
+        } else {
+            Self {
+                version: Version::V1,
+            }
+        }
+    }
+
+    /// Construct a LogFileHeader from a specific `[str]` of `Version`.
+    pub fn from_str(version_str: &str) -> Self {
+        Self {
+            version: Version::new(version_str),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn version(&self) -> Version {
+        self.version
+    }
 }
 
 impl Default for LogFileHeader {
@@ -142,6 +184,15 @@ impl LogFileHeader {
     }
 }
 
+/// Basic trait for the successive LogXXX.
+pub trait Header {
+    /// Return the related file header.
+    fn get_file_header(&self) -> &LogFileHeader;
+
+    /// Set the local file header with the given file header.
+    fn set_file_header(&mut self, header: LogFileHeader);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +219,29 @@ mod tests {
         for case in invalid_cases {
             assert!(FileId::parse_file_name(case).is_none());
         }
+    }
+
+    #[test]
+    fn test_version() {
+        let version_str = String::from("V1");
+        let version = Version::new(&version_str);
+        assert_eq!(Version::V1.to_u64().unwrap(), version.to_u64().unwrap());
+        let opt_version: Option<String> = Version::to_str(version);
+        assert!(opt_version.is_some());
+        assert_eq!(opt_version.unwrap(), "V1");
+    }
+
+    #[test]
+    fn test_file_header() {
+        let header1 = LogFileHeader::default();
+        assert_eq!(header1.version().to_u64().unwrap(), 1);
+
+        let header2 = LogFileHeader::new(2); // forced to be "V1"
+        assert_eq!(header2.version().to_u64(), Some(1));
+        assert_eq!(Version::to_str(header2.version()), Some(String::from("V1")));
+
+        let version = String::from("V2");
+        let header3 = LogFileHeader::from_str(&version);
+        assert_eq!(header3.version().to_u64(), header1.version().to_u64());
     }
 }

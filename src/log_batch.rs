@@ -9,6 +9,7 @@ use log::error;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
+use crate::file_pipe_log::Version;
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::util::{crc32, lz4};
@@ -479,7 +480,10 @@ impl LogItemBatch {
         buf: &mut SliceReader,
         entries: FileBlockHandle,
         compression_type: CompressionType,
+        file_version: Version,
     ) -> Result<LogItemBatch> {
+        //@TODO: decoding based on the version waited to be implemented
+        assert_eq!(Version::V1, file_version);
         verify_checksum(buf)?;
         *buf = &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
@@ -762,6 +766,14 @@ impl LogBatch {
         }
     }
 
+    #[allow(unused_variables)]
+    pub(crate) fn sign_checksum(&mut self, file_version: Version, file_id: FileId) {
+        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+        // @TODO: lucasliang
+        // Supllement the details of signing checksum on each LogBatch with the
+        // specific `Version`.
+    }
+
     /// Notifies the completion of a storage write with the written location.
     ///
     /// Internally sets the file locations of each log entry indexes.
@@ -845,7 +857,10 @@ impl LogBatch {
         buf: &[u8],
         handle: FileBlockHandle,
         compression: CompressionType,
+        file_version: Version,
     ) -> Result<Vec<u8>> {
+        //@TODO: decoding based on the version waited to be implemented
+        assert_eq!(Version::V1, file_version);
         if handle.len > 0 {
             verify_checksum(&buf[0..handle.len])?;
             match compression {
@@ -894,12 +909,17 @@ mod tests {
         buf: &[u8],
         entry_indexes: &[EntryIndex],
         _encoded: bool,
+        version: Version,
     ) -> Vec<M::Entry> {
         let mut entries = Vec::with_capacity(entry_indexes.len());
         for ei in entry_indexes {
-            let block =
-                LogBatch::decode_entries_block(buf, ei.entries.unwrap(), ei.compression_type)
-                    .unwrap();
+            let block = LogBatch::decode_entries_block(
+                buf,
+                ei.entries.unwrap(),
+                ei.compression_type,
+                version,
+            )
+            .unwrap();
             entries.push(
                 parse_from_bytes(
                     &block[ei.entry_offset as usize..(ei.entry_offset + ei.entry_len) as usize],
@@ -1059,19 +1079,22 @@ mod tests {
 
         for batch in batches.into_iter() {
             for compression_type in [CompressionType::Lz4, CompressionType::None] {
-                let mut batch = batch.clone();
-                batch.finish_populate(compression_type);
-                batch.finish_write(FileBlockHandle::dummy(LogQueue::Append));
-                let mut encoded_batch = vec![];
-                batch.encode(&mut encoded_batch).unwrap();
-                let decoded_batch = LogItemBatch::decode(
-                    &mut encoded_batch.as_slice(),
-                    FileBlockHandle::dummy(LogQueue::Append),
-                    compression_type,
-                )
-                .unwrap();
-                assert!(decoded_batch.approximate_size() >= encoded_batch.len());
-                assert_eq!(batch, decoded_batch);
+                for version in [Version::V1] {
+                    let mut batch = batch.clone();
+                    batch.finish_populate(compression_type);
+                    batch.finish_write(FileBlockHandle::dummy(LogQueue::Append));
+                    let mut encoded_batch = vec![];
+                    batch.encode(&mut encoded_batch).unwrap();
+                    let decoded_batch = LogItemBatch::decode(
+                        &mut encoded_batch.as_slice(),
+                        FileBlockHandle::dummy(LogQueue::Append),
+                        compression_type,
+                        version,
+                    )
+                    .unwrap();
+                    assert!(decoded_batch.approximate_size() >= encoded_batch.len());
+                    assert_eq!(batch, decoded_batch);
+                }
             }
         }
     }
@@ -1115,9 +1138,13 @@ mod tests {
             let mut entries_handle = FileBlockHandle::dummy(LogQueue::Append);
             entries_handle.offset = LOG_BATCH_HEADER_LEN as u64;
             entries_handle.len = offset - LOG_BATCH_HEADER_LEN;
-            let decoded_item_batch =
-                LogItemBatch::decode(&mut &encoded[offset..], entries_handle, compression_type)
-                    .unwrap();
+            let decoded_item_batch = LogItemBatch::decode(
+                &mut &encoded[offset..],
+                entries_handle,
+                compression_type,
+                Version::V1,
+            )
+            .unwrap();
             assert_eq!(decoded_item_batch, item_batch);
             assert!(decoded_item_batch.approximate_size() >= len - offset);
 
@@ -1130,8 +1157,12 @@ mod tests {
                             entry_indexes.0.last().unwrap().index + 1,
                         );
                         let origin_entries = generate_entries(begin, end, Some(entry_data));
-                        let decoded_entries =
-                            decode_entries_from_bytes::<Entry>(entries, &entry_indexes.0, false);
+                        let decoded_entries = decode_entries_from_bytes::<Entry>(
+                            entries,
+                            &entry_indexes.0,
+                            false,
+                            Version::V1,
+                        );
                         assert_eq!(origin_entries, decoded_entries);
                     }
                 }
@@ -1219,6 +1250,7 @@ mod tests {
                 len: offset - LOG_BATCH_HEADER_LEN,
             },
             compression_type,
+            Version::V1,
         )
         .unwrap();
 
@@ -1227,8 +1259,12 @@ mod tests {
         for item in decoded_item_batch.items.iter() {
             match &item.content {
                 LogItemContent::EntryIndexes(entry_indexes) => {
-                    let decoded_entries =
-                        decode_entries_from_bytes::<Entry>(entry_bytes, &entry_indexes.0, false);
+                    let decoded_entries = decode_entries_from_bytes::<Entry>(
+                        entry_bytes,
+                        &entry_indexes.0,
+                        false,
+                        Version::V1,
+                    );
                     assert_eq!(entries.remove(0), decoded_entries);
                 }
                 LogItemContent::Kv(kv) => {

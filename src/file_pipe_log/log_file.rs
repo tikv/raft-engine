@@ -9,22 +9,94 @@ use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
 use crate::{Error, Result};
 
-use super::format::LogFileHeader;
+use super::format::{Header, LogFileHeader};
 use crate::env::{FileSystem, Handle, WriteExt};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
+/// Function for reading the header of the log file, and return a `[LogFileHeader]`.
+///
+/// Attention please, to avoid to move the offset of the given `[handle]`, we use a copy
+/// of the `[handle]` to parse the header of the given file.
+pub(super) fn build_file_header<F: FileSystem>(
+    system: &F,
+    handle: Arc<F::Handle>,
+) -> Option<LogFileHeader> {
+    let file_size: usize = match handle.file_size() {
+        Ok(size) => size,
+        Err(_) => {
+            return None; // invalid file
+        }
+    };
+    // [1] If the file was a new file, we just return the default `LogFileHeader`.
+    if file_size == 0 {
+        return Some(LogFileHeader::default());
+    }
+    // [2] If the length lessed than the standard `LogFileHeader::len()`.
+    let header_len = LogFileHeader::len();
+    if file_size < header_len {
+        return None;
+    }
+    // [3] Parse the header of the file.
+    let parse_file_header = |handle: Arc<F::Handle>, header_len: usize| -> Result<LogFileHeader> {
+        let mut reader = system.new_reader(handle)?;
+        reader.seek(SeekFrom::Start(0))?; // move to head of the file.
+
+        // Read and parse the header.
+        let mut container = vec![0; header_len as usize];
+        let mut buf = &mut container[..];
+        loop {
+            match reader.read(buf) {
+                Ok(0) => {
+                    break;
+                }
+                Ok(n) => {
+                    buf = &mut buf[n..];
+                }
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+        LogFileHeader::decode(&mut container.as_slice())
+    };
+    match parse_file_header(handle, header_len) {
+        Ok(header) => Some(header),
+        Err(_) => None,
+    }
+}
+
+/// Build a file writer.
+///
+/// * `[handle]`: standard handle of a log file.
+/// * `[rewrite_flag]`:
+///     - `true` => rewrite the header with `[expected_hdr]`;
+///     - `false`=> use the original header from the log file.
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
+    expected_hdr: Option<LogFileHeader>,
+    rewrite_flag: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    LogFileWriter::open(handle, writer)
+    let header = if expected_hdr.is_none() || !rewrite_flag {
+        build_file_header(system, handle.clone())
+    } else {
+        expected_hdr
+    };
+    LogFileWriter::open(
+        handle,
+        writer,
+        match header {
+            Some(hdr) => hdr,
+            None => LogFileHeader::default(),
+        },
+    )
 }
 
 /// Append-only writer for log file.
 pub struct LogFileWriter<F: FileSystem> {
+    /// header of file
+    header: LogFileHeader,
     writer: F::Writer,
     written: usize,
     capacity: usize,
@@ -32,9 +104,10 @@ pub struct LogFileWriter<F: FileSystem> {
 }
 
 impl<F: FileSystem> LogFileWriter<F> {
-    fn open(handle: Arc<F::Handle>, writer: F::Writer) -> Result<Self> {
+    fn open(handle: Arc<F::Handle>, writer: F::Writer, header: LogFileHeader) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
+            header,
             writer,
             written: file_size,
             capacity: file_size,
@@ -53,7 +126,8 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.last_sync = 0;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileHeader::len());
-        LogFileHeader::default().encode(&mut buf)?;
+        // LogFileHeader::default().encode(&mut buf)?;
+        self.header.encode(&mut buf)?;
         self.write(&buf, 0)
     }
 
@@ -110,16 +184,40 @@ impl<F: FileSystem> LogFileWriter<F> {
     }
 }
 
+impl<F: FileSystem> Header for LogFileWriter<F> {
+    fn get_file_header(&self) -> &LogFileHeader {
+        &self.header
+    }
+
+    fn set_file_header(&mut self, header: LogFileHeader) {
+        self.header = header;
+    }
+}
+
+/// Build a file reader.
+///
+/// Attention please, the reader do not need a specified `[LogFileHeader]` from users.
+///
+/// * `[handle]`: standard handle of a log file.
 pub(super) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
-    LogFileReader::open(handle, reader)
+    let header = build_file_header(system, handle.clone());
+    LogFileReader::open(
+        handle,
+        reader,
+        match header {
+            Some(hdr) => hdr,
+            None => LogFileHeader::default(),
+        },
+    )
 }
 
 /// Random-access reader for log file.
 pub struct LogFileReader<F: FileSystem> {
+    header: LogFileHeader,
     handle: Arc<F::Handle>,
     reader: F::Reader,
 
@@ -127,8 +225,9 @@ pub struct LogFileReader<F: FileSystem> {
 }
 
 impl<F: FileSystem> LogFileReader<F> {
-    fn open(handle: Arc<F::Handle>, reader: F::Reader) -> Result<Self> {
+    fn open(handle: Arc<F::Handle>, reader: F::Reader, header: LogFileHeader) -> Result<Self> {
         Ok(Self {
+            header,
             handle,
             reader,
             // Set to an invalid offset to force a reseek at first read.
@@ -167,5 +266,15 @@ impl<F: FileSystem> LogFileReader<F> {
     #[inline]
     pub fn file_size(&self) -> Result<usize> {
         Ok(self.handle.file_size()?)
+    }
+}
+
+impl<F: FileSystem> Header for LogFileReader<F> {
+    fn get_file_header(&self) -> &LogFileHeader {
+        &self.header
+    }
+
+    fn set_file_header(&mut self, header: LogFileHeader) {
+        self.header = header;
     }
 }

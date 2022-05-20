@@ -5,7 +5,7 @@ use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
 
-use super::format::LogFileHeader;
+use super::format::{Header, LogFileHeader};
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
@@ -44,12 +44,14 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
         self.file_id = Some(file_id);
         self.size = reader.file_size()?;
-        self.reader = Some(reader);
+        self.reader = Some(reader); // The LogFileReader is moved to this obj's reader.
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
-        let mut header = self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
-        LogFileHeader::decode(&mut header)?;
+        // The header of the file had been parsed in the `reader`. So, we just mark the
+        // start_offset of LogBatchs and prefetch the header of the first LogBatch,
+        // without parsing the `LogFileHeader` redundantly.
+        self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
         self.valid_offset = LogFileHeader::len();
         Ok(())
     }
@@ -87,6 +89,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
                 len: footer_offset - LOG_BATCH_HEADER_LEN,
             };
+            let version = self.reader.as_ref().unwrap().get_file_header().version();
             let item_batch = LogItemBatch::decode(
                 &mut self.peek(
                     self.valid_offset + footer_offset,
@@ -95,6 +98,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 )?,
                 handle,
                 compression_type,
+                version,
             )?;
             self.valid_offset += len;
             return Ok(Some(item_batch));
@@ -150,5 +154,12 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// file. Returns zero if there is no file opened.
     pub fn valid_offset(&self) -> usize {
         self.valid_offset
+    }
+
+    #[allow(dead_code)]
+    pub fn file_header(&self) -> Option<LogFileHeader> {
+        self.reader
+            .as_ref()
+            .map(|reader| reader.get_file_header().clone())
     }
 }

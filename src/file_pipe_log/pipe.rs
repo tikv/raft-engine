@@ -17,8 +17,8 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
-use super::format::FileNameExt;
-use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
+use super::format::{FileNameExt, Header, LogFileHeader, Version};
+use super::log_file::{build_file_header, build_file_reader, build_file_writer, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
     first_seq: FileSeq,
@@ -35,6 +35,7 @@ struct ActiveFile<F: FileSystem> {
 pub(super) struct SinglePipe<F: FileSystem> {
     queue: LogQueue,
     dir: String,
+    target_file_header: LogFileHeader,
     target_file_size: usize,
     bytes_per_sync: usize,
     file_system: Arc<F>,
@@ -84,17 +85,25 @@ impl<F: FileSystem> SinglePipe<F> {
                 listener.post_new_log_file(FileId { queue, seq });
             }
         }
-
+        let expected_file_header = LogFileHeader::from_str(&cfg.file_version);
         let active_fd = fds.back().unwrap().clone();
         let active_file = ActiveFile {
             seq: active_seq,
-            writer: build_file_writer(file_system.as_ref(), active_fd)?,
+            // Here, we should keep the LogFileHeader conincident with the original one, written by
+            // the previous `[Pipe]`.
+            writer: build_file_writer(
+                file_system.as_ref(),
+                active_fd,
+                Some(expected_file_header.clone()),
+                false,
+            )?,
         };
 
         let total_files = fds.len();
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
+            target_file_header: expected_file_header,
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,
@@ -146,7 +155,12 @@ impl<F: FileSystem> SinglePipe<F> {
         let fd = Arc::new(self.file_system.create(&path)?);
         let mut new_file = ActiveFile {
             seq,
-            writer: build_file_writer(self.file_system.as_ref(), fd.clone())?,
+            writer: build_file_writer(
+                self.file_system.as_ref(),
+                fd.clone(),
+                Some(self.target_file_header.clone()),
+                true,
+            )?,
         };
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
@@ -283,6 +297,28 @@ impl<F: FileSystem> SinglePipe<F> {
         }
         Ok(purged)
     }
+
+    fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
+        let fd = self.get_fd(file_id.seq)?;
+        match build_file_header(self.file_system.as_ref(), fd) {
+            Some(header) => Ok(header.version()),
+            None => {
+                Ok(Version::V1)
+                // Err(Error::Corruption("invalid header format.".to_owned())),
+            }
+        }
+    }
+
+    fn fetch_active_file(&self) -> (Version, FileId) {
+        let active_file = self.active_file.lock();
+        (
+            active_file.writer.get_file_header().version(),
+            FileId {
+                queue: self.queue,
+                seq: active_file.seq,
+            },
+        )
+    }
 }
 
 /// A [`PipeLog`] implementation that stores data in filesystem.
@@ -350,6 +386,16 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
         self.pipes[file_id.queue as usize].purge_to(file_id.seq)
+    }
+
+    #[inline]
+    fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
+        self.pipes[file_id.queue as usize].fetch_file_version(file_id)
+    }
+
+    #[inline]
+    fn fetch_active_file(&self, queue: LogQueue) -> (Version, FileId) {
+        self.pipes[queue as usize].fetch_active_file()
     }
 }
 
