@@ -48,10 +48,11 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
-        // The header of the file had been parsed in the `reader`. So, we just mark the
-        // start_offset of LogBatchs and prefetch the header of the first LogBatch,
-        // without parsing the `LogFileHeader` redundantly.
-        self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
+        // Attention please, the `reader` do not parse the header of the log file, we
+        // need to parse it here and update the `header` in it.
+        let mut header = self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
+        let file_header = LogFileHeader::decode(&mut header)?;
+        self.reader.as_mut().unwrap().set_file_header(file_header);
         self.valid_offset = LogFileHeader::len();
         Ok(())
     }

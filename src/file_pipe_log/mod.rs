@@ -55,7 +55,7 @@ pub mod debug {
         path: &Path,
     ) -> Result<LogFileReader<F>> {
         let fd = Arc::new(file_system.open(path)?);
-        super::log_file::build_file_reader(file_system, fd)
+        super::log_file::build_file_reader(file_system, fd, true)
     }
 
     /// An iterator over the log items in log files.

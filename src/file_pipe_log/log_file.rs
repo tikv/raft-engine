@@ -9,11 +9,18 @@ use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
 use crate::{Error, Result};
 
-use super::format::{Header, LogFileHeader};
+use super::format::{Header, LogFileHeader, Version};
 use crate::env::{FileSystem, Handle, WriteExt};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
+
+/// Combination of `[Handle]` and `[Version]`, specifying a handler of a file.
+#[derive(Clone, Debug)]
+pub struct FileHandler<F: FileSystem> {
+    pub handle: Arc<F::Handle>,
+    pub version: Version,
+}
 
 /// Function for reading the header of the log file, and return a `[LogFileHeader]`.
 ///
@@ -196,20 +203,26 @@ impl<F: FileSystem> Header for LogFileWriter<F> {
 /// Attention please, the reader do not need a specified `[LogFileHeader]` from users.
 ///
 /// * `[handle]`: standard handle of a log file.
+/// * `[reload_header]`: flag, whether to reload the log file header or not.
 pub(super) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
+    reload_header: bool,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
-    let header = Some(build_file_header(system, handle.clone())?);
-    LogFileReader::open(
-        handle,
-        reader,
-        match header {
-            Some(hdr) => hdr,
-            None => LogFileHeader::default(),
-        },
-    )
+    if reload_header {
+        let header = Some(build_file_header(system, handle.clone())?);
+        LogFileReader::open(
+            handle,
+            reader,
+            match header {
+                Some(hdr) => hdr,
+                None => LogFileHeader::default(),
+            },
+        )
+    } else {
+        LogFileReader::open(handle, reader, LogFileHeader::default())
+    }
 }
 
 /// Random-access reader for log file.

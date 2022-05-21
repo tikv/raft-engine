@@ -21,7 +21,7 @@ use crate::util::Factory;
 use crate::{Error, Result};
 
 use super::format::{lock_file_path, FileNameExt, LogFileHeader};
-use super::log_file::build_file_reader;
+use super::log_file::{build_file_header, build_file_reader, FileHandler};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
@@ -227,7 +227,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     if let Err(e) = reader.open(
                         FileId { queue, seq: f.seq },
-                        build_file_reader(self.file_system.as_ref(), f.handle.clone())?,
+                        // Attention please, to make sure that the `[Err]` message coud be captured,
+                        // the reader is just a `[LogFileReader]` without loadin the file header
+                        // in advance.
+                        build_file_reader(self.file_system.as_ref(), f.handle.clone(), false)?,
                     ) {
                         if f.handle.file_size()? > LogFileHeader::len() {
                             // This file contains some entries.
@@ -315,7 +318,18 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             LogQueue::Rewrite => &self.rewrite_files,
         };
         let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<Arc<F::Handle>> = files.iter().map(|f| f.handle.clone()).collect();
+        let files: VecDeque<FileHandler<F>> = files
+            .iter()
+            .map(|f| {
+                // As the version of each log file could not be captured from outsize, we
+                // need to do the `[build_file_header]` for parsing the `[Version]` at here.
+                let file_header = build_file_header(self.file_system.as_ref(), f.handle.clone());
+                FileHandler {
+                    handle: f.handle.clone(),
+                    version: file_header.unwrap().version(),
+                }
+            })
+            .collect();
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
