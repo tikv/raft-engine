@@ -217,8 +217,8 @@ impl<F: FileSystem> SinglePipe<F> {
 impl<F: FileSystem> SinglePipe<F> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_fd(handle.id.seq)?;
-        // As the header of each log file already parsed in the processing of loading log files,
-        // we just need to build the `[LogFileReader]`.
+        // As the header of each log file already parsed in the processing of loading
+        // log files, we just need to build the `[LogFileReader]`.
         let mut reader = build_file_reader(self.file_system.as_ref(), fd, false)?;
         reader.read(handle)
     }

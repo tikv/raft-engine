@@ -22,10 +22,11 @@ pub struct FileHandler<F: FileSystem> {
     pub version: Version,
 }
 
-/// Function for reading the header of the log file, and return a `[LogFileHeader]`.
+/// Function for reading the header of the log file, and return a
+/// `[LogFileHeader]`.
 ///
-/// Attention please, to avoid to move the offset of the given `[handle]`, we use a copy
-/// of the `[handle]` to parse the header of the given file.
+/// Attention please, to avoid to move the offset of the given `[handle]`, we
+/// use a copy of the `[handle]` to parse the header of the given file.
 pub(super) fn build_file_header<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
@@ -200,7 +201,8 @@ impl<F: FileSystem> Header for LogFileWriter<F> {
 
 /// Build a file reader.
 ///
-/// Attention please, the reader do not need a specified `[LogFileHeader]` from users.
+/// Attention please, the reader do not need a specified `[LogFileHeader]` from
+/// users.
 ///
 /// * `[handle]`: standard handle of a log file.
 /// * `[reload_header]`: flag, whether to reload the log file header or not.
