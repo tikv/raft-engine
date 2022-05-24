@@ -91,7 +91,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 listener.post_new_log_file(FileId { queue, seq });
             }
         }
-        let active_fd = fds.back().unwrap().clone();
+        let active_fd = fds.back().unwrap();
         let active_file = ActiveFile {
             seq: active_seq,
             // Here, we should keep the LogFileHeader conincident with the original one, written by
