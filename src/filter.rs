@@ -9,7 +9,7 @@ use scopeguard::{guard, ScopeGuard};
 
 use crate::env::FileSystem;
 use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
-use crate::file_pipe_log::{FileNameExt, Header, ReplayMachine};
+use crate::file_pipe_log::{FileNameExt, ReplayMachine};
 use crate::log_batch::{
     Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
 };
@@ -287,7 +287,8 @@ impl RhaiFilterMachine {
                                     &entries_buf,
                                     ei.entries.unwrap(),
                                     ei.compression_type,
-                                    reader.get_file_header().version(),
+                                    reader.header.version(),
+                                    // reader.get_file_header().version(),
                                 )?;
                                 entries.push(
                                     block[ei.entry_offset as usize

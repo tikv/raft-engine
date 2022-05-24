@@ -16,12 +16,12 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileId, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileHeader};
-use super::log_file::{build_file_header, build_file_reader, FileHandler};
+use super::format::{lock_file_path, FileNameExt, LogFileHeader, Version};
+use super::log_file::{build_file_reader, FileHandler};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
@@ -55,11 +55,6 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
     }
 }
 
-struct FileToRecover<F: FileSystem> {
-    seq: FileSeq,
-    handle: Arc<F::Handle>,
-}
-
 /// [`DualPipes`] factory that can also recover other customized memory states.
 pub struct DualPipesBuilder<F: FileSystem> {
     cfg: Config,
@@ -69,9 +64,9 @@ pub struct DualPipesBuilder<F: FileSystem> {
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
     dir_lock: Option<File>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    append_files: Vec<FileToRecover<F>>,
+    append_files: Vec<FileHandler<F>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    rewrite_files: Vec<FileToRecover<F>>,
+    rewrite_files: Vec<FileHandler<F>>,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -156,7 +151,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         files.clear();
                     } else {
                         let handle = Arc::new(self.file_system.open(&path)?);
-                        files.push(FileToRecover { seq, handle });
+                        files.push(FileHandler {
+                            seq,
+                            handle,
+                            version: Version::V1, /* default with V1, would be updated later in
+                                                   * the `recover_queue` progress */
+                        });
                     }
                 }
             }
@@ -172,24 +172,18 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         machine_factory: &FA,
     ) -> Result<(M, M)> {
         let threads = self.cfg.recovery_threads;
-        let (append_concurrency, rewrite_concurrency) =
-            match (self.append_files.len(), self.rewrite_files.len()) {
-                (a, b) if a > 0 && b > 0 => {
-                    let a_threads = std::cmp::max(1, threads * a / (a + b));
-                    let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
-                    (a_threads, b_threads)
-                }
-                _ => (threads, threads),
-            };
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .unwrap();
-        let (append, rewrite) = pool.join(
-            || self.recover_queue(LogQueue::Append, machine_factory, append_concurrency),
-            || self.recover_queue(LogQueue::Rewrite, machine_factory, rewrite_concurrency),
-        );
-
+        // As the `recover_queue` would update the `Version` of each log file in
+        // `apend_files` and `rewrite_files`, we just use the naive api `install`
+        // as the choice for parallelly recovering `LogQueue::Append` and
+        // `LogQueue::Rewrite`.
+        let append =
+            pool.install(|| self.recover_queue(LogQueue::Append, machine_factory, threads));
+        let rewrite =
+            pool.install(|| self.recover_queue(LogQueue::Rewrite, machine_factory, threads));
         Ok((append?, rewrite?))
     }
 
@@ -197,15 +191,15 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// queue, and replays them to specific [`ReplayMachine`]s that can be
     /// constructed via `machine_factory`.
     pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
-        &self,
+        &mut self,
         queue: LogQueue,
         replay_machine_factory: &FA,
         concurrency: usize,
     ) -> Result<M> {
         let files = if queue == LogQueue::Append {
-            &self.append_files
+            &mut self.append_files
         } else {
-            &self.rewrite_files
+            &mut self.rewrite_files
         };
         if concurrency == 0 || files.is_empty() {
             return Ok(replay_machine_factory.new_target());
@@ -213,24 +207,26 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
         let recovery_mode = self.cfg.recovery_mode;
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
-        let chunks = files.par_chunks(max_chunk_size);
+        let chunks = files.par_chunks_mut(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
+        let recovery_read_block_size = self.cfg.recovery_read_block_size.0 as usize; // default read_block_size for recovery
+        let filesystem_ref = self.file_system.as_ref(); // filesystem reference
         let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
                 let mut reader =
-                    LogItemBatchFileReader::new(self.cfg.recovery_read_block_size.0 as usize);
+                    LogItemBatchFileReader::new(recovery_read_block_size);
                 let mut sequential_replay_machine = replay_machine_factory.new_target();
                 let file_count = chunk.len();
-                for (i, f) in chunk.iter().enumerate() {
+                for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     if let Err(e) = reader.open(
                         FileId { queue, seq: f.seq },
                         // Attention please, to make sure that the `[Err]` message coud be captured,
                         // the reader is just a `[LogFileReader]` without loadin the file header
-                        // in advance.
-                        build_file_reader(self.file_system.as_ref(), f.handle.clone(), false)?,
+                        // in advance, by passing `Version::V1` as the default param.
+                        build_file_reader(filesystem_ref, f.handle.clone(), Some(Version::V1))?,
                     ) {
                         if f.handle.file_size()? > LogFileHeader::len() {
                             // This file contains some entries.
@@ -262,6 +258,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             return Err(e);
                         }
                     }
+                    // Update file version of each log file.
+                    f.version = reader.file_header().unwrap().version();
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -323,10 +321,17 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .map(|f| {
                 // As the version of each log file could not be captured from outsize, we
                 // need to do the `[build_file_header]` for parsing the `[Version]` at here.
+                /*
                 let file_header = build_file_header(self.file_system.as_ref(), f.handle.clone());
                 FileHandler {
                     handle: f.handle.clone(),
                     version: file_header.unwrap().version(),
+                }
+                */
+                FileHandler {
+                    handle: f.handle.clone(),
+                    version: f.version,
+                    seq: f.seq,
                 }
             })
             .collect();

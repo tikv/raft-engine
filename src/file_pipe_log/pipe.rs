@@ -17,7 +17,7 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
-use super::format::{FileNameExt, Header, LogFileHeader, Version};
+use super::format::{FileNameExt, LogFileHeader, Version};
 use super::log_file::{
     build_file_header, build_file_reader, build_file_writer, FileHandler, LogFileWriter,
 };
@@ -68,7 +68,7 @@ impl<F: FileSystem> SinglePipe<F> {
         mut first_seq: FileSeq,
         mut fds: VecDeque<FileHandler<F>>,
     ) -> Result<Self> {
-        let expected_file_header = LogFileHeader::from_str(&cfg.file_version);
+        let expected_file_header = LogFileHeader::new(cfg.file_version);
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
@@ -78,6 +78,7 @@ impl<F: FileSystem> SinglePipe<F> {
             };
             let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
             fds.push_back(FileHandler {
+                seq: first_seq,
                 handle: fd,
                 version: expected_file_header.version(),
             });
@@ -182,7 +183,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // loss before a new entry is written.
         new_file.writer.sync()?;
         self.sync_dir()?;
-        let active_file_version = new_file.writer.get_file_header().version();
+        let active_file_version = new_file.writer.header.version();
         **active_file = new_file;
 
         let len = {
@@ -190,6 +191,7 @@ impl<F: FileSystem> SinglePipe<F> {
             debug_assert!(files.active_seq + 1 == seq);
             files.active_seq = seq;
             files.fds.push_back(FileHandler {
+                seq,
                 handle: fd,
                 version: active_file_version,
             });
@@ -219,7 +221,11 @@ impl<F: FileSystem> SinglePipe<F> {
         let fd = self.get_fd(handle.id.seq)?;
         // As the header of each log file already parsed in the processing of loading
         // log files, we just need to build the `[LogFileReader]`.
-        let mut reader = build_file_reader(self.file_system.as_ref(), fd, false)?;
+        let mut reader = build_file_reader(
+            self.file_system.as_ref(),
+            fd,
+            Some(self.get_file_version(handle.id.seq)?),
+        )?;
         reader.read(handle)
     }
 
@@ -331,7 +337,7 @@ impl<F: FileSystem> SinglePipe<F> {
     fn fetch_active_file(&self) -> (Version, FileId) {
         let active_file = self.active_file.lock();
         (
-            active_file.writer.get_file_header().version(),
+            active_file.writer.header.version(),
             FileId {
                 queue: self.queue,
                 seq: active_file.seq,
@@ -530,5 +536,18 @@ mod tests {
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
         assert_eq!(pipe_log.file_span(queue), (3, 3));
+
+        // fetch active file
+        let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(file_version, Version::V1);
+        assert_eq!(file_seq.seq, 3);
+
+        // fetch file version
+        let search = pipe_log.fetch_file_version(FileId {
+            queue: LogQueue::Append,
+            seq: 3,
+        });
+        assert!(search.is_ok());
+        assert_eq!(search.unwrap(), Version::V1);
     }
 }

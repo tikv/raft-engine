@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{FileNameExt, Header, Version};
+pub use format::{FileNameExt, Version};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
@@ -55,7 +55,7 @@ pub mod debug {
         path: &Path,
     ) -> Result<LogFileReader<F>> {
         let fd = Arc::new(file_system.open(path)?);
-        super::log_file::build_file_reader(file_system, fd, true)
+        super::log_file::build_file_reader(file_system, fd, None)
     }
 
     /// An iterator over the log items in log files.
@@ -171,7 +171,7 @@ pub mod debug {
     mod tests {
         use super::*;
         use crate::env::DefaultFileSystem;
-        use crate::file_pipe_log::format::{Header, Version};
+        use crate::file_pipe_log::format::Version;
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogQueue};
         use crate::test_util::generate_entries;
@@ -226,9 +226,8 @@ pub mod debug {
                     });
                 }
                 writer.close().unwrap();
-                let writer_header = writer.get_file_header();
                 assert_eq!(
-                    Version::to_str(writer_header.version()),
+                    Version::to_str(writer.header.version()),
                     Some(String::from("V1"))
                 );
                 // Read and verify.

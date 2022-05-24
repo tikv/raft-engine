@@ -120,7 +120,12 @@ impl LogFileHeader {
         }
     }
 
+    pub fn from_version(version: Version) -> Self {
+        Self { version }
+    }
+
     /// Construct a LogFileHeader from a specific `[str]` of `Version`.
+    #[allow(dead_code)]
     pub fn from_str(version_str: &str) -> Self {
         Self {
             version: Version::new(version_str),
@@ -184,15 +189,6 @@ impl LogFileHeader {
     }
 }
 
-/// Basic trait for the successive LogXXX.
-pub trait Header {
-    /// Return the related file header.
-    fn get_file_header(&self) -> &LogFileHeader;
-
-    /// Set the local file header with the given file header.
-    fn set_file_header(&mut self, header: LogFileHeader);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +239,8 @@ mod tests {
         let version = String::from("V2");
         let header3 = LogFileHeader::from_str(&version);
         assert_eq!(header3.version().to_u64(), header1.version().to_u64());
+
+        let header4 = LogFileHeader::from_version(Version::V1);
+        assert_eq!(header4.version(), Version::V1);
     }
 }

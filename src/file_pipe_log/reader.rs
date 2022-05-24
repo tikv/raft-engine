@@ -5,7 +5,7 @@ use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
 
-use super::format::{Header, LogFileHeader};
+use super::format::LogFileHeader;
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
@@ -52,7 +52,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // need to parse it here and update the `header` in it.
         let mut header = self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
         let file_header = LogFileHeader::decode(&mut header)?;
-        self.reader.as_mut().unwrap().set_file_header(file_header);
+        self.reader.as_mut().unwrap().header = file_header;
         self.valid_offset = LogFileHeader::len();
         Ok(())
     }
@@ -90,7 +90,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
                 len: footer_offset - LOG_BATCH_HEADER_LEN,
             };
-            let version = self.reader.as_ref().unwrap().get_file_header().version();
+            let version = self.reader.as_ref().unwrap().header.version();
             let item_batch = LogItemBatch::decode(
                 &mut self.peek(
                     self.valid_offset + footer_offset,
@@ -157,10 +157,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         self.valid_offset
     }
 
-    #[allow(dead_code)]
     pub fn file_header(&self) -> Option<LogFileHeader> {
-        self.reader
-            .as_ref()
-            .map(|reader| reader.get_file_header().clone())
+        self.reader.as_ref().map(|reader| reader.header.clone())
     }
 }
