@@ -149,7 +149,7 @@ where
                             .as_secs_f64(),
                     );
                     sync |= writer.sync;
-                    let log_batch = writer.get_mut_payload();
+                    let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
                         // TODO(lucasliang): bind `Version` to each `LogBatch`
                         self.pipe_log

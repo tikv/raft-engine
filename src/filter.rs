@@ -288,7 +288,6 @@ impl RhaiFilterMachine {
                                     ei.entries.unwrap(),
                                     ei.compression_type,
                                     reader.header.version(),
-                                    // reader.get_file_header().version(),
                                 )?;
                                 entries.push(
                                     block[ei.entry_offset as usize

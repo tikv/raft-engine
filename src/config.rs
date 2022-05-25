@@ -56,8 +56,8 @@ pub struct Config {
 
     /// Version of the log file.
     ///
-    /// Default: "1" => "Version::V1"
-    pub file_version: u64,
+    /// Default: 1
+    pub format_version: u64,
 
     /// Target file size for rotating log files.
     ///
@@ -94,7 +94,7 @@ impl Default for Config {
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
-            file_version: 1, // 1 => Version::V1
+            format_version: 1, // 1 => Version::V1
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
-        assert_eq!(load.file_version, 1_u64);
+        assert_eq!(load.format_version, 1_u64);
     }
 
     #[test]

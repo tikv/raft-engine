@@ -86,24 +86,14 @@ pub enum Version {
     V1 = 1,
 }
 
-impl Version {
-    pub fn new(version: &str) -> Version {
-        match version {
-            "V1" => Version::V1,
-            _ => Version::V1, // default
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn to_str(version: Version) -> Option<String> {
-        match version {
-            Version::V1 => Some(String::from("V1")),
-        }
+impl Default for Version {
+    fn default() -> Self {
+        Version::V1
     }
 }
 
 /// In-memory representation of the log file header.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct LogFileHeader {
     version: Version,
 }
@@ -115,7 +105,7 @@ impl LogFileHeader {
             Self { version: v }
         } else {
             Self {
-                version: Version::V1,
+                version: Version::default(),
             }
         }
     }
@@ -124,25 +114,9 @@ impl LogFileHeader {
         Self { version }
     }
 
-    /// Construct a LogFileHeader from a specific `[str]` of `Version`.
-    #[allow(dead_code)]
-    pub fn from_str(version_str: &str) -> Self {
-        Self {
-            version: Version::new(version_str),
-        }
-    }
-
     #[allow(dead_code)]
     pub fn version(&self) -> Version {
         self.version
-    }
-}
-
-impl Default for LogFileHeader {
-    fn default() -> Self {
-        Self {
-            version: Version::V1,
-        }
     }
 }
 
@@ -219,12 +193,10 @@ mod tests {
 
     #[test]
     fn test_version() {
-        let version_str = String::from("V1");
-        let version = Version::new(&version_str);
+        let version = Version::default();
         assert_eq!(Version::V1.to_u64().unwrap(), version.to_u64().unwrap());
-        let opt_version: Option<String> = Version::to_str(version);
-        assert!(opt_version.is_some());
-        assert_eq!(opt_version.unwrap(), "V1");
+        let version2 = Version::from_u64(1).unwrap();
+        assert_eq!(version, version2);
     }
 
     #[test]
@@ -234,13 +206,10 @@ mod tests {
 
         let header2 = LogFileHeader::new(2); // forced to be "V1"
         assert_eq!(header2.version().to_u64(), Some(1));
-        assert_eq!(Version::to_str(header2.version()), Some(String::from("V1")));
-
-        let version = String::from("V2");
-        let header3 = LogFileHeader::from_str(&version);
+        let header3 = LogFileHeader::from_version(Version::default());
         assert_eq!(header3.version().to_u64(), header1.version().to_u64());
 
-        let header4 = LogFileHeader::from_version(Version::V1);
-        assert_eq!(header4.version(), Version::V1);
+        let header4 = LogFileHeader::from_version(Version::default());
+        assert_eq!(header4.version(), Version::default());
     }
 }

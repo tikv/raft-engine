@@ -68,7 +68,7 @@ impl<F: FileSystem> SinglePipe<F> {
         mut first_seq: FileSeq,
         mut fds: VecDeque<FileHandler<F>>,
     ) -> Result<Self> {
-        let expected_file_header = LogFileHeader::new(cfg.file_version);
+        let expected_file_header = LogFileHeader::new(cfg.format_version);
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
@@ -80,7 +80,7 @@ impl<F: FileSystem> SinglePipe<F> {
             fds.push_back(FileHandler {
                 seq: first_seq,
                 handle: fd,
-                version: expected_file_header.version(),
+                version: Some(expected_file_header.version()),
             });
             first_seq
         } else {
@@ -151,7 +151,13 @@ impl<F: FileSystem> SinglePipe<F> {
         if file_seq < files.first_seq || file_seq > files.active_seq {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        Ok(files.fds[(file_seq - files.first_seq) as usize].version)
+        if let Some(version) = files.fds[(file_seq - files.first_seq) as usize].version {
+            Ok(version)
+        } else {
+            Err(Error::Corruption(
+                "invalid format of file header".to_owned(),
+            ))
+        }
     }
 
     /// Creates a new file for write, and rotates the active log file.
@@ -193,7 +199,7 @@ impl<F: FileSystem> SinglePipe<F> {
             files.fds.push_back(FileHandler {
                 seq,
                 handle: fd,
-                version: active_file_version,
+                version: Some(active_file_version),
             });
             for listener in &self.listeners {
                 listener.post_new_log_file(FileId {
@@ -328,7 +334,7 @@ impl<F: FileSystem> SinglePipe<F> {
     #[allow(dead_code)]
     fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
         let fd = self.get_fd(file_id.seq)?;
-        match build_file_header(self.file_system.as_ref(), fd) {
+        match build_file_header(self.file_system.as_ref(), fd, None) {
             Ok(header) => Ok(header.version()),
             Err(_) => Err(Error::Corruption("invalid header format.".to_owned())),
         }
@@ -539,7 +545,7 @@ mod tests {
 
         // fetch active file
         let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_version, Version::V1);
+        assert_eq!(file_version, Version::default());
         assert_eq!(file_seq.seq, 3);
 
         // fetch file version
@@ -548,6 +554,6 @@ mod tests {
             seq: 3,
         });
         assert!(search.is_ok());
-        assert_eq!(search.unwrap(), Version::V1);
+        assert_eq!(search.unwrap(), Version::default());
     }
 }

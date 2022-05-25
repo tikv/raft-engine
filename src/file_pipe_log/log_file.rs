@@ -20,7 +20,7 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 pub struct FileHandler<F: FileSystem> {
     pub seq: FileSeq,
     pub handle: Arc<F::Handle>,
-    pub version: Version,
+    pub version: Option<Version>,
 }
 
 /// Function for reading the header of the log file, and return a
@@ -31,6 +31,7 @@ pub struct FileHandler<F: FileSystem> {
 pub(super) fn build_file_header<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
+    expected_reader: Option<&mut F::Reader>,
 ) -> Result<LogFileHeader> {
     let file_size: usize = match handle.file_size() {
         Ok(size) => size,
@@ -49,7 +50,13 @@ pub(super) fn build_file_header<F: FileSystem>(
     }
     // [3] Parse the header of the file.
     let parse_file_header = |handle: Arc<F::Handle>, header_len: usize| -> Result<LogFileHeader> {
-        let mut reader = system.new_reader(handle)?;
+        let mut local_reader;
+        let reader = if let Some(rd) = expected_reader {
+            rd
+        } else {
+            local_reader = system.new_reader(handle)?;
+            &mut local_reader
+        };
         reader.seek(SeekFrom::Start(0))?; // move to head of the file.
 
         // Read and parse the header.
@@ -85,7 +92,7 @@ pub(super) fn build_file_writer<F: FileSystem>(
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
     let header = if expected_hdr.is_none() || !rewrite_flag {
-        Some(build_file_header(system, handle.clone())?)
+        Some(build_file_header(system, handle.clone(), None)?)
     } else {
         expected_hdr
     };
@@ -196,15 +203,13 @@ pub(super) fn build_file_reader<F: FileSystem>(
     handle: Arc<F::Handle>,
     expected_version: Option<Version>,
 ) -> Result<LogFileReader<F>> {
-    let reader = system.new_reader(handle.clone())?;
+    let mut reader = system.new_reader(handle.clone())?;
     if let Some(version) = expected_version {
         LogFileReader::open(handle, reader, version)
     } else {
-        LogFileReader::open(
-            handle.clone(),
-            reader,
-            (build_file_header(system, handle)?).version(),
-        )
+        let file_version =
+            (build_file_header(system, handle.clone(), Some(&mut reader))?).version();
+        LogFileReader::open(handle, reader, file_version)
     }
 }
 

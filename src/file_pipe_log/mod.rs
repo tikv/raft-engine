@@ -226,10 +226,7 @@ pub mod debug {
                     });
                 }
                 writer.close().unwrap();
-                assert_eq!(
-                    Version::to_str(writer.header.version()),
-                    Some(String::from("V1"))
-                );
+                assert_eq!(writer.header.version(), Version::default());
                 // Read and verify.
                 let mut reader =
                     LogItemReader::new_file_reader(file_system.clone(), &file_path).unwrap();

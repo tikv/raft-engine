@@ -154,8 +154,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         files.push(FileHandler {
                             seq,
                             handle,
-                            version: Version::V1, /* default with V1, would be updated later in
-                                                   * the `recover_queue` progress */
+                            version: None, /* default with V1, would be updated later in
+                                            * the `recover_queue` progress */
                         });
                     }
                 }
@@ -210,8 +210,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let chunks = files.par_chunks_mut(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
-        let recovery_read_block_size = self.cfg.recovery_read_block_size.0 as usize; // default read_block_size for recovery
-        let filesystem_ref = self.file_system.as_ref(); // filesystem reference
+        let recovery_read_block_size = self.cfg.recovery_read_block_size.0 as usize;
+        let filesystem_ref = self.file_system.as_ref();
         let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
@@ -226,7 +226,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         // Attention please, to make sure that the `[Err]` message coud be captured,
                         // the reader is just a `[LogFileReader]` without loadin the file header
                         // in advance, by passing `Version::V1` as the default param.
-                        build_file_reader(filesystem_ref, f.handle.clone(), Some(Version::V1))?,
+                        build_file_reader(filesystem_ref, f.handle.clone(), Some(Version::default()))?,
                     ) {
                         if f.handle.file_size()? > LogFileHeader::len() {
                             // This file contains some entries.
@@ -259,7 +259,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         }
                     }
                     // Update file version of each log file.
-                    f.version = reader.file_header().unwrap().version();
+                    f.version = Some(reader.file_header().unwrap().version());
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -318,21 +318,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
         let files: VecDeque<FileHandler<F>> = files
             .iter()
-            .map(|f| {
-                // As the version of each log file could not be captured from outsize, we
-                // need to do the `[build_file_header]` for parsing the `[Version]` at here.
-                /*
-                let file_header = build_file_header(self.file_system.as_ref(), f.handle.clone());
-                FileHandler {
-                    handle: f.handle.clone(),
-                    version: file_header.unwrap().version(),
-                }
-                */
-                FileHandler {
-                    handle: f.handle.clone(),
-                    version: f.version,
-                    seq: f.seq,
-                }
+            .map(|f| FileHandler {
+                handle: f.handle.clone(),
+                version: f.version,
+                seq: f.seq,
             })
             .collect();
         SinglePipe::open(

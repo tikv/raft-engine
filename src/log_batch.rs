@@ -483,7 +483,7 @@ impl LogItemBatch {
         file_version: Version,
     ) -> Result<LogItemBatch> {
         //@TODO: decoding based on the version waited to be implemented
-        assert_eq!(Version::V1, file_version);
+        debug_assert_eq!(Version::default(), file_version);
         verify_checksum(buf)?;
         *buf = &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
@@ -766,12 +766,13 @@ impl LogBatch {
         }
     }
 
-    #[allow(unused_variables)]
+    #[allow(dead_code, unused_variables)]
     pub(crate) fn sign_checksum(&mut self, file_version: Version, file_id: FileId) {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
         // @TODO: lucasliang
         // Supllement the details of signing checksum on each LogBatch with the
         // specific `Version`.
+        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+        unimplemented!();
     }
 
     /// Notifies the completion of a storage write with the written location.
@@ -860,7 +861,7 @@ impl LogBatch {
         file_version: Version,
     ) -> Result<Vec<u8>> {
         //@TODO: decoding based on the version waited to be implemented
-        assert_eq!(Version::V1, file_version);
+        debug_assert_eq!(Version::default(), file_version);
         if handle.len > 0 {
             verify_checksum(&buf[0..handle.len])?;
             match compression {
@@ -1142,7 +1143,7 @@ mod tests {
                 &mut &encoded[offset..],
                 entries_handle,
                 compression_type,
-                Version::V1,
+                Version::default(),
             )
             .unwrap();
             assert_eq!(decoded_item_batch, item_batch);
@@ -1161,7 +1162,7 @@ mod tests {
                             entries,
                             &entry_indexes.0,
                             false,
-                            Version::V1,
+                            Version::default(),
                         );
                         assert_eq!(origin_entries, decoded_entries);
                     }
@@ -1250,7 +1251,7 @@ mod tests {
                 len: offset - LOG_BATCH_HEADER_LEN,
             },
             compression_type,
-            Version::V1,
+            Version::default(),
         )
         .unwrap();
 
@@ -1263,7 +1264,7 @@ mod tests {
                         entry_bytes,
                         &entry_indexes.0,
                         false,
-                        Version::V1,
+                        Version::default(),
                     );
                     assert_eq!(entries.remove(0), decoded_entries);
                 }
