@@ -4,12 +4,19 @@ use std::sync::Arc;
 
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
+use raft_engine::env::{FileSystem, ObfuscatedFileSystem};
 use raft_engine::internals::*;
 use raft_engine::*;
 
 use crate::util::*;
 
-fn append(engine: &Engine, rid: u64, start_index: u64, end_index: u64, data: Option<&[u8]>) {
+fn append<FS: FileSystem>(
+    engine: &Engine<FS>,
+    rid: u64,
+    start_index: u64,
+    end_index: u64,
+    data: Option<&[u8]>,
+) {
     let entries = generate_entries(start_index, end_index, data);
     if !entries.is_empty() {
         let mut batch = LogBatch::default();
@@ -389,4 +396,59 @@ fn test_incomplete_purge() {
     assert_eq!(engine.file_span(LogQueue::Append).0, append_first);
     assert_eq!(engine.first_index(rid).unwrap(), 38);
     assert_eq!(engine.last_index(rid).unwrap(), 59);
+}
+
+#[test]
+fn test_tail_corruption() {
+    let data = vec![b'x'; 16];
+    let fs = Arc::new(ObfuscatedFileSystem::default());
+    let rid = 1;
+    // Header is correct, record is corrupted.
+    {
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_1")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let _f = FailGuard::new("log_batch::corrupted_items", "return");
+        append(&engine, rid, 1, 5, Some(&data));
+        drop(engine);
+        let engine = Engine::open_with_file_system(cfg, fs.clone()).unwrap();
+        assert_eq!(engine.first_index(rid), None);
+    }
+    // Header is corrupted.
+    {
+        let _f = FailGuard::new("log_file_header::corrupted", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_2")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        Engine::open_with_file_system(cfg, fs.clone()).unwrap();
+    }
+    // Header is corrupted, followed by some records.
+    {
+        let _f = FailGuard::new("log_file_header::corrupted", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_3")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        append(&engine, rid, 1, 5, Some(&data));
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs).is_err());
+    }
 }

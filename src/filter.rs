@@ -285,14 +285,13 @@ impl RhaiFilterMachine {
                                 let entries_buf = reader.read(ei.entries.unwrap())?;
                                 let block = LogBatch::decode_entries_block(
                                     &entries_buf,
+                                    ei.entries.unwrap(),
                                     ei.compression_type,
                                 )?;
                                 entries.push(
-                                    LogBatch::decode_entry_bytes_from_entries_block(
-                                        &block,
-                                        ei.entry_offset as usize,
-                                    )?
-                                    .to_owned(),
+                                    block[ei.entry_offset as usize
+                                        ..(ei.entry_offset + ei.entry_len) as usize]
+                                        .to_owned(),
                                 );
                             }
                             log_batch.add_raw_entries(item.raft_group_id, eis, entries)?;

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use raft::eraftpb::Entry;
 use raft_engine::env::ObfuscatedFileSystem;
-use raft_engine::{Config, Engine, LogBatch, ReadableSize};
+use raft_engine::internals::*;
+use raft_engine::*;
 
 use crate::util::*;
 
@@ -46,6 +47,10 @@ fn test_file_read_error() {
     let entry = vec![b'x'; 1024];
 
     let engine = Engine::open_with_file_system(cfg, fs).unwrap();
+    // Writing an empty message.
+    engine
+        .write(&mut generate_batch(1, 0, 1, None), true)
+        .unwrap();
     engine
         .write(&mut generate_batch(2, 1, 10, Some(&entry)), true)
         .unwrap();
@@ -62,6 +67,9 @@ fn test_file_read_error() {
 
     let mut entries = Vec::new();
     let _f = FailGuard::new("log_fd::read::err", "return");
+    engine
+        .fetch_entries_to::<MessageExtTyped>(1, 0, 1, None, &mut entries)
+        .unwrap();
     engine.get_message::<Entry>(1, b"k".as_ref()).unwrap();
     engine
         .fetch_entries_to::<MessageExtTyped>(2, 1, 10, None, &mut entries)
@@ -142,31 +150,46 @@ fn test_file_rotate_error() {
     engine
         .write(&mut generate_batch(1, 3, 4, Some(&entry)), false)
         .unwrap();
+    assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+    // The next write will be followed by a rotate.
     {
-        let _f = FailGuard::new("log_fd::create::err", "return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
-    }
-    {
-        // Fail the second header write.
-        let _f = FailGuard::new("log_fd::write::err", "1*off->return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
-    }
-    {
+        // Fail to sync old log file.
         let _f = FailGuard::new("log_fd::sync::err", "return");
         assert!(catch_unwind_silent(|| {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
+        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+    }
+    {
+        // Fail to create new log file.
+        let _f = FailGuard::new("log_fd::create::err", "return");
+        assert!(catch_unwind_silent(|| {
+            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+        })
+        .is_err());
+        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+    }
+    {
+        // Fail to write header of new log file.
+        let _f = FailGuard::new("log_fd::write::err", "1*off->return");
+        assert!(catch_unwind_silent(|| {
+            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+        })
+        .is_err());
+        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+    }
+    {
+        // Fail to sync new log file. The old log file is already sync-ed at this point.
+        let _f = FailGuard::new("log_fd::sync::err", "return");
+        assert!(catch_unwind_silent(|| {
+            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+        })
+        .is_err());
+        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
 
-    // Internal states are consistent after panics. But outstanding writes are not
-    // reverted.
+    // We can continue writing after the incidents.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
@@ -192,6 +215,7 @@ fn test_concurrent_write_error() {
     };
     let entry = vec![b'x'; 1024];
 
+    // Don't use ObfuscatedFileSystem. It will split IO.
     let engine = Arc::new(Engine::open(cfg.clone()).unwrap());
     let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
