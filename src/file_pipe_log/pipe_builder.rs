@@ -55,6 +55,14 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
     }
 }
 
+/// Container for basic settings on recovery.
+pub struct RecoveryConfig<F: FileSystem> {
+    pub mode: RecoveryMode,
+    pub queue: LogQueue,
+    pub file_system: Arc<F>,
+    pub recovery_read_block_size: u64,
+}
+
 /// [`DualPipes`] factory that can also recover other customized memory states.
 pub struct DualPipesBuilder<F: FileSystem> {
     cfg: Config,
@@ -176,42 +184,119 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .num_threads(threads)
             .build()
             .unwrap();
+        let (append_concurrency, rewrite_concurrency) =
+            match (self.append_files.len(), self.rewrite_files.len()) {
+                (a, b) if a > 0 && b > 0 => {
+                    let a_threads = std::cmp::max(1, threads * a / (a + b));
+                    let b_threads = std::cmp::max(1, threads.saturating_sub(a_threads));
+                    (a_threads, b_threads)
+                }
+                _ => (threads, threads),
+            };
+
+        let append_recovery_cfg = RecoveryConfig {
+            queue: LogQueue::Append,
+            mode: self.cfg.recovery_mode,
+            recovery_read_block_size: self.cfg.recovery_read_block_size.0,
+            file_system: self.file_system.clone(),
+        };
+        let rewrite_recovery_cfg = RecoveryConfig {
+            queue: LogQueue::Rewrite,
+            file_system: self.file_system.clone(),
+            ..append_recovery_cfg
+        };
+        let append_files = &mut self.append_files;
+        let rewrite_files = &mut self.rewrite_files;
+
         // As the `recover_queue` would update the `Version` of each log file in
-        // `apend_files` and `rewrite_files`, we just use the naive api `install`
-        // as the choice for parallelly recovering `LogQueue::Append` and
-        // `LogQueue::Rewrite`.
-        let append =
-            pool.install(|| self.recover_queue(LogQueue::Append, machine_factory, threads));
-        let rewrite =
-            pool.install(|| self.recover_queue(LogQueue::Rewrite, machine_factory, threads));
+        // `apend_files` and `rewrite_files`, we re-design the implementation on
+        // `recover_queue` to make it compatiable to concurrent processing
+        // with ThreadPool.
+        let (append, rewrite) = pool.join(
+            || {
+                DualPipesBuilder::recover_queue(
+                    append_recovery_cfg,
+                    append_files,
+                    machine_factory,
+                    append_concurrency,
+                )
+            },
+            || {
+                DualPipesBuilder::recover_queue(
+                    rewrite_recovery_cfg,
+                    rewrite_files,
+                    machine_factory,
+                    rewrite_concurrency,
+                )
+            },
+        );
         Ok((append?, rewrite?))
     }
 
-    /// Reads through log items in all available log files of the specified
-    /// queue, and replays them to specific [`ReplayMachine`]s that can be
-    /// constructed via `machine_factory`.
-    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
-        &mut self,
-        queue: LogQueue,
-        replay_machine_factory: &FA,
-        concurrency: usize,
-    ) -> Result<M> {
-        let files = if queue == LogQueue::Append {
+    /// Builds a new storage for the specified log queue.
+    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
+        let files = match queue {
+            LogQueue::Append => &self.append_files,
+            LogQueue::Rewrite => &self.rewrite_files,
+        };
+        let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
+        let files: VecDeque<FileHandler<F>> = files
+            .iter()
+            .map(|f| FileHandler {
+                handle: f.handle.clone(),
+                version: f.version,
+                seq: f.seq,
+            })
+            .collect();
+        SinglePipe::open(
+            &self.cfg,
+            self.file_system.clone(),
+            self.listeners.clone(),
+            queue,
+            first_seq,
+            files,
+        )
+    }
+
+    /// Builds a [`DualPipes`] that contains all available log files.
+    pub fn finish(self) -> Result<DualPipes<F>> {
+        let appender = self.build_pipe(LogQueue::Append)?;
+        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
+        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
+    }
+
+    /// Returns a mutable reference to the file_list related to `[LogQueue]`.
+    pub fn get_mut_file_list(&mut self, queue: LogQueue) -> &mut Vec<FileHandler<F>> {
+        if queue == LogQueue::Append {
             &mut self.append_files
         } else {
             &mut self.rewrite_files
-        };
+        }
+    }
+}
+
+impl<F: FileSystem> DualPipesBuilder<F> {
+    /// Manually reads through log items in all available log files of the
+    /// specified queue, and replays them to specific [`ReplayMachine`]s
+    /// that can be constructed via `machine_factory`.
+    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
+        recovery_cfg: RecoveryConfig<F>,
+        files: &mut Vec<FileHandler<F>>,
+        replay_machine_factory: &FA,
+        concurrency: usize,
+    ) -> Result<M> {
         if concurrency == 0 || files.is_empty() {
             return Ok(replay_machine_factory.new_target());
         }
 
-        let recovery_mode = self.cfg.recovery_mode;
+        let recovery_mode = recovery_cfg.mode;
+        let recovery_read_block_size = recovery_cfg.recovery_read_block_size as usize;
+        let queue = recovery_cfg.queue;
+        let filesystem_ref = recovery_cfg.file_system.as_ref();
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks_mut(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
-        let recovery_read_block_size = self.cfg.recovery_read_block_size.0 as usize;
-        let filesystem_ref = self.file_system.as_ref();
         let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
@@ -307,38 +392,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             )?;
 
         Ok(sequential_replay_machine)
-    }
-
-    /// Builds a new storage for the specified log queue.
-    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
-        let files = match queue {
-            LogQueue::Append => &self.append_files,
-            LogQueue::Rewrite => &self.rewrite_files,
-        };
-        let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<FileHandler<F>> = files
-            .iter()
-            .map(|f| FileHandler {
-                handle: f.handle.clone(),
-                version: f.version,
-                seq: f.seq,
-            })
-            .collect();
-        SinglePipe::open(
-            &self.cfg,
-            self.file_system.clone(),
-            self.listeners.clone(),
-            queue,
-            first_seq,
-            files,
-        )
-    }
-
-    /// Builds a [`DualPipes`] that contains all available log files.
-    pub fn finish(self) -> Result<DualPipes<F>> {
-        let appender = self.build_pipe(LogQueue::Append)?;
-        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
-        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
     }
 }
 

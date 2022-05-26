@@ -13,7 +13,7 @@ mod reader;
 pub use format::{FileNameExt, Version};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
-    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
+    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
 };
 
 pub mod debug {
