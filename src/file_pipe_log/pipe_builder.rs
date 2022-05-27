@@ -56,10 +56,10 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 }
 
 /// Container for basic settings on recovery.
-pub struct RecoveryConfig<F: FileSystem> {
-    pub mode: RecoveryMode,
+pub struct RecoveryConfig {
     pub queue: LogQueue,
-    pub file_system: Arc<F>,
+    pub mode: RecoveryMode,
+    pub concurrency: usize,
     pub recovery_read_block_size: u64,
 }
 
@@ -88,6 +88,129 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
         }
+    }
+
+    /// Manually reads through log items in all available log files of the
+    /// specified queue, and replays them to specific [`ReplayMachine`]s
+    /// that can be constructed via `machine_factory`.
+    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
+        file_system: Arc<F>,
+        recovery_cfg: RecoveryConfig,
+        files: &mut Vec<FileHandler<F>>,
+        replay_machine_factory: &FA,
+    ) -> Result<M> {
+        if recovery_cfg.concurrency == 0 || files.is_empty() {
+            return Ok(replay_machine_factory.new_target());
+        }
+        let queue = recovery_cfg.queue;
+        let concurrency = recovery_cfg.concurrency;
+        let recovery_mode = recovery_cfg.mode;
+        let recovery_read_block_size = recovery_cfg.recovery_read_block_size as usize;
+
+        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
+        let chunks = files.par_chunks_mut(max_chunk_size);
+        let chunk_count = chunks.len();
+        debug_assert!(chunk_count <= concurrency);
+        let sequential_replay_machine = chunks
+            .enumerate()
+            .map(|(index, chunk)| {
+                let mut reader =
+                    LogItemBatchFileReader::new(recovery_read_block_size);
+                let mut sequential_replay_machine = replay_machine_factory.new_target();
+                let file_count = chunk.len();
+                for (i, f) in chunk.iter_mut().enumerate() {
+                    let is_last_file = index == chunk_count - 1 && i == file_count - 1;
+                    // Attention please, to make sure that the `[Err]` message coud be captured,
+                    // the reader is just a `[LogFileReader]` without loadin the file header
+                    // in advance, by passing `Version::V1` as the default param.
+                    let invalid_flag;
+                    match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
+                        Err(e) => {
+                            invalid_flag = true;
+                            if f.handle.file_size()? > LogFileHeader::len() {
+                                // This file contains some entries.
+                                error!(
+                                    "Failed to open last log file due to broken header: {:?}:{}",
+                                    queue, f.seq
+                                );
+                                return Err(e);
+                            }
+                            if recovery_mode == RecoveryMode::TolerateAnyCorruption {
+                                warn!(
+                                    "File header is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(0)?;
+                            } else if recovery_mode == RecoveryMode::TolerateTailCorruption
+                                && is_last_file
+                            {
+                                warn!(
+                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(0)?;
+                            } else {
+                                error!(
+                                    "Failed to open log file due to broken header: {:?}:{}",
+                                    queue, f.seq
+                                );
+                                return Err(e);
+                            }
+                        },
+                        Ok(file_reader) => {
+                            invalid_flag = false;
+                            reader.open(FileId { queue, seq: f.seq }, file_reader)?;
+                        }
+                    }
+                    // Update file version of each log file.
+                    f.version = Some( if !invalid_flag { reader.file_header().unwrap().version() } else { Version::default() });
+                    loop {
+                        match reader.next() {
+                            Ok(Some(item_batch)) => {
+                                sequential_replay_machine
+                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
+                            }
+                            Ok(None) => break,
+                            Err(e)
+                                if recovery_mode == RecoveryMode::TolerateTailCorruption
+                                    && is_last_file =>
+                            {
+                                warn!(
+                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(reader.valid_offset())?;
+                                break;
+                            }
+                            Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
+                                warn!(
+                                    "File is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(reader.valid_offset())?;
+                                break;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to open log file due to broken entry: {:?}:{} offset={}",
+                                    queue, f.seq, reader.valid_offset()
+                                );
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                Ok(sequential_replay_machine)
+            })
+            .try_reduce(
+                || replay_machine_factory.new_target(),
+                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
+                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
+                    Ok(sequential_replay_machine_left)
+                },
+            )?;
+
+        Ok(sequential_replay_machine)
     }
 
     /// Scans for all log files under the working directory. The directory will
@@ -162,8 +285,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         files.push(FileHandler {
                             seq,
                             handle,
-                            version: None, /* default with V1, would be updated later in
-                                            * the `recover_queue` progress */
+                            version: None,
                         });
                     }
                 }
@@ -197,17 +319,17 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
+            concurrency: append_concurrency,
             recovery_read_block_size: self.cfg.recovery_read_block_size.0,
-            file_system: self.file_system.clone(),
         };
         let rewrite_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Rewrite,
-            file_system: self.file_system.clone(),
+            concurrency: rewrite_concurrency,
             ..append_recovery_cfg
         };
         let append_files = &mut self.append_files;
         let rewrite_files = &mut self.rewrite_files;
-
+        let file_system = self.file_system.clone();
         // As the `recover_queue` would update the `Version` of each log file in
         // `apend_files` and `rewrite_files`, we re-design the implementation on
         // `recover_queue` to make it compatiable to concurrent processing
@@ -215,18 +337,18 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let (append, rewrite) = pool.join(
             || {
                 DualPipesBuilder::recover_queue(
+                    file_system.clone(),
                     append_recovery_cfg,
                     append_files,
                     machine_factory,
-                    append_concurrency,
                 )
             },
             || {
                 DualPipesBuilder::recover_queue(
+                    file_system.clone(),
                     rewrite_recovery_cfg,
                     rewrite_files,
                     machine_factory,
-                    rewrite_concurrency,
                 )
             },
         );
@@ -272,126 +394,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         } else {
             &mut self.rewrite_files
         }
-    }
-}
-
-impl<F: FileSystem> DualPipesBuilder<F> {
-    /// Manually reads through log items in all available log files of the
-    /// specified queue, and replays them to specific [`ReplayMachine`]s
-    /// that can be constructed via `machine_factory`.
-    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
-        recovery_cfg: RecoveryConfig<F>,
-        files: &mut Vec<FileHandler<F>>,
-        replay_machine_factory: &FA,
-        concurrency: usize,
-    ) -> Result<M> {
-        if concurrency == 0 || files.is_empty() {
-            return Ok(replay_machine_factory.new_target());
-        }
-
-        let recovery_mode = recovery_cfg.mode;
-        let recovery_read_block_size = recovery_cfg.recovery_read_block_size as usize;
-        let queue = recovery_cfg.queue;
-        let filesystem_ref = recovery_cfg.file_system.as_ref();
-        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
-        let chunks = files.par_chunks_mut(max_chunk_size);
-        let chunk_count = chunks.len();
-        debug_assert!(chunk_count <= concurrency);
-        let sequential_replay_machine = chunks
-            .enumerate()
-            .map(|(index, chunk)| {
-                let mut reader =
-                    LogItemBatchFileReader::new(recovery_read_block_size);
-                let mut sequential_replay_machine = replay_machine_factory.new_target();
-                let file_count = chunk.len();
-                for (i, f) in chunk.iter_mut().enumerate() {
-                    let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    if let Err(e) = reader.open(
-                        FileId { queue, seq: f.seq },
-                        // Attention please, to make sure that the `[Err]` message coud be captured,
-                        // the reader is just a `[LogFileReader]` without loadin the file header
-                        // in advance, by passing `Version::V1` as the default param.
-                        build_file_reader(filesystem_ref, f.handle.clone(), Some(Version::default()))?,
-                    ) {
-                        if f.handle.file_size()? > LogFileHeader::len() {
-                            // This file contains some entries.
-                            error!(
-                                "Failed to open last log file due to broken header: {:?}:{}",
-                                queue, f.seq
-                            );
-                            return Err(e);
-                        }
-                        if recovery_mode == RecoveryMode::TolerateAnyCorruption {
-                            warn!(
-                                "File header is corrupted but ignored: {:?}:{}, {}",
-                                queue, f.seq, e
-                            );
-                            f.handle.truncate(0)?;
-                        } else if recovery_mode == RecoveryMode::TolerateTailCorruption
-                            && is_last_file
-                        {
-                            warn!(
-                                "The last log file is corrupted but ignored: {:?}:{}, {}",
-                                queue, f.seq, e
-                            );
-                            f.handle.truncate(0)?;
-                        } else {
-                            error!(
-                                "Failed to open log file due to broken header: {:?}:{}",
-                                queue, f.seq
-                            );
-                            return Err(e);
-                        }
-                    }
-                    // Update file version of each log file.
-                    f.version = Some(reader.file_header().unwrap().version());
-                    loop {
-                        match reader.next() {
-                            Ok(Some(item_batch)) => {
-                                sequential_replay_machine
-                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
-                            }
-                            Ok(None) => break,
-                            Err(e)
-                                if recovery_mode == RecoveryMode::TolerateTailCorruption
-                                    && is_last_file =>
-                            {
-                                warn!(
-                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
-                                    queue, f.seq, e
-                                );
-                                f.handle.truncate(reader.valid_offset())?;
-                                break;
-                            }
-                            Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
-                                warn!(
-                                    "File is corrupted but ignored: {:?}:{}, {}",
-                                    queue, f.seq, e
-                                );
-                                f.handle.truncate(reader.valid_offset())?;
-                                break;
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to open log file due to broken entry: {:?}:{} offset={}",
-                                    queue, f.seq, reader.valid_offset()
-                                );
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                Ok(sequential_replay_machine)
-            })
-            .try_reduce(
-                || replay_machine_factory.new_target(),
-                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
-                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
-                    Ok(sequential_replay_machine_left)
-                },
-            )?;
-
-        Ok(sequential_replay_machine)
     }
 }
 

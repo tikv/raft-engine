@@ -23,80 +23,17 @@ pub struct FileHandler<F: FileSystem> {
     pub version: Option<Version>,
 }
 
-/// Function for reading the header of the log file, and return a
-/// `[LogFileHeader]`.
-///
-/// Attention please, to avoid to move the offset of the given `[handle]`, we
-/// use a copy of the `[handle]` to parse the header of the given file.
-pub(super) fn build_file_header<F: FileSystem>(
-    system: &F,
-    handle: Arc<F::Handle>,
-    expected_reader: Option<&mut F::Reader>,
-) -> Result<LogFileHeader> {
-    let file_size: usize = match handle.file_size() {
-        Ok(size) => size,
-        Err(_) => {
-            return Err(Error::Corruption("Corrupted file!".to_owned())); // invalid file
-        }
-    };
-    // [1] If the file was a new file, we just return the default `LogFileHeader`.
-    if file_size == 0 {
-        return Ok(LogFileHeader::default());
-    }
-    // [2] If the length lessed than the standard `LogFileHeader::len()`.
-    let header_len = LogFileHeader::len();
-    if file_size < header_len {
-        return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
-    }
-    // [3] Parse the header of the file.
-    let parse_file_header = |handle: Arc<F::Handle>, header_len: usize| -> Result<LogFileHeader> {
-        let mut local_reader;
-        let reader = if let Some(rd) = expected_reader {
-            rd
-        } else {
-            local_reader = system.new_reader(handle)?;
-            &mut local_reader
-        };
-        reader.seek(SeekFrom::Start(0))?; // move to head of the file.
-
-        // Read and parse the header.
-        let mut container = vec![0; header_len as usize];
-        let mut buf = &mut container[..];
-        loop {
-            match reader.read(buf) {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    buf = &mut buf[n..];
-                }
-                Err(e) => return Err(Error::Io(e)),
-            }
-        }
-        LogFileHeader::decode(&mut container.as_slice())
-    };
-    parse_file_header(handle, header_len)
-}
-
 /// Build a file writer.
 ///
 /// * `[handle]`: standard handle of a log file.
-/// * `[rewrite_flag]`:
-///     - `true` => rewrite the header with `[expected_hdr]`;
-///     - `false`=> use the original header from the log file.
+/// * `[version]`: format version of the log file.
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-    expected_hdr: Option<LogFileHeader>,
-    rewrite_flag: bool,
+    version: Version,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    let header = if expected_hdr.is_none() || !rewrite_flag {
-        Some(build_file_header(system, handle.clone(), None)?)
-    } else {
-        expected_hdr
-    };
-    LogFileWriter::open(handle, writer, header.unwrap().version())
+    LogFileWriter::open(handle, writer, version)
 }
 
 /// Append-only writer for log file.
@@ -132,7 +69,6 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.last_sync = 0;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileHeader::len());
-        // LogFileHeader::default().encode(&mut buf)?;
         self.header.encode(&mut buf)?;
         self.write(&buf, 0)
     }
@@ -201,14 +137,23 @@ impl<F: FileSystem> LogFileWriter<F> {
 pub(super) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-    expected_version: Option<Version>,
+    version: Option<Version>,
 ) -> Result<LogFileReader<F>> {
     let mut reader = system.new_reader(handle.clone())?;
-    if let Some(version) = expected_version {
-        LogFileReader::open(handle, reader, version)
+    if let Some(v) = version {
+        LogFileReader::open(handle, reader, v)
     } else {
+        // Here, the caller expected that the given `handle` has pointed to
+        // a log file with valid format. Otherwise, it should return with
+        // `[Err]`.
+        if handle.file_size()? == 0 {
+            return Err(Error::Corruption(
+                "invalid format of file header".to_owned(),
+            ));
+        }
         let file_version =
-            (build_file_header(system, handle.clone(), Some(&mut reader))?).version();
+            (LogFileHeader::build_file_header(system, handle.clone(), Some(&mut reader))?)
+                .version();
         LogFileReader::open(handle, reader, file_version)
     }
 }

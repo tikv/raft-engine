@@ -3,6 +3,7 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
 
+use crate::file_pipe_log::Version;
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
@@ -139,6 +140,9 @@ impl Config {
             );
             self.recovery_threads = MIN_RECOVERY_THREADS;
         }
+        if !Version::is_valid(self.format_version) {
+            self.format_version = Version::default() as u64;
+        }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is not enabled");
@@ -167,7 +171,7 @@ mod tests {
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
-            file-version = 1
+            format-version = 11
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -175,7 +179,8 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
-        assert_eq!(load.format_version, 1_u64);
+        assert_eq!(load.format_version, 11_u64);
+        assert!(!Version::is_valid(load.format_version));
     }
 
     #[test]
@@ -203,6 +208,7 @@ mod tests {
             soft_sanitized.purge_rewrite_threshold.unwrap(),
             soft_sanitized.target_file_size
         );
+        assert_eq!(soft_sanitized.format_version, Version::default() as u64);
     }
 
     #[test]

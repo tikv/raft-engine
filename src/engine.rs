@@ -153,7 +153,7 @@ where
                     sync |= writer.sync;
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
-                        // TODO(lucasliang): bind `Version` to each `LogBatch`
+                        // @TODO(lucasliang): bind `Version` to each `LogBatch`
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -398,28 +398,28 @@ where
         let mut machine = None;
         if queue.is_none() || queue.unwrap() == LogQueue::Append {
             machine = Some(FilePipeLogBuilder::recover_queue(
+                file_system.clone(),
                 RecoveryConfig {
-                    recovery_read_block_size,
-                    mode: recovery_mode,
                     queue: LogQueue::Append,
-                    file_system: file_system.clone(),
+                    mode: recovery_mode,
+                    concurrency: 1,
+                    recovery_read_block_size,
                 },
                 builder.get_mut_file_list(LogQueue::Append),
                 &factory,
-                1,
             )?);
         }
         if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
             let machine2 = FilePipeLogBuilder::recover_queue(
+                file_system.clone(),
                 RecoveryConfig {
-                    recovery_read_block_size,
-                    mode: recovery_mode,
                     queue: LogQueue::Rewrite,
-                    file_system: file_system.clone(),
+                    mode: recovery_mode,
+                    concurrency: 1,
+                    recovery_read_block_size,
                 },
                 builder.get_mut_file_list(LogQueue::Rewrite),
                 &factory,
-                1,
             )?;
             if let Some(machine) = &mut machine {
                 machine.merge(machine2, LogQueue::Rewrite)?;
@@ -482,14 +482,12 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
-            let version = pipe_log.fetch_file_version(idx.entries.unwrap().id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
-                    version,
                 )?,
             );
         }
@@ -508,14 +506,12 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
-            let version = pipe_log.fetch_file_version(idx.entries.unwrap().id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
-                    version,
                 )?,
             );
         }

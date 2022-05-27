@@ -18,9 +18,7 @@ use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
 use super::format::{FileNameExt, LogFileHeader, Version};
-use super::log_file::{
-    build_file_header, build_file_reader, build_file_writer, FileHandler, LogFileWriter,
-};
+use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
     first_seq: FileSeq,
@@ -100,8 +98,7 @@ impl<F: FileSystem> SinglePipe<F> {
             writer: build_file_writer(
                 file_system.as_ref(),
                 active_fd.handle.clone(),
-                Some(expected_file_header.clone()),
-                false,
+                active_fd.version.unwrap(),
             )?,
         };
 
@@ -181,8 +178,7 @@ impl<F: FileSystem> SinglePipe<F> {
             writer: build_file_writer(
                 self.file_system.as_ref(),
                 fd.clone(),
-                Some(self.target_file_header.clone()),
-                true,
+                self.target_file_header.version(),
             )?,
         };
         // File header must be persisted. This way we can recover gracefully if power
@@ -330,26 +326,6 @@ impl<F: FileSystem> SinglePipe<F> {
         }
         Ok(purged)
     }
-
-    #[allow(dead_code)]
-    fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
-        let fd = self.get_fd(file_id.seq)?;
-        match build_file_header(self.file_system.as_ref(), fd, None) {
-            Ok(header) => Ok(header.version()),
-            Err(_) => Err(Error::Corruption("invalid header format.".to_owned())),
-        }
-    }
-
-    fn fetch_active_file(&self) -> (Version, FileId) {
-        let active_file = self.active_file.lock();
-        (
-            active_file.writer.header.version(),
-            FileId {
-                queue: self.queue,
-                seq: active_file.seq,
-            },
-        )
-    }
 }
 
 /// A [`PipeLog`] implementation that stores data in filesystem.
@@ -417,16 +393,6 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
         self.pipes[file_id.queue as usize].purge_to(file_id.seq)
-    }
-
-    #[inline]
-    fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
-        self.pipes[file_id.queue as usize].get_file_version(file_id.seq)
-    }
-
-    #[inline]
-    fn fetch_active_file(&self, queue: LogQueue) -> (Version, FileId) {
-        self.pipes[queue as usize].fetch_active_file()
     }
 }
 
@@ -542,18 +508,5 @@ mod tests {
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
         assert_eq!(pipe_log.file_span(queue), (3, 3));
-
-        // fetch active file
-        let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_version, Version::default());
-        assert_eq!(file_seq.seq, 3);
-
-        // fetch file version
-        let search = pipe_log.fetch_file_version(FileId {
-            queue: LogQueue::Append,
-            seq: 3,
-        });
-        assert!(search.is_ok());
-        assert_eq!(search.unwrap(), Version::default());
     }
 }

@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{FileNameExt, Version};
+pub use format::{FileNameExt, LogFileHeader, Version};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
@@ -28,7 +28,7 @@ pub mod debug {
     use crate::pipe_log::FileId;
     use crate::{Error, Result};
 
-    use super::format::FileNameExt;
+    use super::format::{FileNameExt, LogFileHeader, Version};
     use super::log_file::{LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
 
@@ -46,7 +46,13 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd, None, false)
+        let version = if create {
+            Version::default()
+        } else {
+            let header = LogFileHeader::build_file_header(file_system, fd.clone(), None)?;
+            header.version()
+        };
+        super::log_file::build_file_writer(file_system, fd, version)
     }
 
     /// Opens a log file for read.
@@ -283,6 +289,7 @@ pub mod debug {
             assert!(
                 LogItemReader::new_directory_reader(file_system.clone(), &empty_file_path).is_err()
             );
+            assert!(LogItemReader::new_file_reader(file_system.clone(), &empty_file_path).is_ok());
 
             let mut reader = LogItemReader::new_directory_reader(file_system, dir.path()).unwrap();
             assert!(reader.next().unwrap().is_err());
