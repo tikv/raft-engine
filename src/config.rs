@@ -141,6 +141,11 @@ impl Config {
             self.recovery_threads = MIN_RECOVERY_THREADS;
         }
         if !Version::is_valid(self.format_version) {
+            warn!(
+                "format-version ({}) is invalid, setting it to {}",
+                self.format_version,
+                Version::default() as u64
+            );
             self.format_version = Version::default() as u64;
         }
         #[cfg(not(feature = "swap"))]

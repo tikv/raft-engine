@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
 use log::{error, warn};
+use num_traits::FromPrimitive;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
@@ -17,7 +18,7 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
-use super::format::{FileNameExt, LogFileHeader, Version};
+use super::format::{FileNameExt, Version};
 use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
@@ -35,7 +36,7 @@ struct ActiveFile<F: FileSystem> {
 pub(super) struct SinglePipe<F: FileSystem> {
     queue: LogQueue,
     dir: String,
-    target_file_header: LogFileHeader,
+    format_version: Version,
     target_file_size: usize,
     bytes_per_sync: usize,
     file_system: Arc<F>,
@@ -66,7 +67,6 @@ impl<F: FileSystem> SinglePipe<F> {
         mut first_seq: FileSeq,
         mut fds: VecDeque<FileHandler<F>>,
     ) -> Result<Self> {
-        let expected_file_header = LogFileHeader::new(cfg.format_version);
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
@@ -78,7 +78,7 @@ impl<F: FileSystem> SinglePipe<F> {
             fds.push_back(FileHandler {
                 seq: first_seq,
                 handle: fd,
-                version: Some(expected_file_header.version()),
+                version: Version::from_u64(cfg.format_version).unwrap(),
             });
             first_seq
         } else {
@@ -98,7 +98,7 @@ impl<F: FileSystem> SinglePipe<F> {
             writer: build_file_writer(
                 file_system.as_ref(),
                 active_fd.handle.clone(),
-                active_fd.version.unwrap(),
+                active_fd.version,
             )?,
         };
 
@@ -106,7 +106,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
-            target_file_header: expected_file_header,
+            format_version: Version::from_u64(cfg.format_version).unwrap(),
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,
@@ -148,13 +148,7 @@ impl<F: FileSystem> SinglePipe<F> {
         if file_seq < files.first_seq || file_seq > files.active_seq {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        if let Some(version) = files.fds[(file_seq - files.first_seq) as usize].version {
-            Ok(version)
-        } else {
-            Err(Error::Corruption(
-                "invalid format of file header".to_owned(),
-            ))
-        }
+        Ok(files.fds[(file_seq - files.first_seq) as usize].version)
     }
 
     /// Creates a new file for write, and rotates the active log file.
@@ -175,11 +169,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let fd = Arc::new(self.file_system.create(&path)?);
         let mut new_file = ActiveFile {
             seq,
-            writer: build_file_writer(
-                self.file_system.as_ref(),
-                fd.clone(),
-                self.target_file_header.version(),
-            )?,
+            writer: build_file_writer(self.file_system.as_ref(), fd.clone(), self.format_version)?,
         };
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
@@ -195,7 +185,7 @@ impl<F: FileSystem> SinglePipe<F> {
             files.fds.push_back(FileHandler {
                 seq,
                 handle: fd,
-                version: Some(active_file_version),
+                version: active_file_version,
             });
             for listener in &self.listeners {
                 listener.post_new_log_file(FileId {

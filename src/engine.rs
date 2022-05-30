@@ -391,34 +391,34 @@ where
             ..Default::default()
         };
         let recovery_mode = cfg.recovery_mode;
-        let recovery_read_block_size = cfg.recovery_read_block_size.0;
+        let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;
         let factory = crate::filter::RhaiFilterMachineFactory::from_script(script);
         let mut machine = None;
         if queue.is_none() || queue.unwrap() == LogQueue::Append {
-            machine = Some(FilePipeLogBuilder::recover_queue(
+            machine = Some(builder.recover_queue_on_type(
                 file_system.clone(),
                 RecoveryConfig {
                     queue: LogQueue::Append,
                     mode: recovery_mode,
                     concurrency: 1,
-                    recovery_read_block_size,
+                    read_block_size,
                 },
-                builder.get_mut_file_list(LogQueue::Append),
+                LogQueue::Append,
                 &factory,
             )?);
         }
         if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
-            let machine2 = FilePipeLogBuilder::recover_queue(
+            let machine2 = builder.recover_queue_on_type(
                 file_system.clone(),
                 RecoveryConfig {
                     queue: LogQueue::Rewrite,
                     mode: recovery_mode,
                     concurrency: 1,
-                    recovery_read_block_size,
+                    read_block_size,
                 },
-                builder.get_mut_file_list(LogQueue::Rewrite),
+                LogQueue::Rewrite,
                 &factory,
             )?;
             if let Some(machine) = &mut machine {

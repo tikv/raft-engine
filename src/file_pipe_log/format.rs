@@ -2,15 +2,13 @@
 
 //! Representations of objects in filesystem.
 
-use std::io::{BufRead, Read, Seek, SeekFrom};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 use crate::codec::{self, NumberEncoder};
-use crate::env::{FileSystem, Handle};
 use crate::pipe_log::{FileId, LogQueue};
 use crate::{Error, Result};
 
@@ -166,59 +164,6 @@ impl LogFileHeader {
             buf[0] += 1;
         }
         Ok(())
-    }
-
-    /// Function for reading the header of the log file, and return a
-    /// `[LogFileHeader]`.
-    ///
-    /// Attention please, to avoid to move the offset of the given `[handle]`,
-    /// we use a copy of the `[handle]` to parse the header of the given
-    /// file.
-    pub(super) fn build_file_header<F: FileSystem>(
-        system: &F,
-        handle: Arc<F::Handle>,
-        expected_reader: Option<&mut F::Reader>,
-    ) -> Result<LogFileHeader> {
-        let file_size: usize = match handle.file_size() {
-            Ok(size) => size,
-            Err(_) => {
-                return Err(Error::Corruption("Corrupted file!".to_owned())); // invalid file
-            }
-        };
-        // [1] If the file was a new file, we just return the default `LogFileHeader`.
-        if file_size == 0 {
-            return Ok(LogFileHeader::default());
-        }
-        // [2] If the length lessed than the standard `LogFileHeader::len()`.
-        let header_len = LogFileHeader::len();
-        if file_size < header_len {
-            return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
-        }
-        // [3] Parse the header of the file.
-        let mut local_reader;
-        let reader = if let Some(rd) = expected_reader {
-            rd
-        } else {
-            local_reader = system.new_reader(handle)?;
-            &mut local_reader
-        };
-        reader.seek(SeekFrom::Start(0))?; // move to head of the file.
-
-        // Read and parse the header.
-        let mut container = vec![0; header_len as usize];
-        let mut buf = &mut container[..];
-        loop {
-            match reader.read(buf) {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    buf = &mut buf[n..];
-                }
-                Err(e) => return Err(Error::Io(e)),
-            }
-        }
-        LogFileHeader::decode(&mut container.as_slice())
     }
 }
 

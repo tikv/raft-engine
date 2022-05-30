@@ -28,7 +28,7 @@ pub mod debug {
     use crate::pipe_log::FileId;
     use crate::{Error, Result};
 
-    use super::format::{FileNameExt, LogFileHeader, Version};
+    use super::format::{FileNameExt, Version};
     use super::log_file::{LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
 
@@ -49,8 +49,8 @@ pub mod debug {
         let version = if create {
             Version::default()
         } else {
-            let header = LogFileHeader::build_file_header(file_system, fd.clone(), None)?;
-            header.version()
+            let reader = super::log_file::build_file_reader(file_system, fd.clone(), None)?;
+            reader.header.version()
         };
         super::log_file::build_file_writer(file_system, fd, version)
     }
