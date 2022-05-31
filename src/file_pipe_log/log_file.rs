@@ -6,19 +6,18 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileSeq};
+use crate::pipe_log::FileBlockHandle;
 use crate::{Error, Result};
 
-use super::format::{LogFileHeader, Version};
+use super::format::{LogFileFormat, Version};
 use crate::env::{FileSystem, Handle, WriteExt};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 /// Combination of `[Handle]` and `[Version]`, specifying a handler of a file.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FileHandler<F: FileSystem> {
-    pub seq: FileSeq,
     pub handle: Arc<F::Handle>,
     pub version: Version,
 }
@@ -39,7 +38,7 @@ pub(super) fn build_file_writer<F: FileSystem>(
 /// Append-only writer for log file.
 pub struct LogFileWriter<F: FileSystem> {
     /// header of file
-    pub header: LogFileHeader,
+    pub header: LogFileFormat,
     writer: F::Writer,
     written: usize,
     capacity: usize,
@@ -50,13 +49,13 @@ impl<F: FileSystem> LogFileWriter<F> {
     fn open(handle: Arc<F::Handle>, writer: F::Writer, version: Version) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
-            header: LogFileHeader::from_version(version),
+            header: LogFileFormat::from_version(version),
             writer,
             written: file_size,
             capacity: file_size,
             last_sync: file_size,
         };
-        if file_size < LogFileHeader::len() {
+        if file_size < LogFileFormat::len() {
             f.write_header()?;
         } else {
             f.writer.seek(SeekFrom::Start(file_size as u64))?;
@@ -68,7 +67,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.writer.seek(SeekFrom::Start(0))?;
         self.last_sync = 0;
         self.written = 0;
-        let mut buf = Vec::with_capacity(LogFileHeader::len());
+        let mut buf = Vec::with_capacity(LogFileFormat::len());
         self.header.encode(&mut buf)?;
         self.write(&buf, 0)
     }
@@ -128,7 +127,7 @@ impl<F: FileSystem> LogFileWriter<F> {
 
 /// Build a file reader.
 ///
-/// Attention please, the reader do not need a specified `[LogFileHeader]` from
+/// Attention please, the reader do not need a specified `[LogFileFormat]` from
 /// users.
 ///
 /// * `[handle]`: standard handle of a log file.
@@ -140,22 +139,12 @@ pub(super) fn build_file_reader<F: FileSystem>(
     version: Option<Version>,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
-    if version.is_none() {
-        // Here, the caller expected that the given `handle` has pointed to
-        // a log file with valid format. Otherwise, it should return with
-        // `[Err]`.
-        if handle.file_size()? == 0 {
-            return Err(Error::Corruption(
-                "invalid format of file header".to_owned(),
-            ));
-        }
-    }
     LogFileReader::open(handle, reader, version)
 }
 
 /// Random-access reader for log file.
 pub struct LogFileReader<F: FileSystem> {
-    pub header: LogFileHeader,
+    pub header: LogFileFormat,
     handle: Arc<F::Handle>,
     reader: F::Reader,
 
@@ -166,21 +155,29 @@ impl<F: FileSystem> LogFileReader<F> {
     fn open(handle: Arc<F::Handle>, reader: F::Reader, version: Option<Version>) -> Result<Self> {
         match version {
             Some(ver) => Ok(Self {
-                header: LogFileHeader::from_version(ver),
+                header: LogFileFormat::from_version(ver),
                 handle,
                 reader,
                 // Set to an invalid offset to force a reseek at first read.
                 offset: u64::MAX,
             }),
             None => {
+                // Here, the caller expected that the given `handle` has pointed to
+                // a log file with valid format. Otherwise, it should return with
+                // `Err`.
+                if handle.file_size()? == 0 {
+                    return Err(Error::Corruption(
+                        "invalid format of file header".to_owned(),
+                    ));
+                }
                 let mut reader = Self {
-                    header: LogFileHeader::from_version(Version::default()),
+                    header: LogFileFormat::from_version(Version::default()),
                     handle,
                     reader,
                     // Set to an invalid offset to force a reseek at first read.
                     offset: u64::MAX,
                 };
-                reader.parse_header()?;
+                reader.parse_format()?;
                 Ok(reader)
             }
         }
@@ -215,28 +212,24 @@ impl<F: FileSystem> LogFileReader<F> {
     }
 
     /// Function for reading the header of the log file, and return a
-    /// `[LogFileHeader]`.
+    /// `[LogFileFormat]`.
     ///
     /// Attention please, this function would move the `reader.offset`
     /// to `0`, that is, the beginning of the file, to parse the
-    /// related `[LogFileHeader]`.
-    pub fn parse_header(&mut self) -> Result<LogFileHeader> {
+    /// related `[LogFileFormat]`.
+    pub fn parse_format(&mut self) -> Result<LogFileFormat> {
         let file_size: usize = match self.handle.file_size() {
             Ok(size) => size,
             Err(_) => {
                 return Err(Error::Corruption("Corrupted file!".to_owned())); // invalid file
             }
         };
-        // [1] If the file was a new file, we just return the default `LogFileHeader`.
-        if file_size == 0 {
-            return Ok(LogFileHeader::default());
-        }
-        // [2] If the length lessed than the standard `LogFileHeader::len()`.
-        let header_len = LogFileHeader::len();
+        // [1] If the length lessed than the standard `LogFileFormat::len()`.
+        let header_len = LogFileFormat::len();
         if file_size < header_len {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
-        // [3] Parse the header of the file.
+        // [2] Parse the header of the file.
         let reader = &mut self.reader;
         reader.seek(SeekFrom::Start(0))?; // move to head of the file.
 
@@ -254,7 +247,7 @@ impl<F: FileSystem> LogFileReader<F> {
                 Err(e) => return Err(Error::Io(e)),
             }
         }
-        self.header = LogFileHeader::decode(&mut container.as_slice())?;
+        self.header = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.header.clone())
     }
 

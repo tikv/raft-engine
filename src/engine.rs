@@ -397,7 +397,7 @@ where
         let factory = crate::filter::RhaiFilterMachineFactory::from_script(script);
         let mut machine = None;
         if queue.is_none() || queue.unwrap() == LogQueue::Append {
-            machine = Some(builder.recover_queue_on_type(
+            machine = Some(builder.recover_queue(
                 file_system.clone(),
                 RecoveryConfig {
                     queue: LogQueue::Append,
@@ -405,12 +405,11 @@ where
                     concurrency: 1,
                     read_block_size,
                 },
-                LogQueue::Append,
                 &factory,
             )?);
         }
         if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
-            let machine2 = builder.recover_queue_on_type(
+            let machine2 = builder.recover_queue(
                 file_system.clone(),
                 RecoveryConfig {
                     queue: LogQueue::Rewrite,
@@ -418,7 +417,6 @@ where
                     concurrency: 1,
                     read_block_size,
                 },
-                LogQueue::Rewrite,
                 &factory,
             )?;
             if let Some(machine) = &mut machine {

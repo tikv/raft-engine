@@ -767,10 +767,10 @@ impl LogBatch {
     #[allow(dead_code, unused_variables)]
     pub(crate) fn sign_checksum(&mut self, file_version: Version, file_id: FileId) {
         // @TODO: lucasliang
-        // Supllement the details of signing checksum on each LogBatch with the
+        // Supplement the details of signing checksum on each LogBatch with the
         // specific `Version`.
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
         unimplemented!();
+        // debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
     }
 
     /// Notifies the completion of a storage write with the written location.

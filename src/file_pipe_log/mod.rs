@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{FileNameExt, LogFileHeader, Version};
+pub use format::{FileNameExt, LogFileFormat, Version};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
@@ -38,6 +38,7 @@ pub mod debug {
     pub fn build_file_writer<F: FileSystem>(
         file_system: &F,
         path: &Path,
+        version: Version,
         create: bool,
     ) -> Result<LogFileWriter<F>> {
         let fd = if create {
@@ -46,12 +47,6 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        let version = if create {
-            Version::default()
-        } else {
-            let reader = super::log_file::build_file_reader(file_system, fd.clone(), None)?;
-            reader.header.version()
-        };
         super::log_file::build_file_writer(file_system, fd, version)
     }
 
@@ -215,8 +210,13 @@ pub mod debug {
             for bs in batches.iter_mut() {
                 let file_path = file_id.build_file_path(dir.path());
                 // Write a file.
-                let mut writer =
-                    build_file_writer(file_system.as_ref(), &file_path, true /* create */).unwrap();
+                let mut writer = build_file_writer(
+                    file_system.as_ref(),
+                    &file_path,
+                    Version::default(),
+                    true, /* create */
+                )
+                .unwrap();
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
                     let len = batch
@@ -277,6 +277,7 @@ pub mod debug {
             let mut writer = build_file_writer(
                 file_system.as_ref(),
                 &empty_file_path,
+                Version::default(),
                 true, /* create */
             )
             .unwrap();

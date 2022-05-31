@@ -20,7 +20,7 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileHeader, Version};
+use super::format::{lock_file_path, FileNameExt, LogFileFormat, Version};
 use super::log_file::{build_file_reader, FileHandler};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
@@ -219,7 +219,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // with ThreadPool.
         let (append, rewrite) = pool.join(
             || {
-                DualPipesBuilder::recover_queue(
+                DualPipesBuilder::recover_queue_impl(
                     file_system.clone(),
                     append_recovery_cfg,
                     append_files,
@@ -227,7 +227,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 )
             },
             || {
-                DualPipesBuilder::recover_queue(
+                DualPipesBuilder::recover_queue_impl(
                     file_system.clone(),
                     rewrite_recovery_cfg,
                     rewrite_files,
@@ -241,7 +241,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Manually reads through log items in all available log files of the
     /// specified queue, and replays them to specific [`ReplayMachine`]s
     /// that can be constructed via `machine_factory`.
-    fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
+    fn recover_queue_impl<M: ReplayMachine, FA: Factory<M>>(
         file_system: Arc<F>,
         recovery_cfg: RecoveryConfig,
         files: &mut Vec<FileToRecover<F>>,
@@ -268,35 +268,22 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    // Attention please, to make sure that the `[Err]` message coud be captured,
-                    // the reader is just a `[LogFileReader]` without loadin the file header
+                    // Attention please, to make sure that the `Err` message coud be captured,
+                    // the reader is just a `LogFileReader` without loadin the file header
                     // in advance, by passing `Version::V1` as the default param.
-                    let invalid_flag;
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
-                            invalid_flag = true;
-                            if f.handle.file_size()? > LogFileHeader::len() {
-                                // This file contains some entries.
-                                error!(
-                                    "Failed to open last log file due to broken header: {:?}:{}",
-                                    queue, f.seq
-                                );
-                                return Err(e);
-                            }
-                            if recovery_mode == RecoveryMode::TolerateAnyCorruption {
+                            let is_local_tail = f.handle.file_size()? <= LogFileFormat::len();
+                            if recovery_mode == RecoveryMode::TolerateAnyCorruption
+                              || recovery_mode == RecoveryMode::TolerateTailCorruption
+                                && is_last_file && is_local_tail {
                                 warn!(
                                     "File header is corrupted but ignored: {:?}:{}, {}",
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(0)?;
-                            } else if recovery_mode == RecoveryMode::TolerateTailCorruption
-                                && is_last_file
-                            {
-                                warn!(
-                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
-                                    queue, f.seq, e
-                                );
-                                f.handle.truncate(0)?;
+                                f.version = Some(Version::default());
+                                continue;
                             } else {
                                 error!(
                                     "Failed to open log file due to broken header: {:?}:{}",
@@ -306,12 +293,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             }
                         },
                         Ok(file_reader) => {
-                            invalid_flag = false;
                             reader.open(FileId { queue, seq: f.seq }, file_reader)?;
                         }
                     }
                     // Update file version of each log file.
-                    f.version = Some( if !invalid_flag { reader.file_header().unwrap().version() } else { Version::default() });
+                    f.version = Some(reader.file_format().unwrap().version());
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -361,6 +347,28 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         Ok(sequential_replay_machine)
     }
 
+    /// Manually reads through log items in all available log files of the
+    /// specified `[LogQueue]`, and replays them to specific
+    /// [`ReplayMachine`]s that can be constructed via `machine_factory`.
+    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
+        &mut self,
+        file_system: Arc<F>,
+        recovery_cfg: RecoveryConfig,
+        replay_machine_factory: &FA,
+    ) -> Result<M> {
+        let files = if recovery_cfg.queue == LogQueue::Append {
+            &mut self.append_files
+        } else {
+            &mut self.rewrite_files
+        };
+        DualPipesBuilder::recover_queue_impl(
+            file_system,
+            recovery_cfg,
+            files,
+            replay_machine_factory,
+        )
+    }
+
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
         let files = match queue {
@@ -373,7 +381,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .map(|f| FileHandler {
                 handle: f.handle.clone(),
                 version: f.version.unwrap(),
-                seq: f.seq,
             })
             .collect();
         SinglePipe::open(
@@ -384,24 +391,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             first_seq,
             files,
         )
-    }
-
-    /// Manually reads through log items in all available log files of the
-    /// specified `[LogQueue]`, and replays them to specific
-    /// [`ReplayMachine`]s that can be constructed via `machine_factory`.
-    pub fn recover_queue_on_type<M: ReplayMachine, FA: Factory<M>>(
-        &mut self,
-        file_system: Arc<F>,
-        recovery_cfg: RecoveryConfig,
-        queue: LogQueue,
-        replay_machine_factory: &FA,
-    ) -> Result<M> {
-        let files = if queue == LogQueue::Append {
-            &mut self.append_files
-        } else {
-            &mut self.rewrite_files
-        };
-        DualPipesBuilder::recover_queue(file_system, recovery_cfg, files, replay_machine_factory)
     }
 
     /// Builds a [`DualPipes`] that contains all available log files.

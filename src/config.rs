@@ -202,6 +202,7 @@ mod tests {
             recovery-threads = 0
             bytes-per-sync = "0KB"
             target-file-size = "5000MB"
+            format-version = 20
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
         let mut soft_sanitized = soft_load;

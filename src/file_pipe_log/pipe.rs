@@ -76,7 +76,6 @@ impl<F: FileSystem> SinglePipe<F> {
             };
             let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
             fds.push_back(FileHandler {
-                seq: first_seq,
                 handle: fd,
                 version: Version::from_u64(cfg.format_version).unwrap(),
             });
@@ -93,8 +92,8 @@ impl<F: FileSystem> SinglePipe<F> {
         let active_fd = fds.back().unwrap();
         let active_file = ActiveFile {
             seq: active_seq,
-            // Here, we should keep the LogFileHeader conincident with the original one, written by
-            // the previous `[Pipe]`.
+            // Here, we should keep the LogFileFormat conincident with the original one, written by
+            // the previous `Pipe`.
             writer: build_file_writer(
                 file_system.as_ref(),
                 active_fd.handle.clone(),
@@ -183,7 +182,6 @@ impl<F: FileSystem> SinglePipe<F> {
             debug_assert!(files.active_seq + 1 == seq);
             files.active_seq = seq;
             files.fds.push_back(FileHandler {
-                seq,
                 handle: fd,
                 version: active_file_version,
             });
@@ -212,7 +210,7 @@ impl<F: FileSystem> SinglePipe<F> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let fd = self.get_fd(handle.id.seq)?;
         // As the header of each log file already parsed in the processing of loading
-        // log files, we just need to build the `[LogFileReader]`.
+        // log files, we just need to build the `LogFileReader`.
         let mut reader = build_file_reader(
             self.file_system.as_ref(),
             fd,
@@ -390,7 +388,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 mod tests {
     use tempfile::Builder;
 
-    use super::super::format::LogFileHeader;
+    use super::super::format::LogFileFormat;
     use super::super::pipe_builder::lock_dir;
     use super::*;
     use crate::env::DefaultFileSystem;
@@ -448,7 +446,7 @@ mod tests {
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
-        let header_size = LogFileHeader::len() as u64;
+        let header_size = LogFileFormat::len() as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
@@ -494,6 +492,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!(content_readed, s_content);
+        // try to fetch abnormal entry
+        let abnormal_content_readed = pipe_log.read_bytes(FileBlockHandle {
+            id: FileId { queue, seq: 12 }, // abnormal seq
+            offset: header_size as u64,
+            len: s_content.len(),
+        });
+        assert!(abnormal_content_readed.is_err());
 
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
