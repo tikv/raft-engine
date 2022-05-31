@@ -219,7 +219,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // with ThreadPool.
         let (append, rewrite) = pool.join(
             || {
-                DualPipesBuilder::recover_queue_impl(
+                DualPipesBuilder::recover_queue_imp(
                     file_system.clone(),
                     append_recovery_cfg,
                     append_files,
@@ -227,7 +227,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 )
             },
             || {
-                DualPipesBuilder::recover_queue_impl(
+                DualPipesBuilder::recover_queue_imp(
                     file_system.clone(),
                     rewrite_recovery_cfg,
                     rewrite_files,
@@ -241,7 +241,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Manually reads through log items in all available log files of the
     /// specified queue, and replays them to specific [`ReplayMachine`]s
     /// that can be constructed via `machine_factory`.
-    fn recover_queue_impl<M: ReplayMachine, FA: Factory<M>>(
+    fn recover_queue_imp<M: ReplayMachine, FA: Factory<M>>(
         file_system: Arc<F>,
         recovery_cfg: RecoveryConfig,
         files: &mut Vec<FileToRecover<F>>,
@@ -268,9 +268,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    // Attention please, to make sure that the `Err` message coud be captured,
-                    // the reader is just a `LogFileReader` without loadin the file header
-                    // in advance, by passing `Version::V1` as the default param.
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
                             let is_local_tail = f.handle.file_size()? <= LogFileFormat::len();
@@ -361,7 +358,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         } else {
             &mut self.rewrite_files
         };
-        DualPipesBuilder::recover_queue_impl(
+        DualPipesBuilder::recover_queue_imp(
             file_system,
             recovery_cfg,
             files,

@@ -150,6 +150,8 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     }
 
     pub fn file_format(&self) -> Option<LogFileFormat> {
-        self.reader.as_ref().map(|reader| reader.header.clone())
+        self.reader
+            .as_ref()
+            .map(|reader| reader.file_format().clone())
     }
 }

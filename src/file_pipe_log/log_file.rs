@@ -144,7 +144,7 @@ pub(super) fn build_file_reader<F: FileSystem>(
 
 /// Random-access reader for log file.
 pub struct LogFileReader<F: FileSystem> {
-    pub header: LogFileFormat,
+    format: LogFileFormat,
     handle: Arc<F::Handle>,
     reader: F::Reader,
 
@@ -155,23 +155,15 @@ impl<F: FileSystem> LogFileReader<F> {
     fn open(handle: Arc<F::Handle>, reader: F::Reader, version: Option<Version>) -> Result<Self> {
         match version {
             Some(ver) => Ok(Self {
-                header: LogFileFormat::from_version(ver),
+                format: LogFileFormat::from_version(ver),
                 handle,
                 reader,
                 // Set to an invalid offset to force a reseek at first read.
                 offset: u64::MAX,
             }),
             None => {
-                // Here, the caller expected that the given `handle` has pointed to
-                // a log file with valid format. Otherwise, it should return with
-                // `Err`.
-                if handle.file_size()? == 0 {
-                    return Err(Error::Corruption(
-                        "invalid format of file header".to_owned(),
-                    ));
-                }
                 let mut reader = Self {
-                    header: LogFileFormat::from_version(Version::default()),
+                    format: LogFileFormat::from_version(Version::default()),
                     handle,
                     reader,
                     // Set to an invalid offset to force a reseek at first read.
@@ -218,6 +210,9 @@ impl<F: FileSystem> LogFileReader<F> {
     /// to `0`, that is, the beginning of the file, to parse the
     /// related `[LogFileFormat]`.
     pub fn parse_format(&mut self) -> Result<LogFileFormat> {
+        // Here, the caller expected that the given `handle` has pointed to
+        // a log file with valid format. Otherwise, it should return with
+        // `Err`.
         let file_size: usize = match self.handle.file_size() {
             Ok(size) => size,
             Err(_) => {
@@ -247,12 +242,17 @@ impl<F: FileSystem> LogFileReader<F> {
                 Err(e) => return Err(Error::Io(e)),
             }
         }
-        self.header = LogFileFormat::decode(&mut container.as_slice())?;
-        Ok(self.header.clone())
+        self.format = LogFileFormat::decode(&mut container.as_slice())?;
+        Ok(self.format.clone())
     }
 
     #[inline]
     pub fn file_size(&self) -> Result<usize> {
         Ok(self.handle.file_size()?)
+    }
+
+    #[inline]
+    pub fn file_format(&self) -> &LogFileFormat {
+        &self.format
     }
 }
