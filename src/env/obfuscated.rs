@@ -65,6 +65,9 @@ impl WriteExt for ObfuscatedWriter {
     }
 }
 
+/// `[ObfuscatedFileSystem]` is a special implementation of `[FileSystem]`,
+/// which is used for constructing and simulating an abnormal file system for
+/// `[Read]` and `[Write]`.
 pub struct ObfuscatedFileSystem(DefaultFileSystem);
 
 impl Default for ObfuscatedFileSystem {

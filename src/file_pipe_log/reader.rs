@@ -5,7 +5,7 @@ use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::{Error, Result};
 
-use super::format::LogFileHeader;
+use super::format::LogFileFormat;
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
@@ -47,10 +47,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         self.reader = Some(reader);
         self.buffer.clear();
         self.buffer_offset = 0;
-        self.valid_offset = 0;
-        let mut header = self.peek(0, LogFileHeader::len(), LOG_BATCH_HEADER_LEN)?;
-        LogFileHeader::decode(&mut header)?;
-        self.valid_offset = LogFileHeader::len();
+        self.valid_offset = LogFileFormat::len();
         Ok(())
     }
 
@@ -150,5 +147,11 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// file. Returns zero if there is no file opened.
     pub fn valid_offset(&self) -> usize {
         self.valid_offset
+    }
+
+    pub fn file_format(&self) -> Option<LogFileFormat> {
+        self.reader
+            .as_ref()
+            .map(|reader| reader.file_format().clone())
     }
 }

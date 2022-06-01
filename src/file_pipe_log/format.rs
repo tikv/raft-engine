@@ -80,33 +80,46 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 /// Version of log file format.
-#[derive(Clone, Copy, FromPrimitive, ToPrimitive)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive)]
 #[repr(u64)]
-enum Version {
+pub enum Version {
     V1 = 1,
 }
 
-/// In-memory representation of the log file header.
-pub(super) struct LogFileHeader {
-    version: Version,
-}
-
-impl Default for LogFileHeader {
-    fn default() -> Self {
-        Self {
-            version: Version::V1,
-        }
+impl Version {
+    pub fn is_valid(version: u64) -> bool {
+        Version::from_u64(version).is_some()
     }
 }
 
-impl LogFileHeader {
+impl Default for Version {
+    fn default() -> Self {
+        Version::V1
+    }
+}
+
+/// In-memory representation of `Format` in log files.
+#[derive(Clone, Default)]
+pub struct LogFileFormat {
+    version: Version,
+}
+
+impl LogFileFormat {
     /// Length of header written on storage.
     pub const fn len() -> usize {
         LOG_FILE_MAGIC_HEADER.len() + std::mem::size_of::<Version>()
     }
 
-    /// Decodes a slice of bytes into a `LogFileHeader`.
-    pub fn decode(buf: &mut &[u8]) -> Result<LogFileHeader> {
+    pub fn from_version(version: Version) -> Self {
+        Self { version }
+    }
+
+    pub fn version(&self) -> Version {
+        self.version
+    }
+
+    /// Decodes a slice of bytes into a `LogFileFormat`.
+    pub fn decode(buf: &mut &[u8]) -> Result<LogFileFormat> {
         if buf.len() < Self::len() {
             return Err(Error::Corruption("log file header too short".to_owned()));
         }
@@ -168,5 +181,25 @@ mod tests {
         for case in invalid_cases {
             assert!(FileId::parse_file_name(case).is_none());
         }
+    }
+
+    #[test]
+    fn test_version() {
+        let version = Version::default();
+        assert_eq!(Version::V1.to_u64().unwrap(), version.to_u64().unwrap());
+        let version2 = Version::from_u64(1).unwrap();
+        assert_eq!(version, version2);
+        assert!(Version::is_valid(1));
+        assert!(!Version::is_valid(2));
+    }
+
+    #[test]
+    fn test_file_header() {
+        let header1 = LogFileFormat::default();
+        assert_eq!(header1.version().to_u64().unwrap(), 1);
+        let header2 = LogFileFormat::from_version(Version::default());
+        assert_eq!(header2.version().to_u64(), header1.version().to_u64());
+        let header3 = LogFileFormat::from_version(Version::default());
+        assert_eq!(header3.version(), header1.version());
     }
 }

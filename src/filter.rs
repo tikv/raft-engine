@@ -9,7 +9,7 @@ use scopeguard::{guard, ScopeGuard};
 
 use crate::env::FileSystem;
 use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
-use crate::file_pipe_log::{FileNameExt, ReplayMachine};
+use crate::file_pipe_log::{FileNameExt, ReplayMachine, Version};
 use crate::log_batch::{
     Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
 };
@@ -275,7 +275,12 @@ impl RhaiFilterMachine {
                     }),
                 ));
                 let mut reader = build_file_reader(system, &bak_path)?;
-                let mut writer = build_file_writer(system, &target_path, true /* create */)?;
+                let mut writer = build_file_writer(
+                    system,
+                    &target_path,
+                    Version::default(),
+                    true, /* create */
+                )?;
                 // Write out new log file.
                 for item in f.items.into_iter() {
                     match item.content {
