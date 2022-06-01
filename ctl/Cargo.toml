@@ -1,6 +1,6 @@
 [package]
 name = "raft-engine-ctl"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["The TiKV Project Developers"]
 edition = "2018"
 rust-version = "1.57"
@@ -11,4 +11,4 @@ license = "Apache-2.0"
 [dependencies]
 clap = { version = "3.0.0-rc.0", features = ["derive", "cargo"] }
 env_logger = "0.9"
-raft-engine = { path = "..", version = "0.1.0", features = ["scripting", "internals"] }
+raft-engine = { path = "..", version = "0.2.0", features = ["scripting", "internals"] }
