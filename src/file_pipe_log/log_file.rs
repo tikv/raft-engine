@@ -220,7 +220,7 @@ impl<F: FileSystem> LogFileReader<F> {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
         // [2] Parse the header of the file.
-        let mut container = vec![0; header_len as usize];
+        let mut container = vec![0; header_len];
         self.read_to(0, &mut container[..])?;
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.format.clone())
