@@ -213,35 +213,15 @@ impl<F: FileSystem> LogFileReader<F> {
         // Here, the caller expected that the given `handle` has pointed to
         // a log file with valid format. Otherwise, it should return with
         // `Err`.
-        let file_size: usize = match self.handle.file_size() {
-            Ok(size) => size,
-            Err(_) => {
-                return Err(Error::Corruption("Corrupted file!".to_owned())); // invalid file
-            }
-        };
+        let file_size = self.handle.file_size()?;
         // [1] If the length lessed than the standard `LogFileFormat::len()`.
         let header_len = LogFileFormat::len();
         if file_size < header_len {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
         // [2] Parse the header of the file.
-        let reader = &mut self.reader;
-        reader.seek(SeekFrom::Start(0))?; // move to head of the file.
-
-        // Read and parse the header.
         let mut container = vec![0; header_len as usize];
-        let mut buf = &mut container[..];
-        loop {
-            match reader.read(buf) {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    buf = &mut buf[n..];
-                }
-                Err(e) => return Err(Error::Io(e)),
-            }
-        }
+        self.read_to(0, &mut container[..])?;
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.format.clone())
     }
