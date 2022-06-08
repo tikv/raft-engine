@@ -13,7 +13,7 @@ use crate::file_pipe_log::{FileNameExt, ReplayMachine, Version};
 use crate::log_batch::{
     Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
 };
-use crate::pipe_log::{FileId, LogQueue};
+use crate::pipe_log::{FileId, LogQueue, Signature};
 use crate::util::Factory;
 use crate::{Error, Result};
 
@@ -292,6 +292,7 @@ impl RhaiFilterMachine {
                                     &entries_buf,
                                     ei.entries.unwrap(),
                                     ei.compression_type,
+                                    (Version::default(), Signature::new(ei.entries.unwrap().id)),
                                 )?;
                                 entries.push(
                                     block[ei.entry_offset as usize

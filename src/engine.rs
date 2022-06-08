@@ -21,7 +21,7 @@ use crate::file_pipe_log::{
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog, Signature};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
@@ -142,6 +142,10 @@ where
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
             let mut writer = Writer::new(log_batch, sync, start);
+            // Here, we introduce the `GroupCommit` by the self-implemented
+            // `Write Barrier` to improve the data syncing of multi-thread writing.
+            // If the `write_barrier.enter(...)` returned the leader of the
+            // writer group, it would responsible for dumping data into the log.
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
@@ -151,9 +155,12 @@ where
                             .as_secs_f64(),
                     );
                     sync |= writer.sync;
-                    let log_batch = writer.get_payload();
+                    let log_batch = writer.get_mut_payload();
                     let res = if !log_batch.is_empty() {
-                        // @TODO(lucasliang): bind `Version` to each `LogBatch`
+                        // Signs a checksum, so-called `signature`, into the LogBatch.
+                        let (file_version, file_id) =
+                            self.pipe_log.fetch_active_file(LogQueue::Append);
+                        log_batch.sign_checksum(file_version, file_id);
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -480,12 +487,15 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
+            let file_id = idx.entries.unwrap().id;
+            let version = pipe_log.fetch_file_version(file_id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
+                    (version, Signature::new(file_id)),
                 )?,
             );
         }
@@ -504,12 +514,15 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
+            let file_id = idx.entries.unwrap().id;
+            let version = pipe_log.fetch_file_version(file_id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
+                    (version, Signature::new(file_id)),
                 )?,
             );
         }

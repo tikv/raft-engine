@@ -18,6 +18,7 @@ pub trait FileSystem: Send + Sync {
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
     fn open<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
+    fn rename<P: AsRef<Path>>(&self, src: P, dst: P) -> Result<()>;
     fn new_reader(&self, handle: Arc<Self::Handle>) -> Result<Self::Reader>;
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
 }
@@ -34,4 +35,5 @@ pub trait WriteExt {
     fn truncate(&mut self, offset: usize) -> Result<()>;
     fn sync(&mut self) -> Result<()>;
     fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
+    fn allocate_with_hole(&mut self, offset: usize, size: usize) -> Result<()>;
 }

@@ -32,6 +32,105 @@ struct ActiveFile<F: FileSystem> {
     writer: LogFileWriter<F>,
 }
 
+/// Collection of staled Files.
+struct RecycleFileCollection {
+    /// capacity of RecycleFiles
+    capacity: Option<u32>,
+    /// sequence number of first file_id in RecycleFiles
+    first_seq: FileSeq,
+    /// list of recycled files
+    fds: VecDeque<Arc<FileId>>,
+}
+
+impl RecycleFileCollection {
+    pub fn new(capacity: Option<u32>) -> Self {
+        Self {
+            capacity,
+            first_seq: 0,
+            fds: VecDeque::new(),
+        }
+    }
+
+    /// Check the RecycleFileCollection is open or not.
+    ///
+    /// Only when had the capacity been set with a valid value, it means that
+    /// the RecycleFileCollection is valid.
+    pub fn valid(&self) -> bool {
+        self.capacity.is_some()
+    }
+
+    pub fn valid_to_push(&self, count: u32) -> bool {
+        match self.capacity {
+            Some(0) => true, // the capacity is infinite.
+            Some(p) => p >= count + self.fds.len() as u32,
+            None => false,
+        }
+    }
+
+    /// Push one log file into the recycle collection.
+    ///
+    /// Attention, the given `[FileId]` must be confirmed that it was stale.
+    pub fn push_one_file(&mut self, fd: FileId) -> bool {
+        let ret = self.valid_to_push(1); // push one file
+        if ret {
+            self.first_seq = if self.fds.is_empty() {
+                fd.seq
+            } else {
+                self.first_seq
+            };
+            self.fds.push_back(Arc::new(fd));
+        }
+        ret
+    }
+
+    /// Pop one FileId from the recycle list.
+    pub fn pop_one_file(&mut self) -> Option<Arc<FileId>> {
+        if !self.valid() {
+            return None;
+        }
+        let first = self.fds.pop_front();
+        match &first {
+            Some(file_ref) => {
+                // Here, the seq of each file in fds is continuous.
+                self.first_seq = self.fds.front().unwrap().clone().seq;
+                debug_assert_eq!(file_ref.seq + 1, self.first_seq);
+            }
+            None => {
+                self.first_seq = 0;
+            }
+        }
+        first
+    }
+
+    /// Recycle one exipired or purged file with new FileId.
+    ///
+    /// Attention please, the recycled file would be automatically `renamed` in
+    /// this func.
+    pub fn recycle_one_file<F: FileSystem>(
+        &mut self,
+        file_system: &Arc<F>,
+        dir_path: &str,
+        dst_fd: &FileId,
+    ) -> bool {
+        let mut ret = false;
+        while let Some(fd) = self.pop_one_file() {
+            let src_path = fd.build_file_path(dir_path); // src filepath
+            let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
+            match file_system.rename(src_path, dst_path) {
+                Ok(_) => {
+                    ret = true;
+                }
+                Err(e) => {
+                    ret = false;
+                    error!("error while trying to recycle one expired file: {}", e);
+                }
+            }
+        }
+        /* Only if the `rename` made sense, we could return success. */
+        ret
+    }
+}
+
 /// A file-based log storage that arranges files as one single queue.
 pub(super) struct SinglePipe<F: FileSystem> {
     queue: LogQueue,
@@ -44,6 +143,8 @@ pub(super) struct SinglePipe<F: FileSystem> {
 
     /// All log files.
     files: CachePadded<RwLock<FileCollection<F>>>,
+    /// All stale log files waited to be recycled
+    stale_files: CachePadded<RwLock<RecycleFileCollection>>,
     /// The log file opened for write.
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
 }
@@ -52,7 +153,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut active_file = self.active_file.lock();
         if let Err(e) = active_file.writer.close() {
-            error!("error while closing sigle pipe: {}", e);
+            error!("error while closing single pipe: {}", e);
         }
     }
 }
@@ -66,6 +167,7 @@ impl<F: FileSystem> SinglePipe<F> {
         queue: LogQueue,
         mut first_seq: FileSeq,
         mut fds: VecDeque<FileHandler<F>>,
+        recycle_capacity: Option<u32>,
     ) -> Result<Self> {
         let create_file = first_seq == 0;
         let active_seq = if create_file {
@@ -116,6 +218,10 @@ impl<F: FileSystem> SinglePipe<F> {
                 active_seq,
                 fds,
             })),
+            // collection of stale files
+            stale_files: CachePadded::new(RwLock::new(RecycleFileCollection::new(
+                recycle_capacity,
+            ))),
             active_file: CachePadded::new(Mutex::new(active_file)),
         };
         pipe.flush_metrics(total_files);
@@ -164,8 +270,22 @@ impl<F: FileSystem> SinglePipe<F> {
             queue: self.queue,
             seq,
         };
+        // Here, check whether exists extra spare / useless files or not in advance.
+        // If there still existed extra free files, pop one as the active file, with
+        // `rename` by the func `recycle_one_file`.
+        let do_recycle = {
+            let mut stale_files = self.stale_files.write();
+            stale_files.recycle_one_file(&self.file_system, &self.dir, &file_id)
+        };
         let path = file_id.build_file_path(&self.dir);
-        let fd = Arc::new(self.file_system.create(&path)?);
+        // If `[do_recycle]` == true, it means that the chosen file is a recycled log
+        // file.
+        let fd = if do_recycle {
+            // Open the recycled file(file is already renamed)
+            Arc::new(self.file_system.open(&path)?)
+        } else {
+            Arc::new(self.file_system.create(&path)?)
+        };
         let mut new_file = ActiveFile {
             seq,
             writer: build_file_writer(self.file_system.as_ref(), fd.clone(), self.format_version)?,
@@ -291,13 +411,20 @@ impl<F: FileSystem> SinglePipe<F> {
             files.first_seq = file_seq;
             (end_offset, files.fds.len())
         };
+        // Closure for checking whether it's capable to do `[file recycle]`.
+        let can_recycle = |files: &mut RecycleFileCollection, file_id: FileId| -> bool {
+            // @TODO: lucasliang.
+            // We should also check the space of disk is spare for the recycled list.
+            files.push_one_file(file_id)
+        };
         self.flush_metrics(remained);
         for seq in file_seq - purged as u64..file_seq {
             let file_id = FileId {
                 queue: self.queue,
                 seq,
             };
-            let path = file_id.build_file_path(&self.dir);
+            // let path = file_id.build_file_path(&self.dir);
+            let mut path = file_id.build_file_path(&self.dir);
             #[cfg(feature = "failpoints")]
             {
                 let remove_failure = || {
@@ -308,11 +435,46 @@ impl<F: FileSystem> SinglePipe<F> {
                     continue;
                 }
             }
+            // If we could recycle the file, we would put the file_id into the
+            // `RecycleFileCollections` for the future reusing.
+            let mut stale_files = self.stale_files.write();
+            if can_recycle(&mut stale_files, file_id) {
+                log::debug!("Do recycle the stale file {:?}", path);
+                continue;
+            } else {
+                // If we could not push the stale file into the RecycleFileCollections, it means
+                // that:
+                // [1]: the RecycleFileCollections is invalid for inserting, that is, it's not
+                //      set by configuration.
+                // [2]: the RecycleFileCollections has no extra space for the new staled file.
+                let first_stale_fid = stale_files.pop_one_file();
+                match first_stale_fid {
+                    None => {
+                        // Invalid RecycleFileCollections
+                        // do nothing.
+                    }
+                    Some(fid) => {
+                        path = fid.build_file_path(&self.dir);
+                        stale_files.push_one_file(file_id);
+                    }
+                }
+            }
             if let Err(e) = fs::remove_file(&path) {
                 warn!("Remove purged log file {:?} failed: {}", path, e);
             }
         }
         Ok(purged)
+    }
+
+    fn fetch_active_file(&self) -> (Version, FileId) {
+        let active_file = self.active_file.lock();
+        (
+            active_file.writer.header.version(),
+            FileId {
+                queue: self.queue,
+                seq: active_file.seq,
+            },
+        )
     }
 }
 
@@ -382,6 +544,16 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
         self.pipes[file_id.queue as usize].purge_to(file_id.seq)
     }
+
+    #[inline]
+    fn fetch_active_file(&self, queue: LogQueue) -> (Version, FileId) {
+        self.pipes[queue as usize].fetch_active_file()
+    }
+
+    #[inline]
+    fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
+        self.pipes[file_id.queue as usize].get_file_version(file_id.seq)
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +574,7 @@ mod tests {
             queue,
             0,
             VecDeque::new(),
+            None,
         )
     }
 
@@ -503,5 +676,10 @@ mod tests {
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
         assert_eq!(pipe_log.file_span(queue), (3, 3));
+
+        // fetch active file
+        let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(file_version, Version::default());
+        assert_eq!(file_seq.seq, 3);
     }
 }

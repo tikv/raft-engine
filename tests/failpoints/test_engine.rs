@@ -411,6 +411,7 @@ fn test_tail_corruption() {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: 2,
             ..Default::default()
         };
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();

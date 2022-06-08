@@ -78,6 +78,12 @@ pub struct Config {
     /// Default: "0.6"
     pub purge_rewrite_garbage_ratio: f64,
 
+    /// Reycle the garbage, that is, stale append / rewrite logs,
+    /// if the size of stale logs lowered than this value.
+    ///
+    /// Default: None
+    pub recycle_garbage_ratio: Option<f64>,
+
     /// Maximum memory bytes allowed for the in-memory index.
     /// Effective under the `swap` feature only.
     ///
@@ -100,6 +106,7 @@ impl Default for Config {
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
+            recycle_garbage_ratio: None,
             memory_limit: None,
         };
         // Test-specific configurations.
@@ -215,6 +222,7 @@ mod tests {
             soft_sanitized.target_file_size
         );
         assert_eq!(soft_sanitized.format_version, Version::default() as u64);
+        assert!(soft_sanitized.recycle_garbage_ratio.is_none());
     }
 
     #[test]

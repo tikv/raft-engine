@@ -63,13 +63,16 @@ impl WriteExt for ObfuscatedWriter {
     fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {
         self.0.allocate(offset, size)
     }
+
+    fn allocate_with_hole(&mut self, offset: usize, size: usize) -> IoResult<()> {
+        self.0.allocate_with_hole(offset, size)
+    }
 }
 
 /// `[ObfuscatedFileSystem]` is a special implementation of `[FileSystem]`,
 /// which is used for constructing and simulating an abnormal file system for
 /// `[Read]` and `[Write]`.
 pub struct ObfuscatedFileSystem(DefaultFileSystem);
-
 impl Default for ObfuscatedFileSystem {
     fn default() -> Self {
         ObfuscatedFileSystem(DefaultFileSystem)
@@ -87,6 +90,10 @@ impl FileSystem for ObfuscatedFileSystem {
 
     fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         self.0.open(path)
+    }
+
+    fn rename<P: AsRef<Path>>(&self, src: P, dst: P) -> IoResult<()> {
+        self.0.rename(src, dst)
     }
 
     fn new_reader(&self, inner: Arc<Self::Handle>) -> IoResult<Self::Reader> {

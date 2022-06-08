@@ -84,6 +84,7 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 #[repr(u64)]
 pub enum Version {
     V1 = 1,
+    V2 = 2,
 }
 
 impl Version {
@@ -190,7 +191,7 @@ mod tests {
         let version2 = Version::from_u64(1).unwrap();
         assert_eq!(version, version2);
         assert!(Version::is_valid(1));
-        assert!(!Version::is_valid(2));
+        assert!(!Version::is_valid(4));
     }
 
     #[test]

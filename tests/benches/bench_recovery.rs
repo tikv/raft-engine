@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use criterion::{criterion_group, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion};
 use raft::eraftpb::Entry;
 use raft_engine::ReadableSize;
 use raft_engine::{Config as EngineConfig, Engine, LogBatch, MessageExt, Result};
@@ -27,6 +27,7 @@ struct Config {
     item_size: ReadableSize,
     entry_size: ReadableSize,
     batch_compression_threshold: ReadableSize,
+    format_version: u64,
 }
 
 impl Default for Config {
@@ -38,19 +39,21 @@ impl Default for Config {
             item_size: ReadableSize::kb(1),
             entry_size: ReadableSize(256),
             batch_compression_threshold: ReadableSize(0),
+            format_version: 1,
         }
     }
 }
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
+        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}][format_version: {}]",
             self.total_size,
             self.region_count,
             self.batch_size,
             self.item_size,
             self.entry_size,
-            self.batch_compression_threshold
+            self.batch_compression_threshold,
+            self.format_version,
         )
     }
 }
@@ -114,7 +117,8 @@ fn dir_size(path: &str) -> ReadableSize {
 
 // Benchmarks
 
-fn bench_recovery(c: &mut Criterion) {
+#[allow(dead_code)]
+pub fn bench_recovery(c: &mut Criterion) {
     // prepare input
     let cfgs = vec![
         (
@@ -130,24 +134,48 @@ fn bench_recovery(c: &mut Criterion) {
                 ..Default::default()
             },
         ),
+        /*
         (
-            "small-batch(1KB)".to_owned(),
+            "small-batch-format-V1(1KB)".to_owned(),
             Config {
                 region_count: 100,
                 batch_size: ReadableSize::kb(1),
                 item_size: ReadableSize(256),
                 entry_size: ReadableSize(32),
+                format_version: 1,
                 ..Default::default()
             },
         ),
         (
-            "10GB".to_owned(),
+            "small-batch-format-V2(1KB)".to_owned(),
             Config {
-                total_size: ReadableSize::gb(10),
-                region_count: 1000,
+                region_count: 100,
+                batch_size: ReadableSize::kb(1),
+                item_size: ReadableSize(256),
+                entry_size: ReadableSize(32),
+                format_version: 2,
                 ..Default::default()
             },
         ),
+        (
+            "10GB-format-V1".to_owned(),
+            Config {
+                total_size: ReadableSize::gb(10),
+                region_count: 1000,
+                format_version: 1,
+                ..Default::default()
+            },
+        ),
+        (
+            "10GB-format-V2".to_owned(),
+            Config {
+                total_size: ReadableSize::gb(10),
+                region_count: 1000,
+                format_version: 2,
+                ..Default::default()
+            },
+        ),
+        */
     ];
 
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
@@ -178,9 +206,10 @@ fn bench_recovery(c: &mut Criterion) {
     }
     fail::remove("log_fd::open::fadvise_dontneed");
 }
-
+/*
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
     targets = bench_recovery
 }
+*/
