@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use clap::{crate_authors, crate_version, AppSettings, Parser};
+use clap::{crate_authors, crate_version, Parser};
 
 use const_format::formatcp;
 use hdrhistogram::Histogram;
@@ -52,7 +52,7 @@ const DEFAULT_WRITE_SYNC: bool = false;
     about = "A stress test tool for Raft Engine",
     author = crate_authors!(),
     version = crate_version!(),
-    setting = AppSettings::DontCollapseArgsInUsage,
+    dont_collapse_args_in_usage = true,
 )]
 struct ControlOpt {
     /// Path of raft-engine storage directory
