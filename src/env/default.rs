@@ -244,6 +244,15 @@ impl LogFile {
     }
 }
 
+impl Clone for LogFile {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            offset: self.offset,
+        }
+    }
+}
+
 impl Write for LogFile {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         let len = self.inner.write(self.offset, buf)?;
