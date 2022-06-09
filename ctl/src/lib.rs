@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use clap::{crate_authors, crate_version, AppSettings, Parser};
+use clap::{crate_authors, crate_version, Parser};
 use raft_engine::internals::LogQueue;
 use raft_engine::{Engine, Error, Result as EngineResult};
 
@@ -24,7 +24,7 @@ use raft_engine::{Engine, Error, Result as EngineResult};
     name = "ctl",
     author = crate_authors!(),
     version = crate_version!(),
-    setting = AppSettings::DontCollapseArgsInUsage,
+    dont_collapse_args_in_usage = true,
 )]
 pub struct ControlOpt {
     // sub command type
@@ -40,7 +40,7 @@ enum Cmd {
         #[clap(short, long)]
         path: String,
 
-        #[clap(short, long, use_delimiter = true)]
+        #[clap(short, long, use_value_delimiter = true)]
         raft_groups: Vec<u64>,
     },
 
