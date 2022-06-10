@@ -183,14 +183,15 @@ fn bench_with_config<F: FileSystem>(
         let mut write_count = (file_size / data_len) as i64;
         let sync_frequency = (bytes_per_sync / data_len) as i64;
         let mut idx = 0_i64;
-        while write_count > 0 {
-            writer.write_all(data)?;
-            if write_count - idx >= 0 && idx < sync_frequency {
+        while write_count > idx {
+            if idx < sync_frequency {
                 idx += 1;
+                writer.write_all(data)?;
                 continue;
             }
             writer.sync()?;
             write_count -= idx;
+            idx = 0;
         }
     }
     writer.sync()?;
