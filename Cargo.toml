@@ -48,7 +48,7 @@ prometheus = { version = "0.13" }
 prometheus-static-metric = "0.5"
 protobuf = "2"
 rayon = "1.5"
-rhai = { version = "~1.4", features = ["sync"], optional = true }
+rhai = { version = "1.7", features = ["sync"], optional = true }
 scopeguard = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"

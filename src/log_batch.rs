@@ -924,13 +924,13 @@ mod tests {
 
     #[test]
     fn test_entry_indexes_enc_dec() {
-        fn encode_and_decode(entry_indexes: &mut Vec<EntryIndex>) -> EntryIndexes {
+        fn encode_and_decode(entry_indexes: &mut [EntryIndex]) -> EntryIndexes {
             let mut entries_size = 0;
             for idx in entry_indexes.iter_mut() {
                 idx.entry_offset = entries_size;
                 entries_size += idx.entry_len;
             }
-            let entry_indexes = EntryIndexes(entry_indexes.clone());
+            let entry_indexes = EntryIndexes(entry_indexes.to_vec());
 
             let mut encoded = vec![];
             entry_indexes.encode(&mut encoded).unwrap();
