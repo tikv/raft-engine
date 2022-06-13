@@ -10,10 +10,10 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::FileNameExt;
+pub use format::{FileNameExt, LogFileFormat, Version};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
-    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, ReplayMachine,
+    DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
 };
 
 pub mod debug {
@@ -28,7 +28,7 @@ pub mod debug {
     use crate::pipe_log::FileId;
     use crate::{Error, Result};
 
-    use super::format::FileNameExt;
+    use super::format::{FileNameExt, Version};
     use super::log_file::{LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
 
@@ -38,6 +38,7 @@ pub mod debug {
     pub fn build_file_writer<F: FileSystem>(
         file_system: &F,
         path: &Path,
+        version: Version,
         create: bool,
     ) -> Result<LogFileWriter<F>> {
         let fd = if create {
@@ -46,7 +47,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd)
+        super::log_file::build_file_writer(file_system, fd, version)
     }
 
     /// Opens a log file for read.
@@ -55,7 +56,7 @@ pub mod debug {
         path: &Path,
     ) -> Result<LogFileReader<F>> {
         let fd = Arc::new(file_system.open(path)?);
-        super::log_file::build_file_reader(file_system, fd)
+        super::log_file::build_file_reader(file_system, fd, None)
     }
 
     /// An iterator over the log items in log files.
@@ -171,6 +172,7 @@ pub mod debug {
     mod tests {
         use super::*;
         use crate::env::DefaultFileSystem;
+        use crate::file_pipe_log::format::Version;
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogQueue};
         use crate::test_util::generate_entries;
@@ -208,8 +210,13 @@ pub mod debug {
             for bs in batches.iter_mut() {
                 let file_path = file_id.build_file_path(dir.path());
                 // Write a file.
-                let mut writer =
-                    build_file_writer(file_system.as_ref(), &file_path, true /* create */).unwrap();
+                let mut writer = build_file_writer(
+                    file_system.as_ref(),
+                    &file_path,
+                    Version::default(),
+                    true, /* create */
+                )
+                .unwrap();
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
                     let len = batch
@@ -225,6 +232,7 @@ pub mod debug {
                     });
                 }
                 writer.close().unwrap();
+                assert_eq!(writer.header.version(), Version::default());
                 // Read and verify.
                 let mut reader =
                     LogItemReader::new_file_reader(file_system.clone(), &file_path).unwrap();
@@ -269,6 +277,7 @@ pub mod debug {
             let mut writer = build_file_writer(
                 file_system.as_ref(),
                 &empty_file_path,
+                Version::default(),
                 true, /* create */
             )
             .unwrap();
@@ -281,6 +290,7 @@ pub mod debug {
             assert!(
                 LogItemReader::new_directory_reader(file_system.clone(), &empty_file_path).is_err()
             );
+            assert!(LogItemReader::new_file_reader(file_system.clone(), &empty_file_path).is_ok());
 
             let mut reader = LogItemReader::new_directory_reader(file_system, dir.path()).unwrap();
             assert!(reader.next().unwrap().is_err());

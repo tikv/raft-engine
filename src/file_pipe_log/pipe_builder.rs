@@ -20,8 +20,8 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileHeader};
-use super::log_file::build_file_reader;
+use super::format::{lock_file_path, FileNameExt, LogFileFormat, Version};
+use super::log_file::{build_file_reader, FileHandler};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
@@ -55,9 +55,18 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
     }
 }
 
+/// Container for basic settings on recovery.
+pub struct RecoveryConfig {
+    pub queue: LogQueue,
+    pub mode: RecoveryMode,
+    pub concurrency: usize,
+    pub read_block_size: u64,
+}
+
 struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
     handle: Arc<F::Handle>,
+    version: Option<Version>,
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
@@ -156,7 +165,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         files.clear();
                     } else {
                         let handle = Arc::new(self.file_system.open(&path)?);
-                        files.push(FileToRecover { seq, handle });
+                        files.push(FileToRecover {
+                            seq,
+                            handle,
+                            version: None,
+                        });
                     }
                 }
             }
@@ -172,6 +185,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         machine_factory: &FA,
     ) -> Result<(M, M)> {
         let threads = self.cfg.recovery_threads;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
         let (append_concurrency, rewrite_concurrency) =
             match (self.append_files.len(), self.rewrite_files.len()) {
                 (a, b) if a > 0 && b > 0 => {
@@ -181,84 +198,103 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
                 _ => (threads, threads),
             };
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap();
-        let (append, rewrite) = pool.join(
-            || self.recover_queue(LogQueue::Append, machine_factory, append_concurrency),
-            || self.recover_queue(LogQueue::Rewrite, machine_factory, rewrite_concurrency),
-        );
 
+        let append_recovery_cfg = RecoveryConfig {
+            queue: LogQueue::Append,
+            mode: self.cfg.recovery_mode,
+            concurrency: append_concurrency,
+            read_block_size: self.cfg.recovery_read_block_size.0,
+        };
+        let rewrite_recovery_cfg = RecoveryConfig {
+            queue: LogQueue::Rewrite,
+            concurrency: rewrite_concurrency,
+            ..append_recovery_cfg
+        };
+        let append_files = &mut self.append_files;
+        let rewrite_files = &mut self.rewrite_files;
+        let file_system = self.file_system.clone();
+        // As the `recover_queue` would update the `Version` of each log file in
+        // `apend_files` and `rewrite_files`, we re-design the implementation on
+        // `recover_queue` to make it compatiable to concurrent processing
+        // with ThreadPool.
+        let (append, rewrite) = pool.join(
+            || {
+                DualPipesBuilder::recover_queue_imp(
+                    file_system.clone(),
+                    append_recovery_cfg,
+                    append_files,
+                    machine_factory,
+                )
+            },
+            || {
+                DualPipesBuilder::recover_queue_imp(
+                    file_system.clone(),
+                    rewrite_recovery_cfg,
+                    rewrite_files,
+                    machine_factory,
+                )
+            },
+        );
         Ok((append?, rewrite?))
     }
 
-    /// Reads through log items in all available log files of the specified
-    /// queue, and replays them to specific [`ReplayMachine`]s that can be
-    /// constructed via `machine_factory`.
-    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
-        &self,
-        queue: LogQueue,
+    /// Manually reads through log items in all available log files of the
+    /// specified queue, and replays them to specific [`ReplayMachine`]s
+    /// that can be constructed via `machine_factory`.
+    fn recover_queue_imp<M: ReplayMachine, FA: Factory<M>>(
+        file_system: Arc<F>,
+        recovery_cfg: RecoveryConfig,
+        files: &mut Vec<FileToRecover<F>>,
         replay_machine_factory: &FA,
-        concurrency: usize,
     ) -> Result<M> {
-        let files = if queue == LogQueue::Append {
-            &self.append_files
-        } else {
-            &self.rewrite_files
-        };
-        if concurrency == 0 || files.is_empty() {
+        if recovery_cfg.concurrency == 0 || files.is_empty() {
             return Ok(replay_machine_factory.new_target());
         }
+        let queue = recovery_cfg.queue;
+        let concurrency = recovery_cfg.concurrency;
+        let recovery_mode = recovery_cfg.mode;
+        let recovery_read_block_size = recovery_cfg.read_block_size as usize;
 
-        let recovery_mode = self.cfg.recovery_mode;
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
-        let chunks = files.par_chunks(max_chunk_size);
+        let chunks = files.par_chunks_mut(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
         let sequential_replay_machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
                 let mut reader =
-                    LogItemBatchFileReader::new(self.cfg.recovery_read_block_size.0 as usize);
+                    LogItemBatchFileReader::new(recovery_read_block_size);
                 let mut sequential_replay_machine = replay_machine_factory.new_target();
                 let file_count = chunk.len();
-                for (i, f) in chunk.iter().enumerate() {
+                for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    if let Err(e) = reader.open(
-                        FileId { queue, seq: f.seq },
-                        build_file_reader(self.file_system.as_ref(), f.handle.clone())?,
-                    ) {
-                        if f.handle.file_size()? > LogFileHeader::len() {
-                            // This file contains some entries.
-                            error!(
-                                "Failed to open last log file due to broken header: {:?}:{}",
-                                queue, f.seq
-                            );
-                            return Err(e);
-                        }
-                        if recovery_mode == RecoveryMode::TolerateAnyCorruption {
-                            warn!(
-                                "File header is corrupted but ignored: {:?}:{}, {}",
-                                queue, f.seq, e
-                            );
-                            f.handle.truncate(0)?;
-                        } else if recovery_mode == RecoveryMode::TolerateTailCorruption
-                            && is_last_file
-                        {
-                            warn!(
-                                "The last log file is corrupted but ignored: {:?}:{}, {}",
-                                queue, f.seq, e
-                            );
-                            f.handle.truncate(0)?;
-                        } else {
-                            error!(
-                                "Failed to open log file due to broken header: {:?}:{}",
-                                queue, f.seq
-                            );
-                            return Err(e);
+                    match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
+                        Err(e) => {
+                            let is_local_tail = f.handle.file_size()? <= LogFileFormat::len();
+                            if recovery_mode == RecoveryMode::TolerateAnyCorruption
+                              || recovery_mode == RecoveryMode::TolerateTailCorruption
+                                && is_last_file && is_local_tail {
+                                warn!(
+                                    "File header is corrupted but ignored: {:?}:{}, {}",
+                                    queue, f.seq, e
+                                );
+                                f.handle.truncate(0)?;
+                                f.version = Some(Version::default());
+                                continue;
+                            } else {
+                                error!(
+                                    "Failed to open log file due to broken header: {:?}:{}",
+                                    queue, f.seq
+                                );
+                                return Err(e);
+                            }
+                        },
+                        Ok(file_reader) => {
+                            reader.open(FileId { queue, seq: f.seq }, file_reader)?;
                         }
                     }
+                    // Update file version of each log file.
+                    f.version = Some(reader.file_format().unwrap().version());
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -308,6 +344,28 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         Ok(sequential_replay_machine)
     }
 
+    /// Manually reads through log items in all available log files of the
+    /// specified `[LogQueue]`, and replays them to specific
+    /// [`ReplayMachine`]s that can be constructed via `machine_factory`.
+    pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
+        &mut self,
+        file_system: Arc<F>,
+        recovery_cfg: RecoveryConfig,
+        replay_machine_factory: &FA,
+    ) -> Result<M> {
+        let files = if recovery_cfg.queue == LogQueue::Append {
+            &mut self.append_files
+        } else {
+            &mut self.rewrite_files
+        };
+        DualPipesBuilder::recover_queue_imp(
+            file_system,
+            recovery_cfg,
+            files,
+            replay_machine_factory,
+        )
+    }
+
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
         let files = match queue {
@@ -315,7 +373,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             LogQueue::Rewrite => &self.rewrite_files,
         };
         let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<Arc<F::Handle>> = files.iter().map(|f| f.handle.clone()).collect();
+        let files: VecDeque<FileHandler<F>> = files
+            .iter()
+            .map(|f| FileHandler {
+                handle: f.handle.clone(),
+                version: f.version.unwrap(),
+            })
+            .collect();
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),

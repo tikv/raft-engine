@@ -15,7 +15,9 @@ use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
+use crate::file_pipe_log::{
+    DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, RecoveryConfig,
+};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
@@ -151,6 +153,7 @@ where
                     sync |= writer.sync;
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
+                        // @TODO(lucasliang): bind `Version` to each `LogBatch`
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -387,16 +390,35 @@ where
             recovery_mode: RecoveryMode::TolerateAnyCorruption,
             ..Default::default()
         };
-
+        let recovery_mode = cfg.recovery_mode;
+        let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;
         let factory = crate::filter::RhaiFilterMachineFactory::from_script(script);
         let mut machine = None;
         if queue.is_none() || queue.unwrap() == LogQueue::Append {
-            machine = Some(builder.recover_queue(LogQueue::Append, &factory, 1)?);
+            machine = Some(builder.recover_queue(
+                file_system.clone(),
+                RecoveryConfig {
+                    queue: LogQueue::Append,
+                    mode: recovery_mode,
+                    concurrency: 1,
+                    read_block_size,
+                },
+                &factory,
+            )?);
         }
         if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
-            let machine2 = builder.recover_queue(LogQueue::Rewrite, &factory, 1)?;
+            let machine2 = builder.recover_queue(
+                file_system.clone(),
+                RecoveryConfig {
+                    queue: LogQueue::Rewrite,
+                    mode: recovery_mode,
+                    concurrency: 1,
+                    read_block_size,
+                },
+                &factory,
+            )?;
             if let Some(machine) = &mut machine {
                 machine.merge(machine2, LogQueue::Rewrite)?;
             }

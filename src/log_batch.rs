@@ -9,6 +9,7 @@ use log::error;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
+use crate::file_pipe_log::Version;
 use crate::memtable::EntryIndex;
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::util::{crc32, lz4};
@@ -480,6 +481,7 @@ impl LogItemBatch {
         entries: FileBlockHandle,
         compression_type: CompressionType,
     ) -> Result<LogItemBatch> {
+        // @TODO: decoding based on the version waited to be implemented
         verify_checksum(buf)?;
         *buf = &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
@@ -762,6 +764,15 @@ impl LogBatch {
         }
     }
 
+    #[allow(dead_code, unused_variables)]
+    pub(crate) fn sign_checksum(&mut self, file_version: Version, file_id: FileId) {
+        // @TODO: lucasliang
+        // Supplement the details of signing checksum on each LogBatch with the
+        // specific `Version`.
+        unimplemented!();
+        // debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+    }
+
     /// Notifies the completion of a storage write with the written location.
     ///
     /// Internally sets the file locations of each log entry indexes.
@@ -846,6 +857,7 @@ impl LogBatch {
         handle: FileBlockHandle,
         compression: CompressionType,
     ) -> Result<Vec<u8>> {
+        // @TODO: decoding based on the version waited to be implemented
         if handle.len > 0 {
             verify_checksum(&buf[0..handle.len])?;
             match compression {
