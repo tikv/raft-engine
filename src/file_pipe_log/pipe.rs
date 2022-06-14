@@ -428,7 +428,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // that:
                 // [1]: the RecycleFileCollections is invalid for inserting, that is, it's not
                 //      set by configuration.
-                // [2]: the RecycleFileCollections has no extra space for the new staled file.
+                // [2]: the RecycleFileCollections has no extra space for the staled file.
                 let first_stale_fid = recycled_files.pop_one_file();
                 match first_stale_fid {
                     None => {
@@ -436,6 +436,8 @@ impl<F: FileSystem> SinglePipe<F> {
                         // do nothing.
                     }
                     Some(fid) => {
+                        // Delete the first stale file in RecycleFileCollections to free space
+                        // for the incoming stale file.
                         path = fid.build_file_path(&self.dir);
                         recycled_files.push_one_file(file_id);
                     }
@@ -550,6 +552,21 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {
+        let capacity_of_recycle = |default_file_size: usize,
+                                   purge_threshold: u64,
+                                   recycle_ratio: Option<f64>|
+         -> Option<u32> {
+            if let Some(ratio) = recycle_ratio {
+                if default_file_size == 0 || purge_threshold == 0 {
+                    Option::None
+                } else {
+                    let recycle_capacity = (purge_threshold as f64) * ratio;
+                    Option::Some((recycle_capacity as usize / default_file_size) as u32)
+                }
+            } else {
+                Option::None
+            }
+        };
         SinglePipe::open(
             cfg,
             Arc::new(DefaultFileSystem),
@@ -557,7 +574,21 @@ mod tests {
             queue,
             0,
             VecDeque::new(),
-            None,
+            match queue {
+                LogQueue::Append => capacity_of_recycle(
+                    cfg.target_file_size.0 as usize,
+                    cfg.purge_threshold.0 as u64,
+                    cfg.recycle_garbage_ratio,
+                ),
+                LogQueue::Rewrite => capacity_of_recycle(
+                    cfg.target_file_size.0 as usize,
+                    match &cfg.purge_rewrite_threshold {
+                        Some(thd) => thd.0,
+                        None => 0,
+                    } as u64,
+                    cfg.recycle_garbage_ratio,
+                ),
+            },
         )
     }
 
@@ -758,5 +789,89 @@ mod tests {
                 assert!(validate_content_of_file(new_file_id, &refreshed_data[..]).unwrap());
             }
         }
+    }
+
+    #[test]
+    fn test_pipe_log_with_recycle() {
+        let dir = Builder::new()
+            .prefix("test_pipe_log_with_recycle")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = Config {
+            dir: path.to_owned(),
+            target_file_size: ReadableSize::kb(1),
+            bytes_per_sync: ReadableSize::kb(32),
+            purge_threshold: ReadableSize::mb(1),
+            recycle_garbage_ratio: Some(0.001),
+            ..Default::default()
+        };
+        let queue = LogQueue::Append;
+
+        let pipe_log = new_test_pipes(&cfg).unwrap();
+        assert_eq!(pipe_log.file_span(queue), (1, 1));
+
+        let header_size = LogFileFormat::len() as u64;
+
+        // generate file 1, 2, 3
+        let content: Vec<u8> = vec![b'a'; 1024];
+        let file_handle = pipe_log.append(queue, &content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
+        assert_eq!(file_handle.id.seq, 1);
+        assert_eq!(file_handle.offset, header_size);
+        assert_eq!(pipe_log.file_span(queue).1, 2);
+
+        let file_handle = pipe_log.append(queue, &content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
+        assert_eq!(file_handle.id.seq, 2);
+        assert_eq!(file_handle.offset, header_size);
+        assert_eq!(pipe_log.file_span(queue).1, 3);
+
+        // purge file 1
+        assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
+        assert_eq!(pipe_log.file_span(queue).0, 2);
+
+        // cannot purge active file
+        assert!(pipe_log.purge_to(FileId { queue, seq: 4 }).is_err());
+
+        // append position
+        let s_content = b"short content".to_vec();
+        let file_handle = pipe_log.append(queue, &s_content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
+        assert_eq!(file_handle.id.seq, 3);
+        assert_eq!(file_handle.offset, header_size);
+
+        let file_handle = pipe_log.append(queue, &s_content).unwrap();
+        pipe_log.maybe_sync(queue, false).unwrap();
+        assert_eq!(file_handle.id.seq, 3);
+        assert_eq!(
+            file_handle.offset,
+            header_size as u64 + s_content.len() as u64
+        );
+
+        let content_readed = pipe_log
+            .read_bytes(FileBlockHandle {
+                id: FileId { queue, seq: 3 },
+                offset: header_size as u64,
+                len: s_content.len(),
+            })
+            .unwrap();
+        assert_eq!(content_readed, s_content);
+        // try to fetch abnormal entry
+        let abnormal_content_readed = pipe_log.read_bytes(FileBlockHandle {
+            id: FileId { queue, seq: 12 }, // abnormal seq
+            offset: header_size as u64,
+            len: s_content.len(),
+        });
+        assert!(abnormal_content_readed.is_err());
+
+        // leave only 1 file to truncate
+        assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
+        assert_eq!(pipe_log.file_span(queue), (3, 3));
+
+        // fetch active file
+        let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(file_version, Version::default());
+        assert_eq!(file_seq.seq, 3);
     }
 }

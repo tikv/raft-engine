@@ -11,6 +11,6 @@ mod bench_recovery;
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = /* bench_recovery::bench_recovery, */bench_falloc::bench_fallocate
+    targets = bench_recovery::bench_recovery, bench_falloc::bench_fallocate
 }
 criterion_main!(benches);

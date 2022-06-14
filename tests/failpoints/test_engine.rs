@@ -453,3 +453,70 @@ fn test_tail_corruption() {
         assert!(Engine::open_with_file_system(cfg, fs).is_err());
     }
 }
+
+#[test]
+fn test_mutable_format_version() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_mutable_format_version")
+        .tempdir()
+        .unwrap();
+    // config with v1
+    let cfg_v1 = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        purge_threshold: ReadableSize(1),
+        ..Default::default()
+    };
+    // config with v2
+    let cfg_v2 = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        purge_threshold: ReadableSize(1),
+        format_version: 2,
+        ..Default::default()
+    };
+    let rid = 1;
+    let data = vec![b'7'; 1024];
+
+    {
+        println!("open engine with format_version - Version::V1");
+        // open engine with format_version - Version::V1
+        let engine = Engine::open(cfg_v1.clone()).unwrap();
+        append(&engine, rid, 0, 20, Some(&data));
+        let append_first = engine.file_span(LogQueue::Append).0;
+        engine.compact_to(rid, 18);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+        assert_eq!(engine.first_index(rid).unwrap(), 18);
+        assert_eq!(engine.last_index(rid).unwrap(), 19);
+    }
+    {
+        println!("open engine with format_version - Version::V2");
+        // open engine with format_version - Version::V2
+        let engine_wrapper = Engine::open(cfg_v2);
+        assert!(engine_wrapper.is_ok());
+        let engine = engine_wrapper.unwrap();
+        assert_eq!(engine.first_index(rid).unwrap(), 18);
+        assert_eq!(engine.last_index(rid).unwrap(), 19);
+        append(&engine, rid, 20, 40, Some(&data));
+        let append_first = engine.file_span(LogQueue::Append).0;
+        engine.compact_to(rid, 38);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+        assert_eq!(engine.first_index(rid).unwrap(), 38);
+        assert_eq!(engine.last_index(rid).unwrap(), 39);
+    }
+    {
+        println!("reopen engine with format_version - Version::V1");
+        // reopen engine with format_version - Version::V1
+        let engine_wrapper = Engine::open(cfg_v1);
+        let engine = match engine_wrapper {
+            Ok(eng) => eng,
+            Err(err) => {
+                panic!("Err : {:?}", err);
+            }
+        };
+        assert_eq!(engine.first_index(rid).unwrap(), 38);
+        assert_eq!(engine.last_index(rid).unwrap(), 39);
+    }
+}

@@ -136,7 +136,7 @@ fn prepare_with_config(
     let file_size = cfg.file_size.0 as usize;
     let file_system = Arc::new(DefaultFileSystem);
     let entry_data = vec![b'x'; cfg.data_block_size.0 as usize];
-    let black_hole: Vec<u8> = vec![b'\0' as u8; file_size];
+    let black_hole: Vec<u8> = vec![b'\0'; file_size];
     //
     let dir = tempfile::Builder::new()
         .prefix(format!("bench_falloc_{}", cfg.dir).as_str())
@@ -164,7 +164,7 @@ fn prepare_with_config(
             // writer.allocate_with_hole(0, file_size)?;
             // let black_hole: Vec<u8> = vec![b'\0' as u8; file_size];
             writer.allocate(0, file_size)?;
-            writer.write(&black_hole[..])?; // extra
+            writer.write_all(&black_hole[..])?; // extra
             writer.sync()?;
             writer.seek(SeekFrom::Start(0))?;
         }
