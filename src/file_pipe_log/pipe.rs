@@ -36,25 +36,22 @@ struct ActiveFile<F: FileSystem> {
 struct RecycleFileCollection {
     /// capacity of RecycleFiles
     capacity: Option<u32>,
-    /// sequence number of first file_id in RecycleFiles
-    first_seq: FileSeq,
     /// list of recycled files
-    fds: VecDeque<Arc<FileId>>,
+    fds: VecDeque<FileId>,
 }
 
 impl RecycleFileCollection {
     pub fn new(capacity: Option<u32>) -> Self {
         Self {
             capacity,
-            first_seq: 0,
             fds: VecDeque::new(),
         }
     }
 
     /// Check the RecycleFileCollection is open or not.
     ///
-    /// Only when had the capacity been set with a valid value, it means that
-    /// the RecycleFileCollection is valid.
+    /// Only when had the capacity been set with a valid value, the
+    /// `RecycleFileCollection` is valid.
     pub fn valid(&self) -> bool {
         self.capacity.is_some()
     }
@@ -73,33 +70,18 @@ impl RecycleFileCollection {
     pub fn push_one_file(&mut self, fd: FileId) -> bool {
         let ret = self.valid_to_push(1); // push one file
         if ret {
-            self.first_seq = if self.fds.is_empty() {
-                fd.seq
-            } else {
-                self.first_seq
-            };
-            self.fds.push_back(Arc::new(fd));
+            self.fds.push_back(fd);
         }
         ret
     }
 
     /// Pop one FileId from the recycle list.
-    pub fn pop_one_file(&mut self) -> Option<Arc<FileId>> {
+    pub fn pop_one_file(&mut self) -> Option<FileId> {
         if !self.valid() {
-            return None;
+            None
+        } else {
+            self.fds.pop_front()
         }
-        let first = self.fds.pop_front();
-        match &first {
-            Some(file_ref) => {
-                // Here, the seq of each file in fds is continuous.
-                self.first_seq = self.fds.front().unwrap().clone().seq;
-                debug_assert_eq!(file_ref.seq + 1, self.first_seq);
-            }
-            None => {
-                self.first_seq = 0;
-            }
-        }
-        first
     }
 
     /// Recycle one exipired or purged file with new FileId.
@@ -110,7 +92,7 @@ impl RecycleFileCollection {
         &mut self,
         file_system: &Arc<F>,
         dir_path: &str,
-        dst_fd: &FileId,
+        dst_fd: FileId,
     ) -> bool {
         let mut ret = false;
         while let Some(fd) = self.pop_one_file() {
@@ -143,8 +125,8 @@ pub(super) struct SinglePipe<F: FileSystem> {
 
     /// All log files.
     files: CachePadded<RwLock<FileCollection<F>>>,
-    /// All stale log files waited to be recycled
-    stale_files: CachePadded<RwLock<RecycleFileCollection>>,
+    /// All recycled log files waited to be reused.
+    recycled_files: CachePadded<RwLock<RecycleFileCollection>>,
     /// The log file opened for write.
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
 }
@@ -218,8 +200,8 @@ impl<F: FileSystem> SinglePipe<F> {
                 active_seq,
                 fds,
             })),
-            // collection of stale files
-            stale_files: CachePadded::new(RwLock::new(RecycleFileCollection::new(
+            // collection of recycled files
+            recycled_files: CachePadded::new(RwLock::new(RecycleFileCollection::new(
                 recycle_capacity,
             ))),
             active_file: CachePadded::new(Mutex::new(active_file)),
@@ -274,8 +256,8 @@ impl<F: FileSystem> SinglePipe<F> {
         // If there still existed extra free files, pop one as the active file, with
         // `rename` by the func `recycle_one_file`.
         let do_recycle = {
-            let mut stale_files = self.stale_files.write();
-            stale_files.recycle_one_file(&self.file_system, &self.dir, &file_id)
+            let mut recycled_files = self.recycled_files.write();
+            recycled_files.recycle_one_file(&self.file_system, &self.dir, file_id)
         };
         let path = file_id.build_file_path(&self.dir);
         // If `[do_recycle]` == true, it means that the chosen file is a recycled log
@@ -437,8 +419,8 @@ impl<F: FileSystem> SinglePipe<F> {
             }
             // If we could recycle the file, we would put the file_id into the
             // `RecycleFileCollections` for the future reusing.
-            let mut stale_files = self.stale_files.write();
-            if can_recycle(&mut stale_files, file_id) {
+            let mut recycled_files = self.recycled_files.write();
+            if can_recycle(&mut recycled_files, file_id) {
                 log::debug!("Do recycle the stale file {:?}", path);
                 continue;
             } else {
@@ -447,7 +429,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // [1]: the RecycleFileCollections is invalid for inserting, that is, it's not
                 //      set by configuration.
                 // [2]: the RecycleFileCollections has no extra space for the new staled file.
-                let first_stale_fid = stale_files.pop_one_file();
+                let first_stale_fid = recycled_files.pop_one_file();
                 match first_stale_fid {
                     None => {
                         // Invalid RecycleFileCollections
@@ -455,7 +437,7 @@ impl<F: FileSystem> SinglePipe<F> {
                     }
                     Some(fid) => {
                         path = fid.build_file_path(&self.dir);
-                        stale_files.push_one_file(file_id);
+                        recycled_files.push_one_file(file_id);
                     }
                 }
             }
@@ -563,8 +545,9 @@ mod tests {
     use super::super::format::LogFileFormat;
     use super::super::pipe_builder::lock_dir;
     use super::*;
-    use crate::env::DefaultFileSystem;
+    use crate::env::{DefaultFileSystem, WriteExt};
     use crate::util::ReadableSize;
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {
         SinglePipe::open(
@@ -681,5 +664,99 @@ mod tests {
         let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_version, Version::default());
         assert_eq!(file_seq.seq, 3);
+    }
+
+    #[test]
+    fn test_recycle_file_collections() {
+        let dir = Builder::new()
+            .prefix("test_recycle_file_collections")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let default_file_size = 32 * 1024 * 1024; // 32MB as default
+        let file_system = Arc::new(DefaultFileSystem);
+        // test RecycleFileCollection with None(Invalid)
+        {
+            let mut recycle_collections = RecycleFileCollection::new(None);
+            assert!(!recycle_collections.valid());
+            assert!(!recycle_collections.valid_to_push(1));
+            assert!(!recycle_collections.push_one_file(FileId::dummy(LogQueue::Append)));
+            assert!(recycle_collections.pop_one_file().is_none());
+            assert!(!recycle_collections.recycle_one_file(
+                &file_system,
+                path,
+                FileId::dummy(LogQueue::Append)
+            ));
+        }
+        // test RecycleFileCollection with a valid file
+        {
+            let data = vec![b'x'; 1024];
+            let prepare_file =
+                |file_id: FileId,
+                 data: &[u8]|
+                 -> Result<Arc<<DefaultFileSystem as FileSystem>::Handle>> {
+                    let fd = Arc::new(file_system.create(&file_id.build_file_path(path))?);
+                    let mut writer = file_system.new_writer(fd.clone())?;
+                    writer.allocate(0, default_file_size)?;
+                    writer.write_all(data)?;
+                    writer.sync()?;
+                    Ok(fd)
+                };
+            let validate_content_of_file =
+                |file_id: FileId, expected_data: &[u8]| -> Result<bool> {
+                    let data_len = expected_data.len();
+                    let mut buf = vec![0; 1024];
+                    let fd = Arc::new(file_system.open(&file_id.build_file_path(path)).unwrap());
+                    let mut new_reader = file_system.new_reader(fd).unwrap();
+                    let actual_len = new_reader.read(&mut buf[..]).unwrap();
+                    Ok(if actual_len != data_len {
+                        false
+                    } else {
+                        buf[..] == expected_data[..]
+                    })
+                };
+            let mut recycle_collections = RecycleFileCollection::new(Some(1));
+            let invalid_file_id = FileId {
+                queue: LogQueue::Append,
+                seq: 1,
+            };
+            let old_file_id = FileId {
+                queue: LogQueue::Append,
+                seq: 12,
+            };
+            let new_file_id = FileId {
+                queue: LogQueue::Append,
+                seq: old_file_id.seq + 1,
+            };
+            assert!(recycle_collections.valid());
+            assert!(recycle_collections.valid_to_push(1));
+            assert!(recycle_collections.push_one_file(invalid_file_id));
+            assert!(!recycle_collections.valid_to_push(1)); // full
+            let ret = recycle_collections.pop_one_file();
+            assert!(ret.is_some());
+            assert_eq!(invalid_file_id, ret.unwrap());
+            // prepare old file
+            let _ = prepare_file(old_file_id, &data[..]);
+            // recycle old file
+            assert!(recycle_collections.push_one_file(old_file_id));
+            assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(recycle_collections.valid_to_push(1));
+            // validate the content of recycled file
+            assert!(validate_content_of_file(new_file_id, &data[..]).unwrap());
+            // rewrite and validate the cotent
+            {
+                let refreshed_data = vec![b'm'; 1024];
+                let fd = Arc::new(
+                    file_system
+                        .create(&new_file_id.build_file_path(path))
+                        .unwrap(),
+                );
+                let mut new_writer = file_system.new_writer(fd).unwrap();
+                assert!(new_writer.seek(SeekFrom::Start(0)).is_ok());
+                assert_eq!(new_writer.write(&refreshed_data[..]).unwrap(), 1024);
+                assert!(new_writer.sync().is_ok());
+                assert!(validate_content_of_file(new_file_id, &refreshed_data[..]).unwrap());
+            }
+        }
     }
 }

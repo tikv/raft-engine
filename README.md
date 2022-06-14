@@ -85,7 +85,7 @@ cargo +nightly test --test failpoints --all-features -- --test-threads 1
 
 ```
 cargo +nightly bench --all-features <bench-case-name>
-cargo run --release --package stress --help
+cargo run --release --package stress -- --help
 ```
 
 ## License

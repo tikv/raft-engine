@@ -347,6 +347,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Manually reads through log items in all available log files of the
     /// specified `[LogQueue]`, and replays them to specific
     /// [`ReplayMachine`]s that can be constructed via `machine_factory`.
+    #[allow(dead_code)]
     pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
         &mut self,
         file_system: Arc<F>,

@@ -15,9 +15,7 @@ use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{
-    DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, RecoveryConfig,
-};
+use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
@@ -25,6 +23,9 @@ use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog, Signature};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
+
+#[cfg(feature = "scripting")]
+use crate::file_pipe_log::RecoveryConfig;
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
