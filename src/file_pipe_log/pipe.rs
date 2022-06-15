@@ -35,13 +35,13 @@ struct ActiveFile<F: FileSystem> {
 /// Collection of staled Files.
 struct RecycleFileCollection {
     /// capacity of RecycleFiles
-    capacity: Option<u32>,
+    capacity: Option<usize>,
     /// list of recycled files
     fds: VecDeque<FileId>,
 }
 
 impl RecycleFileCollection {
-    pub fn new(capacity: Option<u32>) -> Self {
+    pub fn new(capacity: Option<usize>) -> Self {
         Self {
             capacity,
             fds: VecDeque::new(),
@@ -56,11 +56,23 @@ impl RecycleFileCollection {
         self.capacity.is_some()
     }
 
-    pub fn valid_to_push(&self, count: u32) -> bool {
+    pub fn valid_to_push(&self, count: usize) -> bool {
         match self.capacity {
             Some(0) => true, // the capacity is infinite.
-            Some(p) => p >= count + self.fds.len() as u32,
+            Some(p) => p >= count + self.fds.len(),
             None => false,
+        }
+    }
+
+    /// Support update the capacity dynamically.
+    pub fn upd_capacity(&mut self, count: i64) {
+        if self.capacity.is_some() {
+            let cur_capacity = self.capacity.unwrap() as i64;
+            if cur_capacity + count > 0 {
+                self.capacity = Some((cur_capacity + count) as usize);
+            } else {
+                self.capacity = None;
+            }
         }
     }
 
@@ -111,6 +123,10 @@ impl RecycleFileCollection {
         /* Only if the `rename` made sense, we could return success. */
         ret
     }
+
+    pub fn size(&self) -> usize {
+        self.fds.len()
+    }
 }
 
 /// A file-based log storage that arranges files as one single queue.
@@ -149,7 +165,7 @@ impl<F: FileSystem> SinglePipe<F> {
         queue: LogQueue,
         mut first_seq: FileSeq,
         mut fds: VecDeque<FileHandler<F>>,
-        recycle_capacity: Option<u32>,
+        recycle_capacity: Option<usize>,
     ) -> Result<Self> {
         let create_file = first_seq == 0;
         let active_seq = if create_file {
@@ -202,7 +218,15 @@ impl<F: FileSystem> SinglePipe<F> {
             })),
             // collection of recycled files
             recycled_files: CachePadded::new(RwLock::new(RecycleFileCollection::new(
-                recycle_capacity,
+                if let Some(capacity) = recycle_capacity {
+                    if capacity >= total_files {
+                        Some(capacity - total_files)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
             ))),
             active_file: CachePadded::new(Mutex::new(active_file)),
         };
@@ -252,20 +276,17 @@ impl<F: FileSystem> SinglePipe<F> {
             queue: self.queue,
             seq,
         };
-        // Here, check whether exists extra spare / useless files or not in advance.
-        // If there still existed extra free files, pop one as the active file, with
-        // `rename` by the func `recycle_one_file`.
-        let do_recycle = {
-            let mut recycled_files = self.recycled_files.write();
-            recycled_files.recycle_one_file(&self.file_system, &self.dir, file_id)
-        };
         let path = file_id.build_file_path(&self.dir);
-        // If `[do_recycle]` == true, it means that the chosen file is a recycled log
-        // file.
-        let fd = if do_recycle {
+        let mut recycled_files = self.recycled_files.write();
+        // If there still existed extra free files in `RecycleFileCollection`,
+        // pop one as the active file, with `rename` by the func `recycle_one_file`.
+        let fd = if recycled_files.recycle_one_file(&self.file_system, &self.dir, file_id) {
             // Open the recycled file(file is already renamed)
             Arc::new(self.file_system.open(&path)?)
         } else {
+            // A new file is introduced, so we should update the capacity of
+            // `ReycleFileCollection` by "current_capacity - 1".
+            recycled_files.upd_capacity(-1);
             Arc::new(self.file_system.create(&path)?)
         };
         let mut new_file = ActiveFile {
@@ -375,7 +396,9 @@ impl<F: FileSystem> SinglePipe<F> {
 
     fn total_size(&self) -> usize {
         let files = self.files.read();
-        (files.active_seq - files.first_seq + 1) as usize * self.target_file_size
+        let recycled_files = self.recycled_files.read();
+        ((files.active_seq - files.first_seq + 1) as usize + recycled_files.size())
+            * self.target_file_size
     }
 
     fn rotate(&self) -> Result<()> {
@@ -383,10 +406,6 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        // Closure for checking whether it's capable to do `[file recycle]`.
-        let can_recycle = |files: &mut RecycleFileCollection, file_id: FileId| -> bool {
-            files.push_one_file(file_id)
-        };
         let (purged, remained) = {
             let mut files = self.files.write();
             if file_seq > files.active_seq {
@@ -403,7 +422,6 @@ impl<F: FileSystem> SinglePipe<F> {
                 queue: self.queue,
                 seq,
             };
-            // let path = file_id.build_file_path(&self.dir);
             let mut path = file_id.build_file_path(&self.dir);
             #[cfg(feature = "failpoints")]
             {
@@ -415,11 +433,14 @@ impl<F: FileSystem> SinglePipe<F> {
                     continue;
                 }
             }
+            let mut recycled_files = self.recycled_files.write();
             // If we could recycle the file, we would put the file_id into the
             // `RecycleFileCollections` for the future reusing.
-            let mut recycled_files = self.recycled_files.write();
-            if can_recycle(&mut recycled_files, file_id) {
-                log::debug!("Do recycle the stale file {:?}", path);
+            if recycled_files.valid_to_push(1) {
+                // A stale file is purged, so we should update the capacity of
+                // `ReycleFileCollection` by "current_capacity + 1".
+                recycled_files.upd_capacity(1);
+                recycled_files.push_one_file(file_id);
                 continue;
             } else {
                 // If we could not push the stale file into the RecycleFileCollections, it means
@@ -550,21 +571,14 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {
-        let capacity_of_recycle = |default_file_size: usize,
-                                   purge_threshold: u64,
-                                   recycle_ratio: Option<f64>|
-         -> Option<u32> {
-            if let Some(ratio) = recycle_ratio {
+        let capacity_of_recycle =
+            |default_file_size: usize, purge_threshold: usize| -> Option<usize> {
                 if default_file_size == 0 || purge_threshold == 0 {
                     Option::None
                 } else {
-                    let recycle_capacity = (purge_threshold as f64) * ratio;
-                    Option::Some((recycle_capacity as usize / default_file_size) as u32)
+                    Option::Some(purge_threshold / default_file_size)
                 }
-            } else {
-                Option::None
-            }
-        };
+            };
         SinglePipe::open(
             cfg,
             Arc::new(DefaultFileSystem),
@@ -575,17 +589,9 @@ mod tests {
             match queue {
                 LogQueue::Append => capacity_of_recycle(
                     cfg.target_file_size.0 as usize,
-                    cfg.purge_threshold.0 as u64,
-                    cfg.recycle_garbage_ratio,
+                    cfg.purge_threshold.0 as usize,
                 ),
-                LogQueue::Rewrite => capacity_of_recycle(
-                    cfg.target_file_size.0 as usize,
-                    match &cfg.purge_rewrite_threshold {
-                        Some(thd) => thd.0,
-                        None => 0,
-                    } as u64,
-                    cfg.recycle_garbage_ratio,
-                ),
+                LogQueue::Rewrite => None,
             },
         )
     }
@@ -758,10 +764,17 @@ mod tests {
                 seq: old_file_id.seq + 1,
             };
             assert!(recycle_collections.valid());
+            assert_eq!(recycle_collections.size(), 0);
             assert!(recycle_collections.valid_to_push(1));
             assert!(recycle_collections.push_one_file(invalid_file_id));
+            assert_eq!(recycle_collections.size(), 1);
+            assert!(!recycle_collections.valid_to_push(1)); // full
+            recycle_collections.upd_capacity(1);
+            assert!(recycle_collections.valid_to_push(1));
+            recycle_collections.upd_capacity(-1);
             assert!(!recycle_collections.valid_to_push(1)); // full
             let ret = recycle_collections.pop_one_file();
+            assert_eq!(recycle_collections.size(), 0);
             assert!(ret.is_some());
             assert_eq!(invalid_file_id, ret.unwrap());
             // prepare old file
@@ -769,6 +782,7 @@ mod tests {
             // recycle old file
             assert!(recycle_collections.push_one_file(old_file_id));
             assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert_eq!(recycle_collections.size(), 0);
             assert!(recycle_collections.valid_to_push(1));
             // validate the content of recycled file
             assert!(validate_content_of_file(new_file_id, &data[..]).unwrap());
@@ -801,7 +815,6 @@ mod tests {
             target_file_size: ReadableSize::kb(1),
             bytes_per_sync: ReadableSize::kb(32),
             purge_threshold: ReadableSize::mb(1),
-            recycle_garbage_ratio: Some(0.001),
             ..Default::default()
         };
         let queue = LogQueue::Append;

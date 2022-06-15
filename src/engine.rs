@@ -24,9 +24,6 @@ use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
 
-#[cfg(feature = "scripting")]
-use crate::file_pipe_log::RecoveryConfig;
-
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
@@ -380,6 +377,7 @@ where
         script: String,
         file_system: Arc<F>,
     ) -> Result<()> {
+        use crate::file_pipe_log::RecoveryConfig;
         use crate::file_pipe_log::ReplayMachine;
 
         if !path.exists() {
