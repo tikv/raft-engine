@@ -479,7 +479,6 @@ fn test_mutable_format_version() {
     let data = vec![b'7'; 1024];
 
     {
-        println!("open engine with format_version - Version::V1");
         // open engine with format_version - Version::V1
         let engine = Engine::open(cfg_v1.clone()).unwrap();
         append(&engine, rid, 0, 20, Some(&data));
@@ -491,7 +490,6 @@ fn test_mutable_format_version() {
         assert_eq!(engine.last_index(rid).unwrap(), 19);
     }
     {
-        println!("open engine with format_version - Version::V2");
         // open engine with format_version - Version::V2
         let engine_wrapper = Engine::open(cfg_v2);
         assert!(engine_wrapper.is_ok());
@@ -507,7 +505,6 @@ fn test_mutable_format_version() {
         assert_eq!(engine.last_index(rid).unwrap(), 39);
     }
     {
-        println!("reopen engine with format_version - Version::V1");
         // reopen engine with format_version - Version::V1
         let engine_wrapper = Engine::open(cfg_v1);
         let engine = match engine_wrapper {

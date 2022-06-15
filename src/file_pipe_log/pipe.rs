@@ -230,7 +230,7 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     /// Returns a shared [`Version`] for the specified file sequence number.
-    fn get_file_version(&self, file_seq: FileSeq) -> Result<Version> {
+    fn get_format_version(&self, file_seq: FileSeq) -> Result<Version> {
         let files = self.files.read();
         if file_seq < files.first_seq || file_seq > files.active_seq {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
@@ -276,7 +276,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // loss before a new entry is written.
         new_file.writer.sync()?;
         self.sync_dir()?;
-        let active_file_version = new_file.writer.header.version();
+        let active_file_format_version = new_file.writer.header.version();
         **active_file = new_file;
 
         let len = {
@@ -285,7 +285,7 @@ impl<F: FileSystem> SinglePipe<F> {
             files.active_seq = seq;
             files.fds.push_back(FileHandler {
                 handle: fd,
-                version: active_file_version,
+                version: active_file_format_version,
             });
             for listener in &self.listeners {
                 listener.post_new_log_file(FileId {
@@ -316,7 +316,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let mut reader = build_file_reader(
             self.file_system.as_ref(),
             fd,
-            Some(self.get_file_version(handle.id.seq)?),
+            Some(self.get_format_version(handle.id.seq)?),
         )?;
         reader.read(handle)
     }
@@ -383,6 +383,10 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
+        // Closure for checking whether it's capable to do `[file recycle]`.
+        let can_recycle = |files: &mut RecycleFileCollection, file_id: FileId| -> bool {
+            files.push_one_file(file_id)
+        };
         let (purged, remained) = {
             let mut files = self.files.write();
             if file_seq > files.active_seq {
@@ -392,12 +396,6 @@ impl<F: FileSystem> SinglePipe<F> {
             files.fds.drain(..end_offset);
             files.first_seq = file_seq;
             (end_offset, files.fds.len())
-        };
-        // Closure for checking whether it's capable to do `[file recycle]`.
-        let can_recycle = |files: &mut RecycleFileCollection, file_id: FileId| -> bool {
-            // @TODO: lucasliang.
-            // We should also check the space of disk is spare for the recycled list.
-            files.push_one_file(file_id)
         };
         self.flush_metrics(remained);
         for seq in file_seq - purged as u64..file_seq {
@@ -535,8 +533,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn fetch_file_version(&self, file_id: FileId) -> Result<Version> {
-        self.pipes[file_id.queue as usize].get_file_version(file_id.seq)
+    fn fetch_format_version(&self, file_id: FileId) -> Result<Version> {
+        self.pipes[file_id.queue as usize].get_format_version(file_id.seq)
     }
 }
 
@@ -692,8 +690,8 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_version, Version::default());
+        let (format_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(format_version, Version::default());
         assert_eq!(file_seq.seq, 3);
     }
 
@@ -870,8 +868,8 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let (file_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_version, Version::default());
+        let (format_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(format_version, Version::default());
         assert_eq!(file_seq.seq, 3);
     }
 }

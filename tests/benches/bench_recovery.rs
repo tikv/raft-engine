@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use criterion::{BenchmarkId, Criterion};
+use criterion::{criterion_group, BenchmarkId, Criterion};
 use raft::eraftpb::Entry;
 use raft_engine::ReadableSize;
 use raft_engine::{Config as EngineConfig, Engine, LogBatch, MessageExt, Result};
@@ -66,6 +66,7 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     let ecfg = EngineConfig {
         dir: path.clone(),
         batch_compression_threshold: cfg.batch_compression_threshold,
+        format_version: cfg.format_version,
         ..Default::default()
     };
 
@@ -117,8 +118,7 @@ fn dir_size(path: &str) -> ReadableSize {
 
 // Benchmarks
 
-#[allow(dead_code)]
-pub fn bench_recovery(c: &mut Criterion) {
+fn bench_recovery(c: &mut Criterion) {
     // prepare input
     let cfgs = vec![
         (
@@ -134,7 +134,6 @@ pub fn bench_recovery(c: &mut Criterion) {
                 ..Default::default()
             },
         ),
-        /*
         (
             "small-batch-format-V1(1KB)".to_owned(),
             Config {
@@ -175,7 +174,6 @@ pub fn bench_recovery(c: &mut Criterion) {
                 ..Default::default()
             },
         ),
-        */
     ];
 
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
@@ -189,6 +187,7 @@ pub fn bench_recovery(c: &mut Criterion) {
         let ecfg = EngineConfig {
             dir: path.clone(),
             batch_compression_threshold: cfg.batch_compression_threshold,
+            format_version: cfg.format_version,
             ..Default::default()
         };
         c.bench_with_input(
@@ -206,10 +205,9 @@ pub fn bench_recovery(c: &mut Criterion) {
     }
     fail::remove("log_fd::open::fadvise_dontneed");
 }
-/*
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
     targets = bench_recovery
 }
-*/

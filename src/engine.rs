@@ -159,9 +159,9 @@ where
                     let log_batch = writer.get_mut_payload();
                     let res = if !log_batch.is_empty() {
                         // Signs a checksum, so-called `signature`, into the LogBatch.
-                        let (file_version, file_id) =
+                        let (format_version, file_id) =
                             self.pipe_log.fetch_active_file(LogQueue::Append);
-                        log_batch.sign_checksum(file_version, file_id);
+                        log_batch.sign_checksum(format_version, file_id);
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -489,7 +489,7 @@ where
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
             let file_id = idx.entries.unwrap().id;
-            let version = pipe_log.fetch_file_version(file_id)?;
+            let version = pipe_log.fetch_format_version(file_id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
@@ -516,7 +516,7 @@ where
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
             let file_id = idx.entries.unwrap().id;
-            let version = pipe_log.fetch_file_version(file_id)?;
+            let version = pipe_log.fetch_format_version(file_id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(

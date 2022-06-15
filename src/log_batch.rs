@@ -783,11 +783,11 @@ impl LogBatch {
                     // Insert the signature into the encoded bytes.
                     match self.buf_state {
                         BufState::Sealed(header_offset, len) => {
-                            // (1) Rewrite checksum of compressed / raw content of LogBatch
-                            //
-                            // As the encoding format, checksum of the embedded buf in
-                            // `LogBatch` is located a `header_offset` +
-                            // `buf_len(including header_len)` - `4(size of checksum)`.
+                            // Rewrite checksum of compressed / raw content of LogBatch
+                            // *
+                            // * As the encoding format, checksum of the embedded buf in
+                            // * `LogBatch` is located a `header_offset` +
+                            // * `buf_len(including header_len)` - `4(size of checksum)`.
                             let checksum_offset = header_offset + len + LOG_BATCH_HEADER_LEN - 4;
                             let signature = Signature::new(file_id).encode_as_u32();
                             match codec::decode_u32_le(
@@ -803,7 +803,7 @@ impl LogBatch {
                                 }
                                 _ => unreachable!(),
                             };
-                            // (2) Rewrite checksum of LogItems of LogBatch
+                            // Rewrite checksum of LogItemBatch in LogBatch
                             let footer_checksum_offset = self.buf.len();
                             match codec::decode_u32_le(
                                 &mut &self.buf[footer_checksum_offset - LOG_BATCH_CHECKSUM_LEN..],
@@ -926,37 +926,6 @@ impl LogBatch {
     }
 }
 
-/*
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-enum VerifyMode {
-    CheckWithoutSignature, // verify the checksum without signature.
-    CheckWithSignature,    // verify the checksum with signature.
-    DoubleCheck,           // verify the checksum both with signature and initial.
-}
-*/
-
-/*
-/// Verifies the checksum of a slice of bytes that sequentially holds data.
-fn verify_checksum(buf: &[u8]) -> Result<()> {
-    if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
-        return Err(Error::Corruption(format!(
-            "Content too short {}",
-            buf.len()
-        )));
-    }
-    let expected = codec::decode_u32_le(&mut &buf[buf.len() - LOG_BATCH_CHECKSUM_LEN..])?;
-    let actual = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
-    if actual != expected {
-        return Err(Error::Corruption(format!(
-            "Checksum expected {} but got {}",
-            expected, actual
-        )));
-    }
-    Ok(())
-}
-*/
-
 /// Verifies the checksum of a slice of bytes that sequentially holds data and
 /// checksum with the given `[signature]`.
 fn verify_checksum(buf: &[u8], version: Version, mut signature: Signature) -> Result<()> {
@@ -972,17 +941,6 @@ fn verify_checksum(buf: &[u8], version: Version, mut signature: Signature) -> Re
         Version::V1 => actual,
         Version::V2 => actual ^ signature.encode_as_u32(),
     };
-    /*
-    // Here, we could not get enough messages to distinguish the source of the data block, as the data
-    // block could both belong to `[RecycleFiles]`(LogBatch is encoded with `[signature]`) and
-    // `[NormalFiles]`(LogBatch is encoded without `[signature]`). So, we do the double check of
-    // the checksum validation. It just introduces a little cost on CPU.
-    let invalid_flag = match mode {
-        VerifyMode::CheckWithoutSignature => actual != expected,
-        VerifyMode::CheckWithSignature => actual_with_signature != expected,
-        VerifyMode::DoubleCheck => actual != expected && actual_with_signature != expected,
-    };
-    */
     if actual_with_signature != expected {
         return Err(Error::Corruption(format!(
             "Checksum expected {} but got {}, format_version: {:?}",
@@ -1218,7 +1176,7 @@ mod tests {
             let len = batch.finish_populate(if compress { 1 } else { 0 }).unwrap();
             assert!(old_approximate_size >= len);
             assert_eq!(batch.approximate_size(), len);
-            let mut batch_handle = mocked_file_block_handle/* FileBlockHandle::dummy(LogQueue::Append) */;
+            let mut batch_handle = mocked_file_block_handle;
             batch_handle.len = len;
             batch.sign_checksum(version, batch_handle.id);
             batch.finish_write(batch_handle);
@@ -1249,7 +1207,7 @@ mod tests {
                 Signature::new(mocked_file_block_handle.id)
             )
             .is_ok());
-            let mut entries_handle = mocked_file_block_handle /* FileBlockHandle::dummy(LogQueue::Append) */;
+            let mut entries_handle = mocked_file_block_handle;
             entries_handle.offset = LOG_BATCH_HEADER_LEN as u64;
             entries_handle.len = offset - LOG_BATCH_HEADER_LEN;
             let decoded_item_batch = LogItemBatch::decode(

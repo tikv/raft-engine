@@ -165,8 +165,8 @@ pub trait PipeLog: Sized {
     /// Returns the number of deleted files.
     fn purge_to(&self, file_id: FileId) -> Result<usize>;
 
-    /// Returns the `Version` corresponding to the given `[FileId]`
-    fn fetch_file_version(&self, file_id: FileId) -> Result<Version>;
+    /// Returns the `[Version]` corresponding to the given `[FileId]`
+    fn fetch_format_version(&self, file_id: FileId) -> Result<Version>;
 
     /// Returns the active `[FileId]` and related `[Version]` of the specific
     /// log queue.

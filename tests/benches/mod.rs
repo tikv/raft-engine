@@ -2,15 +2,8 @@
 
 extern crate libc;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::criterion_main;
 
-mod bench_falloc;
 mod bench_recovery;
 
-// criterion_main!(bench_recovery::benches);
-criterion_group! {
-    name = benches;
-    config = Criterion::default().sample_size(10);
-    targets = bench_recovery::bench_recovery, bench_falloc::bench_fallocate
-}
-criterion_main!(benches);
+criterion_main!(bench_recovery::benches);
