@@ -43,12 +43,12 @@ impl<P, O> Writer<P, O> {
     }
 
     /// Returns an immutable reference to the payload.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn get_payload(&self) -> &P {
         unsafe { &*self.payload }
     }
 
-    /// Returns an immutable reference to the payload.
+    /// Returns a mutable reference to the payload.
     pub fn get_mut_payload(&mut self) -> &mut P {
         unsafe { &mut *self.payload }
     }

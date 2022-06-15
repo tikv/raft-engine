@@ -491,9 +491,7 @@ fn test_mutable_format_version() {
     }
     {
         // open engine with format_version - Version::V2
-        let engine_wrapper = Engine::open(cfg_v2);
-        assert!(engine_wrapper.is_ok());
-        let engine = engine_wrapper.unwrap();
+        let engine = Engine::open(cfg_v2).unwrap();
         assert_eq!(engine.first_index(rid).unwrap(), 18);
         assert_eq!(engine.last_index(rid).unwrap(), 19);
         append(&engine, rid, 20, 40, Some(&data));
@@ -506,13 +504,7 @@ fn test_mutable_format_version() {
     }
     {
         // reopen engine with format_version - Version::V1
-        let engine_wrapper = Engine::open(cfg_v1);
-        let engine = match engine_wrapper {
-            Ok(eng) => eng,
-            Err(err) => {
-                panic!("Err : {:?}", err);
-            }
-        };
+        let engine = Engine::open(cfg_v1).unwrap();
         assert_eq!(engine.first_index(rid).unwrap(), 38);
         assert_eq!(engine.last_index(rid).unwrap(), 39);
     }

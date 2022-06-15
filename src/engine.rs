@@ -19,13 +19,10 @@ use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilde
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog, Signature};
+use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result};
-
-#[cfg(feature = "scripting")]
-use crate::file_pipe_log::RecoveryConfig;
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -157,7 +154,7 @@ where
                         // Signs a checksum, so-called `signature`, into the LogBatch.
                         let (format_version, file_id) =
                             self.pipe_log.fetch_active_file(LogQueue::Append);
-                        log_batch.sign_checksum(format_version, file_id);
+                        log_batch.prepare_write(format_version, file_id);
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -380,6 +377,7 @@ where
         script: String,
         file_system: Arc<F>,
     ) -> Result<()> {
+        use crate::file_pipe_log::RecoveryConfig;
         use crate::file_pipe_log::ReplayMachine;
 
         if !path.exists() {
@@ -484,15 +482,12 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
-            let file_id = idx.entries.unwrap().id;
-            let version = pipe_log.fetch_format_version(file_id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
-                    (version, Signature::new(file_id)),
                 )?,
             );
         }
@@ -511,15 +506,12 @@ where
 {
     BLOCK_CACHE.with(|cache| {
         if cache.key.get() != idx.entries.unwrap() {
-            let file_id = idx.entries.unwrap().id;
-            let version = pipe_log.fetch_format_version(file_id)?;
             cache.insert(
                 idx.entries.unwrap(),
                 LogBatch::decode_entries_block(
                     &pipe_log.read_bytes(idx.entries.unwrap())?,
                     idx.entries.unwrap(),
                     idx.compression_type,
-                    (version, Signature::new(file_id)),
                 )?,
             );
         }

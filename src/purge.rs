@@ -353,7 +353,7 @@ where
         }
         // Signs a checksum, so-called `signature`, into the LogBatch.
         let (format_version, file_id) = self.pipe_log.fetch_active_file(LogQueue::Rewrite);
-        log_batch.sign_checksum(format_version, file_id);
+        log_batch.prepare_write(format_version, file_id);
         let file_handle = self
             .pipe_log
             .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
