@@ -411,14 +411,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     self.cfg.purge_threshold.0 as u64,
                     self.cfg.recycle_garbage_ratio,
                 ),
-                LogQueue::Rewrite => capacity_of_recycle(
-                    self.cfg.target_file_size.0 as usize,
-                    match &self.cfg.purge_rewrite_threshold {
-                        Some(thd) => thd.0,
-                        None => 0,
-                    } as u64,
-                    self.cfg.recycle_garbage_ratio,
-                ),
+                // No need to build RecycleFileCollection for
+                // LogQueue::Rewrite.
+                LogQueue::Rewrite => None,
             },
         )
     }

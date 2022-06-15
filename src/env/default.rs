@@ -172,33 +172,6 @@ impl LogFd {
             Ok(())
         }
     }
-
-    #[allow(unused_variables)]
-    pub fn allocate_with_hole(&self, offset: usize, size: usize) -> IoResult<()> {
-        fail_point!("log_fd::falloc_with_hole::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        #[cfg(target_os = "linux")]
-        {
-            fcntl::fallocate(
-                self.0,
-                // It'a special flag for users who want to `fallcate` a file with
-                // fill a `hole`(that is, zero) into the specified `offset + size`
-                // position in the file, which is equivalent to the manual `fallocate`
-                // and `fill zeros` into the file.
-                // Refer to `[link]https://man7.org/linux/man-pages/man2/fallocate.2.html`.
-                fcntl::FallocateFlags::FALLOC_FL_KEEP_SIZE
-                    | fcntl::FallocateFlags::FALLOC_FL_PUNCH_HOLE,
-                offset as i64,
-                size as i64,
-            )
-            .map_err(|e| from_nix_error(e, "fallocate"))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(())
-        }
-    }
 }
 
 impl Handle for LogFd {
@@ -297,10 +270,6 @@ impl WriteExt for LogFile {
 
     fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {
         self.inner.allocate(offset, size)
-    }
-
-    fn allocate_with_hole(&mut self, offset: usize, size: usize) -> IoResult<()> {
-        self.inner.allocate_with_hole(offset, size)
     }
 }
 

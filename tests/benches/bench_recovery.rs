@@ -27,7 +27,6 @@ struct Config {
     item_size: ReadableSize,
     entry_size: ReadableSize,
     batch_compression_threshold: ReadableSize,
-    format_version: u64,
 }
 
 impl Default for Config {
@@ -39,21 +38,19 @@ impl Default for Config {
             item_size: ReadableSize::kb(1),
             entry_size: ReadableSize(256),
             batch_compression_threshold: ReadableSize(0),
-            format_version: 1,
         }
     }
 }
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}][format_version: {}]",
+        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
             self.total_size,
             self.region_count,
             self.batch_size,
             self.item_size,
             self.entry_size,
             self.batch_compression_threshold,
-            self.format_version,
         )
     }
 }
@@ -66,7 +63,6 @@ fn generate(cfg: &Config) -> Result<TempDir> {
     let ecfg = EngineConfig {
         dir: path.clone(),
         batch_compression_threshold: cfg.batch_compression_threshold,
-        format_version: cfg.format_version,
         ..Default::default()
     };
 
@@ -135,42 +131,20 @@ fn bench_recovery(c: &mut Criterion) {
             },
         ),
         (
-            "small-batch-format-V1(1KB)".to_owned(),
+            "small-batch(1KB)".to_owned(),
             Config {
                 region_count: 100,
                 batch_size: ReadableSize::kb(1),
                 item_size: ReadableSize(256),
                 entry_size: ReadableSize(32),
-                format_version: 1,
                 ..Default::default()
             },
         ),
         (
-            "small-batch-format-V2(1KB)".to_owned(),
-            Config {
-                region_count: 100,
-                batch_size: ReadableSize::kb(1),
-                item_size: ReadableSize(256),
-                entry_size: ReadableSize(32),
-                format_version: 2,
-                ..Default::default()
-            },
-        ),
-        (
-            "10GB-format-V1".to_owned(),
+            "10GB".to_owned(),
             Config {
                 total_size: ReadableSize::gb(10),
                 region_count: 1000,
-                format_version: 1,
-                ..Default::default()
-            },
-        ),
-        (
-            "10GB-format-V2".to_owned(),
-            Config {
-                total_size: ReadableSize::gb(10),
-                region_count: 1000,
-                format_version: 2,
                 ..Default::default()
             },
         ),
@@ -187,7 +161,6 @@ fn bench_recovery(c: &mut Criterion) {
         let ecfg = EngineConfig {
             dir: path.clone(),
             batch_compression_threshold: cfg.batch_compression_threshold,
-            format_version: cfg.format_version,
             ..Default::default()
         };
         c.bench_with_input(

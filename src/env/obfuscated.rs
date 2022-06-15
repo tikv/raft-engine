@@ -63,10 +63,6 @@ impl WriteExt for ObfuscatedWriter {
     fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {
         self.0.allocate(offset, size)
     }
-
-    fn allocate_with_hole(&mut self, offset: usize, size: usize) -> IoResult<()> {
-        self.0.allocate_with_hole(offset, size)
-    }
 }
 
 /// `[ObfuscatedFileSystem]` is a special implementation of `[FileSystem]`,

@@ -35,5 +35,4 @@ pub trait WriteExt {
     fn truncate(&mut self, offset: usize) -> Result<()>;
     fn sync(&mut self) -> Result<()>;
     fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
-    fn allocate_with_hole(&mut self, offset: usize, size: usize) -> Result<()>;
 }

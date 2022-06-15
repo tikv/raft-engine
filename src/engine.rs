@@ -143,10 +143,6 @@ where
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
             let mut writer = Writer::new(log_batch, sync, start);
-            // Here, we introduce the `GroupCommit` by the self-implemented
-            // `Write Barrier` to improve the data syncing of multi-thread writing.
-            // If the `write_barrier.enter(...)` returned the leader of the
-            // writer group, it would responsible for dumping data into the log.
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
