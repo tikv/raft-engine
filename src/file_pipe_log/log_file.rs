@@ -105,6 +105,10 @@ impl<F: FileSystem> LogFileWriter<F> {
         Ok(())
     }
 
+    pub fn reset(&mut self) -> Result<()> {
+        self.write_header()
+    }
+
     pub fn sync(&mut self) -> Result<()> {
         if self.last_sync < self.written {
             let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
