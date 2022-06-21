@@ -2,9 +2,9 @@
 
 ## [Unreleased]
 
-### Behavior Changes
+### Bug Fixes
 
-* Tolerate unsupported `fallocate` calls on Linux.
+* Unconditionally tolerate `fallocate` failures as a fix to its portability issue.
 
 ## [0.2.0] - 2022-05-25
 
