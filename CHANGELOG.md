@@ -4,7 +4,7 @@
 
 ### Bug Fixes
 
-* Unconditionally tolerate `fallocate` failures as a fix to its portability issue.
+* Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
 
 ## [0.2.0] - 2022-05-25
 
