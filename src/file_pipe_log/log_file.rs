@@ -5,12 +5,14 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
+use log::warn;
+
+use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
 use crate::{Error, Result};
 
 use super::format::LogFileHeader;
-use crate::env::{FileSystem, Handle, WriteExt};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
@@ -82,7 +84,9 @@ impl<F: FileSystem> LogFileWriter<F> {
                     target_size_hint.saturating_sub(self.capacity),
                 ),
             );
-            self.writer.allocate(self.capacity, alloc)?;
+            if let Err(e) = self.writer.allocate(self.capacity, alloc) {
+                warn!("log file allocation failed: {}", e);
+            }
             self.capacity += alloc;
         }
         self.writer.write_all(buf)?;
