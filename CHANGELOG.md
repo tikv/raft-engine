@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Bug Fixes
+
+* Fix `fallocate` portability issue by tolerating its failure unconditionally.
+
 ## [0.2.0] - 2022-05-25
 
 ### Bug Fixes

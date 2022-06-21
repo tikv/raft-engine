@@ -159,10 +159,7 @@ impl LogFd {
                 size as i64,
             );
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(())
-        }
+        Ok(())
     }
 }
 
