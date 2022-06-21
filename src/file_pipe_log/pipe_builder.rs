@@ -20,7 +20,7 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileFormat, Version};
+use super::format::{lock_file_path, FileNameExt, LogFileContext, LogFileFormat, Version};
 use super::log_file::{build_file_reader, FileHandler};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
@@ -391,7 +391,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .iter()
             .map(|f| FileHandler {
                 handle: f.handle.clone(),
-                version: f.version.unwrap(),
+                context: LogFileContext::new(FileId { seq: f.seq, queue }, f.version.unwrap()),
             })
             .collect();
         SinglePipe::open(

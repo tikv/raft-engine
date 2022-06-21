@@ -4,7 +4,7 @@
 
 use std::cmp::Ordering;
 
-use crate::file_pipe_log::Version;
+use crate::file_pipe_log::{LogFileContext, Version};
 use crate::Result;
 
 /// The type of log queue.
@@ -75,49 +75,6 @@ impl FileBlockHandle {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
-enum Content {
-    Checksum(u32),
-}
-
-#[derive(Debug, Clone)]
-pub struct Signature {
-    pub id: FileId,
-    _cont: Option<Content>,
-}
-
-impl Signature {
-    pub fn new(file_id: FileId) -> Self {
-        let mut ret = Self {
-            id: file_id,
-            _cont: None,
-        };
-        ret.encode_as_u32(); // default
-        ret
-    }
-
-    #[cfg(test)]
-    pub fn dummy(queue: LogQueue) -> Self {
-        Self {
-            id: FileId::dummy(queue),
-            _cont: None,
-        }
-    }
-
-    /// Encode the signature and output it as `u32`.
-    pub fn encode_as_u32(&mut self) -> u32 {
-        if self._cont.is_none() {
-            let high = (self.id.seq as u64 >> 32) as u32;
-            let low = self.id.seq as u32;
-            let flag = self.id.queue as usize;
-            self._cont = Some(Content::Checksum(high ^ low ^ (flag as u32)));
-        }
-        match self._cont.unwrap() {
-            Content::Checksum(v) => v,
-        }
-    }
-}
-
 /// A `PipeLog` serves reads and writes over multiple queues of log files.
 pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
@@ -168,9 +125,7 @@ pub trait PipeLog: Sized {
     /// Returns the `[Version]` corresponding to the given `[FileId]`
     fn fetch_format_version(&self, file_id: FileId) -> Result<Version>;
 
-    /// Returns the active `[FileId]` and related `[Version]` of the specific
+    /// Returns `[LogFileContext]` of the active file in the specific
     /// log queue.
-    ///
-    /// Returns the `[Version]` and `[FileId]` of the related file.
-    fn fetch_active_file(&self, queue: LogQueue) -> (Version, FileId);
+    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext;
 }

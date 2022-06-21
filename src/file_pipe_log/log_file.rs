@@ -9,7 +9,7 @@ use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
 use crate::{Error, Result};
 
-use super::format::{LogFileFormat, Version};
+use super::format::{LogFileContext, LogFileFormat, Version};
 use crate::env::{FileSystem, Handle, WriteExt};
 
 /// Maximum number of bytes to allocate ahead.
@@ -19,7 +19,7 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 #[derive(Debug)]
 pub struct FileHandler<F: FileSystem> {
     pub handle: Arc<F::Handle>,
-    pub version: Version,
+    pub context: LogFileContext,
 }
 
 /// Build a file writer.

@@ -18,7 +18,7 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{Error, Result};
 
-use super::format::{FileNameExt, Version};
+use super::format::{FileNameExt, LogFileContext, Version};
 use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
@@ -65,7 +65,6 @@ impl<F: FileSystem> FileCollection<F> {
         let mut ret = false;
         let first_file_id = FileId {
             queue: dst_fd.queue,
-            // seq: self.first_seq,
             seq: self.first_stale_seq,
         };
         if self.fds.pop_front().is_some() {
@@ -143,7 +142,10 @@ impl<F: FileSystem> SinglePipe<F> {
             let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
             fds.push_back(FileHandler {
                 handle: fd,
-                version: Version::from_u64(cfg.format_version).unwrap(),
+                context: LogFileContext::new(
+                    file_id,
+                    Version::from_u64(cfg.format_version).unwrap(),
+                ),
             });
             first_seq
         } else {
@@ -163,7 +165,7 @@ impl<F: FileSystem> SinglePipe<F> {
             writer: build_file_writer(
                 file_system.as_ref(),
                 active_fd.handle.clone(),
-                active_fd.version,
+                active_fd.context.version,
             )?,
         };
 
@@ -215,7 +217,9 @@ impl<F: FileSystem> SinglePipe<F> {
         if file_seq < files.first_seq || file_seq > files.active_seq {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        Ok(files.fds[(file_seq - files.first_stale_seq) as usize].version)
+        Ok(files.fds[(file_seq - files.first_stale_seq) as usize]
+            .context
+            .version)
     }
 
     /// Creates a new file for write, and rotates the active log file.
@@ -263,7 +267,13 @@ impl<F: FileSystem> SinglePipe<F> {
             files.active_seq = seq;
             files.fds.push_back(FileHandler {
                 handle: fd,
-                version: active_file_format_version,
+                context: LogFileContext::new(
+                    FileId {
+                        seq,
+                        queue: self.queue,
+                    },
+                    active_file_format_version,
+                ),
             });
             for listener in &self.listeners {
                 listener.post_new_log_file(FileId {
@@ -442,14 +452,14 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(purged + recycled)
     }
 
-    fn fetch_active_file(&self) -> (Version, FileId) {
+    fn fetch_active_file(&self) -> LogFileContext {
         let active_file = self.active_file.lock();
-        (
-            active_file.writer.header.version(),
+        LogFileContext::new(
             FileId {
                 queue: self.queue,
                 seq: active_file.seq,
             },
+            active_file.writer.header.version(),
         )
     }
 }
@@ -522,7 +532,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn fetch_active_file(&self, queue: LogQueue) -> (Version, FileId) {
+    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext {
         self.pipes[queue as usize].fetch_active_file()
     }
 
@@ -669,9 +679,9 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let (format_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(format_version, Version::default());
-        assert_eq!(file_seq.seq, 3);
+        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(file_context.version, Version::default());
+        assert_eq!(file_context.id.seq, 3);
     }
 
     #[test]
@@ -750,7 +760,7 @@ mod tests {
                         .open(&old_file_id.build_file_path(path))
                         .unwrap(),
                 ),
-                version: Version::default(),
+                context: LogFileContext::dummy(LogQueue::Append),
             });
             // recycle an old file
             assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
@@ -762,7 +772,7 @@ mod tests {
                             .open(&old_file_id.build_file_path(path))
                             .unwrap(),
                     ),
-                    version: Version::default(),
+                    context: LogFileContext::dummy(LogQueue::Append),
                 });
                 recycle_collections.first_seq = cur_file_id.seq;
                 recycle_collections.active_seq = cur_file_id.seq;
@@ -866,8 +876,8 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let (format_version, file_seq) = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(format_version, Version::default());
-        assert_eq!(file_seq.seq, 3);
+        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
+        assert_eq!(file_context.version, Version::default());
+        assert_eq!(file_context.id.seq, 3);
     }
 }

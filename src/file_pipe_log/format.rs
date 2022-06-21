@@ -156,6 +156,59 @@ impl LogFileFormat {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum Content {
+    Checksum(u32),
+}
+
+#[derive(Debug, Clone)]
+pub struct LogFileContext {
+    pub id: FileId,
+    pub version: Version,
+    _cont: Option<Content>,
+}
+
+impl LogFileContext {
+    pub fn new(file_id: FileId, version: Version) -> Self {
+        let mut ret = Self {
+            id: file_id,
+            version,
+            _cont: None,
+        };
+        ret.encode_as_u32(); // default
+        ret
+    }
+
+    #[cfg(test)]
+    pub fn dummy(queue: LogQueue) -> Self {
+        Self {
+            id: FileId::dummy(queue),
+            version: Version::default(),
+            _cont: None,
+        }
+    }
+
+    /// Encode the signature and output it as `u32`.
+    pub fn encode_as_u32(&mut self) -> u32 {
+        if self._cont.is_none() {
+            let high = (self.id.seq as u64 >> 32) as u32;
+            let low = self.id.seq as u32;
+            let flag = self.id.queue as usize;
+            self._cont = Some(Content::Checksum(high ^ low ^ (flag as u32)));
+        }
+        match self._cont.unwrap() {
+            Content::Checksum(v) => v,
+        }
+    }
+
+    pub fn get_signature_as_u32(&self) -> u32 {
+        match self._cont {
+            None => 0,
+            Some(Content::Checksum(v)) => v,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

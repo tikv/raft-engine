@@ -151,10 +151,10 @@ where
                     sync |= writer.sync;
                     let log_batch = writer.get_mut_payload();
                     let res = if !log_batch.is_empty() {
-                        // Signs a checksum, so-called `signature`, into the LogBatch.
-                        let (format_version, file_id) =
-                            self.pipe_log.fetch_active_file(LogQueue::Append);
-                        log_batch.prepare_write(format_version, file_id);
+                        // Signs a checksum, so-called `signature`, by the specified
+                        // `LogFileContext`, into the LogBatch.
+                        let file_format = self.pipe_log.fetch_active_file(LogQueue::Append);
+                        log_batch.prepare_write(&file_format);
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
