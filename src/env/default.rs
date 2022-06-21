@@ -159,18 +159,18 @@ impl LogFd {
         });
         #[cfg(target_os = "linux")]
         {
-            fcntl::fallocate(
+            if let Err(e) = fcntl::fallocate(
                 self.0,
                 fcntl::FallocateFlags::empty(),
                 offset as i64,
                 size as i64,
-            )
-            .map_err(|e| from_nix_error(e, "fallocate"))
+            ) {
+                if e != nix::Error::EOPNOTSUPP {
+                    return Err(from_nix_error(e, "fallocate"));
+                }
+            }
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(())
-        }
+        Ok(())
     }
 }
 
