@@ -611,6 +611,15 @@ mod tests {
                 reader(e.index, entry_index.entries.unwrap().id.queue, &e.data);
             }
         }
+
+        fn file_count(&self, queue: Option<LogQueue>) -> usize {
+            if let Some(queue) = queue {
+                let (a, b) = self.file_span(queue);
+                (b - a + 1) as usize
+            } else {
+                self.file_count(Some(LogQueue::Append)) + self.file_count(Some(LogQueue::Rewrite))
+            }
+        }
     }
 
     #[test]
@@ -1597,5 +1606,31 @@ mod tests {
                 .unwrap();
             vec.clear();
         });
+    }
+
+    #[test]
+    fn test_managed_file_deletion() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_managed_file_deletion")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        for rid in 1..=10 {
+            engine.append(rid, 1, 11, Some(&entry_data));
+        }
+        for rid in 1..=5 {
+            engine.clean(rid);
+        }
+        assert_eq!(engine.file_count(None), fs.file_count());
+        let engine = engine.reopen();
+        assert_eq!(engine.file_count(None), fs.file_count());
     }
 }

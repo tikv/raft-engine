@@ -1,7 +1,8 @@
-// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
+// Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.inner.
 
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
@@ -68,11 +69,23 @@ impl WriteExt for ObfuscatedWriter {
 /// `[ObfuscatedFileSystem]` is a special implementation of `[FileSystem]`,
 /// which is used for constructing and simulating an abnormal file system for
 /// `[Read]` and `[Write]`.
-pub struct ObfuscatedFileSystem(DefaultFileSystem);
+pub struct ObfuscatedFileSystem {
+    inner: DefaultFileSystem,
+    files: AtomicUsize,
+}
 
 impl Default for ObfuscatedFileSystem {
     fn default() -> Self {
-        ObfuscatedFileSystem(DefaultFileSystem)
+        ObfuscatedFileSystem {
+            inner: DefaultFileSystem,
+            files: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ObfuscatedFileSystem {
+    pub fn file_count(&self) -> usize {
+        self.files.load(Ordering::Relaxed)
     }
 }
 
@@ -82,18 +95,30 @@ impl FileSystem for ObfuscatedFileSystem {
     type Writer = ObfuscatedWriter;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
-        self.0.create(path)
+        let r = self.inner.create(path);
+        if r.is_ok() {
+            self.files.fetch_add(1, Ordering::Relaxed);
+        }
+        r
     }
 
     fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
-        self.0.open(path)
+        self.inner.open(path)
+    }
+
+    fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
+        let r = self.inner.delete(path);
+        if r.is_ok() {
+            self.files.fetch_sub(1, Ordering::Relaxed);
+        }
+        r
     }
 
     fn new_reader(&self, inner: Arc<Self::Handle>) -> IoResult<Self::Reader> {
-        Ok(ObfuscatedReader(self.0.new_reader(inner)?))
+        Ok(ObfuscatedReader(self.inner.new_reader(inner)?))
     }
 
     fn new_writer(&self, inner: Arc<Self::Handle>) -> IoResult<Self::Writer> {
-        Ok(ObfuscatedWriter(self.0.new_writer(inner)?))
+        Ok(ObfuscatedWriter(self.inner.new_writer(inner)?))
     }
 }

@@ -1,13 +1,13 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
-use log::{error, warn};
+use log::error;
 use num_traits::FromPrimitive;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -300,17 +300,15 @@ impl<F: FileSystem> SinglePipe<F> {
             let path = file_id.build_file_path(&self.dir);
             #[cfg(feature = "failpoints")]
             {
-                let remove_failure = || {
-                    fail::fail_point!("file_pipe_log::remove_file_failure", |_| true);
+                let remove_skipped = || {
+                    fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
                     false
                 };
-                if remove_failure() {
+                if remove_skipped() {
                     continue;
                 }
             }
-            if let Err(e) = fs::remove_file(&path) {
-                warn!("Remove purged log file {:?} failed: {}", path, e);
-            }
+            self.file_system.delete(&path)?;
         }
         Ok(purged)
     }
