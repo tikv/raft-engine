@@ -381,7 +381,6 @@ impl<F: FileSystem> SinglePipe<F> {
             if file_seq > files.active_seq {
                 return Err(box_err!("Purge active or newer files"));
             }
-            // /*
             let mut first_purge_seq = 0;
             let mut end_offset: usize = 0;
             let mut recycled: usize = 0;
