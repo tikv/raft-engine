@@ -16,7 +16,7 @@ use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
-use crate::{Error, Result};
+use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, Version};
 use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
@@ -154,7 +154,10 @@ impl<F: FileSystem> SinglePipe<F> {
     ///
     /// This operation is atomic in face of errors.
     fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<F>>) -> Result<()> {
-        let _t = StopWatch::new(&LOG_ROTATE_DURATION_HISTOGRAM);
+        let _t = StopWatch::new((
+            &*LOG_ROTATE_DURATION_HISTOGRAM,
+            perf_context!(log_rotate_nanos),
+        ));
         let seq = active_file.seq + 1;
         debug_assert!(seq > 1);
 

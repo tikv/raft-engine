@@ -13,6 +13,8 @@ use std::time::Instant;
 use fail::fail_point;
 use parking_lot::{Condvar, Mutex};
 
+use crate::{metrics::StopWatch, perf_context, PerfContext};
+
 type Ptr<T> = Option<NonNull<T>>;
 
 ///
@@ -23,6 +25,7 @@ pub struct Writer<P, O> {
 
     pub(crate) sync: bool,
     pub(crate) start_time: Instant,
+    pub(crate) perf_context_diff: PerfContext,
 }
 
 impl<P, O> Writer<P, O> {
@@ -39,6 +42,7 @@ impl<P, O> Writer<P, O> {
             output: None,
             sync,
             start_time,
+            perf_context_diff: PerfContext::default(),
         }
     }
 
@@ -179,6 +183,7 @@ impl<P, O> WriteBarrier<P, O> {
                 return None;
             } else {
                 // leader of next write group.
+                let _t = StopWatch::new(perf_context!(write_leader_wait_nanos));
                 inner.pending_leader.set(node);
                 inner
                     .pending_index

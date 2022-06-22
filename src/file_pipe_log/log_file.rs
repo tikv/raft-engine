@@ -10,7 +10,7 @@ use log::warn;
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
-use crate::{Error, Result};
+use crate::{perf_context, Error, Result};
 
 use super::format::{LogFileFormat, Version};
 
@@ -91,7 +91,7 @@ impl<F: FileSystem> LogFileWriter<F> {
     pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> Result<()> {
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
-            let _t = StopWatch::new(&LOG_ALLOCATE_DURATION_HISTOGRAM);
+            let _t = StopWatch::new(&*LOG_ALLOCATE_DURATION_HISTOGRAM);
             let alloc = std::cmp::max(
                 new_written - self.capacity,
                 std::cmp::min(
@@ -111,7 +111,10 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     pub fn sync(&mut self) -> Result<()> {
         if self.last_sync < self.written {
-            let _t = StopWatch::new(&LOG_SYNC_DURATION_HISTOGRAM);
+            let _t = StopWatch::new((
+                &*LOG_SYNC_DURATION_HISTOGRAM,
+                perf_context!(log_rotate_nanos),
+            ));
             self.writer.sync()?;
             self.last_sync = self.written;
         }
