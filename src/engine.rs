@@ -1618,6 +1618,7 @@ mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1),
             ..Default::default()
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
@@ -1629,6 +1630,9 @@ mod tests {
         for rid in 1..=5 {
             engine.clean(rid);
         }
+        let (start, _) = engine.file_span(LogQueue::Append);
+        engine.purge_expired_files().unwrap();
+        assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(None), fs.file_count());
         let engine = engine.reopen();
         assert_eq!(engine.file_count(None), fs.file_count());
