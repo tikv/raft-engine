@@ -353,3 +353,28 @@ fn test_swappy_page_create_error() {
     vec.resize(1024, 0);
     assert_eq!(allocator.memory_usage(), 0);
 }
+
+#[test]
+fn test_file_allocate_error() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_file_allocate_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::mb(100),
+        ..Default::default()
+    };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
+    let entry = vec![b'x'; 1024];
+    {
+        let _f = FailGuard::new("log_fd::allocate::err", "return");
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        engine
+            .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
+            .unwrap();
+    }
+    let engine = Engine::open_with_file_system(cfg, fs).unwrap();
+    assert_eq!(engine.first_index(1).unwrap(), 1);
+    assert_eq!(engine.last_index(1).unwrap(), 4);
+}

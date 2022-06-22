@@ -13,7 +13,7 @@ pub enum Error {
     InvalidArgument(String),
     #[error("Corruption: {0}")]
     Corruption(String),
-    #[error("IO Error: {0}")]
+    #[error("IO Error: {0:?}")]
     Io(#[from] IoError),
     #[error("Codec Error: {0}")]
     Codec(#[from] CodecError),
