@@ -162,8 +162,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let seq = i * min_id / max_sample;
                     let file_id = FileId { queue, seq };
                     let path = file_id.build_file_path(dir);
-                    if let Ok(true) = self.file_system.delete_metadata(&path) {
-                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample);
+                    if self.file_system.exists_metadata(&path) {
+                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
                         break;
                     }
                 }
@@ -175,7 +175,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         let path = file_id.build_file_path(dir);
                         match self.file_system.delete_metadata(&path) {
                             Err(e) => {
-                                error!("failed to delete metadata of {}: {e}.", path.display());
+                                error!("failed to delete metadata of {}: {}.", path.display(), e);
                                 break;
                             }
                             Ok(true) => success += 1,
@@ -183,7 +183,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         }
                     }
                     warn!(
-                        "deleted {success} stale files of {queue:?} in range [{start}, {min_id})."
+                        "deleted {} stale files of {:?} in range [{}, {}).",
+                        success, queue, start, min_id,
                     );
                 }
                 for seq in min_id..=max_id {

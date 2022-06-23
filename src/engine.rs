@@ -1695,7 +1695,7 @@ mod tests {
         }
 
         fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<bool> {
-            Ok(self.inner.delete_metadata(&path)? || self.update_metadata(path.as_ref(), true))
+            Ok(self.inner.delete_metadata(&path)? | self.update_metadata(path.as_ref(), true))
         }
 
         fn exists_metadata<P: AsRef<Path>>(&self, path: P) -> bool {
@@ -1747,12 +1747,18 @@ mod tests {
         assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(None), fs.inner.file_count());
         let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(fs.append_metadata.lock().unwrap().first().unwrap(), &start);
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
 
         let engine = engine.reopen();
         assert_eq!(engine.file_count(None), fs.inner.file_count());
         let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(fs.append_metadata.lock().unwrap().first().unwrap(), &start);
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
 
         // Simulate stale metadata.
         for i in start / 2..start {
@@ -1760,6 +1766,9 @@ mod tests {
         }
         let engine = engine.reopen();
         let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(fs.append_metadata.lock().unwrap().first().unwrap(), &start);
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
     }
 }
