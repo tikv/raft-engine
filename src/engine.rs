@@ -142,6 +142,8 @@ where
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
             let mut writer = Writer::new(log_batch, sync, start);
+            // Snapshot and clear the current perf context temporarily, so the write group
+            // leader will collect the perf context diff later.
             let mut perf_context = get_perf_context().with(|pc| pc.take());
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
@@ -175,6 +177,7 @@ where
                         e
                     );
                 }
+                // Pass the perf context diff to all the writers.
                 get_perf_context().with(|pc| {
                     let diff = pc.borrow();
                     for writer in group.iter_mut() {

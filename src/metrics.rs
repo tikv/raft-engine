@@ -109,8 +109,10 @@ macro_rules! perf_context {
 pub trait TimeMetric {
     fn observe(&self, duration: Duration);
 
-    fn observe_since(&self, earlier: Instant) {
-        self.observe(earlier.saturating_elapsed());
+    fn observe_since(&self, earlier: Instant) -> Duration {
+        let dur = earlier.saturating_elapsed();
+        self.observe(dur);
+        dur
     }
 }
 
