@@ -303,9 +303,14 @@ where
         self.memtables.is_empty()
     }
 
-    // For testing.
+    /// Returns the range of sequence number of `active` files of the
+    /// specific `LogQueue`.
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
+    }
+
+    pub fn expired_file_count(&self, queue: LogQueue) -> usize {
+        self.pipe_log.expired_file_count(queue)
     }
 
     pub fn get_used_size(&self) -> usize {
@@ -624,7 +629,7 @@ mod tests {
         fn file_count(&self, queue: Option<LogQueue>) -> usize {
             if let Some(queue) = queue {
                 let (a, b) = self.file_span(queue);
-                (b - a + 1) as usize
+                (b - a + 1) as usize + self.expired_file_count(queue)
             } else {
                 self.file_count(Some(LogQueue::Append)) + self.file_count(Some(LogQueue::Rewrite))
             }
@@ -1747,8 +1752,10 @@ mod tests {
         let (start, _) = engine.file_span(LogQueue::Append);
         engine.purge_expired_files().unwrap();
         assert!(start < engine.file_span(LogQueue::Append).0);
+        let expired_file_count = engine.expired_file_count(LogQueue::Append);
+        assert_eq!(expired_file_count, 1);
         assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let start = engine.file_span(LogQueue::Append).0 - expired_file_count as u64;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start

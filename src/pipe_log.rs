@@ -91,9 +91,12 @@ pub trait PipeLog: Sized {
     /// call it once every batch of writes.
     fn maybe_sync(&self, queue: LogQueue, sync: bool) -> Result<()>;
 
-    /// Returns the smallest and largest file sequence number of the specified
-    /// log queue.
+    /// Returns the smallest and largest file sequence number, still in use,
+    /// of the specified log queue.
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
+
+    /// Returns the count of expired files of the specified log queue.
+    fn expired_file_count(&self, queue: LogQueue) -> usize;
 
     /// Returns the oldest file ID that is newer than `position`% of all files.
     fn file_at(&self, queue: LogQueue, mut position: f64) -> FileSeq {

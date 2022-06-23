@@ -352,6 +352,11 @@ impl<F: FileSystem> SinglePipe<F> {
         )
     }
 
+    fn expired_file_count(&self) -> usize {
+        let files = self.files.read();
+        (files.first_seq_in_use - files.first_seq) as usize
+    }
+
     fn total_size(&self) -> usize {
         let files = self.files.read();
         files.fds.len() * self.target_file_size
@@ -494,6 +499,11 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
         self.pipes[queue as usize].file_span()
+    }
+
+    #[inline]
+    fn expired_file_count(&self, queue: LogQueue) -> usize {
+        self.pipes[queue as usize].expired_file_count()
     }
 
     #[inline]
@@ -808,10 +818,12 @@ mod tests {
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
+        assert_eq!(pipe_log.expired_file_count(queue), 1);
         assert_eq!(pipe_log.file_span(queue).0, 2);
 
         // cannot purge active file
         assert!(pipe_log.purge_to(FileId { queue, seq: 4 }).is_err());
+        assert_eq!(pipe_log.expired_file_count(queue), 1);
 
         // append position
         let s_content = b"short content".to_vec();
@@ -847,6 +859,7 @@ mod tests {
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
         assert_eq!(pipe_log.file_span(queue), (3, 3));
+        assert_eq!(pipe_log.expired_file_count(queue), 2);
 
         // fetch active file
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
