@@ -373,7 +373,7 @@ fn test_incomplete_purge() {
     let engine = Engine::open(cfg.clone()).unwrap();
 
     {
-        let _f = FailGuard::new("file_pipe_log::remove_file_failure", "return");
+        let _f = FailGuard::new("file_pipe_log::remove_file_skipped", "return");
         append(&engine, rid, 0, 20, Some(&data));
         let append_first = engine.file_span(LogQueue::Append).0;
         engine.compact_to(rid, 18);
