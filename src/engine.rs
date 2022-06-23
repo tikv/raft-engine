@@ -15,9 +15,7 @@ use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{
-    DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, RecoveryConfig,
-};
+use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
@@ -141,18 +139,16 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
-            let mut writer = Writer::new(log_batch, sync, start);
+            let mut writer = Writer::new(log_batch, sync);
             // Snapshot and clear the current perf context temporarily, so the write group
             // leader will collect the perf context diff later.
             let mut perf_context = take_perf_context();
+            let before_enter = Instant::now();
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 for writer in group.iter_mut() {
-                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM.observe(
-                        now.saturating_duration_since(writer.start_time)
-                            .as_secs_f64(),
-                    );
+                    writer.entered_time = Some(now);
                     sync |= writer.sync;
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
@@ -183,6 +179,11 @@ where
                     writer.perf_context_diff = diff.clone();
                 }
             }
+            let entered_time = writer.entered_time.unwrap();
+            ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
+                .observe(entered_time.saturating_duration_since(start).as_secs_f64());
+            perf_context.write_leader_wait_duration +=
+                entered_time.saturating_duration_since(before_enter);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
             writer.finish()?
@@ -394,7 +395,7 @@ where
         script: String,
         file_system: Arc<F>,
     ) -> Result<()> {
-        use crate::file_pipe_log::ReplayMachine;
+        use crate::file_pipe_log::{RecoveryConfig, ReplayMachine};
 
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(

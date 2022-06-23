@@ -13,7 +13,7 @@ use std::time::Instant;
 use fail::fail_point;
 use parking_lot::{Condvar, Mutex};
 
-use crate::{metrics::TimeMetric, perf_context, PerfContext};
+use crate::PerfContext;
 
 type Ptr<T> = Option<NonNull<T>>;
 
@@ -24,7 +24,7 @@ pub struct Writer<P, O> {
     output: Option<O>,
 
     pub(crate) sync: bool,
-    pub(crate) start_time: Instant,
+    pub(crate) entered_time: Option<Instant>,
     pub(crate) perf_context_diff: PerfContext,
 }
 
@@ -35,13 +35,13 @@ impl<P, O> Writer<P, O> {
     ///
     /// Data pointed by `payload` is mutably referenced by this writer. Do not
     /// access the payload by its original name during this writer's lifetime.
-    pub fn new(payload: &mut P, sync: bool, start_time: Instant) -> Self {
+    pub fn new(payload: &mut P, sync: bool) -> Self {
         Writer {
             next: Cell::new(None),
             payload: payload as *mut _,
             output: None,
             sync,
-            start_time,
+            entered_time: None,
             perf_context_diff: PerfContext::default(),
         }
     }
@@ -169,7 +169,6 @@ impl<P, O> WriteBarrier<P, O> {
     /// the leader of a set of writers, returns a [`WriteGroup`] that contains
     /// them, `writer` included.
     pub fn enter<'a>(&self, writer: &'a mut Writer<P, O>) -> Option<WriteGroup<'_, 'a, P, O>> {
-        let start = Instant::now();
         let node = unsafe { Some(NonNull::new_unchecked(writer)) };
         let mut inner = self.inner.lock();
         if let Some(tail) = inner.tail.get() {
@@ -191,7 +190,6 @@ impl<P, O> WriteBarrier<P, O> {
                 //
                 self.leader_cv.wait(&mut inner);
                 inner.pending_leader.set(None);
-                perf_context!(write_leader_wait_duration).observe_since(start);
             }
         } else {
             // leader of a empty write group. proceed directly.
@@ -244,7 +242,7 @@ mod tests {
         let mut processed_writers = 0;
 
         for _ in 0..4 {
-            let mut writer = Writer::new(&mut payload, false, Instant::now());
+            let mut writer = Writer::new(&mut payload, false);
             {
                 let mut wg = barrier.enter(&mut writer).unwrap();
                 leaders += 1;
@@ -296,7 +294,7 @@ mod tests {
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
-                            let mut writer = Writer::new(&mut seq, false, Instant::now());
+                            let mut writer = Writer::new(&mut seq, false);
                             {
                                 let mut wg = barrier.enter(&mut writer).unwrap();
                                 leader_enter_tx.send(()).unwrap();
@@ -330,7 +328,7 @@ mod tests {
                 self.ths.push(
                     ThreadBuilder::new()
                         .spawn(move || {
-                            let mut writer = Writer::new(&mut seq, false, Instant::now());
+                            let mut writer = Writer::new(&mut seq, false);
                             start_thread.wait();
                             if let Some(mut wg) = barrier.enter(&mut writer) {
                                 leader_enter_tx_clone.send(()).unwrap();
