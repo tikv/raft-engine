@@ -13,7 +13,7 @@ use std::time::Instant;
 use fail::fail_point;
 use parking_lot::{Condvar, Mutex};
 
-use crate::{metrics::StopWatch, perf_context, PerfContext};
+use crate::{metrics::TimeMetric, perf_context, PerfContext};
 
 type Ptr<T> = Option<NonNull<T>>;
 
@@ -169,6 +169,7 @@ impl<P, O> WriteBarrier<P, O> {
     /// the leader of a set of writers, returns a [`WriteGroup`] that contains
     /// them, `writer` included.
     pub fn enter<'a>(&self, writer: &'a mut Writer<P, O>) -> Option<WriteGroup<'_, 'a, P, O>> {
+        let start = Instant::now();
         let node = unsafe { Some(NonNull::new_unchecked(writer)) };
         let mut inner = self.inner.lock();
         if let Some(tail) = inner.tail.get() {
@@ -183,7 +184,6 @@ impl<P, O> WriteBarrier<P, O> {
                 return None;
             } else {
                 // leader of next write group.
-                let _t = StopWatch::new(perf_context!(write_leader_wait_duration));
                 inner.pending_leader.set(node);
                 inner
                     .pending_index
@@ -191,6 +191,7 @@ impl<P, O> WriteBarrier<P, O> {
                 //
                 self.leader_cv.wait(&mut inner);
                 inner.pending_leader.set(None);
+                perf_context!(write_leader_wait_duration).observe_since(start);
             }
         } else {
             // leader of a empty write group. proceed directly.

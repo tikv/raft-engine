@@ -261,6 +261,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 panic!("error when rotate [{:?}:{}]: {}", self.queue, seq, e);
             }
         } else if writer.since_last_sync() >= self.bytes_per_sync || force {
+            let _t = StopWatch::new(perf_context!(log_sync_duration));
             if let Err(e) = writer.sync() {
                 panic!("error when sync [{:?}:{}]: {}", self.queue, seq, e,);
             }

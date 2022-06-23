@@ -10,7 +10,7 @@ use log::warn;
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
 use crate::pipe_log::FileBlockHandle;
-use crate::{perf_context, Error, Result};
+use crate::{Error, Result};
 
 use super::format::{LogFileFormat, Version};
 
@@ -111,10 +111,7 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     pub fn sync(&mut self) -> Result<()> {
         if self.last_sync < self.written {
-            let _t = StopWatch::new((
-                &*LOG_SYNC_DURATION_HISTOGRAM,
-                perf_context!(log_rotate_duration),
-            ));
+            let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
             self.writer.sync()?;
             self.last_sync = self.written;
         }

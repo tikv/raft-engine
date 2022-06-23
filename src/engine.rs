@@ -144,7 +144,7 @@ where
             let mut writer = Writer::new(log_batch, sync, start);
             // Snapshot and clear the current perf context temporarily, so the write group
             // leader will collect the perf context diff later.
-            let mut perf_context = get_perf_context().with(|pc| pc.take());
+            let mut perf_context = take_perf_context();
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
@@ -178,17 +178,13 @@ where
                     );
                 }
                 // Pass the perf context diff to all the writers.
-                get_perf_context().with(|pc| {
-                    let diff = pc.borrow();
-                    for writer in group.iter_mut() {
-                        writer.perf_context_diff = diff.clone();
-                    }
-                });
+                let diff = get_perf_context();
+                for writer in group.iter_mut() {
+                    writer.perf_context_diff = diff.clone();
+                }
             }
-            get_perf_context().with(|pc| {
-                perf_context += &writer.perf_context_diff;
-                *pc.borrow_mut() = perf_context;
-            });
+            perf_context += &writer.perf_context_diff;
+            set_perf_context(perf_context);
             writer.finish()?
         };
 
@@ -1785,6 +1781,37 @@ mod tests {
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
+        );
+    }
+
+    #[test]
+    fn test_simple_write_perf_context() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_simple_write_perf_context")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let rid = 1;
+        let entry_size = 5120;
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; entry_size];
+        let old_perf_context = get_perf_context();
+        engine.append(rid, 1, 5, Some(&data));
+        let new_perf_context = get_perf_context();
+        assert_ne!(
+            old_perf_context.log_populating_duration,
+            new_perf_context.log_populating_duration
+        );
+        assert_ne!(
+            old_perf_context.log_write_duration,
+            new_perf_context.log_write_duration
+        );
+        assert_ne!(
+            old_perf_context.apply_duration,
+            new_perf_context.apply_duration
         );
     }
 }

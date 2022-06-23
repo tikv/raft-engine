@@ -1,6 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
@@ -39,7 +40,6 @@ fn append<FS: FileSystem>(
 fn test_pipe_log_listeners() {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use std::time::Duration;
 
     #[derive(Default)]
     struct QueueHook {
@@ -450,5 +450,72 @@ fn test_tail_corruption() {
         append(&engine, rid, 1, 5, Some(&data));
         drop(engine);
         assert!(Engine::open_with_file_system(cfg, fs).is_err());
+    }
+}
+
+#[test]
+fn test_concurrent_write_perf_context() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_concurrent_write_perf_context")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+
+    let some_entries = vec![
+        Entry::new(),
+        Entry {
+            index: 1,
+            ..Default::default()
+        },
+    ];
+
+    let engine = Arc::new(Engine::open(cfg).unwrap());
+    let barrier = Arc::new(Barrier::new(4));
+
+    let ths: Vec<_> = (1..=3)
+        .map(|i| {
+            let engine = engine.clone();
+            let barrier = barrier.clone();
+            let some_entries = some_entries.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut log_batch = LogBatch::default();
+                log_batch
+                    .add_entries::<MessageExtTyped>(i, &some_entries)
+                    .unwrap();
+                let old_perf_context = get_perf_context();
+                engine.write(&mut log_batch, true).unwrap();
+                let new_perf_context = get_perf_context();
+                (old_perf_context, new_perf_context)
+            })
+        })
+        .collect();
+
+    fail::cfg_callback("write_barrier::leader_exit", move || {
+        barrier.wait();
+        // Sleep a while until new writers enter the next write group.
+        std::thread::sleep(Duration::from_millis(100));
+        fail::remove("write_barrier::leader_exit");
+    })
+    .unwrap();
+
+    let mut log_batch = LogBatch::default();
+    log_batch
+        .add_entries::<MessageExtTyped>(4, &some_entries)
+        .unwrap();
+    engine.write(&mut log_batch, true).unwrap();
+
+    for th in ths {
+        let (old, new) = th.join().unwrap();
+        assert_ne!(old.log_populating_duration, new.log_populating_duration);
+        assert_ne!(
+            old.write_leader_wait_duration,
+            new.write_leader_wait_duration
+        );
+        assert_ne!(old.log_write_duration, new.log_write_duration);
+        assert_ne!(old.apply_duration, new.apply_duration);
     }
 }

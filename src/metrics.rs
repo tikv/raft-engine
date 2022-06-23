@@ -3,7 +3,6 @@
 use std::{
     cell::{RefCell, RefMut},
     ops::AddAssign,
-    thread::LocalKey,
     time::{Duration, Instant},
 };
 
@@ -78,12 +77,19 @@ thread_local! {
     static TLS_PERF_CONTEXT: RefCell<PerfContext> = RefCell::new(PerfContext::default());
 }
 
-pub fn reset_perf_context() {
-    TLS_PERF_CONTEXT.with(|c| *c.borrow_mut() = PerfContext::default());
+/// Gets a copy of the thread-local PerfContext.
+pub fn get_perf_context() -> PerfContext {
+    TLS_PERF_CONTEXT.with(|c| c.borrow().clone())
 }
 
-pub fn get_perf_context() -> &'static LocalKey<RefCell<PerfContext>> {
-    &TLS_PERF_CONTEXT
+/// Resets the thread-local PerfContext and takes its old value.
+pub fn take_perf_context() -> PerfContext {
+    TLS_PERF_CONTEXT.with(|c| c.take())
+}
+
+/// Sets the value of the thread-local PerfContext.
+pub fn set_perf_context(perf_context: PerfContext) {
+    TLS_PERF_CONTEXT.with(|c| *c.borrow_mut() = perf_context);
 }
 
 pub(crate) struct PerfContextField<P> {
