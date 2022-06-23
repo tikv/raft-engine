@@ -912,6 +912,16 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         ids
     }
 
+    /// Returns `true` if it does not contains any memtable.
+    pub fn is_empty(&self) -> bool {
+        for i in 0..MEMTABLE_SLOT_COUNT {
+            if !self.slots[i].read().is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Merges with a newer neighbor [`MemTableAccessor`].
     ///
     /// This method is only used for recovery.
