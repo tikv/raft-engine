@@ -6,6 +6,10 @@
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
 
+### Public API Changes
+
+* Add metadata deletion capability to `FileSystem` trait. Users can implement `exists_metadata` and `delete_metadata` to clean up obsolete metadata from older versions of Raft Engine.
+
 ## [0.2.0] - 2022-05-25
 
 ### Bug Fixes

@@ -272,6 +272,10 @@ impl FileSystem for DefaultFileSystem {
         LogFd::open(path.as_ref())
     }
 
+    fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
+        std::fs::remove_file(path)
+    }
+
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
         Ok(LogFile::new(handle))
     }
