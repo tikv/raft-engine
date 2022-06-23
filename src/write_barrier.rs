@@ -183,7 +183,7 @@ impl<P, O> WriteBarrier<P, O> {
                 return None;
             } else {
                 // leader of next write group.
-                let _t = StopWatch::new(perf_context!(write_leader_wait_nanos));
+                let _t = StopWatch::new(perf_context!(write_leader_wait_duration));
                 inner.pending_leader.set(node);
                 inner
                     .pending_index

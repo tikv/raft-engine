@@ -156,7 +156,7 @@ impl<F: FileSystem> SinglePipe<F> {
     fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<F>>) -> Result<()> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
-            perf_context!(log_rotate_nanos),
+            perf_context!(log_rotate_duration),
         ));
         let seq = active_file.seq + 1;
         debug_assert!(seq > 1);

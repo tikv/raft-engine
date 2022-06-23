@@ -113,7 +113,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         if self.last_sync < self.written {
             let _t = StopWatch::new((
                 &*LOG_SYNC_DURATION_HISTOGRAM,
-                perf_context!(log_rotate_nanos),
+                perf_context!(log_rotate_duration),
             ));
             self.writer.sync()?;
             self.last_sync = self.written;

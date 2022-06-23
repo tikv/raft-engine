@@ -45,32 +45,32 @@ impl<M: TimeMetric> Drop for StopWatch<M> {
 #[derive(Debug, Clone, Default)]
 pub struct PerfContext {
     /// Time spent encoding and compressing log entries.
-    pub log_populating_nanos: u64,
+    pub log_populating_duration: Duration,
 
     /// Time spent waiting for becoming the write leader.
-    pub write_leader_wait_nanos: u64,
+    pub write_leader_wait_duration: Duration,
 
     /// Time spent writing the logs to files.
-    pub log_write_nanos: u64,
+    pub log_write_duration: Duration,
 
     /// Time spent rotating the active log file.
-    pub log_rotate_nanos: u64,
+    pub log_rotate_duration: Duration,
 
     // Time spent synchronizing logs to the disk.
-    pub log_sync_nanos: u64,
+    pub log_sync_duration: Duration,
 
     // Time spent applying the appended logs.
-    pub write_apply_nanos: u64,
+    pub apply_duration: Duration,
 }
 
 impl AddAssign<&'_ PerfContext> for PerfContext {
     fn add_assign(&mut self, rhs: &PerfContext) {
-        self.log_populating_nanos += rhs.log_populating_nanos;
-        self.write_leader_wait_nanos += rhs.write_leader_wait_nanos;
-        self.log_write_nanos += rhs.log_write_nanos;
-        self.log_rotate_nanos += rhs.log_rotate_nanos;
-        self.log_sync_nanos += rhs.log_sync_nanos;
-        self.write_apply_nanos += rhs.write_apply_nanos;
+        self.log_populating_duration += rhs.log_populating_duration;
+        self.write_leader_wait_duration += rhs.write_leader_wait_duration;
+        self.log_write_duration += rhs.log_write_duration;
+        self.log_rotate_duration += rhs.log_rotate_duration;
+        self.log_sync_duration += rhs.log_sync_duration;
+        self.apply_duration += rhs.apply_duration;
     }
 }
 
@@ -92,7 +92,7 @@ pub(crate) struct PerfContextField<P> {
 
 impl<P> PerfContextField<P>
 where
-    P: Fn(&mut PerfContext) -> &mut u64,
+    P: Fn(&mut PerfContext) -> &mut Duration,
 {
     pub fn new(projector: P) -> Self {
         PerfContextField { projector }
@@ -108,6 +108,10 @@ macro_rules! perf_context {
 
 pub trait TimeMetric {
     fn observe(&self, duration: Duration);
+
+    fn observe_since(&self, earlier: Instant) {
+        self.observe(earlier.saturating_elapsed());
+    }
 }
 
 impl<'a> TimeMetric for &'a Histogram {
@@ -118,11 +122,11 @@ impl<'a> TimeMetric for &'a Histogram {
 
 impl<P> TimeMetric for PerfContextField<P>
 where
-    P: Fn(&mut PerfContext) -> &mut u64,
+    P: Fn(&mut PerfContext) -> &mut Duration,
 {
     fn observe(&self, duration: Duration) {
         TLS_PERF_CONTEXT.with(|perf_context| {
-            *RefMut::map(perf_context.borrow_mut(), &self.projector) += duration.as_nanos() as u64;
+            *RefMut::map(perf_context.borrow_mut(), &self.projector) += duration;
         })
     }
 }

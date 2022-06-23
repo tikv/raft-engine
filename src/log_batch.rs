@@ -698,7 +698,7 @@ impl LogBatch {
     /// Internally, encodes and optionally compresses log entries. Sets the
     /// compression type to each entry index.
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
-        let _t = StopWatch::new(perf_context!(log_populating_nanos));
+        let _t = StopWatch::new(perf_context!(log_populating_duration));
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
             self.buf_state = BufState::Sealed(self.buf.len(), 0);

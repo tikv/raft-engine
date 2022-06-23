@@ -146,7 +146,6 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
-                let append_watch = StopWatch::new_with(perf_context!(log_write_nanos), now);
                 for writer in group.iter_mut() {
                     ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM.observe(
                         now.saturating_duration_since(writer.start_time)
@@ -168,7 +167,7 @@ where
                     };
                     writer.set_output(res);
                 }
-                drop(append_watch);
+                perf_context!(log_write_duration).observe_since(now);
                 if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                     panic!(
                         "Cannot sync {:?} queue due to IO error: {}",
@@ -200,7 +199,7 @@ where
             let end = Instant::now();
             let apply_duration = end.saturating_duration_since(now);
             ENGINE_WRITE_APPLY_DURATION_HISTOGRAM.observe(apply_duration.as_secs_f64());
-            perf_context!(write_apply_nanos).observe(apply_duration);
+            perf_context!(apply_duration).observe(apply_duration);
             now = end;
         }
         ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
