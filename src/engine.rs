@@ -296,6 +296,12 @@ where
         })
     }
 
+    /// Returns `true` if the engine contains no Raft Group. Empty Raft Group
+    /// that isn't cleaned is counted as well.
+    pub fn is_empty(&self) -> bool {
+        self.memtables.is_empty()
+    }
+
     // For testing.
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
@@ -1607,6 +1613,35 @@ mod tests {
                 .unwrap();
             vec.clear();
         });
+    }
+
+    #[test]
+    fn test_engine_is_empty() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_engine_is_empty")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let rid = 1;
+
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        assert!(engine.is_empty());
+        engine.append(rid, 1, 11, Some(&entry_data));
+        assert!(!engine.is_empty());
+
+        let mut log_batch = LogBatch::default();
+        log_batch.add_command(rid, Command::Compact { index: 11 });
+        log_batch.delete(rid, b"last_index".to_vec());
+        engine.write(&mut log_batch, true).unwrap();
+        assert!(!engine.is_empty());
+
+        engine.clean(rid);
+        assert!(engine.is_empty());
     }
 
     pub struct DeleteMonitoredFileSystem {
