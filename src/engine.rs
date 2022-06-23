@@ -528,6 +528,7 @@ mod tests {
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
+    use std::collections::BTreeSet;
     use std::fs::OpenOptions;
     use std::path::PathBuf;
 
@@ -1608,6 +1609,82 @@ mod tests {
         });
     }
 
+    pub struct DeleteMonitoredFileSystem {
+        inner: ObfuscatedFileSystem,
+        append_metadata: Mutex<BTreeSet<u64>>,
+    }
+
+    impl DeleteMonitoredFileSystem {
+        fn new() -> Self {
+            Self {
+                inner: ObfuscatedFileSystem::default(),
+                append_metadata: Mutex::new(BTreeSet::new()),
+            }
+        }
+
+        fn update_metadata(&self, path: &Path, delete: bool) -> bool {
+            let id = FileId::parse_file_name(path.file_name().unwrap().to_str().unwrap()).unwrap();
+            if id.queue == LogQueue::Append {
+                if delete {
+                    self.append_metadata.lock().unwrap().remove(&id.seq)
+                } else {
+                    self.append_metadata.lock().unwrap().insert(id.seq)
+                }
+            } else {
+                false
+            }
+        }
+    }
+
+    impl FileSystem for DeleteMonitoredFileSystem {
+        type Handle = <ObfuscatedFileSystem as FileSystem>::Handle;
+        type Reader = <ObfuscatedFileSystem as FileSystem>::Reader;
+        type Writer = <ObfuscatedFileSystem as FileSystem>::Writer;
+
+        fn create<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {
+            let handle = self.inner.create(&path)?;
+            self.update_metadata(path.as_ref(), false);
+            Ok(handle)
+        }
+
+        fn open<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {
+            let handle = self.inner.open(&path)?;
+            self.update_metadata(path.as_ref(), false);
+            Ok(handle)
+        }
+
+        fn delete<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+            self.inner.delete(&path)?;
+            self.update_metadata(path.as_ref(), true);
+            Ok(())
+        }
+
+        fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<bool> {
+            Ok(self.inner.delete_metadata(&path)? || self.update_metadata(path.as_ref(), true))
+        }
+
+        fn exists_metadata<P: AsRef<Path>>(&self, path: P) -> bool {
+            if self.inner.exists_metadata(&path) {
+                return true;
+            }
+            let id = FileId::parse_file_name(path.as_ref().file_name().unwrap().to_str().unwrap())
+                .unwrap();
+            if id.queue == LogQueue::Append {
+                self.append_metadata.lock().unwrap().contains(&id.seq)
+            } else {
+                false
+            }
+        }
+
+        fn new_reader(&self, h: Arc<Self::Handle>) -> std::io::Result<Self::Reader> {
+            self.inner.new_reader(h)
+        }
+
+        fn new_writer(&self, h: Arc<Self::Handle>) -> std::io::Result<Self::Writer> {
+            self.inner.new_writer(h)
+        }
+    }
+
     #[test]
     fn test_managed_file_deletion() {
         let dir = tempfile::Builder::new()
@@ -1621,7 +1698,7 @@ mod tests {
             purge_threshold: ReadableSize(1),
             ..Default::default()
         };
-        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let fs = Arc::new(DeleteMonitoredFileSystem::new());
 
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
         for rid in 1..=10 {
@@ -1633,8 +1710,21 @@ mod tests {
         let (start, _) = engine.file_span(LogQueue::Append);
         engine.purge_expired_files().unwrap();
         assert!(start < engine.file_span(LogQueue::Append).0);
-        assert_eq!(engine.file_count(None), fs.file_count());
+        assert_eq!(engine.file_count(None), fs.inner.file_count());
+        let (start, _) = engine.file_span(LogQueue::Append);
+        assert_eq!(fs.append_metadata.lock().unwrap().first().unwrap(), &start);
+
         let engine = engine.reopen();
-        assert_eq!(engine.file_count(None), fs.file_count());
+        assert_eq!(engine.file_count(None), fs.inner.file_count());
+        let (start, _) = engine.file_span(LogQueue::Append);
+        assert_eq!(fs.append_metadata.lock().unwrap().first().unwrap(), &start);
+
+        // Simulate stale metadata.
+        for i in start / 2..start {
+            fs.append_metadata.lock().unwrap().insert(i);
+        }
+        let engine = engine.reopen();
+        let (start, _) = engine.file_span(LogQueue::Append);
+        assert_eq!(fs.append_metadata.lock().unwrap().first().unwrap(), &start);
     }
 }

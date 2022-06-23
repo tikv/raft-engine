@@ -114,11 +114,11 @@ impl FileSystem for ObfuscatedFileSystem {
         r
     }
 
-    fn new_reader(&self, inner: Arc<Self::Handle>) -> IoResult<Self::Reader> {
-        Ok(ObfuscatedReader(self.inner.new_reader(inner)?))
+    fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
+        Ok(ObfuscatedReader(self.inner.new_reader(handle)?))
     }
 
-    fn new_writer(&self, inner: Arc<Self::Handle>) -> IoResult<Self::Writer> {
-        Ok(ObfuscatedWriter(self.inner.new_writer(inner)?))
+    fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
+        Ok(ObfuscatedWriter(self.inner.new_writer(handle)?))
     }
 }

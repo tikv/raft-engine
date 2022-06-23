@@ -154,6 +154,38 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             ),
         ] {
             if max_id > 0 {
+                // Try to cleanup stale metadata left by the previous version.
+                let max_sample = 100;
+                // Find the first obsolete metadata.
+                let mut delete_start = None;
+                for i in 0..max_sample {
+                    let seq = i * min_id / max_sample;
+                    let file_id = FileId { queue, seq };
+                    let path = file_id.build_file_path(dir);
+                    if let Ok(true) = self.file_system.delete_metadata(&path) {
+                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample);
+                        break;
+                    }
+                }
+                // Delete metadata starting from the oldest. Abort on error.
+                if let Some(start) = delete_start {
+                    let mut success = 0;
+                    for seq in start..min_id {
+                        let file_id = FileId { queue, seq };
+                        let path = file_id.build_file_path(dir);
+                        match self.file_system.delete_metadata(&path) {
+                            Err(e) => {
+                                error!("failed to delete metadata of {}: {e}.", path.display());
+                                break;
+                            }
+                            Ok(true) => success += 1,
+                            _ => {}
+                        }
+                    }
+                    warn!(
+                        "deleted {success} stale files of {queue:?} in range [{start}, {min_id})."
+                    );
+                }
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };
                     let path = file_id.build_file_path(dir);
