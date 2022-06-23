@@ -425,7 +425,7 @@ impl LogItemBatch {
                     // Insert the signature into the encoded bytes.
                     // Rewrite checksum of LogItemBatch in LogBatch
                     let footer_checksum_offset = buf.len();
-                    let signature = file_context.get_signature_as_u32();
+                    let signature = file_context.get_signature();
                     match codec::decode_u32_le(
                         &mut &buf[footer_checksum_offset - LOG_BATCH_CHECKSUM_LEN..],
                     ) {
@@ -800,6 +800,7 @@ impl LogBatch {
     }
 
     /// Make preparations for the write of `LogBatch`.
+    #[inline]
     pub(crate) fn prepare_write(&mut self, file_context: &LogFileContext) {
         debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
         if !self.is_empty() {
@@ -940,7 +941,7 @@ fn verify_checksum_with_context(buf: &[u8], file_context: &LogFileContext) -> Re
     let actual = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
     let actual_with_context = match version {
         Version::V1 => actual,
-        Version::V2 => actual ^ file_context.get_signature_as_u32(),
+        Version::V2 => actual ^ file_context.get_signature(),
     };
     if actual_with_context != expected {
         return Err(Error::Corruption(format!(
@@ -1402,7 +1403,7 @@ mod tests {
             );
             let mut data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
             let checksum = crc32(&data[..]);
-            data.encode_u32_le(checksum ^ file_context_v2.get_signature_as_u32())
+            data.encode_u32_le(checksum ^ file_context_v2.get_signature())
                 .unwrap();
             assert!(verify_checksum_with_context(&data[..], &file_context_v1).is_err());
             assert!(verify_checksum_with_context(&data[..], &file_context_v2).is_ok());

@@ -22,17 +22,14 @@ use super::format::{FileNameExt, LogFileContext, Version};
 use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
-    /// first seq of active files
+    /// Sequence number of the first file.
     first_seq: FileSeq,
-    /// final seq of active files
-    active_seq: FileSeq,
-    /// first seq of stale files
-    first_stale_seq: FileSeq,
+    /// Sequence number of the first file that is in use.
+    first_seq_in_use: FileSeq,
     fds: VecDeque<FileHandler<F>>,
-    /// `None` => no capbility for recycling stale files
-    /// `Some(0)` => infinite volume for recycling stale files
-    /// `Some(_)` => finite volume for recycling stale files
-    capacity: Option<usize>,
+    /// `0` => no capbility for recycling stale files
+    /// `_` => finite volume for recycling stale files
+    capacity: usize,
 }
 
 #[cfg(test)]
@@ -40,10 +37,9 @@ impl<F: FileSystem> Default for FileCollection<F> {
     fn default() -> Self {
         Self {
             first_seq: 0,
-            active_seq: 0,
-            first_stale_seq: 0,
+            first_seq_in_use: 0,
             fds: VecDeque::new(),
-            capacity: None,
+            capacity: 0,
         }
     }
 }
@@ -53,29 +49,24 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention please, the recycled file would be automatically `renamed` in
     /// this func.
-    pub fn recycle_one_file(
-        &mut self,
-        file_system: &Arc<F>,
-        dir_path: &str,
-        dst_fd: FileId,
-    ) -> bool {
-        if self.capacity.is_none() || self.first_stale_seq >= self.first_seq {
+    pub fn recycle_one_file(&mut self, dir_path: &str, dst_fd: FileId) -> bool {
+        if self.capacity == 0 || self.first_seq >= self.first_seq_in_use {
             return false;
         }
         let mut ret = false;
         let first_file_id = FileId {
             queue: dst_fd.queue,
-            seq: self.first_stale_seq,
+            seq: self.first_seq,
         };
         if self.fds.pop_front().is_some() {
             let src_path = first_file_id.build_file_path(dir_path); // src filepath
             let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
-            match file_system.rename(src_path, dst_path) {
+            match std::fs::rename(&src_path, &dst_path) {
                 Ok(_) => {
                     // Update the first_seq
-                    self.first_stale_seq = first_file_id.seq + 1;
-                    if self.first_stale_seq >= self.first_seq {
-                        self.first_seq = self.first_stale_seq;
+                    self.first_seq = first_file_id.seq + 1;
+                    if self.first_seq >= self.first_seq_in_use {
+                        self.first_seq_in_use = self.first_seq;
                     }
                     ret = true;
                 }
@@ -129,8 +120,7 @@ impl<F: FileSystem> SinglePipe<F> {
         queue: LogQueue,
         mut first_seq: FileSeq,
         mut fds: VecDeque<FileHandler<F>>,
-        capacity: Option<usize>,
-        // recycle_capacity: Option<usize>,
+        capacity: usize,
     ) -> Result<Self> {
         let create_file = first_seq == 0;
         let active_seq = if create_file {
@@ -181,8 +171,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
             files: CachePadded::new(RwLock::new(FileCollection {
                 first_seq,
-                active_seq,
-                first_stale_seq: first_seq,
+                first_seq_in_use: first_seq,
                 fds,
                 capacity,
             })),
@@ -203,10 +192,10 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
         let files = self.files.read();
-        if file_seq < files.first_seq || file_seq > files.active_seq {
+        if file_seq < files.first_seq || (file_seq >= files.first_seq + files.fds.len() as u64) {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        Ok(files.fds[(file_seq - files.first_stale_seq) as usize]
+        Ok(files.fds[(file_seq - files.first_seq) as usize]
             .handle
             .clone())
     }
@@ -214,10 +203,10 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Returns a shared [`Version`] for the specified file sequence number.
     fn get_format_version(&self, file_seq: FileSeq) -> Result<Version> {
         let files = self.files.read();
-        if file_seq < files.first_seq || file_seq > files.active_seq {
+        if file_seq < files.first_seq || (file_seq >= files.first_seq + files.fds.len() as u64) {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        Ok(files.fds[(file_seq - files.first_stale_seq) as usize]
+        Ok(files.fds[(file_seq - files.first_seq) as usize]
             .context
             .version)
     }
@@ -239,7 +228,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let path = file_id.build_file_path(&self.dir);
         let fd = {
             let mut files = self.files.write();
-            if files.recycle_one_file(&self.file_system, &self.dir, file_id) {
+            if files.recycle_one_file(&self.dir, file_id) {
                 // Open the recycled file(file is already renamed)
                 Arc::new(self.file_system.open(&path)?)
             } else {
@@ -263,8 +252,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
         let len = {
             let mut files = self.files.write();
-            debug_assert!(files.active_seq + 1 == seq);
-            files.active_seq = seq;
+            debug_assert!(files.first_seq + files.fds.len() as u64 == seq);
             files.fds.push_back(FileHandler {
                 handle: fd,
                 context: LogFileContext::new(
@@ -358,12 +346,15 @@ impl<F: FileSystem> SinglePipe<F> {
 
     fn file_span(&self) -> (FileSeq, FileSeq) {
         let files = self.files.read();
-        (files.first_seq, files.active_seq)
+        (
+            files.first_seq_in_use,
+            files.first_seq + files.fds.len() as u64 - 1,
+        )
     }
 
     fn total_size(&self) -> usize {
         let files = self.files.read();
-        (files.active_seq - files.first_stale_seq + 1) as usize * self.target_file_size
+        files.fds.len() * self.target_file_size
     }
 
     fn rotate(&self) -> Result<()> {
@@ -378,52 +369,44 @@ impl<F: FileSystem> SinglePipe<F> {
             remained,        /* count of remained files */
         ) = {
             let mut files = self.files.write();
-            if file_seq > files.active_seq {
+            if file_seq >= files.first_seq + files.fds.len() as u64 {
                 return Err(box_err!("Purge active or newer files"));
             }
             let mut first_purge_seq = 0;
-            let mut end_offset: usize = 0;
+            let end_offset: usize;
             let mut recycled: usize = 0;
-            if let Some(capacity) = files.capacity {
-                // Capable for recycling log files
-                // [1] capacity == 0, it means that the volume of FileCollections for
-                //     recycling is limitless.
-                // [2] capacity > 0, it means that the FileCollections for recycling
-                //     has a finite volume for storing recycled files.
-                //     *(2.1) if `reset_volume` <= `expected_purge_count`, it means
-                //            that the FileCollection for recycling can not recycle
-                //            all files which need to be purged, we should purge
-                //            several files and recycle the others.
-                //     *(2.2) if `reset_volume` > `expected_purge_count`, it means
-                //            that the FileCollection has enough space for recycling
-                //            all files which need to be purged.
-                if capacity == 0 {
-                    end_offset = 0;
-                    recycled = file_seq.saturating_sub(files.first_seq) as usize;
-                    files.first_seq = file_seq;
-                } else {
-                    let spare_count = capacity - (files.first_seq - files.first_stale_seq) as usize;
-                    let expected_purge_count = file_seq.saturating_sub(files.first_seq) as usize;
-                    if expected_purge_count >= spare_count {
-                        first_purge_seq = files.first_stale_seq;
-                        end_offset = expected_purge_count - spare_count;
-                        recycled = spare_count;
-                        files.first_stale_seq += end_offset as u64;
-                        files.first_seq = file_seq;
-                    } else {
-                        end_offset = 0;
-                        recycled = file_seq.saturating_sub(files.first_seq) as usize;
-                        files.first_seq = file_seq;
-                    }
-                }
-                files.fds.drain(..end_offset);
-            } else {
+            if files.capacity == 0 {
                 // Not capable for Recycle
-                first_purge_seq = file_seq - end_offset as u64;
+                first_purge_seq = files.first_seq;
                 end_offset = file_seq.saturating_sub(files.first_seq) as usize;
                 files.fds.drain(..end_offset);
                 files.first_seq = file_seq;
-                files.first_stale_seq = file_seq;
+                files.first_seq_in_use = file_seq;
+            } else {
+                // Capable for recycling log files. It means that the
+                // FileCollections has a finite volume for storing recycled files.
+                // [1] if `reset_volume` <= `expected_purge_count`, it means
+                //     that the FileCollection for recycling can not recycle
+                //     all files which need to be purged, we should purge
+                //     several files and recycle the others.
+                // [2] if `reset_volume` > `expected_purge_count`, it means
+                //     that the FileCollection has enough space for recycling
+                //     all files which need to be purged.
+                let reset_volume =
+                    files.capacity - (files.first_seq_in_use - files.first_seq) as usize;
+                let expected_purge_count = file_seq.saturating_sub(files.first_seq_in_use) as usize;
+                if expected_purge_count >= reset_volume {
+                    first_purge_seq = files.first_seq;
+                    end_offset = expected_purge_count - reset_volume;
+                    recycled = reset_volume;
+                    files.first_seq += end_offset as u64;
+                    files.first_seq_in_use = file_seq;
+                } else {
+                    end_offset = 0;
+                    recycled = file_seq.saturating_sub(files.first_seq_in_use) as usize;
+                    files.first_seq_in_use = file_seq;
+                }
+                files.fds.drain(..end_offset);
             }
             (first_purge_seq, end_offset, recycled, files.fds.len())
         };
@@ -553,14 +536,13 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {
-        let capacity_of_recycle =
-            |default_file_size: usize, purge_threshold: usize| -> Option<usize> {
-                if default_file_size == 0 || purge_threshold == 0 {
-                    Option::None
-                } else {
-                    Option::Some(purge_threshold / default_file_size)
-                }
-            };
+        let capacity_of_recycle = |default_file_size: usize, purge_threshold: usize| -> usize {
+            if default_file_size == 0 || purge_threshold == 0 {
+                0
+            } else {
+                purge_threshold / default_file_size
+            }
+        };
         SinglePipe::open(
             cfg,
             Arc::new(DefaultFileSystem),
@@ -573,7 +555,7 @@ mod tests {
                     cfg.target_file_size.0 as usize,
                     cfg.purge_threshold.0 as usize,
                 ),
-                LogQueue::Rewrite => None,
+                LogQueue::Rewrite => 0,
             },
         )
     }
@@ -696,14 +678,10 @@ mod tests {
         {
             let mut recycle_collections = FileCollection::<DefaultFileSystem>::default();
             assert_eq!(recycle_collections.first_seq, 0);
-            assert_eq!(recycle_collections.active_seq, 0);
-            assert_eq!(recycle_collections.first_stale_seq, 0);
-            assert!(recycle_collections.capacity.is_none());
-            assert!(!recycle_collections.recycle_one_file(
-                &file_system,
-                path,
-                FileId::dummy(LogQueue::Append)
-            ));
+            assert_eq!(recycle_collections.first_seq_in_use, 0);
+            assert_eq!(recycle_collections.capacity, 0);
+            assert_eq!(recycle_collections.fds.len(), 0);
+            assert!(!recycle_collections.recycle_one_file(path, FileId::dummy(LogQueue::Append)));
         }
         // test FileCollection with a valid file
         {
@@ -748,9 +726,8 @@ mod tests {
             let _ = prepare_file(old_file_id, &data[..]); // prepare old file
             let mut recycle_collections = FileCollection::<DefaultFileSystem> {
                 first_seq: old_file_id.seq,
-                first_stale_seq: old_file_id.seq,
-                active_seq: old_file_id.seq,
-                capacity: Some(3),
+                first_seq_in_use: old_file_id.seq,
+                capacity: 3,
                 ..Default::default()
             };
             recycle_collections.fds.push_back(FileHandler {
@@ -762,7 +739,7 @@ mod tests {
                 context: LogFileContext::dummy(LogQueue::Append),
             });
             // recycle an old file
-            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(!recycle_collections.recycle_one_file(path, new_file_id));
             // update the reycle collection
             {
                 recycle_collections.fds.push_back(FileHandler {
@@ -773,11 +750,10 @@ mod tests {
                     ),
                     context: LogFileContext::dummy(LogQueue::Append),
                 });
-                recycle_collections.first_seq = cur_file_id.seq;
-                recycle_collections.active_seq = cur_file_id.seq;
+                recycle_collections.first_seq_in_use = cur_file_id.seq;
             }
             // recycle an old file
-            assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(recycle_collections.recycle_one_file(path, new_file_id));
             // validate the content of recycled file
             assert!(validate_content_of_file(new_file_id, &data[..]).unwrap());
             // rewrite and validate the cotent

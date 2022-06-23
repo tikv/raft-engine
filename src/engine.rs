@@ -153,8 +153,8 @@ where
                     let res = if !log_batch.is_empty() {
                         // Signs a checksum, so-called `signature`, by the specified
                         // `LogFileContext`, into the LogBatch.
-                        let file_format = self.pipe_log.fetch_active_file(LogQueue::Append);
-                        log_batch.prepare_write(&file_format);
+                        let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
+                        log_batch.prepare_write(&file_context);
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {

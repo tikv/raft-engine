@@ -374,14 +374,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // Attention please, `capacity_of_recycle` would be dynamically updated
         // by the formula:
         // `Config::purge_threshold / Config::targe_file_size - active_file_count`
-        let capacity_of_recycle =
-            |default_file_size: usize, purge_threshold: usize| -> Option<usize> {
-                if default_file_size == 0 || purge_threshold == 0 {
-                    Option::None
-                } else {
-                    Option::Some(purge_threshold / default_file_size)
-                }
-            };
+        let capacity_of_recycle = |default_file_size: usize, purge_threshold: usize| -> usize {
+            if default_file_size == 0 || purge_threshold == 0 {
+                0
+            } else {
+                purge_threshold / default_file_size
+            }
+        };
         let files = match queue {
             LogQueue::Append => &self.append_files,
             LogQueue::Rewrite => &self.rewrite_files,
@@ -408,7 +407,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 ),
                 // No need to build RecycleFileCollection for
                 // LogQueue::Rewrite.
-                LogQueue::Rewrite => None,
+                LogQueue::Rewrite => 0,
             },
         )
     }

@@ -351,7 +351,6 @@ where
         if len == 0 {
             return self.pipe_log.maybe_sync(LogQueue::Rewrite, sync);
         }
-        // Signs a checksum, so-called `signature`, into the LogBatch.
         let file_context = self.pipe_log.fetch_active_file(LogQueue::Rewrite);
         log_batch.prepare_write(&file_context);
         let file_handle = self

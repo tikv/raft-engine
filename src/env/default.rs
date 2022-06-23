@@ -74,13 +74,6 @@ impl LogFd {
         close(self.0).map_err(|e| from_nix_error(e, "close"))
     }
 
-    pub fn rename<P: AsRef<Path>>(src: P, dst: P) -> IoResult<()> {
-        fail_point!("log_fd::rename::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        std::fs::rename(src, dst)
-    }
-
     /// Synchronizes all in-memory data of the file except metadata to the
     /// filesystem.
     pub fn sync(&self) -> IoResult<()> {
@@ -217,15 +210,6 @@ impl LogFile {
     }
 }
 
-impl Clone for LogFile {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            offset: self.offset,
-        }
-    }
-}
-
 impl Write for LogFile {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         let len = self.inner.write(self.offset, buf)?;
@@ -286,10 +270,6 @@ impl FileSystem for DefaultFileSystem {
 
     fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         LogFd::open(path.as_ref())
-    }
-
-    fn rename<P: AsRef<Path>>(&self, src: P, dst: P) -> IoResult<()> {
-        LogFd::rename(src, dst)
     }
 
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
