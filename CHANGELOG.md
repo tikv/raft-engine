@@ -8,7 +8,7 @@
 
 ### Public API Changes
 
-* Add `delete` to `FileSystem` trait API.
+* Add metadata deletion capability to `FileSystem` trait. Users can implement `exists_metadata` and `delete_metadata` to clean up obsolete metadata from older versions of Raft Engine.
 
 ## [0.2.0] - 2022-05-25
 
