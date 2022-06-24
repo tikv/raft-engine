@@ -24,6 +24,7 @@
 
 ### New Features
 
+* Support recycling obsolete logs in Raft Engine to reduce the cost on `fallocate` with new files #224 
 * Support limiting the memory usage of Raft Engine under new feature `swap` #211 
 * Add a new Prometheus counter `raft_engine_memory_usage` to track memory usage #207
 
