@@ -173,14 +173,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     for seq in start..min_id {
                         let file_id = FileId { queue, seq };
                         let path = file_id.build_file_path(dir);
-                        match self.file_system.delete_metadata(&path) {
-                            Err(e) => {
-                                error!("failed to delete metadata of {}: {}.", path.display(), e);
-                                break;
-                            }
-                            Ok(true) => success += 1,
-                            _ => {}
+                        if let Err(e) = self.file_system.delete_metadata(&path) {
+                            error!("failed to delete metadata of {}: {}.", path.display(), e);
+                            break;
                         }
+                        success += 1;
                     }
                     warn!(
                         "deleted {} stale files of {:?} in range [{}, {}).",
