@@ -276,6 +276,10 @@ impl FileSystem for DefaultFileSystem {
         std::fs::remove_file(path)
     }
 
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> IoResult<()> {
+        std::fs::rename(src_path, dst_path)
+    }
+
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
         Ok(LogFile::new(handle))
     }

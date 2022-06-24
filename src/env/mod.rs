@@ -22,6 +22,8 @@ pub trait FileSystem: Send + Sync {
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> Result<()>;
 
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<()>;
+
     /// Deletes user implemented metadata associated with `path`. Returns
     /// `true` if any metadata is deleted.
     ///

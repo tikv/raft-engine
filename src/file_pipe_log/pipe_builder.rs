@@ -402,18 +402,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
-        // Here, we would calculate the `Recycle Capacity` based on the relevant
-        // configurations in `cfg`.
-        // Attention please, `capacity_of_recycle` would be dynamically updated
-        // by the formula:
-        // `Config::purge_threshold / Config::targe_file_size - active_file_count`
-        let capacity_of_recycle = |default_file_size: usize, purge_threshold: usize| -> usize {
-            if default_file_size == 0 || purge_threshold == 0 {
-                0
-            } else {
-                purge_threshold / default_file_size
-            }
-        };
         let files = match queue {
             LogQueue::Append => &self.append_files,
             LogQueue::Rewrite => &self.rewrite_files,
@@ -434,10 +422,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             first_seq,
             files,
             match queue {
-                LogQueue::Append => capacity_of_recycle(
-                    self.cfg.target_file_size.0 as usize,
-                    self.cfg.purge_threshold.0 as usize,
-                ),
+                LogQueue::Append => self.cfg.recycle_capacity(),
                 // No need to build RecycleFileCollection for
                 // LogQueue::Rewrite.
                 LogQueue::Rewrite => 0,

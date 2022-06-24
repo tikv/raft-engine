@@ -83,6 +83,13 @@ pub struct Config {
     ///
     /// Default: None
     pub memory_limit: Option<ReadableSize>,
+
+    /// Whether to recycle stale logs.
+    /// If `true`, `purge` operations on logs will firstly put stale
+    /// files into a list for recycle.
+    ///
+    /// Default: false,
+    pub allow_recycle: bool,
 }
 
 impl Default for Config {
@@ -101,6 +108,7 @@ impl Default for Config {
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
+            allow_recycle: false,
         };
         // Test-specific configurations.
         #[cfg(test)]
@@ -154,6 +162,17 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Returns the capacity for recycling log files.
+    pub fn recycle_capacity(&self) -> usize {
+        if self.allow_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
+            // Attention please, `capacity_of_recycle` would be dynamically updated
+            // by the formula: `Config::purge_threshold / Config::targe_file_size`.
+            (self.purge_threshold.0 / self.target_file_size.0) as usize
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +205,8 @@ mod tests {
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
         assert_eq!(load.format_version, 11_u64);
         assert!(!Version::is_valid(load.format_version));
+        assert!(!load.allow_recycle);
+        assert_eq!(load.recycle_capacity(), 0);
     }
 
     #[test]
@@ -203,6 +224,7 @@ mod tests {
             bytes-per-sync = "0KB"
             target-file-size = "5000MB"
             format-version = 20
+            allow-recycle = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
         let mut soft_sanitized = soft_load;
@@ -215,6 +237,8 @@ mod tests {
             soft_sanitized.target_file_size
         );
         assert_eq!(soft_sanitized.format_version, Version::default() as u64);
+        assert!(soft_sanitized.allow_recycle);
+        assert_eq!(soft_sanitized.recycle_capacity(), 2);
     }
 
     #[test]

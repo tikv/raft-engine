@@ -1373,11 +1373,12 @@ mod tests {
                 &LogFileContext::dummy(LogQueue::Append)
             )
             .is_ok());
+            // file_context.signature() == 0
             assert!(verify_checksum_with_context(
                 &data[..],
                 &LogFileContext::new(FileId::dummy(LogQueue::Rewrite), Version::V2),
             )
-            .is_err());
+            .is_ok());
             let file_context = LogFileContext::new(
                 FileId {
                     seq: 11,

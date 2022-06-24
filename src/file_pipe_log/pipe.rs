@@ -49,7 +49,7 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention please, the recycled file would be automatically `renamed` in
     /// this func.
-    pub fn recycle_one_file(&mut self, dir_path: &str, dst_fd: FileId) -> bool {
+    pub fn recycle_one_file(&mut self, file_system: &F, dir_path: &str, dst_fd: FileId) -> bool {
         if self.capacity == 0 || self.first_seq >= self.first_seq_in_use {
             return false;
         }
@@ -61,7 +61,7 @@ impl<F: FileSystem> FileCollection<F> {
         if self.fds.pop_front().is_some() {
             let src_path = first_file_id.build_file_path(dir_path); // src filepath
             let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
-            match std::fs::rename(&src_path, &dst_path) {
+            match file_system.rename(&src_path, &dst_path) {
                 Ok(_) => {
                     // Update the first_seq
                     self.first_seq = first_file_id.seq + 1;
@@ -231,7 +231,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let path = file_id.build_file_path(&self.dir);
         let fd = {
             let mut files = self.files.write();
-            if files.recycle_one_file(&self.dir, file_id) {
+            if files.recycle_one_file(&self.file_system, &self.dir, file_id) {
                 // Open the recycled file(file is already renamed)
                 Arc::new(self.file_system.open(&path)?)
             } else {
@@ -548,13 +548,6 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {
-        let capacity_of_recycle = |default_file_size: usize, purge_threshold: usize| -> usize {
-            if default_file_size == 0 || purge_threshold == 0 {
-                0
-            } else {
-                purge_threshold / default_file_size
-            }
-        };
         SinglePipe::open(
             cfg,
             Arc::new(DefaultFileSystem),
@@ -563,10 +556,7 @@ mod tests {
             0,
             VecDeque::new(),
             match queue {
-                LogQueue::Append => capacity_of_recycle(
-                    cfg.target_file_size.0 as usize,
-                    cfg.purge_threshold.0 as usize,
-                ),
+                LogQueue::Append => cfg.recycle_capacity(),
                 LogQueue::Rewrite => 0,
             },
         )
@@ -693,7 +683,11 @@ mod tests {
             assert_eq!(recycle_collections.first_seq_in_use, 0);
             assert_eq!(recycle_collections.capacity, 0);
             assert_eq!(recycle_collections.fds.len(), 0);
-            assert!(!recycle_collections.recycle_one_file(path, FileId::dummy(LogQueue::Append)));
+            assert!(!recycle_collections.recycle_one_file(
+                &file_system,
+                path,
+                FileId::dummy(LogQueue::Append)
+            ));
         }
         // test FileCollection with a valid file
         {
@@ -751,7 +745,7 @@ mod tests {
                 context: LogFileContext::dummy(LogQueue::Append),
             });
             // recycle an old file
-            assert!(!recycle_collections.recycle_one_file(path, new_file_id));
+            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
             // update the reycle collection
             {
                 recycle_collections.fds.push_back(FileHandler {
@@ -765,7 +759,7 @@ mod tests {
                 recycle_collections.first_seq_in_use = cur_file_id.seq;
             }
             // recycle an old file
-            assert!(recycle_collections.recycle_one_file(path, new_file_id));
+            assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
             // validate the content of recycled file
             assert!(validate_content_of_file(new_file_id, &data[..]).unwrap());
             // rewrite and validate the cotent
@@ -797,6 +791,7 @@ mod tests {
             target_file_size: ReadableSize::kb(1),
             bytes_per_sync: ReadableSize::kb(32),
             purge_threshold: ReadableSize::mb(1),
+            allow_recycle: true,
             ..Default::default()
         };
         let queue = LogQueue::Append;
