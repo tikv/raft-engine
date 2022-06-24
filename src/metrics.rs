@@ -46,8 +46,8 @@ pub struct PerfContext {
     /// Time spent encoding and compressing log entries.
     pub log_populating_duration: Duration,
 
-    /// Time spent waiting for becoming the write leader.
-    pub write_leader_wait_duration: Duration,
+    /// Time spent waiting for the write group to form and get processed.
+    pub write_wait_duration: Duration,
 
     /// Time spent writing the logs to files.
     pub log_write_duration: Duration,
@@ -65,7 +65,7 @@ pub struct PerfContext {
 impl AddAssign<&'_ PerfContext> for PerfContext {
     fn add_assign(&mut self, rhs: &PerfContext) {
         self.log_populating_duration += rhs.log_populating_duration;
-        self.write_leader_wait_duration += rhs.write_leader_wait_duration;
+        self.write_wait_duration += rhs.write_wait_duration;
         self.log_write_duration += rhs.log_write_duration;
         self.log_rotate_duration += rhs.log_rotate_duration;
         self.log_sync_duration += rhs.log_sync_duration;

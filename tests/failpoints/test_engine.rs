@@ -511,10 +511,7 @@ fn test_concurrent_write_perf_context() {
     for th in ths {
         let (old, new) = th.join().unwrap();
         assert_ne!(old.log_populating_duration, new.log_populating_duration);
-        assert_ne!(
-            old.write_leader_wait_duration,
-            new.write_leader_wait_duration
-        );
+        assert_ne!(old.write_wait_duration, new.write_wait_duration);
         assert_ne!(old.log_write_duration, new.log_write_duration);
         assert_ne!(old.apply_duration, new.apply_duration);
     }

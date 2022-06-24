@@ -6,11 +6,14 @@
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
 
+### New Features
+
+* Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
+
 ### Public API Changes
 
 * Add `is_empty` to `Engine` API.
 * Add metadata deletion capability to `FileSystem` trait. Users can implement `exists_metadata` and `delete_metadata` to clean up obsolete metadata from older versions of Raft Engine.
-* Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
 
 ## [0.2.0] - 2022-05-25
 

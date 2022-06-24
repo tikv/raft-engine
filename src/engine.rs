@@ -182,8 +182,9 @@ where
             let entered_time = writer.entered_time.unwrap();
             ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
                 .observe(entered_time.saturating_duration_since(start).as_secs_f64());
-            perf_context.write_leader_wait_duration +=
+            perf_context.write_wait_duration +=
                 entered_time.saturating_duration_since(before_enter);
+            debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
             writer.finish()?
