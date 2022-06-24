@@ -1637,8 +1637,10 @@ mod tests {
             Ok(())
         }
 
-        fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<bool> {
-            Ok(self.inner.delete_metadata(&path)? | self.update_metadata(path.as_ref(), true))
+        fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+            self.inner.delete_metadata(&path)?;
+            self.update_metadata(path.as_ref(), true);
+            Ok(())
         }
 
         fn exists_metadata<P: AsRef<Path>>(&self, path: P) -> bool {

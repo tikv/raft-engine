@@ -29,8 +29,8 @@ pub trait FileSystem: Send + Sync {
     /// going through user implemented cleanup procedure. This method is used to
     /// detect and cleanup the user metadata that is no longer mapped to a
     /// physical file.
-    fn delete_metadata<P: AsRef<Path>>(&self, _path: P) -> Result<bool> {
-        Ok(false)
+    fn delete_metadata<P: AsRef<Path>>(&self, _path: P) -> Result<()> {
+        Ok(())
     }
 
     /// Returns whether there is any user metadata associated with given `path`.
