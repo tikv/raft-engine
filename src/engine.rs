@@ -15,16 +15,14 @@ use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{
-    DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder, RecoveryConfig,
-};
+use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{Error, GlobalStats, Result};
+use crate::{perf_context, Error, GlobalStats, Result};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -141,15 +139,16 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
-            let mut writer = Writer::new(log_batch, sync, start);
+            let mut writer = Writer::new(log_batch, sync);
+            // Snapshot and clear the current perf context temporarily, so the write group
+            // leader will collect the perf context diff later.
+            let mut perf_context = take_perf_context();
+            let before_enter = Instant::now();
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
-                let _t = StopWatch::new_with(&ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
+                let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 for writer in group.iter_mut() {
-                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM.observe(
-                        now.saturating_duration_since(writer.start_time)
-                            .as_secs_f64(),
-                    );
+                    writer.entered_time = Some(now);
                     sync |= writer.sync;
                     let log_batch = writer.get_payload();
                     let res = if !log_batch.is_empty() {
@@ -166,6 +165,7 @@ where
                     };
                     writer.set_output(res);
                 }
+                perf_context!(log_write_duration).observe_since(now);
                 if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                     panic!(
                         "Cannot sync {:?} queue due to IO error: {}",
@@ -173,7 +173,20 @@ where
                         e
                     );
                 }
+                // Pass the perf context diff to all the writers.
+                let diff = get_perf_context();
+                for writer in group.iter_mut() {
+                    writer.perf_context_diff = diff.clone();
+                }
             }
+            let entered_time = writer.entered_time.unwrap();
+            ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
+                .observe(entered_time.saturating_duration_since(start).as_secs_f64());
+            perf_context.write_wait_duration +=
+                entered_time.saturating_duration_since(before_enter);
+            debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
+            perf_context += &writer.perf_context_diff;
+            set_perf_context(perf_context);
             writer.finish()?
         };
 
@@ -185,8 +198,9 @@ where
                 listener.post_apply_memtables(block_handle.id);
             }
             let end = Instant::now();
-            ENGINE_WRITE_APPLY_DURATION_HISTOGRAM
-                .observe(end.saturating_duration_since(now).as_secs_f64());
+            let apply_duration = end.saturating_duration_since(now);
+            ENGINE_WRITE_APPLY_DURATION_HISTOGRAM.observe(apply_duration.as_secs_f64());
+            perf_context!(apply_duration).observe(apply_duration);
             now = end;
         }
         ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
@@ -201,7 +215,7 @@ where
     }
 
     pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
-        let _t = StopWatch::new(&ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
+        let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(value) = memtable.read().get(key) {
                 return Ok(Some(parse_from_bytes(&value)?));
@@ -215,7 +229,7 @@ where
         region_id: u64,
         log_idx: u64,
     ) -> Result<Option<M::Entry>> {
-        let _t = StopWatch::new(&ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
+        let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.read().get_entry(log_idx) {
                 ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(1.0);
@@ -243,7 +257,7 @@ where
         max_size: Option<usize>,
         vec: &mut Vec<M::Entry>,
     ) -> Result<usize> {
-        let _t = StopWatch::new(&ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
+        let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
             memtable
@@ -382,7 +396,7 @@ where
         script: String,
         file_system: Arc<F>,
     ) -> Result<()> {
-        use crate::file_pipe_log::ReplayMachine;
+        use crate::file_pipe_log::{RecoveryConfig, ReplayMachine};
 
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
@@ -1694,8 +1708,10 @@ mod tests {
             Ok(())
         }
 
-        fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<bool> {
-            Ok(self.inner.delete_metadata(&path)? | self.update_metadata(path.as_ref(), true))
+        fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
+            self.inner.delete_metadata(&path)?;
+            self.update_metadata(path.as_ref(), true);
+            Ok(())
         }
 
         fn exists_metadata<P: AsRef<Path>>(&self, path: P) -> bool {
@@ -1769,6 +1785,37 @@ mod tests {
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
+        );
+    }
+
+    #[test]
+    fn test_simple_write_perf_context() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_simple_write_perf_context")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let rid = 1;
+        let entry_size = 5120;
+        let engine = RaftLogEngine::open(cfg).unwrap();
+        let data = vec![b'x'; entry_size];
+        let old_perf_context = get_perf_context();
+        engine.append(rid, 1, 5, Some(&data));
+        let new_perf_context = get_perf_context();
+        assert_ne!(
+            old_perf_context.log_populating_duration,
+            new_perf_context.log_populating_duration
+        );
+        assert_ne!(
+            old_perf_context.log_write_duration,
+            new_perf_context.log_write_duration
+        );
+        assert_ne!(
+            old_perf_context.apply_duration,
+            new_perf_context.apply_duration
         );
     }
 }
