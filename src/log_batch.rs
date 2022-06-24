@@ -11,9 +11,10 @@ use protobuf::Message;
 use crate::codec::{self, NumberEncoder};
 use crate::file_pipe_log::{LogFileContext, Version};
 use crate::memtable::EntryIndex;
+use crate::metrics::StopWatch;
 use crate::pipe_log::{FileBlockHandle, FileId};
 use crate::util::{crc32, lz4};
-use crate::{Error, Result};
+use crate::{perf_context, Error, Result};
 
 pub(crate) const LOG_BATCH_HEADER_LEN: usize = 16;
 pub(crate) const LOG_BATCH_CHECKSUM_LEN: usize = 4;
@@ -731,6 +732,7 @@ impl LogBatch {
     /// Internally, encodes and optionally compresses log entries. Sets the
     /// compression type to each entry index.
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
+        let _t = StopWatch::new(perf_context!(log_populating_duration));
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
             self.buf_state = BufState::Sealed(self.buf.len(), 0);

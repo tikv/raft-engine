@@ -6,6 +6,10 @@
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
 
+### New Features
+
+* Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
+
 ### Public API Changes
 
 * Add `is_empty` to `Engine` API.

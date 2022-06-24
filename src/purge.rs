@@ -65,7 +65,7 @@ where
     }
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let _t = StopWatch::new(&ENGINE_PURGE_DURATION_HISTOGRAM);
+        let _t = StopWatch::new(&*ENGINE_PURGE_DURATION_HISTOGRAM);
         let guard = self.force_rewrite_candidates.try_lock();
         if guard.is_none() {
             warn!("Unable to purge expired files: locked");
@@ -202,7 +202,7 @@ where
         compact_watermark: FileSeq,
         rewrite_candidates: &mut HashMap<u64, u32>,
     ) -> Result<Vec<u64>> {
-        let _t = StopWatch::new(&ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
+        let _t = StopWatch::new(&*ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::with_capacity(16);
 
@@ -239,7 +239,7 @@ where
 
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
-        let _t = StopWatch::new(&ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
+        let _t = StopWatch::new(&*ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let mut force_compact_regions = vec![];

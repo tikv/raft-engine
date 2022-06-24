@@ -1,36 +1,152 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::time::Instant;
+use std::{
+    cell::{RefCell, RefMut},
+    ops::AddAssign,
+    time::{Duration, Instant},
+};
 
 use prometheus::*;
 use prometheus_static_metric::*;
 
 use crate::util::InstantExt;
 
-pub struct StopWatch<'a> {
-    histogram: &'a Histogram,
+pub struct StopWatch<M: TimeMetric> {
+    metric: M,
     start: Instant,
 }
 
-impl<'a> StopWatch<'a> {
+impl<M: TimeMetric> StopWatch<M> {
     #[inline]
-    pub fn new(histogram: &'a Histogram) -> Self {
+    pub fn new(metric: M) -> Self {
         Self {
-            histogram,
+            metric,
             start: Instant::now(),
         }
     }
 
     #[inline]
-    pub fn new_with(histogram: &'a Histogram, start: Instant) -> Self {
-        Self { histogram, start }
+    pub fn new_with(metric: M, start: Instant) -> Self {
+        Self { metric, start }
     }
 }
 
-impl<'a> Drop for StopWatch<'a> {
+impl<M: TimeMetric> Drop for StopWatch<M> {
     fn drop(&mut self) {
-        self.histogram
-            .observe(self.start.saturating_elapsed().as_secs_f64());
+        self.metric.observe(self.start.saturating_elapsed());
+    }
+}
+
+/// PerfContext records cumulative performance statistics of operations.
+///
+/// Raft Engine will update the data in the thread-local PerfContext whenever
+/// an opeartion is performed.
+#[derive(Debug, Clone, Default)]
+pub struct PerfContext {
+    /// Time spent encoding and compressing log entries.
+    pub log_populating_duration: Duration,
+
+    /// Time spent waiting for the write group to form and get processed.
+    pub write_wait_duration: Duration,
+
+    /// Time spent writing the logs to files.
+    pub log_write_duration: Duration,
+
+    /// Time spent rotating the active log file.
+    pub log_rotate_duration: Duration,
+
+    // Time spent synchronizing logs to the disk.
+    pub log_sync_duration: Duration,
+
+    // Time spent applying the appended logs.
+    pub apply_duration: Duration,
+}
+
+impl AddAssign<&'_ PerfContext> for PerfContext {
+    fn add_assign(&mut self, rhs: &PerfContext) {
+        self.log_populating_duration += rhs.log_populating_duration;
+        self.write_wait_duration += rhs.write_wait_duration;
+        self.log_write_duration += rhs.log_write_duration;
+        self.log_rotate_duration += rhs.log_rotate_duration;
+        self.log_sync_duration += rhs.log_sync_duration;
+        self.apply_duration += rhs.apply_duration;
+    }
+}
+
+thread_local! {
+    static TLS_PERF_CONTEXT: RefCell<PerfContext> = RefCell::new(PerfContext::default());
+}
+
+/// Gets a copy of the thread-local PerfContext.
+pub fn get_perf_context() -> PerfContext {
+    TLS_PERF_CONTEXT.with(|c| c.borrow().clone())
+}
+
+/// Resets the thread-local PerfContext and takes its old value.
+pub fn take_perf_context() -> PerfContext {
+    TLS_PERF_CONTEXT.with(|c| c.take())
+}
+
+/// Sets the value of the thread-local PerfContext.
+pub fn set_perf_context(perf_context: PerfContext) {
+    TLS_PERF_CONTEXT.with(|c| *c.borrow_mut() = perf_context);
+}
+
+pub(crate) struct PerfContextField<P> {
+    projector: P,
+}
+
+impl<P> PerfContextField<P>
+where
+    P: Fn(&mut PerfContext) -> &mut Duration,
+{
+    pub fn new(projector: P) -> Self {
+        PerfContextField { projector }
+    }
+}
+
+#[macro_export(crate)]
+macro_rules! perf_context {
+    ($field: ident) => {
+        $crate::metrics::PerfContextField::new(|perf_context| &mut perf_context.$field)
+    };
+}
+
+pub trait TimeMetric {
+    fn observe(&self, duration: Duration);
+
+    fn observe_since(&self, earlier: Instant) -> Duration {
+        let dur = earlier.saturating_elapsed();
+        self.observe(dur);
+        dur
+    }
+}
+
+impl<'a> TimeMetric for &'a Histogram {
+    fn observe(&self, duration: Duration) {
+        Histogram::observe(self, duration.as_secs_f64());
+    }
+}
+
+impl<P> TimeMetric for PerfContextField<P>
+where
+    P: Fn(&mut PerfContext) -> &mut Duration,
+{
+    fn observe(&self, duration: Duration) {
+        TLS_PERF_CONTEXT.with(|perf_context| {
+            *RefMut::map(perf_context.borrow_mut(), &self.projector) += duration;
+        })
+    }
+}
+
+impl<M1, M2> TimeMetric for (M1, M2)
+where
+    M1: TimeMetric,
+    M2: TimeMetric,
+{
+    fn observe(&self, duration: Duration) {
+        self.0.observe(duration);
+        self.1.observe(duration);
     }
 }
 
