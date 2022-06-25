@@ -180,11 +180,11 @@ impl LogFileContext {
 
     /// Return the `signature` in `u32` format.
     ///
-    /// Here, in mainly common case in producion, the `Config::purge_threshold` is
-    /// always limited to less than `UINT32_MAX` * `Config::target_file_size`,
-    /// the higher 32 bit keeps always same with zero bits. That is, the count of
-    /// files will be limited to less than `UINT32_MAX`. So, we just use the low
-    /// 32 bit as the `signature` by default.
+    /// Here, in mainly common case in producion, the `Config::purge_threshold`
+    /// is always limited to less than `UINT32_MAX`*`Config::target_file_size`,
+    /// the higher 32 bit keeps always same with zero bits. That is, the
+    /// count of files will be limited to less than `UINT32_MAX`. So, we
+    /// just use the low 32 bit as the `signature` by default.
     pub fn get_signature(&self) -> u32 {
         self.id.seq as u32
     }
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(file_context.get_signature(), 0);
         file_context.id.seq = 10;
         assert_eq!(file_context.get_signature(), 10);
-        let abnormal_seq = (file_context.id.seq << 32) as u64 + 100 as u64;
+        let abnormal_seq = (file_context.id.seq << 32) as u64 + 100_u64;
         file_context.id.seq = abnormal_seq;
         assert_ne!(file_context.get_signature() as u64, abnormal_seq);
         assert_eq!(file_context.get_signature(), 100);
