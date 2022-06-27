@@ -3,6 +3,7 @@
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::marker::PhantomData;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -257,6 +258,14 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// Returns value for a given key.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.kvs.get(key).map(|v| v.0.clone())
+    }
+
+    /// Returns value that its key is equal or maximum less than a given key.
+    pub fn get_leq(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.kvs
+            .range::<[u8], _>((Bound::Unbounded, Bound::Included(key)))
+            .next_back()
+            .map(|(_, v)| v.0.clone())
     }
 
     /// Deletes a key value pair.
@@ -1608,8 +1617,12 @@ mod tests {
         memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 5));
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
+        assert_eq!(memtable.get_leq(b"key0"), None);
         assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
+        assert_eq!(memtable.get_leq(k1.as_ref()), Some(v1.to_vec()));
+        assert_eq!(memtable.get_leq(b"key2"), Some(v1.to_vec()));
         assert_eq!(memtable.get(k5.as_ref()), Some(v5.to_vec()));
+        assert_eq!(memtable.get_leq(b"key9"), Some(v5.to_vec()));
 
         memtable.delete(k5.as_ref());
         assert_eq!(memtable.get(k5.as_ref()), None);
