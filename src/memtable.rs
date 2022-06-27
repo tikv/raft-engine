@@ -261,10 +261,11 @@ impl<A: AllocatorTrait> MemTable<A> {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
+    /// Iterator over [start_key, end_key) range.
     pub fn scan_message<S, F>(
         &self,
-        start_key: &[u8],
-        end_key: &[u8],
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
         reverse: bool,
         mut f: F,
     ) -> Result<()>
@@ -272,34 +273,30 @@ impl<A: AllocatorTrait> MemTable<A> {
         S: Message,
         F: FnMut(&[u8], S) -> Result<bool>,
     {
-        let iter = self
-            .kvs
-            .range::<[u8], _>((Bound::Included(start_key), Bound::Included(end_key)));
-        if reverse {
-            for (key, (v, _)) in iter.rev() {
-                let value = parse_from_bytes(&v)?;
-                if !f(key, value)? {
-                    break;
-                }
-            }
-        } else {
-            for (key, (v, _)) in iter {
-                let value = parse_from_bytes(&v)?;
-                if !f(key, value)? {
-                    break;
-                }
-            }
-        }
-        Ok(())
+        self.scan(start_key, end_key, reverse, |key, v| {
+            let value = parse_from_bytes(&v)?;
+            f(key, value)
+        })
     }
 
-    pub fn scan<F>(&self, start_key: &[u8], end_key: &[u8], reverse: bool, mut f: F) -> Result<()>
+    /// Iterator over [start_key, end_key) range.
+    pub fn scan<F>(
+        &self,
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
+        reverse: bool,
+        mut f: F,
+    ) -> Result<()>
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
-        let iter = self
-            .kvs
-            .range::<[u8], _>((Bound::Included(start_key), Bound::Included(end_key)));
+        let lower = start_key
+            .map(|k| Bound::Included(k))
+            .unwrap_or(Bound::Unbounded);
+        let upper = end_key
+            .map(|k| Bound::Excluded(k))
+            .unwrap_or(Bound::Unbounded);
+        let iter = self.kvs.range::<[u8], _>((lower, upper));
         if reverse {
             for (key, (value, _)) in iter.rev() {
                 if !f(key, value)? {
@@ -1670,7 +1667,7 @@ mod tests {
 
         let mut res = vec![];
         memtable
-            .scan(b"", b"k9", false, |key, value| {
+            .scan(None, None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
@@ -1681,7 +1678,7 @@ mod tests {
         );
         res.clear();
         memtable
-            .scan(b"", b"k1", false, |key, value| {
+            .scan(None, Some(b"k1"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
@@ -1689,7 +1686,7 @@ mod tests {
         assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);
         res.clear();
         memtable
-            .scan(b"k5", b"k9", false, |key, value| {
+            .scan(Some(b"k5"), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
@@ -1697,7 +1694,7 @@ mod tests {
         assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
         res.clear();
         memtable
-            .scan(b"k1", b"k5", false, |key, value| {
+            .scan(Some(b"k1"), Some(b"k5"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })

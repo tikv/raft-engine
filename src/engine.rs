@@ -227,8 +227,8 @@ where
     pub fn scan_message<S, C>(
         &self,
         region_id: u64,
-        start_key: &[u8],
-        end_key: &[u8],
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
         reverse: bool,
         callback: C,
     ) -> Result<()>
