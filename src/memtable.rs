@@ -9,6 +9,7 @@ use std::sync::Arc;
 use fail::fail_point;
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
+use protobuf::{parse_from_bytes, Message};
 
 use crate::config::Config;
 use crate::file_pipe_log::ReplayMachine;
@@ -260,12 +261,59 @@ impl<A: AllocatorTrait> MemTable<A> {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
-    /// Returns value that its key is equal or maximum less than a given key.
-    pub fn get_leq(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.kvs
-            .range::<[u8], _>((Bound::Unbounded, Bound::Included(key)))
-            .next_back()
-            .map(|(_, v)| v.0.clone())
+    pub fn scan_message<S, F>(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        reverse: bool,
+        mut f: F,
+    ) -> Result<()>
+    where
+        S: Message,
+        F: FnMut(&[u8], S) -> Result<bool>,
+    {
+        let iter = self
+            .kvs
+            .range::<[u8], _>((Bound::Included(start_key), Bound::Included(end_key)));
+        if reverse {
+            for (key, (v, _)) in iter.rev() {
+                let value = parse_from_bytes(&v)?;
+                if !f(key, value)? {
+                    break;
+                }
+            }
+        } else {
+            for (key, (v, _)) in iter {
+                let value = parse_from_bytes(&v)?;
+                if !f(key, value)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn scan<F>(&self, start_key: &[u8], end_key: &[u8], reverse: bool, mut f: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool>,
+    {
+        let iter = self
+            .kvs
+            .range::<[u8], _>((Bound::Included(start_key), Bound::Included(end_key)));
+        if reverse {
+            for (key, (value, _)) in iter.rev() {
+                if !f(key, value)? {
+                    break;
+                }
+            }
+        } else {
+            for (key, (value, _)) in iter {
+                if !f(key, value)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Deletes a key value pair.
@@ -1617,12 +1665,47 @@ mod tests {
         memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 5));
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
-        assert_eq!(memtable.get_leq(b"key0"), None);
         assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
-        assert_eq!(memtable.get_leq(k1.as_ref()), Some(v1.to_vec()));
-        assert_eq!(memtable.get_leq(b"key2"), Some(v1.to_vec()));
         assert_eq!(memtable.get(k5.as_ref()), Some(v5.to_vec()));
-        assert_eq!(memtable.get_leq(b"key9"), Some(v5.to_vec()));
+
+        let mut res = vec![];
+        memtable
+            .scan(b"", b"k9", false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(
+            res,
+            vec![(k1.to_vec(), v1.to_vec()), (k5.to_vec(), v5.to_vec())]
+        );
+        res.clear();
+        memtable
+            .scan(b"", b"k1", false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);
+        res.clear();
+        memtable
+            .scan(b"k5", b"k9", false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
+        res.clear();
+        memtable
+            .scan(b"k1", b"k5", false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(
+            res,
+            vec![(k1.to_vec(), v1.to_vec()), (k5.to_vec(), v5.to_vec())]
+        );
 
         memtable.delete(k5.as_ref());
         assert_eq!(memtable.get(k5.as_ref()), None);

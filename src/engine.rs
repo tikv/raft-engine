@@ -224,14 +224,25 @@ where
         Ok(None)
     }
 
-    pub fn get_message_leq<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
+    pub fn scan_message<S, C>(
+        &self,
+        region_id: u64,
+        start_key: &[u8],
+        end_key: &[u8],
+        reverse: bool,
+        callback: C,
+    ) -> Result<()>
+    where
+        S: Message,
+        C: FnMut(&[u8], S) -> Result<bool>,
+    {
         let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
-            if let Some(value) = memtable.read().get_leq(key) {
-                return Ok(Some(parse_from_bytes(&value)?));
-            }
+            memtable
+                .read()
+                .scan_message(start_key, end_key, reverse, callback)?;
         }
-        Ok(None)
+        Ok(())
     }
 
     pub fn get_entry<M: MessageExt>(
