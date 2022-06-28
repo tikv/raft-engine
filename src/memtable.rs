@@ -274,7 +274,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         F: FnMut(&[u8], S) -> Result<bool>,
     {
         self.scan(start_key, end_key, reverse, |key, v| {
-            let value = parse_from_bytes(&v)?;
+            let value = parse_from_bytes(v)?;
             f(key, value)
         })
     }
@@ -290,12 +290,8 @@ impl<A: AllocatorTrait> MemTable<A> {
     where
         F: FnMut(&[u8], &[u8]) -> Result<bool>,
     {
-        let lower = start_key
-            .map(|k| Bound::Included(k))
-            .unwrap_or(Bound::Unbounded);
-        let upper = end_key
-            .map(|k| Bound::Excluded(k))
-            .unwrap_or(Bound::Unbounded);
+        let lower = start_key.map(Bound::Included).unwrap_or(Bound::Unbounded);
+        let upper = end_key.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
         let iter = self.kvs.range::<[u8], _>((lower, upper));
         if reverse {
             for (key, (value, _)) in iter.rev() {
