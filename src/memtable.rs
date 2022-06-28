@@ -1674,15 +1674,25 @@ mod tests {
         );
         res.clear();
         memtable
-            .scan(None, Some(b"k1"), false, |key, value| {
+            .scan(None, None, true, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
             .unwrap();
-        assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);
+        assert_eq!(
+            res,
+            vec![(k5.to_vec(), v5.to_vec()), (k1.to_vec(), v1.to_vec())]
+        );
         res.clear();
         memtable
-            .scan(Some(b"k5"), None, false, |key, value| {
+            .scan(None, Some(b"key1"), false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(res, vec![]);
+        memtable
+            .scan(Some(b"key5"), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
@@ -1690,15 +1700,12 @@ mod tests {
         assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
         res.clear();
         memtable
-            .scan(Some(b"k1"), Some(b"k5"), false, |key, value| {
+            .scan(Some(b"key1"), Some(b"key5"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
             .unwrap();
-        assert_eq!(
-            res,
-            vec![(k1.to_vec(), v1.to_vec()), (k5.to_vec(), v5.to_vec())]
-        );
+        assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);
 
         memtable.delete(k5.as_ref());
         assert_eq!(memtable.get(k5.as_ref()), None);

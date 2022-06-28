@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
         let mut res = vec![];
         engine
-            .scan(rid, None, Some(&key), false, |key, value| {
+            .scan(rid, Some(&key), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 Ok(true)
             })
