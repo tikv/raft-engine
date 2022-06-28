@@ -245,6 +245,26 @@ where
         Ok(())
     }
 
+    pub fn scan<C>(
+        &self,
+        region_id: u64,
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
+        reverse: bool,
+        callback: C,
+    ) -> Result<()>
+    where
+        C: FnMut(&[u8], &[u8]) -> Result<bool>,
+    {
+        let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
+        if let Some(memtable) = self.memtables.get(region_id) {
+            memtable
+                .read()
+                .scan(start_key, end_key, reverse, callback)?;
+        }
+        Ok(())
+    }
+
     pub fn get_entry<M: MessageExt>(
         &self,
         region_id: u64,
@@ -624,7 +644,13 @@ mod tests {
             RaftLogEngine::open_with(cfg, file_system, listeners).unwrap()
         }
 
-        fn scan<FR: Fn(u64, LogQueue, &[u8])>(&self, rid: u64, start: u64, end: u64, reader: FR) {
+        fn scan_entries<FR: Fn(u64, LogQueue, &[u8])>(
+            &self,
+            rid: u64,
+            start: u64,
+            end: u64,
+            reader: FR,
+        ) {
             let mut entries = Vec::new();
             self.fetch_entries_to::<Entry>(
                 rid,
@@ -709,7 +735,7 @@ mod tests {
             for i in 10..20 {
                 let rid = i;
                 let index = i;
-                engine.scan(rid, index, index + 2, |_, q, d| {
+                engine.scan_entries(rid, index, index + 2, |_, q, d| {
                     assert_eq!(q, LogQueue::Append);
                     assert_eq!(d, &data);
                 });
@@ -720,7 +746,7 @@ mod tests {
             for i in 10..20 {
                 let rid = i;
                 let index = i;
-                engine.scan(rid, index, index + 2, |_, q, d| {
+                engine.scan_entries(rid, index, index + 2, |_, q, d| {
                     assert_eq!(q, LogQueue::Append);
                     assert_eq!(d, &data);
                 });
@@ -770,7 +796,7 @@ mod tests {
 
                     let engine = engine.reopen();
                     if let Some((start, end)) = *steps.last().unwrap() {
-                        engine.scan(rid, start, end, |_, _, d| {
+                        engine.scan_entries(rid, start, end, |_, _, d| {
                             assert_eq!(d, &data);
                         });
                     } else {
@@ -780,7 +806,7 @@ mod tests {
                     engine.purge_manager.must_rewrite_append_queue(None, None);
                     let engine = engine.reopen();
                     if let Some((start, end)) = *steps.last().unwrap() {
-                        engine.scan(rid, start, end, |_, _, d| {
+                        engine.scan_entries(rid, start, end, |_, _, d| {
                             assert_eq!(d, &data);
                         });
                     } else {
@@ -884,6 +910,14 @@ mod tests {
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
+        let mut res = vec![];
+        engine
+            .scan(rid, None, Some(&key), false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(res, vec![(key.clone(), v2.clone())]);
 
         // put | delete | put |
         //                    ^ rewrite
@@ -934,7 +968,7 @@ mod tests {
         compact_log.add_command(rid, Command::Compact { index: 5 });
         engine.write(&mut compact_log, true).unwrap();
         let engine = engine.reopen();
-        engine.scan(rid, 5, 10, |_, q, d| {
+        engine.scan_entries(rid, 5, 10, |_, q, d| {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
@@ -958,7 +992,7 @@ mod tests {
         engine.memtables.apply_append_writes(compact_log.drain());
         engine.purge_manager.must_rewrite_rewrite_queue();
         let engine = engine.reopen();
-        engine.scan(rid, 10, 25, |_, q, d| {
+        engine.scan_entries(rid, 10, 25, |_, q, d| {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
@@ -971,7 +1005,7 @@ mod tests {
             .purge_manager
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
-        engine.scan(rid, 10, 25, |_, q, d| {
+        engine.scan_entries(rid, 10, 25, |_, q, d| {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
@@ -992,7 +1026,7 @@ mod tests {
         compact_log.add_command(rid, Command::Compact { index: 20 });
         engine.write(&mut compact_log, true).unwrap();
         let engine = engine.reopen();
-        engine.scan(rid, 20, 25, |_, q, d| {
+        engine.scan_entries(rid, 20, 25, |_, q, d| {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
@@ -1011,7 +1045,7 @@ mod tests {
             .purge_manager
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
-        engine.scan(rid, 10, 15, |_, q, d| {
+        engine.scan_entries(rid, 10, 15, |_, q, d| {
             assert_eq!(q, LogQueue::Append);
             assert_eq!(d, &data);
         });
@@ -1166,7 +1200,7 @@ mod tests {
 
         // All entries should be available.
         for rid in 1..=10 {
-            engine.scan(rid, 1, 11, |_, _, d| {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &data);
             });
         }
@@ -1178,7 +1212,7 @@ mod tests {
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
 
         for rid in 1..=10 {
-            engine.scan(rid, 1, 11, |_, _, d| {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &data);
             });
         }
@@ -1282,7 +1316,7 @@ mod tests {
 
         let engine = engine.reopen();
         for rid in 1..21 {
-            engine.scan(rid, 1, 21, |_, _, d| {
+            engine.scan_entries(rid, 1, 21, |_, _, d| {
                 assert_eq!(d, &data);
             });
         }
@@ -1317,7 +1351,7 @@ mod tests {
 
         let engine = engine.reopen();
         for rid in 1..=3 {
-            engine.scan(rid, 1, 11, |_, _, d| {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &data);
             });
         }
@@ -1455,12 +1489,12 @@ mod tests {
 
         let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
         for rid in 1..25 {
-            engine.scan(rid, 1, 6, |_, _, d| {
+            engine.scan_entries(rid, 1, 6, |_, _, d| {
                 assert_eq!(d, &entry_data);
             });
         }
         for rid in 25..=50 {
-            engine.scan(rid, 1, 11, |_, _, d| {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &entry_data);
             });
         }
@@ -1520,7 +1554,7 @@ mod tests {
             if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
                 continue;
             }
-            engine.scan(rid, 1, 6, |_, _, d| {
+            engine.scan_entries(rid, 1, 6, |_, _, d| {
                 assert_eq!(d, &entry_data);
             });
         }
@@ -1528,14 +1562,14 @@ mod tests {
             if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
                 continue;
             }
-            engine.scan(rid, 1, 11, |_, _, d| {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &entry_data);
             });
         }
         for rid in existing_emptied {
             let first_index = if rid < 25 { 1 } else { 6 };
             let last_index = if rid < 25 { 5 } else { 10 };
-            engine.scan(rid, first_index, last_index + 1, |_, _, d| {
+            engine.scan_entries(rid, first_index, last_index + 1, |_, _, d| {
                 assert_eq!(d, &entry_data);
             });
         }
@@ -1614,7 +1648,7 @@ mod tests {
 
         let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
         for rid in 1..10 {
-            engine.scan(rid, 1, 11, |_, _, d| {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &entry_data);
             });
         }
