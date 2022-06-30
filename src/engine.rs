@@ -1376,7 +1376,7 @@ mod tests {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
-                allow_recycle: true,
+                enable_log_recycle: true,
                 ..Default::default()
             };
             // config with v2
@@ -1385,7 +1385,7 @@ mod tests {
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
                 format_version: 2,
-                allow_recycle: true,
+                enable_log_recycle: true,
                 ..Default::default()
             };
             test_engine_ops(&cfg_v1, &cfg_v2);
@@ -1895,7 +1895,7 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(1),
-            allow_recycle: true,
+            enable_log_recycle: true,
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());

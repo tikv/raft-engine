@@ -156,6 +156,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 file_system.as_ref(),
                 active_fd.handle.clone(),
                 active_fd.context.version,
+                false,
             )?,
         };
 
@@ -241,11 +242,15 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         let mut new_file = ActiveFile {
             seq,
-            writer: build_file_writer(self.file_system.as_ref(), fd.clone(), self.format_version)?,
+            // The file might generated from a recycled stale-file, we should reset the file
+            // header of it.
+            writer: build_file_writer(
+                self.file_system.as_ref(),
+                fd.clone(),
+                self.format_version,
+                true,
+            )?,
         };
-        // The file might generated from a recycled stale-file, we should reset the file
-        // header of it manually.
-        new_file.writer.reset()?;
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
@@ -354,11 +359,6 @@ impl<F: FileSystem> SinglePipe<F> {
             files.first_seq_in_use,
             files.first_seq + files.fds.len() as u64 - 1,
         )
-    }
-
-    fn expired_file_count(&self) -> usize {
-        let files = self.files.read();
-        (files.first_seq_in_use - files.first_seq) as usize
     }
 
     fn total_size(&self) -> usize {
@@ -506,11 +506,6 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn expired_file_count(&self, queue: LogQueue) -> usize {
-        self.pipes[queue as usize].expired_file_count()
-    }
-
-    #[inline]
     fn total_size(&self, queue: LogQueue) -> usize {
         self.pipes[queue as usize].total_size()
     }
@@ -556,7 +551,7 @@ mod tests {
             0,
             VecDeque::new(),
             match queue {
-                LogQueue::Append => cfg.recycle_capacity(),
+                LogQueue::Append => (cfg.purge_threshold.0 / cfg.target_file_size.0) as usize,
                 LogQueue::Rewrite => 0,
             },
         )
@@ -791,7 +786,7 @@ mod tests {
             target_file_size: ReadableSize::kb(1),
             bytes_per_sync: ReadableSize::kb(32),
             purge_threshold: ReadableSize::mb(1),
-            allow_recycle: true,
+            enable_log_recycle: true,
             ..Default::default()
         };
         let queue = LogQueue::Append;
@@ -817,12 +812,10 @@ mod tests {
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
-        assert_eq!(pipe_log.expired_file_count(queue), 1);
         assert_eq!(pipe_log.file_span(queue).0, 2);
 
         // cannot purge active file
         assert!(pipe_log.purge_to(FileId { queue, seq: 4 }).is_err());
-        assert_eq!(pipe_log.expired_file_count(queue), 1);
 
         // append position
         let s_content = b"short content".to_vec();
@@ -858,7 +851,6 @@ mod tests {
         // leave only 1 file to truncate
         assert!(pipe_log.purge_to(FileId { queue, seq: 3 }).is_ok());
         assert_eq!(pipe_log.file_span(queue), (3, 3));
-        assert_eq!(pipe_log.expired_file_count(queue), 2);
 
         // fetch active file
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);

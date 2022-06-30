@@ -231,10 +231,10 @@ struct ControlOpt {
     batch_compression_threshold: String,
 
     #[clap(
-        long = "allow-recycle",
+        long = "enable-log-recycle",
         help = "Recycle purged and stale logs for incoming writing"
     )]
-    allow_recycle: bool,
+    enable_log_recycle: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -582,7 +582,7 @@ fn main() {
     config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio;
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
-    config.allow_recycle = opts.allow_recycle;
+    config.enable_log_recycle = opts.enable_log_recycle;
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);

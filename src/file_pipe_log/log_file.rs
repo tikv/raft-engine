@@ -26,15 +26,17 @@ pub struct FileHandler<F: FileSystem> {
 
 /// Build a file writer.
 ///
-/// * `[handle]`: standard handle of a log file.
-/// * `[version]`: format version of the log file.
+/// * `handle`: standard handle of a log file.
+/// * `version`: format version of the log file.
+/// * `force_reset`: if true => rewrite the header of this file.
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
     version: Version,
+    force_reset: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    LogFileWriter::open(handle, writer, version)
+    LogFileWriter::open(handle, writer, version, force_reset)
 }
 
 /// Append-only writer for log file.
@@ -48,7 +50,12 @@ pub struct LogFileWriter<F: FileSystem> {
 }
 
 impl<F: FileSystem> LogFileWriter<F> {
-    fn open(handle: Arc<F::Handle>, writer: F::Writer, version: Version) -> Result<Self> {
+    fn open(
+        handle: Arc<F::Handle>,
+        writer: F::Writer,
+        version: Version,
+        force_reset: bool,
+    ) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
             header: LogFileFormat::from_version(version),
@@ -57,7 +64,7 @@ impl<F: FileSystem> LogFileWriter<F> {
             capacity: file_size,
             last_sync: file_size,
         };
-        if file_size < LogFileFormat::len() {
+        if file_size < LogFileFormat::len() || force_reset {
             f.write_header()?;
         } else {
             f.writer.seek(SeekFrom::Start(file_size as u64))?;
@@ -107,10 +114,6 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.writer.write_all(buf)?;
         self.written = new_written;
         Ok(())
-    }
-
-    pub fn reset(&mut self) -> Result<()> {
-        self.write_header()
     }
 
     pub fn sync(&mut self) -> Result<()> {

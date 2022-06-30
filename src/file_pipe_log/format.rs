@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
+use strum_macros::EnumIter;
 
 use crate::codec::{self, NumberEncoder};
 use crate::pipe_log::{FileId, LogQueue};
@@ -80,7 +81,7 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 /// Version of log file format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, EnumIter)]
 #[repr(u64)]
 pub enum Version {
     V1 = 1,

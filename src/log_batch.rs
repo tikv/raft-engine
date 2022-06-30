@@ -930,7 +930,7 @@ fn verify_checksum(buf: &[u8]) -> Result<()> {
 }
 
 /// Verifies the checksum of a slice of bytes that sequentially holds data and
-/// checksum with the given `[signature]`.
+/// checksum generated with the given `file_context`.
 fn verify_checksum_with_context(buf: &[u8], file_context: &LogFileContext) -> Result<()> {
     if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
         return Err(Error::Corruption(format!(
@@ -961,6 +961,7 @@ mod tests {
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
+    use strum::IntoEnumIterator;
 
     fn decode_entries_from_bytes<M: MessageExt>(
         buf: &[u8],
@@ -1250,15 +1251,12 @@ mod tests {
             .unwrap();
         batches.push((batch, Vec::new()));
 
-        // for Version::V1
-        for (batch, entry_data) in batches.clone().into_iter() {
-            decode_and_encode(batch.clone(), true, Version::V1, &entry_data);
-            decode_and_encode(batch, false, Version::V1, &entry_data);
-        }
-        // for Version::V2
-        for (batch, entry_data) in batches.clone().into_iter() {
-            decode_and_encode(batch.clone(), true, Version::V2, &entry_data);
-            decode_and_encode(batch, false, Version::V2, &entry_data);
+        // Validate with different Versions
+        for version in Version::iter() {
+            for (batch, entry_data) in batches.clone().into_iter() {
+                decode_and_encode(batch.clone(), true, version, &entry_data);
+                decode_and_encode(batch, false, version, &entry_data);
+            }
         }
     }
 

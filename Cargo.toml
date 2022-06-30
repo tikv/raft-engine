@@ -52,6 +52,8 @@ rhai = { version = "1.7", features = ["sync"], optional = true }
 scopeguard = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
+strum = "0.24.0"
+strum_macros = "0.24.0"
 
 [dev-dependencies]
 criterion = "0.3"
