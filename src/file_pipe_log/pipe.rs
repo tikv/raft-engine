@@ -105,6 +105,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
 impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut active_file = self.active_file.lock();
+        fail_point!("file_pipe_log::single_pipe::drop", |_| {});
         if let Err(e) = active_file.writer.close() {
             error!("error while closing single pipe: {}", e);
         }
@@ -551,7 +552,7 @@ mod tests {
             0,
             VecDeque::new(),
             match queue {
-                LogQueue::Append => (cfg.purge_threshold.0 / cfg.target_file_size.0) as usize,
+                LogQueue::Append => cfg.recycle_capacity(),
                 LogQueue::Rewrite => 0,
             },
         )
@@ -787,6 +788,7 @@ mod tests {
             bytes_per_sync: ReadableSize::kb(32),
             purge_threshold: ReadableSize::mb(1),
             enable_log_recycle: true,
+            format_version: 2,
             ..Default::default()
         };
         let queue = LogQueue::Append;
@@ -854,7 +856,7 @@ mod tests {
 
         // fetch active file
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_context.version, Version::default());
+        assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
     }
 }

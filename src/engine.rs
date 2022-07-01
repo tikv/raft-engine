@@ -1365,10 +1365,10 @@ mod tests {
             };
             test_engine_ops(&cfg_v1, &cfg_v2);
         }
-        // test engine when allow_recycle == true
+        // test engine when enable_log_recycle == true
         {
             let dir = tempfile::Builder::new()
-                .prefix("test_allow_recycle_stale_logs")
+                .prefix("test_enable_log_recycle")
                 .tempdir()
                 .unwrap();
             // config with v1
@@ -1376,7 +1376,6 @@ mod tests {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
-                enable_log_recycle: true,
                 ..Default::default()
             };
             // config with v2
@@ -1895,6 +1894,7 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(1),
+            format_version: 2,
             enable_log_recycle: true,
             ..Default::default()
         };

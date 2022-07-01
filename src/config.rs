@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use fail::fail_point;
 use log::warn;
 use serde::{Deserialize, Serialize};
 
@@ -154,7 +155,16 @@ impl Config {
                 self.format_version,
                 Version::default() as u64
             );
-            self.format_version = Version::default() as u64;
+            self.format_version = if self.enable_log_recycle {
+                Version::V2 as u64
+            } else {
+                Version::default() as u64
+            };
+        } else if self.enable_log_recycle && self.format_version == Version::default() as u64 {
+            fail_point!("config::format::err", |_| { Ok(()) });
+            return Err(box_err!(
+                "format_version is invalid when 'enable_format_version' on, should > Version::V1"
+            ));
         }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
@@ -165,6 +175,15 @@ impl Config {
 
     /// Returns the capacity for recycling log files.
     pub fn recycle_capacity(&self) -> usize {
+        fail_point!("config::format::err", |_| {
+            (self.purge_threshold.0 / self.target_file_size.0) as usize
+        });
+        // Attention please, log files with Version::V1 could not be recycled, it might
+        // cause LogBatchs in a mess in the recycled file, where the reader could not
+        // recognize the final LogBatch (latest in the recycled log).
+        if self.format_version == Version::default() as u64 {
+            return 0;
+        }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
             // Attention please, `capacity_of_recycle` would be dynamically updated
             // by the formula: `Config::purge_threshold / Config::targe_file_size`.
@@ -235,8 +254,14 @@ mod tests {
             soft_sanitized.purge_rewrite_threshold.unwrap(),
             soft_sanitized.target_file_size
         );
-        assert_eq!(soft_sanitized.format_version, Version::default() as u64);
+        assert_eq!(soft_sanitized.format_version, Version::V2 as u64);
         assert!(soft_sanitized.enable_log_recycle);
+
+        let format_error = r#"
+            enable-log-recycle = true
+        "#;
+        let mut cfg_load: Config = toml::from_str(format_error).unwrap();
+        assert!(cfg_load.sanitize().is_err());
     }
 
     #[test]

@@ -517,3 +517,62 @@ fn test_concurrent_write_perf_context() {
         assert_ne!(old.apply_duration, new.apply_duration);
     }
 }
+
+#[test]
+fn test_recycle_with_invalid_format_version() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_recycle_with_invalid_format_version")
+        .tempdir()
+        .unwrap();
+    let data = vec![b'x'; 1024];
+    let rid = 1;
+    {
+        let cfg_err = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(2),
+            purge_threshold: ReadableSize::kb(2),
+            enable_log_recycle: true,
+            ..Default::default()
+        };
+        // Force enable_log_recycle with Version::V1.
+        let _f = FailGuard::new("config::format::err", "return");
+        // Do not truncate the active_file when exit
+        let _f = FailGuard::new("file_pipe_log::single_pipe::drop", "return");
+        assert_eq!(cfg_err.recycle_capacity(), 1);
+        assert_eq!(cfg_err.format_version, Version::V1 as u64);
+        let engine = Engine::open(cfg_err).unwrap();
+        append(&engine, rid, 1, 3, Some(&data));
+        append(&engine, rid, 3, 5, Some(&data));
+        append(&engine, rid, 5, 7, Some(&data));
+        let append_first = engine.file_span(LogQueue::Append).0;
+        engine.compact_to(rid, 3);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+        append(&engine, rid, 7, 9, Some(&data));
+        append(&engine, rid, 9, 10, Some(&data));
+    }
+    {
+        // Recover the engine with invalid file with
+        // RecoveryMode::AbsoluteConsistency.
+        let _f = FailGuard::new("config::format::err", "return");
+        let cfg_err = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(2),
+            purge_threshold: ReadableSize::kb(2),
+            enable_log_recycle: true,
+            recovery_mode: RecoveryMode::AbsoluteConsistency,
+            ..Default::default()
+        };
+        assert!(Engine::open(cfg_err).is_err());
+        // Recover the engine with invalid file with
+        // RecoveryMode::default().
+        let cfg_err = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize::kb(2),
+            purge_threshold: ReadableSize::kb(2),
+            enable_log_recycle: true,
+            ..Default::default()
+        };
+        assert!(Engine::open(cfg_err).is_ok());
+    }
+}
