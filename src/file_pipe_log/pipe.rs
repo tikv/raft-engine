@@ -105,7 +105,6 @@ pub(super) struct SinglePipe<F: FileSystem> {
 impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut active_file = self.active_file.lock();
-        fail_point!("file_pipe_log::single_pipe::drop", |_| {});
         if let Err(e) = active_file.writer.close() {
             error!("error while closing single pipe: {}", e);
         }

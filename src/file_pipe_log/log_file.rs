@@ -5,6 +5,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
+use fail::fail_point;
 use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
@@ -89,6 +90,9 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     pub fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
+            fail_point!("file_pipe_log::log_file_writer::skip_truncate", |_| {
+                Ok(())
+            });
             self.writer.truncate(self.written)?;
             self.capacity = self.written;
         }
