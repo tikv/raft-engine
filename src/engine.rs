@@ -152,8 +152,6 @@ where
                     sync |= writer.sync;
                     let log_batch = writer.get_mut_payload();
                     let res = if !log_batch.is_empty() {
-                        // Signs a checksum, so-called `signature`, by the specified
-                        // `LogFileContext`, into the LogBatch.
                         let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
                         log_batch.prepare_write(&file_context);
                         self.pipe_log
@@ -321,6 +319,7 @@ where
 
     /// Returns the range of sequence number of `active` files of the
     /// specific `LogQueue`.
+    /// For testing only.
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
     }
@@ -548,6 +547,7 @@ mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
+    use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
@@ -1360,7 +1360,7 @@ mod tests {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
-                format_version: 2,
+                format_version: Version::V2,
                 ..Default::default()
             };
             test_engine_ops(&cfg_v1, &cfg_v2);
@@ -1383,7 +1383,7 @@ mod tests {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
-                format_version: 2,
+                format_version: Version::V2,
                 enable_log_recycle: true,
                 ..Default::default()
             };
@@ -1893,8 +1893,8 @@ mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(1),
-            format_version: 2,
+            purge_threshold: ReadableSize(2),
+            format_version: Version::V2,
             enable_log_recycle: true,
             ..Default::default()
         };
@@ -1907,11 +1907,11 @@ mod tests {
             engine.clean(rid);
         }
         let (start, _) = engine.file_span(LogQueue::Append);
-        // the [start - 1] file is recycled
+        // the [start - 2] files are recycled
         engine.purge_expired_files().unwrap();
         assert!(start < engine.file_span(LogQueue::Append).0);
-        assert_eq!(engine.file_count(None) + 1, fs.inner.file_count());
-        let start = engine.file_span(LogQueue::Append).0 - 1;
+        assert_eq!(engine.file_count(None) + 2, fs.inner.file_count());
+        let start = engine.file_span(LogQueue::Append).0 - 2;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start

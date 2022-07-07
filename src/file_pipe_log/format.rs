@@ -5,12 +5,10 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
-use strum_macros::EnumIter;
 
 use crate::codec::{self, NumberEncoder};
-use crate::pipe_log::{FileId, LogQueue};
+use crate::pipe_log::{FileId, LogQueue, Version};
 use crate::{Error, Result};
 
 /// Width to format log sequence number.
@@ -80,26 +78,6 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     path
 }
 
-/// Version of log file format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, EnumIter)]
-#[repr(u64)]
-pub enum Version {
-    V1 = 1,
-    V2 = 2,
-}
-
-impl Version {
-    pub fn is_valid(version: u64) -> bool {
-        Version::from_u64(version).is_some()
-    }
-}
-
-impl Default for Version {
-    fn default() -> Self {
-        Version::V1
-    }
-}
-
 /// In-memory representation of `Format` in log files.
 #[derive(Clone, Default)]
 pub struct LogFileFormat {
@@ -157,43 +135,10 @@ impl LogFileFormat {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct LogFileContext {
-    pub id: FileId,
-    pub version: Version,
-}
-
-impl LogFileContext {
-    pub fn new(file_id: FileId, version: Version) -> Self {
-        Self {
-            id: file_id,
-            version,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn dummy(queue: LogQueue) -> Self {
-        Self {
-            id: FileId::dummy(queue),
-            version: Version::default(),
-        }
-    }
-
-    /// Return the `signature` in `u32` format.
-    ///
-    /// Here, in mainly common case in producion, the `Config::purge_threshold`
-    /// is always limited to less than `UINT32_MAX`*`Config::target_file_size`,
-    /// the higher 32 bit keeps always same with zero bits. That is, the
-    /// count of files will be limited to less than `UINT32_MAX`. So, we
-    /// just use the low 32 bit as the `signature` by default.
-    pub fn get_signature(&self) -> u32 {
-        self.id.seq as u32
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe_log::LogFileContext;
 
     #[test]
     fn test_file_name() {
@@ -241,7 +186,8 @@ mod tests {
 
     #[test]
     fn test_file_context() {
-        let mut file_context = LogFileContext::dummy(LogQueue::Append);
+        let mut file_context =
+            LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
         assert_eq!(file_context.get_signature(), 0);
         file_context.id.seq = 10;
         assert_eq!(file_context.get_signature(), 10);

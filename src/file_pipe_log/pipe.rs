@@ -8,17 +8,18 @@ use std::sync::Arc;
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
 use log::error;
-use num_traits::FromPrimitive;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
+use crate::pipe_log::{
+    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, Version,
+};
 use crate::{perf_context, Error, Result};
 
-use super::format::{FileNameExt, LogFileContext, Version};
+use super::format::FileNameExt;
 use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
@@ -134,7 +135,8 @@ impl<F: FileSystem> SinglePipe<F> {
                 handle: fd,
                 context: LogFileContext::new(
                     file_id,
-                    Version::from_u64(cfg.format_version).unwrap(),
+                    // Version::from_u64(cfg.format_version).unwrap(),
+                    cfg.format_version,
                 ),
             });
             first_seq
@@ -164,7 +166,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
-            format_version: Version::from_u64(cfg.format_version).unwrap(),
+            format_version: cfg.format_version, /* Version::from_u64(cfg.format_version).unwrap() */
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,
@@ -737,7 +739,7 @@ mod tests {
                         .open(&old_file_id.build_file_path(path))
                         .unwrap(),
                 ),
-                context: LogFileContext::dummy(LogQueue::Append),
+                context: LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default()),
             });
             // recycle an old file
             assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
@@ -749,7 +751,10 @@ mod tests {
                             .open(&old_file_id.build_file_path(path))
                             .unwrap(),
                     ),
-                    context: LogFileContext::dummy(LogQueue::Append),
+                    context: LogFileContext::new(
+                        FileId::dummy(LogQueue::Append),
+                        Version::default(),
+                    ),
                 });
                 recycle_collections.first_seq_in_use = cur_file_id.seq;
             }
@@ -787,7 +792,7 @@ mod tests {
             bytes_per_sync: ReadableSize::kb(32),
             purge_threshold: ReadableSize::mb(1),
             enable_log_recycle: true,
-            format_version: 2,
+            format_version: Version::V2,
             ..Default::default()
         };
         let queue = LogQueue::Append;

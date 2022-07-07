@@ -411,7 +411,7 @@ fn test_tail_corruption() {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            format_version: 2,
+            format_version: Version::V2,
             ..Default::default()
         };
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
@@ -519,64 +519,6 @@ fn test_concurrent_write_perf_context() {
 }
 
 #[test]
-fn test_recycle_with_abnormal_rewritten_format() {
-    let dir = tempfile::Builder::new()
-        .prefix("test_recycle_with_tail_rewritten_err")
-        .tempdir()
-        .unwrap();
-    let data = vec![b'x'; 1024];
-    let rid = 1;
-    let cfg_err = Config {
-        dir: dir.path().to_str().unwrap().to_owned(),
-        target_file_size: ReadableSize::kb(2),
-        purge_threshold: ReadableSize::kb(2),
-        enable_log_recycle: true,
-        ..Default::default()
-    };
-    // Force enable_log_recycle with Version::V1.
-    let _f = FailGuard::new("config::format::err", "return");
-    // Do not truncate the active_file when exit
-    let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
-    assert_eq!(cfg_err.recycle_capacity(), 1);
-    assert_eq!(cfg_err.format_version, Version::V1 as u64);
-    let engine = Engine::open(cfg_err).unwrap();
-    append(&engine, rid, 1, 3, Some(&data));
-    append(&engine, rid, 3, 5, Some(&data));
-    append(&engine, rid, 5, 7, Some(&data));
-    let append_first = engine.file_span(LogQueue::Append).0;
-    engine.compact_to(rid, 3);
-    engine.purge_expired_files().unwrap();
-    assert!(engine.file_span(LogQueue::Append).0 > append_first);
-    append(&engine, rid, 7, 9, Some(&data));
-    append(&engine, rid, 9, 10, Some(&data));
-    drop(engine);
-    {
-        // Recover the engine with invalid file as the tail, in
-        // RecoveryMode::AbsoluteConsistency mode.
-        let cfg_err = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::kb(2),
-            purge_threshold: ReadableSize::kb(2),
-            enable_log_recycle: true,
-            recovery_mode: RecoveryMode::AbsoluteConsistency,
-            ..Default::default()
-        };
-        assert!(Engine::open(cfg_err).is_err());
-        // Recover the engine with invalid file as the tail, in
-        // RecoveryMode::default().
-        let cfg_err = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::kb(2),
-            purge_threshold: ReadableSize::kb(2),
-            enable_log_recycle: true,
-            ..Default::default()
-        };
-        assert!(Engine::open(cfg_err).is_ok());
-    }
-}
-
-#[test]
-#[should_panic]
 fn test_recycle_with_stale_logbatch_at_tail() {
     let dir = tempfile::Builder::new()
         .prefix("test_recycle_with_invalid_format_version_case_2")
@@ -592,11 +534,11 @@ fn test_recycle_with_stale_logbatch_at_tail() {
         ..Default::default()
     };
     // Force enable_log_recycle with Version::V1.
-    let _f = FailGuard::new("config::format::err", "return");
+    let _f = FailGuard::new("config::format::before", "return");
     // Do not truncate the active_file when exit
     let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
     assert_eq!(cfg_err.recycle_capacity(), 1);
-    assert_eq!(cfg_err.format_version, Version::V1 as u64);
+    assert_eq!(cfg_err.format_version, Version::V1);
     let engine = Engine::open(cfg_err.clone()).unwrap();
     append(&engine, rid, 1, 2, Some(&data));
     append(&engine, rid, 2, 3, Some(&data));
@@ -612,5 +554,8 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     // Causing the final log file is a recycled file, containing rewritten
     // LogBatchs and end with stale LogBatchs, `Engine::open(...)` should
     // `panic` when recovering the relate `Memtable`.
-    Engine::open(cfg_err).unwrap();
+    assert!(catch_unwind_silent(|| {
+        Engine::open(cfg_err).unwrap();
+    })
+    .is_err());
 }

@@ -4,7 +4,7 @@ use fail::fail_point;
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::file_pipe_log::Version;
+use crate::pipe_log::Version;
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
@@ -58,8 +58,8 @@ pub struct Config {
 
     /// Version of the log file.
     ///
-    /// Default: 1
-    pub format_version: u64,
+    /// Default: "V1"
+    pub format_version: Version,
 
     /// Target file size for rotating log files.
     ///
@@ -103,7 +103,7 @@ impl Default for Config {
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
-            format_version: 1, // 1 => Version::V1
+            format_version: Version::V1,
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
@@ -122,6 +122,7 @@ impl Default for Config {
 
 impl Config {
     pub fn sanitize(&mut self) -> Result<()> {
+        fail_point!("config::format::before", |_| { Ok(()) });
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
         }
@@ -149,22 +150,18 @@ impl Config {
             );
             self.recovery_threads = MIN_RECOVERY_THREADS;
         }
-        if !Version::is_valid(self.format_version) {
-            warn!(
-                "format-version ({}) is invalid, setting it to {}",
-                self.format_version,
-                Version::default() as u64
-            );
-            self.format_version = if self.enable_log_recycle {
-                Version::V2 as u64
-            } else {
-                Version::default() as u64
-            };
-        } else if self.enable_log_recycle && self.format_version == Version::default() as u64 {
-            fail_point!("config::format::err", |_| { Ok(()) });
-            return Err(box_err!(
-                "format_version is invalid when 'enable_format_version' on, should > Version::V1"
+        if self.enable_log_recycle {
+            if !self.format_version.support_log_recycle() {
+                return Err(box_err!(
+                "format_version: {:?} is invalid when 'enable_format_version' on, setting it to V2",
+                self.format_version
             ));
+            }
+            if self.purge_threshold.0 / self.target_file_size.0 >= std::u32::MAX as u64 {
+                return Err(box_err!(
+                    "File count exceed UINT32_MAX, calculated by 'purge-threshold / target-file-size'"
+                ));
+            }
         }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
@@ -175,18 +172,16 @@ impl Config {
 
     /// Returns the capacity for recycling log files.
     pub fn recycle_capacity(&self) -> usize {
-        fail_point!("config::format::err", |_| {
+        fail_point!("config::format::before", |_| {
             (self.purge_threshold.0 / self.target_file_size.0) as usize
         });
         // Attention please, log files with Version::V1 could not be recycled, it might
-        // cause LogBatchs in a mess in the recycled file, where the reader could not
-        // recognize the final LogBatch (latest in the recycled log).
-        if self.format_version == Version::default() as u64 {
+        // cause LogBatchs in a mess in the recycled file, where the reader might get
+        // an obsolete entries (unexpected) from the recycled file.
+        if !self.format_version.support_log_recycle() {
             return 0;
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
-            // Attention please, `capacity_of_recycle` would be dynamically updated
-            // by the formula: `Config::purge_threshold / Config::targe_file_size`.
             (self.purge_threshold.0 / self.target_file_size.0) as usize
         } else {
             0
@@ -214,7 +209,7 @@ mod tests {
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
-            format-version = 11
+            format-version = "V1"
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -222,8 +217,7 @@ mod tests {
         assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
-        assert_eq!(load.format_version, 11_u64);
-        assert!(!Version::is_valid(load.format_version));
+        assert_eq!(load.format_version, Version::V1);
         assert!(!load.enable_log_recycle);
     }
 
@@ -241,7 +235,7 @@ mod tests {
             recovery-threads = 0
             bytes-per-sync = "0KB"
             target-file-size = "5000MB"
-            format-version = 20
+            format-version = "V2"
             enable-log-recycle = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
@@ -254,7 +248,7 @@ mod tests {
             soft_sanitized.purge_rewrite_threshold.unwrap(),
             soft_sanitized.target_file_size
         );
-        assert_eq!(soft_sanitized.format_version, Version::V2 as u64);
+        assert_eq!(soft_sanitized.format_version, Version::V2);
         assert!(soft_sanitized.enable_log_recycle);
 
         let format_error = r#"
@@ -262,6 +256,15 @@ mod tests {
         "#;
         let mut cfg_load: Config = toml::from_str(format_error).unwrap();
         assert!(cfg_load.sanitize().is_err());
+
+        let file_count_error = r#"
+            target-file-size = "1B"
+            purge-threshold = "4GB"
+            format-version = "V2"
+            enable-log-recycle = true
+        "#;
+        let mut file_count_load: Config = toml::from_str(file_count_error).unwrap();
+        assert!(file_count_load.sanitize().is_err());
     }
 
     #[test]

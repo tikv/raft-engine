@@ -2,15 +2,16 @@
 
 use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{FileBlockHandle, FileId};
+use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
 use crate::{Error, Result};
 
-use super::format::{LogFileContext, LogFileFormat};
+use super::format::LogFileFormat;
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {
-    file_id: Option<FileId>,
+    /// The file context responding to `FildId`.
+    file_context: Option<LogFileContext>,
     reader: Option<LogFileReader<F>>,
     size: usize,
 
@@ -22,16 +23,13 @@ pub(super) struct LogItemBatchFileReader<F: FileSystem> {
 
     /// The maximum number of bytes to prefetch.
     read_block_size: usize,
-
-    /// The file context responding to `FildId`.
-    file_context: Option<LogFileContext>,
 }
 
 impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Creates a new reader.
     pub fn new(read_block_size: usize) -> Self {
         Self {
-            file_id: None,
+            file_context: None,
             reader: None,
             size: 0,
 
@@ -40,26 +38,22 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             valid_offset: 0,
 
             read_block_size,
-            file_context: None,
         }
     }
 
     /// Opens a file that can be accessed through the given reader.
     pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
-        let file_context = LogFileContext::new(file_id, reader.file_format().version());
-        self.file_id = Some(file_id);
+        self.file_context = Some(LogFileContext::new(file_id, reader.file_format().version()));
         self.size = reader.file_size()?;
         self.reader = Some(reader);
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = LogFileFormat::len();
-        self.file_context = Some(file_context);
         Ok(())
     }
 
     /// Closes any ongoing file access.
     pub fn reset(&mut self) {
-        self.file_id = None;
         self.reader = None;
         self.size = 0;
         self.buffer.clear();
@@ -87,7 +81,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             }
             let file_context = self.file_context.as_ref().unwrap().clone();
             let handle = FileBlockHandle {
-                id: self.file_id.unwrap(),
+                id: self.file_context.as_ref().unwrap().id,
                 offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
                 len: footer_offset - LOG_BATCH_HEADER_LEN,
             };

@@ -10,10 +10,10 @@ use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
-use crate::pipe_log::FileBlockHandle;
+use crate::pipe_log::{FileBlockHandle, LogFileContext, Version};
 use crate::{Error, Result};
 
-use super::format::{LogFileContext, LogFileFormat, Version};
+use super::format::LogFileFormat;
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;

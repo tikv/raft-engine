@@ -9,10 +9,9 @@ use log::error;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
-use crate::file_pipe_log::{LogFileContext, Version};
 use crate::memtable::EntryIndex;
 use crate::metrics::StopWatch;
-use crate::pipe_log::{FileBlockHandle, FileId};
+use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext, Version};
 use crate::util::{crc32, lz4};
 use crate::{perf_context, Error, Result};
 
@@ -561,6 +560,11 @@ enum BufState {
     /// # Invariants
     /// LOG_BATCH_HEADER_LEN <= buf.len()
     Sealed(usize, usize),
+    /// Buffer is preparing for signing checksum, accroding to format. This
+    /// state only briefly exists before writing.
+    /// # Content
+    /// (header_offset, entries_len)
+    Prepare(usize, usize),
     /// Buffer is undergoing writes. User operation will panic under this state.
     Incomplete,
 }
@@ -792,21 +796,26 @@ impl LogBatch {
         Ok(self.buf.len() - header_offset)
     }
 
-    /// Returns a slice of bytes containing encoded data of this log batch.
-    /// Assumes called after a successful call of [`finish_populate`].
-    pub(crate) fn encoded_bytes(&self) -> &[u8] {
+    /// Make preparations for the write of `LogBatch`.
+    #[inline]
+    pub(crate) fn prepare_write(&mut self, file_context: &LogFileContext) {
         match self.buf_state {
-            BufState::Sealed(header_offset, _) => &self.buf[header_offset..],
+            BufState::Sealed(header_offset, entries_len) => {
+                self.buf_state = BufState::Prepare(header_offset, entries_len);
+                if !self.is_empty() {
+                    LogItemBatch::prepare_write(&mut self.buf, file_context);
+                }
+            }
             _ => unreachable!(),
         }
     }
 
-    /// Make preparations for the write of `LogBatch`.
-    #[inline]
-    pub(crate) fn prepare_write(&mut self, file_context: &LogFileContext) {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
-        if !self.is_empty() {
-            LogItemBatch::prepare_write(&mut self.buf, file_context);
+    /// Returns a slice of bytes containing encoded data of this log batch.
+    /// Assumes called after a successful call of [`prepare_write`].
+    pub(crate) fn encoded_bytes(&self) -> &[u8] {
+        match self.buf_state {
+            BufState::Prepare(header_offset, _) => &self.buf[header_offset..],
+            _ => unreachable!(),
         }
     }
 
@@ -814,12 +823,12 @@ impl LogBatch {
     ///
     /// Internally sets the file locations of each log entry indexes.
     pub(crate) fn finish_write(&mut self, mut handle: FileBlockHandle) {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+        debug_assert!(matches!(self.buf_state, BufState::Prepare(_, _)));
         if !self.is_empty() {
             // adjust log batch handle to log entries handle.
             handle.offset += LOG_BATCH_HEADER_LEN as u64;
             match self.buf_state {
-                BufState::Sealed(_, entries_len) => {
+                BufState::Prepare(_, entries_len) => {
                     debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
                     handle.len = entries_len;
                 }
@@ -850,6 +859,7 @@ impl LogBatch {
                     self.buf.len() + LOG_BATCH_CHECKSUM_LEN + self.item_batch.approximate_size()
                 }
                 BufState::Sealed(header_offset, _) => self.buf.len() - header_offset,
+                BufState::Prepare(header_offset, _) => self.buf.len() - header_offset,
                 s => {
                     error!("querying incomplete log batch with state {:?}", s);
                     0
@@ -1137,7 +1147,8 @@ mod tests {
                 batch.finish_write(FileBlockHandle::dummy(LogQueue::Append));
                 let mut encoded_batch = vec![];
                 batch.encode(&mut encoded_batch).unwrap();
-                let file_context = LogFileContext::dummy(LogQueue::Append);
+                let file_context =
+                    LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
                 let decoded_batch = LogItemBatch::decode(
                     &mut encoded_batch.as_slice(),
                     FileBlockHandle::dummy(LogQueue::Append),
@@ -1266,6 +1277,8 @@ mod tests {
         let mut entries = Vec::new();
         let mut kvs = Vec::new();
         let data = vec![b'x'; 1024];
+        let file_id = FileId::dummy(LogQueue::Append);
+        let file_context = LogFileContext::new(file_id, Version::default());
 
         let mut batch1 = LogBatch::default();
         entries.push(generate_entries(1, 11, Some(&data)));
@@ -1299,14 +1312,13 @@ mod tests {
         assert!(batch2.is_empty());
 
         let len = batch1.finish_populate(0).unwrap();
+        batch1.prepare_write(&file_context);
         let encoded = batch1.encoded_bytes();
         assert_eq!(len, encoded.len());
 
         // decode item batch
         let (offset, compression_type, len) = LogBatch::decode_header(&mut &*encoded).unwrap();
         assert_eq!(encoded.len(), len);
-        let file_id = FileId::dummy(LogQueue::Append);
-        let file_context = LogFileContext::new(file_id, Version::default());
         let decoded_item_batch = LogItemBatch::decode(
             &mut &encoded[offset..],
             FileBlockHandle {
@@ -1358,7 +1370,7 @@ mod tests {
             .collect();
         assert!(verify_checksum_with_context(
             &invalid_data[..],
-            &LogFileContext::dummy(LogQueue::Append)
+            &LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default())
         )
         .is_err());
         {
@@ -1368,7 +1380,7 @@ mod tests {
             data.encode_u32_le(checksum).unwrap();
             assert!(verify_checksum_with_context(
                 &data[..],
-                &LogFileContext::dummy(LogQueue::Append)
+                &LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default())
             )
             .is_ok());
             // file_context.signature() == 0

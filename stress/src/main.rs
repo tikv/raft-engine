@@ -15,7 +15,7 @@ use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::internals::{EventListener, FileBlockHandle};
-use raft_engine::{Command, Config, Engine, LogBatch, MessageExt, ReadableSize};
+use raft_engine::{Command, Config, Engine, LogBatch, MessageExt, ReadableSize, Version};
 use rand::{thread_rng, Rng, RngCore};
 
 type WriteBatch = LogBatch;
@@ -583,7 +583,11 @@ fn main() {
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     config.enable_log_recycle = opts.enable_log_recycle;
-    config.format_version = if config.enable_log_recycle { 2 } else { 1 };
+    config.format_version = if config.enable_log_recycle {
+        Version::V2
+    } else {
+        Version::V1
+    };
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### New Features
+* Support recycling obsolete logs in Raft Engine to reduce the cost on `fallocate` with new files.
+
 ### Bug Fixes
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
@@ -26,7 +29,6 @@
 
 * Support limiting the memory usage of Raft Engine under new feature `swap` #211 
 * Add a new Prometheus counter `raft_engine_memory_usage` to track memory usage #207
-* Support recycling obsolete logs in Raft Engine to reduce the cost on `fallocate` with new files #224 
 
 ### Improvements
 

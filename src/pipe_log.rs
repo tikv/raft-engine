@@ -2,9 +2,12 @@
 
 //! A generic log storage.
 
+use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use strum::EnumIter;
 
-use crate::file_pipe_log::{LogFileContext, Version};
 use crate::Result;
 
 /// The type of log queue.
@@ -72,6 +75,61 @@ impl FileBlockHandle {
             offset: 0,
             len: 0,
         }
+    }
+}
+
+/// Version of log file format.
+// #[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, EnumIter)]
+// #[repr(u64)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, Serialize, Deserialize, EnumIter,
+)]
+#[repr(u64)]
+pub enum Version {
+    V1 = 1,
+    V2 = 2,
+}
+
+impl Version {
+    pub fn is_valid(version: u64) -> bool {
+        Version::from_u64(version).is_some()
+    }
+
+    pub fn support_log_recycle(&self) -> bool {
+        match self {
+            Version::V1 => false,
+            Version::V2 => true,
+        }
+    }
+}
+
+impl Default for Version {
+    fn default() -> Self {
+        Version::V1
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LogFileContext {
+    pub id: FileId,
+    pub version: Version,
+}
+
+impl LogFileContext {
+    pub fn new(file_id: FileId, version: Version) -> Self {
+        Self {
+            id: file_id,
+            version,
+        }
+    }
+
+    /// Return the `signature` in `u32` format.
+    ///
+    /// Here, the count of files will be always limited to less than
+    /// `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
+    /// by default.
+    pub fn get_signature(&self) -> u32 {
+        self.id.seq as u32
     }
 }
 
