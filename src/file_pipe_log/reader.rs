@@ -10,7 +10,6 @@ use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {
-    /// The file context responding to `FildId`.
     file_context: Option<LogFileContext>,
     reader: Option<LogFileReader<F>>,
     size: usize,

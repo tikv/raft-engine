@@ -1916,6 +1916,16 @@ mod tests {
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
         );
+        // rewrite the recycled files
+        for rid in 1..=2 {
+            engine.append(rid, 1, 11, Some(&entry_data));
+        }
+        assert_eq!(engine.file_count(None), fs.inner.file_count());
+        let start = engine.file_span(LogQueue::Append).0;
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
 
         let engine = engine.reopen();
         assert_eq!(engine.file_count(None), fs.inner.file_count());

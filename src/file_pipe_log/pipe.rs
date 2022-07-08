@@ -166,7 +166,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
-            format_version: cfg.format_version, /* Version::from_u64(cfg.format_version).unwrap() */
+            format_version: cfg.format_version,
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,
@@ -666,12 +666,42 @@ mod tests {
 
     #[test]
     fn test_recycle_file_collections() {
+        fn prepare_file<F: FileSystem>(
+            file_system: &F,
+            path: &str,
+            file_id: FileId,
+            data: &[u8],
+        ) -> Result<Arc<F::Handle>> {
+            let fd = Arc::new(file_system.create(&file_id.build_file_path(path))?);
+            let mut writer = file_system.new_writer(fd.clone())?;
+            writer.allocate(0, 32 * 1024 * 1024)?; // 32MB as default
+            writer.write_all(data)?;
+            writer.sync()?;
+            Ok(fd)
+        }
+        fn validate_content_of_file<F: FileSystem>(
+            file_system: &F,
+            path: &str,
+            file_id: FileId,
+            expected_data: &[u8],
+        ) -> Result<bool> {
+            let data_len = expected_data.len();
+            let mut buf = vec![0; 1024];
+            let fd = Arc::new(file_system.open(&file_id.build_file_path(path)).unwrap());
+            let mut new_reader = file_system.new_reader(fd).unwrap();
+            let actual_len = new_reader.read(&mut buf[..]).unwrap();
+            Ok(if actual_len != data_len {
+                false
+            } else {
+                buf[..] == expected_data[..]
+            })
+        }
         let dir = Builder::new()
             .prefix("test_recycle_file_collections")
             .tempdir()
             .unwrap();
         let path = dir.path().to_str().unwrap();
-        let default_file_size = 32 * 1024 * 1024; // 32MB as default
+        let data = vec![b'x'; 1024];
         let file_system = Arc::new(DefaultFileSystem);
         // test FileCollection with Default(Invalid)
         {
@@ -688,31 +718,7 @@ mod tests {
         }
         // test FileCollection with a valid file
         {
-            let data = vec![b'x'; 1024];
-            let prepare_file =
-                |file_id: FileId,
-                 data: &[u8]|
-                 -> Result<Arc<<DefaultFileSystem as FileSystem>::Handle>> {
-                    let fd = Arc::new(file_system.create(&file_id.build_file_path(path))?);
-                    let mut writer = file_system.new_writer(fd.clone())?;
-                    writer.allocate(0, default_file_size)?;
-                    writer.write_all(data)?;
-                    writer.sync()?;
-                    Ok(fd)
-                };
-            let validate_content_of_file =
-                |file_id: FileId, expected_data: &[u8]| -> Result<bool> {
-                    let data_len = expected_data.len();
-                    let mut buf = vec![0; 1024];
-                    let fd = Arc::new(file_system.open(&file_id.build_file_path(path)).unwrap());
-                    let mut new_reader = file_system.new_reader(fd).unwrap();
-                    let actual_len = new_reader.read(&mut buf[..]).unwrap();
-                    Ok(if actual_len != data_len {
-                        false
-                    } else {
-                        buf[..] == expected_data[..]
-                    })
-                };
+            // mock
             let old_file_id = FileId {
                 queue: LogQueue::Append,
                 seq: 12,
@@ -725,8 +731,7 @@ mod tests {
                 queue: LogQueue::Append,
                 seq: cur_file_id.seq + 1,
             };
-            // mock
-            let _ = prepare_file(old_file_id, &data[..]); // prepare old file
+            let _ = prepare_file(file_system.as_ref(), path, old_file_id, &data[..]); // prepare old file
             let mut recycle_collections = FileCollection::<DefaultFileSystem> {
                 first_seq: old_file_id.seq,
                 first_seq_in_use: old_file_id.seq,
@@ -761,7 +766,10 @@ mod tests {
             // recycle an old file
             assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
             // validate the content of recycled file
-            assert!(validate_content_of_file(new_file_id, &data[..]).unwrap());
+            assert!(
+                validate_content_of_file(file_system.as_ref(), path, new_file_id, &data[..])
+                    .unwrap()
+            );
             // rewrite and validate the cotent
             {
                 let refreshed_data = vec![b'm'; 1024];
@@ -774,8 +782,48 @@ mod tests {
                 assert!(new_writer.seek(SeekFrom::Start(0)).is_ok());
                 assert_eq!(new_writer.write(&refreshed_data[..]).unwrap(), 1024);
                 assert!(new_writer.sync().is_ok());
-                assert!(validate_content_of_file(new_file_id, &refreshed_data[..]).unwrap());
+                assert!(validate_content_of_file(
+                    file_system.as_ref(),
+                    path,
+                    new_file_id,
+                    &refreshed_data[..]
+                )
+                .unwrap());
             }
+        }
+        // test FileCollection with abnormal `recycle_one_file`
+        {
+            let fake_file_id = FileId {
+                queue: LogQueue::Append,
+                seq: 12,
+            };
+            let _ = prepare_file(file_system.as_ref(), path, fake_file_id, &data[..]); // prepare old file
+            let mut recycle_collections = FileCollection::<DefaultFileSystem> {
+                first_seq: fake_file_id.seq,
+                first_seq_in_use: fake_file_id.seq + 1,
+                capacity: 2,
+                ..Default::default()
+            };
+            recycle_collections.fds.push_back(FileHandler {
+                handle: Arc::new(
+                    file_system
+                        .open(&fake_file_id.build_file_path(path))
+                        .unwrap(),
+                ),
+                context: LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default()),
+            });
+            // mock the failure on `rename`
+            assert!(file_system
+                .delete(&fake_file_id.build_file_path(path))
+                .is_ok());
+            let new_file_id = FileId {
+                queue: LogQueue::Append,
+                seq: 13,
+            };
+            // `rename` is failed
+            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            // no stale files in recycle_collections could be recycled
+            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
         }
     }
 

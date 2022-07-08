@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### New Features
-* Support recycling obsolete logs in Raft Engine to reduce the cost on `fallocate` with new files.
-
 ### Bug Fixes
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
@@ -12,6 +9,7 @@
 ### New Features
 
 * Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
+* Support recycling obsolete logs in Raft Engine to reduce the cost on `fallocate` with new files.
 
 ### Public API Changes
 

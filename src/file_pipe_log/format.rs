@@ -170,8 +170,6 @@ mod tests {
         assert_eq!(Version::V1.to_u64().unwrap(), version.to_u64().unwrap());
         let version2 = Version::from_u64(1).unwrap();
         assert_eq!(version, version2);
-        assert!(Version::is_valid(1));
-        assert!(!Version::is_valid(4));
     }
 
     #[test]

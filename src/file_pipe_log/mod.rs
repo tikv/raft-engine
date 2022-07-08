@@ -47,7 +47,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd, version, false)
+        super::log_file::build_file_writer(file_system, fd, version, create)
     }
 
     /// Opens a log file for read.

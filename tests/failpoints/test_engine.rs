@@ -534,7 +534,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
         ..Default::default()
     };
     // Force enable_log_recycle with Version::V1.
-    let _f = FailGuard::new("config::format::before", "return");
+    let _f = FailGuard::new("pipe_log::version::skip_check", "return");
     // Do not truncate the active_file when exit
     let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
     assert_eq!(cfg_err.recycle_capacity(), 1);

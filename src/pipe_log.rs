@@ -1,9 +1,8 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 //! A generic log storage.
-
+use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use strum::EnumIter;
@@ -79,8 +78,6 @@ impl FileBlockHandle {
 }
 
 /// Version of log file format.
-// #[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, EnumIter)]
-// #[repr(u64)]
 #[derive(
     Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, Serialize, Deserialize, EnumIter,
 )]
@@ -91,11 +88,8 @@ pub enum Version {
 }
 
 impl Version {
-    pub fn is_valid(version: u64) -> bool {
-        Version::from_u64(version).is_some()
-    }
-
-    pub fn support_log_recycle(&self) -> bool {
+    pub fn has_log_signing(&self) -> bool {
+        fail_point!("pipe_log::version::skip_check", |_| { true });
         match self {
             Version::V1 => false,
             Version::V2 => true,

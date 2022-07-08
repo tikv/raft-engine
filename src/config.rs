@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use fail::fail_point;
 use log::warn;
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +121,6 @@ impl Default for Config {
 
 impl Config {
     pub fn sanitize(&mut self) -> Result<()> {
-        fail_point!("config::format::before", |_| { Ok(()) });
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
         }
@@ -151,11 +149,11 @@ impl Config {
             self.recovery_threads = MIN_RECOVERY_THREADS;
         }
         if self.enable_log_recycle {
-            if !self.format_version.support_log_recycle() {
+            if !self.format_version.has_log_signing() {
                 return Err(box_err!(
-                "format_version: {:?} is invalid when 'enable_format_version' on, setting it to V2",
-                self.format_version
-            ));
+                    "format_version: {:?} is invalid when 'enable_log_recycle' on, setting it to V2",
+                    self.format_version
+                ));
             }
             if self.purge_threshold.0 / self.target_file_size.0 >= std::u32::MAX as u64 {
                 return Err(box_err!(
@@ -172,13 +170,10 @@ impl Config {
 
     /// Returns the capacity for recycling log files.
     pub fn recycle_capacity(&self) -> usize {
-        fail_point!("config::format::before", |_| {
-            (self.purge_threshold.0 / self.target_file_size.0) as usize
-        });
         // Attention please, log files with Version::V1 could not be recycled, it might
         // cause LogBatchs in a mess in the recycled file, where the reader might get
         // an obsolete entries (unexpected) from the recycled file.
-        if !self.format_version.support_log_recycle() {
+        if !self.format_version.has_log_signing() {
             return 0;
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {

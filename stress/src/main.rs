@@ -231,6 +231,14 @@ struct ControlOpt {
     batch_compression_threshold: String,
 
     #[clap(
+        long = "format-version",
+        takes_value = true,
+        default_value = "V1",
+        help = "Format version of log files"
+    )]
+    format_version: String,
+
+    #[clap(
         long = "enable-log-recycle",
         help = "Recycle purged and stale logs for incoming writing"
     )]
@@ -583,11 +591,8 @@ fn main() {
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     config.enable_log_recycle = opts.enable_log_recycle;
-    config.format_version = if config.enable_log_recycle {
-        Version::V2
-    } else {
-        Version::V1
-    };
+    config.format_version =
+        serde_json::from_str::<Version>(&format!(r#""{}""#, opts.format_version)).unwrap();
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);
