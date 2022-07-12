@@ -65,10 +65,7 @@ impl<F: FileSystem> FileCollection<F> {
             match file_system.rename(&src_path, &dst_path) {
                 Ok(_) => {
                     // Update the first_seq
-                    self.first_seq = first_file_id.seq + 1;
-                    if self.first_seq >= self.first_seq_in_use {
-                        self.first_seq_in_use = self.first_seq;
-                    }
+                    self.first_seq += 1;
                     ret = true;
                 }
                 Err(e) => {
@@ -403,8 +400,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 // [2] if `reset_volume` > `expected_purge_count`, it means
                 //     that the FileCollection has enough space for recycling
                 //     all files which need to be purged.
-                let reset_volume =
-                    files.capacity - (files.first_seq_in_use - files.first_seq) as usize;
+                let reset_volume = (files.capacity as u64)
+                    .saturating_sub(files.first_seq_in_use - files.first_seq)
+                    as usize;
                 let expected_purge_count = file_seq.saturating_sub(files.first_seq_in_use) as usize;
                 if expected_purge_count >= reset_volume {
                     first_purge_seq = files.first_seq;
