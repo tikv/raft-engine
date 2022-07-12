@@ -106,6 +106,23 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = active_file.writer.close() {
             error!("error while closing single pipe: {}", e);
         }
+        // Here, we also should release the unnecessary disk space
+        // occupied by stale files.
+        let files = self.files.write();
+        for seq in files.first_seq..files.first_seq_in_use {
+            let file_id = FileId {
+                queue: self.queue,
+                seq,
+            };
+            let path = file_id.build_file_path(&self.dir);
+            if let Err(e) = self.file_system.delete(&path) {
+                error!(
+                    "error while deleting stale file: {}, err_msg: {}",
+                    path.display(),
+                    e
+                )
+            }
+        }
     }
 }
 

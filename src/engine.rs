@@ -1910,8 +1910,18 @@ mod tests {
         // the [start - 2] files are recycled
         engine.purge_expired_files().unwrap();
         assert!(start < engine.file_span(LogQueue::Append).0);
-        assert_eq!(engine.file_count(None) + 2, fs.inner.file_count());
+        let file_count = fs.inner.file_count();
+        assert_eq!(engine.file_count(None) + 2, file_count);
         let start = engine.file_span(LogQueue::Append).0 - 2;
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
+        // reopen the engine and validate the stale files are removed
+        let engine = engine.reopen();
+        assert_eq!(fs.inner.file_count(), file_count - 2);
+        assert_eq!(engine.file_span(LogQueue::Append).0, start + 2);
+        let start = engine.file_span(LogQueue::Append).0;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
