@@ -1799,6 +1799,11 @@ mod tests {
 
         fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> std::io::Result<()> {
             self.inner.rename(src_path.as_ref(), dst_path.as_ref())?;
+            println!(
+                "[Testing]Rename the file from src_path: {} to dst_path: {}",
+                src_path.as_ref().display(),
+                dst_path.as_ref().display(),
+            );
             self.update_metadata(src_path.as_ref(), true);
             self.update_metadata(dst_path.as_ref(), false);
             Ok(())
@@ -1927,6 +1932,10 @@ mod tests {
             &start
         );
         // rewrite the recycled files
+        for rid in 1..=2 {
+            engine.clean(rid);
+        }
+        engine.purge_expired_files().unwrap();
         for rid in 1..=2 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
