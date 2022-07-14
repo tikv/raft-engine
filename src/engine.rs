@@ -224,7 +224,7 @@ where
         Ok(None)
     }
 
-    pub fn scan_message<S, C>(
+    pub fn scan_messages<S, C>(
         &self,
         region_id: u64,
         start_key: Option<&[u8]>,
@@ -240,12 +240,12 @@ where
         if let Some(memtable) = self.memtables.get(region_id) {
             memtable
                 .read()
-                .scan_message(start_key, end_key, reverse, callback)?;
+                .scan_messages(start_key, end_key, reverse, callback)?;
         }
         Ok(())
     }
 
-    pub fn scan<C>(
+    pub fn scan_raw_messages<C>(
         &self,
         region_id: u64,
         start_key: Option<&[u8]>,
@@ -260,7 +260,7 @@ where
         if let Some(memtable) = self.memtables.get(region_id) {
             memtable
                 .read()
-                .scan(start_key, end_key, reverse, callback)?;
+                .scan_raw_messages(start_key, end_key, reverse, callback)?;
         }
         Ok(())
     }
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
         let mut res = vec![];
         engine
-            .scan(rid, Some(&key), None, false, |key, value| {
+            .scan_raw_messages(rid, Some(&key), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })

@@ -262,7 +262,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     }
 
     /// Iterator over [start_key, end_key) range.
-    pub fn scan_message<S, F>(
+    pub fn scan_messages<S, F>(
         &self,
         start_key: Option<&[u8]>,
         end_key: Option<&[u8]>,
@@ -295,7 +295,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     }
 
     /// Iterator over [start_key, end_key) range.
-    pub fn scan<F>(
+    pub fn scan_raw_messages<F>(
         &self,
         start_key: Option<&[u8]>,
         end_key: Option<&[u8]>,
@@ -1678,7 +1678,7 @@ mod tests {
 
         let mut res = vec![];
         memtable
-            .scan(None, None, false, |key, value| {
+            .scan_raw_messages(None, None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
@@ -1689,7 +1689,7 @@ mod tests {
         );
         res.clear();
         memtable
-            .scan(None, None, true, |key, value| {
+            .scan_raw_messages(None, None, true, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
@@ -1700,14 +1700,14 @@ mod tests {
         );
         res.clear();
         memtable
-            .scan(None, Some(b"key1"), false, |key, value| {
+            .scan_raw_messages(None, Some(b"key1"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
             .unwrap();
         assert_eq!(res, vec![]);
         memtable
-            .scan(Some(b"key5"), None, false, |key, value| {
+            .scan_raw_messages(Some(b"key5"), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
@@ -1715,7 +1715,7 @@ mod tests {
         assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
         res.clear();
         memtable
-            .scan(Some(b"key1"), Some(b"key5"), false, |key, value| {
+            .scan_raw_messages(Some(b"key1"), Some(b"key5"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
