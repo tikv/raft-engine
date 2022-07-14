@@ -521,7 +521,7 @@ fn test_concurrent_write_perf_context() {
 #[test]
 fn test_recycle_with_stale_logbatch_at_tail() {
     let dir = tempfile::Builder::new()
-        .prefix("test_recycle_with_invalid_format_version_case_2")
+        .prefix("test_recycle_with_stale_log_batch_at_tail")
         .tempdir()
         .unwrap();
     let data = vec![b'x'; 1024];
@@ -534,7 +534,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
         ..Default::default()
     };
     // Force enable_log_recycle with Version::V1.
-    let _f = FailGuard::new("pipe_log::version::skip_check", "return");
+    let _f = FailGuard::new("pipe_log::version::force_enable", "return");
     // Do not truncate the active_file when exit
     let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
     assert_eq!(cfg_err.recycle_capacity(), 1);

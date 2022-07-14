@@ -9,7 +9,7 @@
 ### New Features
 
 * Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
-* Support recycling obsolete logs in Raft Engine to reduce the cost on `fallocate` with new files.
+* Support recycling obsolete log files to reduce the cost of `fallocate`-ing new ones.
 
 ### Public API Changes
 

@@ -186,12 +186,13 @@ mod tests {
     fn test_file_context() {
         let mut file_context =
             LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
-        assert_eq!(file_context.get_signature(), 0);
+        assert_eq!(file_context.get_signature(), None);
         file_context.id.seq = 10;
-        assert_eq!(file_context.get_signature(), 10);
+        file_context.version = Version::V2;
+        assert_eq!(file_context.get_signature().unwrap(), 10);
         let abnormal_seq = (file_context.id.seq << 32) as u64 + 100_u64;
         file_context.id.seq = abnormal_seq;
-        assert_ne!(file_context.get_signature() as u64, abnormal_seq);
-        assert_eq!(file_context.get_signature(), 100);
+        assert_ne!(file_context.get_signature().unwrap() as u64, abnormal_seq);
+        assert_eq!(file_context.get_signature().unwrap(), 100);
     }
 }

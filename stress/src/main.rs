@@ -233,7 +233,7 @@ struct ControlOpt {
     #[clap(
         long = "format-version",
         takes_value = true,
-        default_value = "V1",
+        default_value = "1",
         help = "Format version of log files"
     )]
     format_version: String,
@@ -591,8 +591,7 @@ fn main() {
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     config.enable_log_recycle = opts.enable_log_recycle;
-    config.format_version =
-        serde_json::from_str::<Version>(&format!(r#""{}""#, opts.format_version)).unwrap();
+    config.format_version = serde_json::from_str::<Version>(&opts.format_version).unwrap();
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);

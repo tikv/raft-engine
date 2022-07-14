@@ -3,7 +3,7 @@
 //! A generic log storage.
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
-use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::cmp::Ordering;
 use strum::EnumIter;
 
@@ -79,7 +79,16 @@ impl FileBlockHandle {
 
 /// Version of log file format.
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive, Serialize, Deserialize, EnumIter,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    FromPrimitive,
+    ToPrimitive,
+    Serialize_repr,
+    Deserialize_repr,
+    EnumIter,
 )]
 #[repr(u64)]
 pub enum Version {
@@ -89,7 +98,7 @@ pub enum Version {
 
 impl Version {
     pub fn has_log_signing(&self) -> bool {
-        fail_point!("pipe_log::version::skip_check", |_| { true });
+        fail_point!("pipe_log::version::force_enable", |_| { true });
         match self {
             Version::V1 => false,
             Version::V2 => true,
@@ -117,13 +126,17 @@ impl LogFileContext {
         }
     }
 
-    /// Return the `signature` in `u32` format.
+    /// Return the `signature` in `Option<u32>` format.
     ///
-    /// Here, the count of files will be always limited to less than
-    /// `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
-    /// by default.
-    pub fn get_signature(&self) -> u32 {
-        self.id.seq as u32
+    /// `None` will be returned only if `self.version` is invalid.
+    pub fn get_signature(&self) -> Option<u32> {
+        match self.version {
+            Version::V1 => None,
+            // Here, the count of files will be always limited to less than
+            // `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
+            // by default.
+            Version::V2 => Some(self.id.seq as u32),
+        }
     }
 }
 
@@ -134,6 +147,11 @@ pub trait PipeLog: Sized {
 
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.
+    ///
+    /// Incoming `bytes` will be appended to the `active_file`, which should
+    /// only be held by one thread, that is, the leader of the writer group.
+    /// Also, it's not permitted to change the `active_file` until the leader
+    /// confirms all bytes have been dumped into the file.
     fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle>;
 
     /// Hints it to synchronize buffered writes. The synchronization is

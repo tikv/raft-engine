@@ -97,6 +97,9 @@ pub(super) struct SinglePipe<F: FileSystem> {
     /// All log files.
     files: CachePadded<RwLock<FileCollection<F>>>,
     /// The log file opened for write.
+    ///
+    /// Accessing to `active_file` should hold the
+    /// file mutex before locking `files`.
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
 }
 
@@ -147,11 +150,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
             fds.push_back(FileHandler {
                 handle: fd,
-                context: LogFileContext::new(
-                    file_id,
-                    // Version::from_u64(cfg.format_version).unwrap(),
-                    cfg.format_version,
-                ),
+                context: LogFileContext::new(file_id, cfg.format_version),
             });
             first_seq
         } else {
@@ -172,7 +171,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 file_system.as_ref(),
                 active_fd.handle.clone(),
                 active_fd.context.version,
-                false,
+                false, /* force_reset */
             )?,
         };
 
@@ -264,7 +263,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 self.file_system.as_ref(),
                 fd.clone(),
                 self.format_version,
-                true,
+                true, /* force_reset */
             )?,
         };
         // File header must be persisted. This way we can recover gracefully if power
@@ -397,44 +396,31 @@ impl<F: FileSystem> SinglePipe<F> {
             if file_seq >= files.first_seq + files.fds.len() as u64 {
                 return Err(box_err!("Purge active or newer files"));
             }
-            let mut first_purge_seq = 0;
-            let end_offset: usize;
+            let first_purge_seq: u64;
+            let purged: usize;
             let mut recycled: usize = 0;
             if files.capacity == 0 {
                 // Not capable for Recycle
                 first_purge_seq = files.first_seq;
-                end_offset = file_seq.saturating_sub(files.first_seq) as usize;
-                files.fds.drain(..end_offset);
+                purged = file_seq.saturating_sub(files.first_seq) as usize;
+                files.fds.drain(..purged);
                 files.first_seq = file_seq;
                 files.first_seq_in_use = file_seq;
             } else {
                 // Capable for recycling log files. It means that the
                 // FileCollections has a finite volume for storing recycled files.
-                // [1] if `reset_volume` <= `expected_purge_count`, it means
-                //     that the FileCollection for recycling can not recycle
-                //     all files which need to be purged, we should purge
-                //     several files and recycle the others.
-                // [2] if `reset_volume` > `expected_purge_count`, it means
-                //     that the FileCollection has enough space for recycling
-                //     all files which need to be purged.
-                let reset_volume = (files.capacity as u64)
+                let rest_volume = (files.capacity as u64)
                     .saturating_sub(files.first_seq_in_use - files.first_seq)
                     as usize;
                 let expected_purge_count = file_seq.saturating_sub(files.first_seq_in_use) as usize;
-                if expected_purge_count >= reset_volume {
-                    first_purge_seq = files.first_seq;
-                    end_offset = expected_purge_count - reset_volume;
-                    recycled = reset_volume;
-                    files.first_seq += end_offset as u64;
-                    files.first_seq_in_use = file_seq;
-                } else {
-                    end_offset = 0;
-                    recycled = file_seq.saturating_sub(files.first_seq_in_use) as usize;
-                    files.first_seq_in_use = file_seq;
-                }
-                files.fds.drain(..end_offset);
+                recycled = std::cmp::min(rest_volume, expected_purge_count);
+                purged = std::cmp::max(rest_volume, expected_purge_count) - rest_volume;
+                first_purge_seq = files.first_seq;
+                files.first_seq += purged as u64;
+                files.first_seq_in_use = file_seq;
+                files.fds.drain(..purged);
             }
-            (first_purge_seq, end_offset, recycled, files.fds.len())
+            (first_purge_seq, purged, recycled, files.fds.len())
         };
         self.flush_metrics(remained);
         for seq in first_purge_seq..first_purge_seq + purged as u64 {

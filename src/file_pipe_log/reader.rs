@@ -80,7 +80,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             }
             let file_context = self.file_context.as_ref().unwrap().clone();
             let handle = FileBlockHandle {
-                id: self.file_context.as_ref().unwrap().id,
+                id: file_context.id,
                 offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
                 len: footer_offset - LOG_BATCH_HEADER_LEN,
             };

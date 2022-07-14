@@ -57,7 +57,7 @@ pub struct Config {
 
     /// Version of the log file.
     ///
-    /// Default: "V1"
+    /// Default: 1
     pub format_version: Version,
 
     /// Target file size for rotating log files.
@@ -86,7 +86,8 @@ pub struct Config {
 
     /// Whether to recycle stale logs.
     /// If `true`, `purge` operations on logs will firstly put stale
-    /// files into a list for recycle.
+    /// files into a list for recycle. It's only available if
+    /// `format_version` >= `2`.
     ///
     /// Default: false,
     pub enable_log_recycle: bool,
@@ -204,7 +205,7 @@ mod tests {
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
-            format-version = "V1"
+            format-version = 1
         "#;
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -230,7 +231,7 @@ mod tests {
             recovery-threads = 0
             bytes-per-sync = "0KB"
             target-file-size = "5000MB"
-            format-version = "V2"
+            format-version = 2
             enable-log-recycle = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
@@ -255,7 +256,7 @@ mod tests {
         let file_count_error = r#"
             target-file-size = "1B"
             purge-threshold = "4GB"
-            format-version = "V2"
+            format-version = 2
             enable-log-recycle = true
         "#;
         let mut file_count_load: Config = toml::from_str(file_count_error).unwrap();
