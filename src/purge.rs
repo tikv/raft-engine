@@ -351,7 +351,7 @@ where
         if len == 0 {
             return self.pipe_log.maybe_sync(LogQueue::Rewrite, sync);
         }
-        let file_context = self.pipe_log.fetch_active_file(LogQueue::Rewrite);
+        let file_context = self.pipe_log.fetch_active_file(LogQueue::Rewrite)?;
         log_batch.prepare_write(&file_context);
         let file_handle = self
             .pipe_log

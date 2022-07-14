@@ -197,5 +197,5 @@ pub trait PipeLog: Sized {
 
     /// Returns `[LogFileContext]` of the active file in the specific
     /// log queue.
-    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext;
+    fn fetch_active_file(&self, queue: LogQueue) -> Result<LogFileContext>;
 }

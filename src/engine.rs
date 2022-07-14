@@ -147,7 +147,7 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
-                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
+                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append)?;
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
@@ -167,7 +167,7 @@ where
                     writer.set_output(res);
                 }
                 debug_assert!(
-                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
+                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append)?.id
                 );
                 perf_context!(log_write_duration).observe_since(now);
                 if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
