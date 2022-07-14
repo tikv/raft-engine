@@ -9,12 +9,12 @@
 ### New Features
 
 * Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
-* Add `Engine::scan_messages` and `Engine::scan_raw_messages` for iterating over written key-values. 
 
 ### Public API Changes
 
 * Add `is_empty` to `Engine` API.
 * Add metadata deletion capability to `FileSystem` trait. Users can implement `exists_metadata` and `delete_metadata` to clean up obsolete metadata from older versions of Raft Engine.
+* Add `Engine::scan_messages` and `Engine::scan_raw_messages` for iterating over written key-values. 
 
 ## [0.2.0] - 2022-05-25
 
