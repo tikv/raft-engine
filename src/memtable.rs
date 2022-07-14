@@ -271,12 +271,27 @@ impl<A: AllocatorTrait> MemTable<A> {
     ) -> Result<()>
     where
         S: Message,
-        F: FnMut(&[u8], S) -> Result<bool>,
+        F: FnMut(&[u8], S) -> bool,
     {
-        self.scan(start_key, end_key, reverse, |key, v| {
-            let value = parse_from_bytes(v)?;
-            f(key, value)
-        })
+        let lower = start_key.map(Bound::Included).unwrap_or(Bound::Unbounded);
+        let upper = end_key.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
+        let iter = self.kvs.range::<[u8], _>((lower, upper));
+        if reverse {
+            for (key, (v, _)) in iter.rev() {
+                let value = parse_from_bytes(v)?;
+                if !f(key, value) {
+                    break;
+                }
+            }
+        } else {
+            for (key, (v, _)) in iter {
+                let value = parse_from_bytes(v)?;
+                if !f(key, value) {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Iterator over [start_key, end_key) range.
@@ -288,20 +303,20 @@ impl<A: AllocatorTrait> MemTable<A> {
         mut f: F,
     ) -> Result<()>
     where
-        F: FnMut(&[u8], &[u8]) -> Result<bool>,
+        F: FnMut(&[u8], &[u8]) -> bool,
     {
         let lower = start_key.map(Bound::Included).unwrap_or(Bound::Unbounded);
         let upper = end_key.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
         let iter = self.kvs.range::<[u8], _>((lower, upper));
         if reverse {
             for (key, (value, _)) in iter.rev() {
-                if !f(key, value)? {
+                if !f(key, value) {
                     break;
                 }
             }
         } else {
             for (key, (value, _)) in iter {
-                if !f(key, value)? {
+                if !f(key, value) {
                     break;
                 }
             }
@@ -1665,7 +1680,7 @@ mod tests {
         memtable
             .scan(None, None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
-                Ok(true)
+                true
             })
             .unwrap();
         assert_eq!(
@@ -1676,7 +1691,7 @@ mod tests {
         memtable
             .scan(None, None, true, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
-                Ok(true)
+                true
             })
             .unwrap();
         assert_eq!(
@@ -1687,14 +1702,14 @@ mod tests {
         memtable
             .scan(None, Some(b"key1"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
-                Ok(true)
+                true
             })
             .unwrap();
         assert_eq!(res, vec![]);
         memtable
             .scan(Some(b"key5"), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
-                Ok(true)
+                true
             })
             .unwrap();
         assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
@@ -1702,7 +1717,7 @@ mod tests {
         memtable
             .scan(Some(b"key1"), Some(b"key5"), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
-                Ok(true)
+                true
             })
             .unwrap();
         assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);

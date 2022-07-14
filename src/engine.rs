@@ -234,7 +234,7 @@ where
     ) -> Result<()>
     where
         S: Message,
-        C: FnMut(&[u8], S) -> Result<bool>,
+        C: FnMut(&[u8], S) -> bool,
     {
         let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
@@ -254,7 +254,7 @@ where
         callback: C,
     ) -> Result<()>
     where
-        C: FnMut(&[u8], &[u8]) -> Result<bool>,
+        C: FnMut(&[u8], &[u8]) -> bool,
     {
         let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
@@ -914,7 +914,7 @@ mod tests {
         engine
             .scan(rid, Some(&key), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
-                Ok(true)
+                true
             })
             .unwrap();
         assert_eq!(res, vec![(key.clone(), v2.clone())]);
