@@ -51,13 +51,14 @@ fn main() {
     loop {
         for _ in 0..1024 {
             let region = rand_regions.next().unwrap();
-            let state = engine
+            let mut state = engine
                 .get_message::<RaftLocalState>(region, b"last_index")
                 .unwrap()
                 .unwrap_or_else(|| init_state.clone());
 
+            state.last_index += 1; // manually update the state
             let mut e = entry.clone();
-            e.index = state.last_index + 1;
+            e.index = state.last_index;
             batch.add_entries::<MessageExtTyped>(region, &[e]).unwrap();
             batch
                 .put_message(region, b"last_index".to_vec(), &state)
