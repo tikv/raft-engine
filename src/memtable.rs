@@ -3,11 +3,13 @@
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::marker::PhantomData;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use fail::fail_point;
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
+use protobuf::{parse_from_bytes, Message};
 
 use crate::config::Config;
 use crate::file_pipe_log::ReplayMachine;
@@ -257,6 +259,69 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// Returns value for a given key.
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.kvs.get(key).map(|v| v.0.clone())
+    }
+
+    /// Iterator over [start_key, end_key) range.
+    pub fn scan_messages<S, F>(
+        &self,
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
+        reverse: bool,
+        mut f: F,
+    ) -> Result<()>
+    where
+        S: Message,
+        F: FnMut(&[u8], S) -> bool,
+    {
+        let lower = start_key.map(Bound::Included).unwrap_or(Bound::Unbounded);
+        let upper = end_key.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
+        let iter = self.kvs.range::<[u8], _>((lower, upper));
+        if reverse {
+            for (key, (v, _)) in iter.rev() {
+                let value = parse_from_bytes(v)?;
+                if !f(key, value) {
+                    break;
+                }
+            }
+        } else {
+            for (key, (v, _)) in iter {
+                let value = parse_from_bytes(v)?;
+                if !f(key, value) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Iterator over [start_key, end_key) range.
+    pub fn scan_raw_messages<F>(
+        &self,
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
+        reverse: bool,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        let lower = start_key.map(Bound::Included).unwrap_or(Bound::Unbounded);
+        let upper = end_key.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
+        let iter = self.kvs.range::<[u8], _>((lower, upper));
+        if reverse {
+            for (key, (value, _)) in iter.rev() {
+                if !f(key, value) {
+                    break;
+                }
+            }
+        } else {
+            for (key, (value, _)) in iter {
+                if !f(key, value) {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Deletes a key value pair.
@@ -1610,6 +1675,52 @@ mod tests {
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
         assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
         assert_eq!(memtable.get(k5.as_ref()), Some(v5.to_vec()));
+
+        let mut res = vec![];
+        memtable
+            .scan_raw_messages(None, None, false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            res,
+            vec![(k1.to_vec(), v1.to_vec()), (k5.to_vec(), v5.to_vec())]
+        );
+        res.clear();
+        memtable
+            .scan_raw_messages(None, None, true, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            res,
+            vec![(k5.to_vec(), v5.to_vec()), (k1.to_vec(), v1.to_vec())]
+        );
+        res.clear();
+        memtable
+            .scan_raw_messages(None, Some(b"key1"), false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(res, vec![]);
+        memtable
+            .scan_raw_messages(Some(b"key5"), None, false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
+        res.clear();
+        memtable
+            .scan_raw_messages(Some(b"key1"), Some(b"key5"), false, |key, value| {
+                res.push((key.to_vec(), value.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);
 
         memtable.delete(k5.as_ref());
         assert_eq!(memtable.get(k5.as_ref()), None);
