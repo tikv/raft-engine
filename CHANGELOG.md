@@ -9,6 +9,7 @@
 ### New Features
 
 * Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
+* Add `Engine::scan_messages` and `Engine::scan_raw_messages` for iterating over written key-values. 
 
 ### Public API Changes
 
