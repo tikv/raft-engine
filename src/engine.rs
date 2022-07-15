@@ -224,27 +224,31 @@ where
         Ok(None)
     }
 
+    /// Iterates over [start_key, end_key) range of Raft Group key-values and
+    /// yields messages of the required type. Unparsable items are skipped.
     pub fn scan_messages<S, C>(
         &self,
         region_id: u64,
         start_key: Option<&[u8]>,
         end_key: Option<&[u8]>,
         reverse: bool,
-        callback: C,
+        mut callback: C,
     ) -> Result<()>
     where
         S: Message,
         C: FnMut(&[u8], S) -> bool,
     {
-        let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
-        if let Some(memtable) = self.memtables.get(region_id) {
-            memtable
-                .read()
-                .scan_messages(start_key, end_key, reverse, callback)?;
-        }
-        Ok(())
+        self.scan_raw_messages(region_id, start_key, end_key, reverse, move |k, raw_v| {
+            if let Ok(v) = parse_from_bytes(raw_v) {
+                callback(k, v)
+            } else {
+                true
+            }
+        })
     }
 
+    /// Iterates over [start_key, end_key) range of Raft Group key-values and
+    /// yields all key value pairs as bytes.
     pub fn scan_raw_messages<C>(
         &self,
         region_id: u64,
@@ -260,7 +264,7 @@ where
         if let Some(memtable) = self.memtables.get(region_id) {
             memtable
                 .read()
-                .scan_raw_messages(start_key, end_key, reverse, callback)?;
+                .scan(start_key, end_key, reverse, callback)?;
         }
         Ok(())
     }
@@ -824,6 +828,99 @@ mod tests {
     }
 
     #[test]
+    fn test_key_value_scan() {
+        fn key(i: u64) -> Vec<u8> {
+            format!("k{}", i).as_bytes().to_vec()
+        }
+        fn value(i: u64) -> Vec<u8> {
+            format!("v{}", i).as_bytes().to_vec()
+        }
+        fn rich_value(i: u64) -> RaftLocalState {
+            RaftLocalState {
+                last_index: i,
+                ..Default::default()
+            }
+        }
+
+        let dir = tempfile::Builder::new()
+            .prefix("test_key_value_scan")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        let rid = 1;
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+                .unwrap();
+
+        engine
+            .scan_messages::<RaftLocalState, _>(rid, None, None, false, |_, _| {
+                panic!("unexpected message.");
+            })
+            .unwrap();
+
+        let mut batch = LogBatch::default();
+        let mut res = Vec::new();
+        let mut rich_res = Vec::new();
+        batch.put(rid, key(1), value(1));
+        batch.put(rid, key(2), value(2));
+        batch.put(rid, key(3), value(3));
+        engine.write(&mut batch, false).unwrap();
+
+        engine
+            .scan_raw_messages(rid, None, None, false, |k, v| {
+                res.push((k.to_vec(), v.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            res,
+            vec![(key(1), value(1)), (key(2), value(2)), (key(3), value(3))]
+        );
+        res.clear();
+        engine
+            .scan_raw_messages(rid, None, None, true, |k, v| {
+                res.push((k.to_vec(), v.to_vec()));
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            res,
+            vec![(key(3), value(3)), (key(2), value(2)), (key(1), value(1))]
+        );
+        res.clear();
+        engine
+            .scan_messages::<RaftLocalState, _>(rid, None, None, false, |_, _| {
+                panic!("unexpected message.")
+            })
+            .unwrap();
+
+        batch.put_message(rid, key(22), &rich_value(22)).unwrap();
+        batch.put_message(rid, key(33), &rich_value(33)).unwrap();
+        engine.write(&mut batch, false).unwrap();
+
+        engine
+            .scan_messages(rid, None, None, false, |k, v| {
+                rich_res.push((k.to_vec(), v));
+                false
+            })
+            .unwrap();
+        assert_eq!(rich_res, vec![(key(22), rich_value(22))]);
+        rich_res.clear();
+        engine
+            .scan_messages(rid, None, None, true, |k, v| {
+                rich_res.push((k.to_vec(), v));
+                false
+            })
+            .unwrap();
+        assert_eq!(rich_res, vec![(key(33), rich_value(33))]);
+        rich_res.clear();
+    }
+
+    #[test]
     fn test_delete_key_value() {
         let dir = tempfile::Builder::new()
             .prefix("test_delete_key_value")
@@ -844,16 +941,28 @@ mod tests {
         let mut delete_batch = LogBatch::default();
         delete_batch.delete(rid, key.clone());
 
-        // put | delete
-        //     ^ rewrite
         let engine =
             RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
                 .unwrap();
+        assert_eq!(
+            engine.get_message::<RaftLocalState>(rid, &key).unwrap(),
+            None
+        );
+        assert_eq!(engine.get(rid, &key), None);
+
+        // put | delete
+        //     ^ rewrite
         engine.write(&mut batch_1.clone(), true).unwrap();
+        assert!(engine.get_message::<RaftLocalState>(rid, &key).is_err());
         engine.purge_manager.must_rewrite_append_queue(None, None);
         engine.write(&mut delete_batch.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key), None);
+        assert_eq!(
+            engine.get_message::<RaftLocalState>(rid, &key).unwrap(),
+            None
+        );
+
         // Incomplete purge.
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine
@@ -910,14 +1019,6 @@ mod tests {
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
-        let mut res = vec![];
-        engine
-            .scan_raw_messages(rid, Some(&key), None, false, |key, value| {
-                res.push((key.to_vec(), value.to_vec()));
-                true
-            })
-            .unwrap();
-        assert_eq!(res, vec![(key.clone(), v2.clone())]);
 
         // put | delete | put |
         //                    ^ rewrite

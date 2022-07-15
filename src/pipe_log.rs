@@ -18,7 +18,7 @@ pub enum LogQueue {
 pub type FileSeq = u64;
 
 /// A unique identifier for a log file.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FileId {
     pub queue: LogQueue,
     pub seq: FileSeq,
@@ -55,7 +55,7 @@ impl std::cmp::PartialOrd for FileId {
 }
 
 /// A logical pointer to a chunk of log file data.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FileBlockHandle {
     pub id: FileId,
     pub offset: u64,

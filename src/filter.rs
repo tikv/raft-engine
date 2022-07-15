@@ -19,7 +19,7 @@ use crate::{Error, Result};
 
 /// `FilterResult` determines how to alter the existing log items in
 /// `RhaiFilterMachine`.
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq)]
 enum FilterResult {
     /// Apply in the usual way.
     Default,

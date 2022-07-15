@@ -104,7 +104,7 @@ where
                 should_compact.extend(self.rewrite_or_compact_append_queue(
                     rewrite_watermark,
                     compact_watermark,
-                    &mut *rewrite_candidate_regions,
+                    &mut rewrite_candidate_regions,
                 )?);
 
                 if append_queue_barrier == first_append && first_append < latest_append {

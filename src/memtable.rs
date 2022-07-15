@@ -9,7 +9,6 @@ use std::sync::Arc;
 use fail::fail_point;
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
-use protobuf::{parse_from_bytes, Message};
 
 use crate::config::Config;
 use crate::file_pipe_log::ReplayMachine;
@@ -73,7 +72,7 @@ const CAPACITY_INIT: usize = 32 - 1;
 const MEMTABLE_SLOT_COUNT: usize = 128;
 
 /// Location of a log entry.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct EntryIndex {
     /// Logical index.
     pub index: u64,
@@ -113,7 +112,7 @@ impl EntryIndex {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct ThinEntryIndex {
     entries: Option<FileBlockHandle>,
     compression_type: CompressionType,
@@ -261,41 +260,9 @@ impl<A: AllocatorTrait> MemTable<A> {
         self.kvs.get(key).map(|v| v.0.clone())
     }
 
-    /// Iterator over [start_key, end_key) range.
-    pub fn scan_messages<S, F>(
-        &self,
-        start_key: Option<&[u8]>,
-        end_key: Option<&[u8]>,
-        reverse: bool,
-        mut f: F,
-    ) -> Result<()>
-    where
-        S: Message,
-        F: FnMut(&[u8], S) -> bool,
-    {
-        let lower = start_key.map(Bound::Included).unwrap_or(Bound::Unbounded);
-        let upper = end_key.map(Bound::Excluded).unwrap_or(Bound::Unbounded);
-        let iter = self.kvs.range::<[u8], _>((lower, upper));
-        if reverse {
-            for (key, (v, _)) in iter.rev() {
-                let value = parse_from_bytes(v)?;
-                if !f(key, value) {
-                    break;
-                }
-            }
-        } else {
-            for (key, (v, _)) in iter {
-                let value = parse_from_bytes(v)?;
-                if !f(key, value) {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Iterator over [start_key, end_key) range.
-    pub fn scan_raw_messages<F>(
+    /// Iterates over [start_key, end_key) range and yields all key value pairs
+    /// as bytes.
+    pub fn scan<F>(
         &self,
         start_key: Option<&[u8]>,
         end_key: Option<&[u8]>,
@@ -1664,83 +1631,75 @@ mod tests {
 
     #[test]
     fn test_memtable_kv_operations() {
+        fn key(i: u64) -> Vec<u8> {
+            format!("k{}", i).as_bytes().to_vec()
+        }
+        fn value(i: u64) -> Vec<u8> {
+            format!("v{}", i).as_bytes().to_vec()
+        }
+
         let region_id = 8;
         let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
 
-        let (k1, v1) = (b"key1", b"value1");
-        let (k5, v5) = (b"key5", b"value5");
-        memtable.put(k1.to_vec(), v1.to_vec(), FileId::new(LogQueue::Append, 1));
-        memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 5));
+        memtable.put(key(1), value(1), FileId::new(LogQueue::Append, 1));
+        memtable.put(key(5), value(5), FileId::new(LogQueue::Append, 5));
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 5);
-        assert_eq!(memtable.get(k1.as_ref()), Some(v1.to_vec()));
-        assert_eq!(memtable.get(k5.as_ref()), Some(v5.to_vec()));
+        assert_eq!(memtable.get(&key(1)), Some(value(1)));
+        assert_eq!(memtable.get(&key(5)), Some(value(5)));
 
-        let mut res = vec![];
+        let mut res = Vec::new();
         memtable
-            .scan_raw_messages(None, None, false, |key, value| {
-                res.push((key.to_vec(), value.to_vec()));
-                true
+            .scan(None, None, false, |k, v| {
+                res.push((k.to_vec(), v.to_vec()));
+                false
             })
             .unwrap();
-        assert_eq!(
-            res,
-            vec![(k1.to_vec(), v1.to_vec()), (k5.to_vec(), v5.to_vec())]
-        );
+        assert_eq!(res, vec![(key(1), value(1))]);
         res.clear();
         memtable
-            .scan_raw_messages(None, None, true, |key, value| {
-                res.push((key.to_vec(), value.to_vec()));
-                true
+            .scan(None, None, true, |k, v| {
+                res.push((k.to_vec(), v.to_vec()));
+                false
             })
             .unwrap();
-        assert_eq!(
-            res,
-            vec![(k5.to_vec(), v5.to_vec()), (k1.to_vec(), v1.to_vec())]
-        );
+        assert_eq!(res, vec![(key(5), value(5))]);
         res.clear();
         memtable
-            .scan_raw_messages(None, Some(b"key1"), false, |key, value| {
+            .scan(Some(&key(5)), None, false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
             .unwrap();
-        assert_eq!(res, vec![]);
-        memtable
-            .scan_raw_messages(Some(b"key5"), None, false, |key, value| {
-                res.push((key.to_vec(), value.to_vec()));
-                true
-            })
-            .unwrap();
-        assert_eq!(res, vec![(k5.to_vec(), v5.to_vec())]);
+        assert_eq!(res, vec![(key(5), value(5))]);
         res.clear();
         memtable
-            .scan_raw_messages(Some(b"key1"), Some(b"key5"), false, |key, value| {
+            .scan(Some(&key(1)), Some(&key(5)), false, |key, value| {
                 res.push((key.to_vec(), value.to_vec()));
                 true
             })
             .unwrap();
-        assert_eq!(res, vec![(k1.to_vec(), v1.to_vec())]);
+        assert_eq!(res, vec![(key(1), value(1))]);
 
-        memtable.delete(k5.as_ref());
-        assert_eq!(memtable.get(k5.as_ref()), None);
+        memtable.delete(&key(5));
+        assert_eq!(memtable.get(&key(5)), None);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 1);
 
-        memtable.put(k1.to_vec(), v1.to_vec(), FileId::new(LogQueue::Rewrite, 2));
-        memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Rewrite, 3));
+        memtable.put(key(1), value(1), FileId::new(LogQueue::Rewrite, 2));
+        memtable.put(key(5), value(5), FileId::new(LogQueue::Rewrite, 3));
         assert_eq!(memtable.min_file_seq(LogQueue::Append), None);
         assert_eq!(memtable.max_file_seq(LogQueue::Append), None);
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 3);
         assert_eq!(memtable.global_stats.rewrite_entries(), 2);
 
-        memtable.delete(k1.as_ref());
+        memtable.delete(&key(1));
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite).unwrap(), 3);
         assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 1);
 
-        memtable.put(k5.to_vec(), v5.to_vec(), FileId::new(LogQueue::Append, 7));
+        memtable.put(key(5), value(5), FileId::new(LogQueue::Append, 7));
         assert_eq!(memtable.min_file_seq(LogQueue::Rewrite), None);
         assert_eq!(memtable.max_file_seq(LogQueue::Rewrite), None);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 7);

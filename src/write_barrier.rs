@@ -237,12 +237,11 @@ mod tests {
     #[test]
     fn test_sequential_groups() {
         let barrier: WriteBarrier<(), u32> = Default::default();
-        let mut payload = ();
         let mut leaders = 0;
         let mut processed_writers = 0;
 
         for _ in 0..4 {
-            let mut writer = Writer::new(&mut payload, false);
+            let mut writer = Writer::new(&mut (), false);
             {
                 let mut wg = barrier.enter(&mut writer).unwrap();
                 leaders += 1;

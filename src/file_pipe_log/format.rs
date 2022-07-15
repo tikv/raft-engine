@@ -80,7 +80,7 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 /// Version of log file format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FromPrimitive, ToPrimitive)]
 #[repr(u64)]
 pub enum Version {
     V1 = 1,

@@ -19,7 +19,7 @@ pub const GIB: u64 = MIB * BINARY_DATA_MAGNITUDE;
 pub const TIB: u64 = GIB * BINARY_DATA_MAGNITUDE;
 pub const PIB: u64 = TIB * BINARY_DATA_MAGNITUDE;
 
-#[derive(Clone, Debug, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd)]
 pub struct ReadableSize(pub u64);
 
 impl ReadableSize {

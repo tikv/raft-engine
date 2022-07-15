@@ -68,7 +68,7 @@ type SliceReader<'a> = &'a [u8];
 
 // Format:
 // { count | first index | [ tail offsets ] }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryIndexes(pub Vec<EntryIndex>);
 
 impl EntryIndexes {
@@ -115,7 +115,7 @@ impl EntryIndexes {
 
 // Format:
 // { type | (index) }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Clean,
     Compact { index: u64 },
@@ -158,7 +158,7 @@ impl Command {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum OpType {
     Put = 1,
     Del = 2,
@@ -180,7 +180,7 @@ impl OpType {
 
 // Format:
 // { op_type | key len | key | ( value len | value ) }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyValue {
     pub op_type: OpType,
     pub key: Vec<u8>,
@@ -239,13 +239,13 @@ impl KeyValue {
 
 // Format:
 // { 8 byte region id | 1 byte type | item }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogItem {
     pub raft_group_id: u64,
     pub content: LogItemContent,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogItemContent {
     EntryIndexes(EntryIndexes),
     Command(Command),
@@ -343,7 +343,7 @@ pub(crate) type LogItemDrain<'a> = std::vec::Drain<'a, LogItem>;
 /// A lean batch of log item, without entry data.
 // Format:
 // { item count | [items] | crc32 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
@@ -513,7 +513,7 @@ impl LogItemBatch {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum BufState {
     /// Buffer contains header and optionally entries.
     /// # Invariants
@@ -545,7 +545,7 @@ enum BufState {
 /// limits.
 // Calling protocol:
 // Insert log items -> [`finish_populate`] -> [`finish_write`]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogBatch {
     item_batch: LogItemBatch,
     buf_state: BufState,
@@ -737,17 +737,10 @@ impl LogBatch {
 
         #[cfg(feature = "failpoints")]
         {
-            let corrupted_items = || {
-                fail::fail_point!("log_batch::corrupted_items", |_| true);
-                false
-            };
             let corrupted_entries = || {
                 fail::fail_point!("log_batch::corrupted_entries", |_| true);
                 false
             };
-            if corrupted_items() {
-                self.buf[footer_roffset] += 1;
-            }
             if corrupted_entries() && footer_roffset > LOG_BATCH_HEADER_LEN {
                 self.buf[footer_roffset - 1] += 1;
             }
@@ -1121,7 +1114,7 @@ mod tests {
 
             let item_batch = batch.item_batch.clone();
             // decode item batch
-            let mut bytes_slice = &*encoded;
+            let mut bytes_slice = encoded;
             let (offset, compression_type, len) =
                 LogBatch::decode_header(&mut bytes_slice).unwrap();
             assert_eq!(len, encoded.len());
@@ -1200,6 +1193,8 @@ mod tests {
             batch1.put(region_id, k.clone(), v.clone());
             kvs.push((k, v));
         }
+
+        batch1.merge(&mut LogBatch::default()).unwrap();
 
         let mut batch2 = LogBatch::default();
         entries.push(generate_entries(11, 21, Some(&data)));
