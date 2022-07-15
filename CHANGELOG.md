@@ -5,6 +5,7 @@
 ### Bug Fixes
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
+* Avoid leaving fractured write after failure by reseeking the file writer. Panic if the reseek fails as well.
 
 ### Public API Changes
 
