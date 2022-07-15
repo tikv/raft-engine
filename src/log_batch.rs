@@ -737,12 +737,12 @@ impl LogBatch {
 
         #[cfg(feature = "failpoints")]
         {
-            let corrupted_entries = || {
-                fail::fail_point!("log_batch::corrupted_entries", |_| true);
+            let corrupted_items = || {
+                fail::fail_point!("log_batch::corrupted_items", |_| true);
                 false
             };
-            if corrupted_entries() && footer_roffset > LOG_BATCH_HEADER_LEN {
-                self.buf[footer_roffset - 1] += 1;
+            if corrupted_items() {
+                self.buf[footer_roffset] += 1;
             }
         }
 
