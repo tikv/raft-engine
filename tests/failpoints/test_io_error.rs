@@ -287,6 +287,68 @@ fn test_concurrent_write_error() {
     );
 }
 
+#[test]
+fn test_non_atomic_write_error() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_non_atomic_write_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        bytes_per_sync: ReadableSize::kb(1024),
+        target_file_size: ReadableSize::kb(1024),
+        ..Default::default()
+    };
+    let fs = Arc::new(ObfuscatedFileSystem::default());
+    let entry = vec![b'x'; 1024];
+    let rid = 1;
+
+    {
+        // Write partially succeeds. We can reopen.
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let _f1 = FailGuard::new("log_fd::write::err", "return");
+        engine
+            .write(&mut generate_batch(rid, 0, 1, Some(&entry)), true)
+            .unwrap_err();
+    }
+    {
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        assert_eq!(engine.first_index(rid), None);
+    }
+    {
+        // Write partially succeeds. We can overwrite.
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let _f1 = FailGuard::new("log_fd::write::err", "1*off->1*return->off");
+        engine
+            .write(&mut generate_batch(rid, 0, 1, Some(&entry)), true)
+            .unwrap_err();
+        engine
+            .write(&mut generate_batch(rid, 5, 6, Some(&entry)), true)
+            .unwrap();
+        assert_eq!(engine.first_index(rid).unwrap(), 5);
+    }
+    {
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        assert_eq!(engine.first_index(rid).unwrap(), 5);
+    }
+    {
+        // Write partially succeeds and can't be reverted. We panic.
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let _f1 = FailGuard::new("log_fd::write::err", "return");
+        let _f2 = FailGuard::new("log_file::seek::err", "return");
+        assert!(catch_unwind_silent(|| {
+            engine
+                .write(&mut generate_batch(rid, 6, 7, Some(&entry)), true)
+                .unwrap_err();
+        })
+        .is_err());
+    }
+    {
+        let engine = Engine::open_with_file_system(cfg, fs).unwrap();
+        assert_eq!(engine.last_index(rid), Some(5));
+    }
+}
+
 #[cfg(feature = "scripting")]
 #[test]
 fn test_error_during_repair() {
