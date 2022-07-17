@@ -318,7 +318,7 @@ impl RhaiFilterMachine {
                     // Batch 64KB.
                     if log_batch.approximate_size() >= 64 * 1024 {
                         log_batch.finish_populate(0 /* compression_threshold */)?;
-                        log_batch.prepare_write(&log_file_format);
+                        log_batch.prepare_write(&log_file_format)?;
                         writer.write(
                             log_batch.encoded_bytes(),
                             usize::MAX, /* target_size_hint */
@@ -328,7 +328,7 @@ impl RhaiFilterMachine {
                 }
                 if !log_batch.is_empty() {
                     log_batch.finish_populate(0 /* compression_threshold */)?;
-                    log_batch.prepare_write(&log_file_format);
+                    log_batch.prepare_write(&log_file_format)?;
                     writer.write(
                         log_batch.encoded_bytes(),
                         usize::MAX, /* target_size_hint */

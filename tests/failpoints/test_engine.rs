@@ -535,6 +535,26 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     };
     // Force enable_log_recycle with Version::V1.
     let _f = FailGuard::new("pipe_log::version::force_enable", "return");
+    // Force setting signature with Version::V1.
+    let _f = FailGuard::new("pipe_log::version::force_get_signature", "return");
+    {
+        let v1 = LogFileContext::new(
+            FileId {
+                seq: 10,
+                queue: LogQueue::Append,
+            },
+            Version::V1,
+        );
+        let v2 = LogFileContext::new(
+            FileId {
+                seq: 10,
+                queue: LogQueue::Append,
+            },
+            Version::V2,
+        );
+        assert!(v1.get_signature().is_none());
+        assert_eq!(v2.get_signature().unwrap() as u64, v2.id.seq);
+    }
     // Do not truncate the active_file when exit
     let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
     assert_eq!(cfg_err.recycle_capacity(), 1);

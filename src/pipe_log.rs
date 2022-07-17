@@ -1,10 +1,12 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 //! A generic log storage.
+
+use std::cmp::Ordering;
+
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::cmp::Ordering;
 use strum::EnumIter;
 
 use crate::Result;
@@ -130,12 +132,19 @@ impl LogFileContext {
     ///
     /// `None` will be returned only if `self.version` is invalid.
     pub fn get_signature(&self) -> Option<u32> {
-        match self.version {
-            Version::V1 => None,
+        fail_point!("pipe_log::version::force_get_signature", |_| {
+            match self.version {
+                Version::V1 => None,
+                Version::V2 => Some(self.id.seq as u32),
+            }
+        });
+        if self.version.has_log_signing() {
             // Here, the count of files will be always limited to less than
             // `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
             // by default.
-            Version::V2 => Some(self.id.seq as u32),
+            Some(self.id.seq as u32)
+        } else {
+            None
         }
     }
 }
@@ -197,5 +206,5 @@ pub trait PipeLog: Sized {
 
     /// Returns `[LogFileContext]` of the active file in the specific
     /// log queue.
-    fn fetch_active_file(&self, queue: LogQueue) -> Result<LogFileContext>;
+    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext;
 }

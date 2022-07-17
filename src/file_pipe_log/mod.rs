@@ -222,7 +222,7 @@ pub mod debug {
                     let len = batch
                         .finish_populate(1 /* compression_threshold */)
                         .unwrap();
-                    batch.prepare_write(&log_file_format);
+                    assert!(batch.prepare_write(&log_file_format).is_ok());
                     writer
                         .write(batch.encoded_bytes(), 0 /* target_file_hint */)
                         .unwrap();

@@ -98,8 +98,8 @@ pub(super) struct SinglePipe<F: FileSystem> {
     files: CachePadded<RwLock<FileCollection<F>>>,
     /// The log file opened for write.
     ///
-    /// Accessing to `active_file` should hold the
-    /// file mutex before locking `files`.
+    /// `active_file` must be locked first to acquire
+    /// both `files` and `active_file`.
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
 }
 
@@ -107,7 +107,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut active_file = self.active_file.lock();
         if let Err(e) = active_file.writer.close() {
-            error!("error while closing single pipe: {}", e);
+            error!("error while closing the active writer: {}", e);
         }
         // Here, we also should release the unnecessary disk space
         // occupied by stale files.
@@ -394,19 +394,9 @@ impl<F: FileSystem> SinglePipe<F> {
         ) = {
             let mut files = self.files.write();
             if file_seq >= files.first_seq + files.fds.len() as u64 {
-                #[cfg(feature = "failpoints")]
-                {
-                    fail::fail_point!("file_pipe_log::pipe::force_purge", |_| {
-                        let purged = file_seq.saturating_sub(files.first_seq) as usize;
-                        files.fds.drain(..purged);
-                        files.first_seq = file_seq;
-                        files.first_seq_in_use = file_seq;
-                        Ok(purged)
-                    });
-                }
                 return Err(box_err!("Purge active or newer files"));
             }
-            println!("Force to do purge op: file_seq: {}", file_seq);
+
             let first_purge_seq: u64;
             let purged: usize;
             let mut recycled: usize = 0;
@@ -455,14 +445,11 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(purged + recycled)
     }
 
-    fn fetch_active_file(&self) -> Result<LogFileContext> {
+    fn fetch_active_file(&self) -> LogFileContext {
         let files = self.files.read();
         match files.fds.back() {
-            Some(active_fd) => Ok(LogFileContext::new(
-                active_fd.context.id,
-                active_fd.context.version,
-            )),
-            None => Err(Error::Corruption("no valid files remained".to_owned())),
+            Some(active_fd) => LogFileContext::new(active_fd.context.id, active_fd.context.version),
+            _ => unreachable!(),
         }
     }
 }
@@ -535,7 +522,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn fetch_active_file(&self, queue: LogQueue) -> Result<LogFileContext> {
+    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext {
         self.pipes[queue as usize].fetch_active_file()
     }
 
@@ -671,7 +658,7 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let file_context = pipe_log.fetch_active_file(LogQueue::Append).unwrap();
+        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.version, Version::default());
         assert_eq!(file_context.id.seq, 3);
     }
@@ -919,38 +906,8 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let file_context = pipe_log.fetch_active_file(LogQueue::Append).unwrap();
+        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
-    }
-
-    #[test]
-    #[cfg(feature = "failpoints")]
-    fn test_pipe_log_fetch_active_file_err() {
-        let dir = Builder::new()
-            .prefix("test_pipe_log_fetch_active_file_err")
-            .tempdir()
-            .unwrap();
-        let path = dir.path().to_str().unwrap();
-        let cfg = Config {
-            dir: path.to_owned(),
-            target_file_size: ReadableSize::kb(1),
-            bytes_per_sync: ReadableSize::kb(32),
-            purge_threshold: ReadableSize::mb(1),
-            enable_log_recycle: false,
-            format_version: Version::V2,
-            ..Default::default()
-        };
-        let queue = LogQueue::Append;
-        let pipe_log = new_test_pipes(&cfg).unwrap();
-        assert_eq!(pipe_log.file_span(queue), (1, 1));
-        let active_file_formate = pipe_log.fetch_active_file(queue).unwrap();
-        assert_eq!(active_file_formate.id, FileId { seq: 1, queue });
-        assert_eq!(active_file_formate.version, Version::V2);
-        let force_purge = "file_pipe_log::pipe::force_purge";
-        fail::cfg(force_purge, "return").unwrap();
-        pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap();
-        assert!(pipe_log.fetch_active_file(queue).is_err());
-        fail::remove(force_purge);
     }
 }
