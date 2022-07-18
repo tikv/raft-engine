@@ -410,14 +410,28 @@ impl<F: FileSystem> SinglePipe<F> {
             // When capacity is zero, always remove logically deleted files.
             let capacity_exceeded = files.fds.len().saturating_sub(files.capacity);
             let purged = std::cmp::min(capacity_exceeded, obsolete_files);
-            // Update
+
+            // The files marked with `recycle` but with format_version V1 should also
+            // be removed.
             files.first_seq += purged as u64;
+            let extra_purged = {
+                let mut count = 0;
+                for recycle_idx in 0..(file_seq - files.first_seq) as usize {
+                    if !files.fds[recycle_idx].context.version.has_log_signing() {
+                        count += 1;
+                    }
+                }
+                count
+            };
+            let final_purge_count = purged + extra_purged;
+            // Update metadata of files
+            files.first_seq += extra_purged as u64;
             files.first_seq_in_use = file_seq;
-            files.fds.drain(..purged);
+            files.fds.drain(..final_purge_count);
             (
-                files.first_seq - purged as u64,
-                purged,
-                logically_purged,
+                files.first_seq - final_purge_count as u64,
+                final_purge_count,
+                logically_purged.saturating_sub(extra_purged),
                 files.fds.len(),
             )
         };

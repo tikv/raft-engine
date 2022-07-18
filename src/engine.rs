@@ -2054,4 +2054,53 @@ mod tests {
             new_perf_context.apply_duration
         );
     }
+
+    #[test]
+    fn test_recycle_no_signing_files() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_managed_file_rename")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let fs = Arc::new(DeleteMonitoredFileSystem::new());
+        // Prepare files with format_version V1
+        {
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                purge_threshold: ReadableSize(1024),
+                format_version: Version::V1,
+                ..Default::default()
+            };
+            let fs = Arc::new(DeleteMonitoredFileSystem::new());
+            let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+            for rid in 1..=10 {
+                engine.append(rid, 1, 11, Some(&entry_data));
+            }
+            let (start, end) = engine.file_span(LogQueue::Append);
+            assert_eq!((start, end), (1, 11));
+        }
+        // Reopen the Engine with V2 and purge
+        {
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                purge_threshold: ReadableSize(15),
+                format_version: Version::V2,
+                enable_log_recycle: true,
+                ..Default::default()
+            };
+            let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+            let (start, end) = engine.file_span(LogQueue::Append);
+            assert_eq!((start, end), (1, 11));
+            for rid in 1..=5 {
+                engine.clean(rid);
+            }
+            // the [1, 11] files are recycled
+            engine.purge_expired_files().unwrap();
+            assert!(start < engine.file_span(LogQueue::Append).0);
+            assert_eq!(start + 15, engine.file_span(LogQueue::Append).0);
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
+        }
+    }
 }
