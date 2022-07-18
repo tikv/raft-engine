@@ -921,7 +921,8 @@ impl LogBatch {
     }
 }
 
-/// Verifies the checksum of a slice of bytes that sequentially holds data and checksum.
+/// Verifies the checksum of a slice of bytes that sequentially holds data and
+/// checksum.
 fn verify_checksum(buf: &[u8]) -> Result<()> {
     if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
         return Err(Error::Corruption(format!(
