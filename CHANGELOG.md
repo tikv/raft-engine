@@ -1,11 +1,16 @@
 # Raft Engine Change Log
 
+## [Unreleased]
+
+### Bug Fixes
+
+* Avoid leaving fractured write after failure by reseeking the file writer. Panic if the reseek fails as well.
+
 ## [0.2.1] - 2022-07-12
 
 ### Bug Fixes
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
-* Avoid leaving fractured write after failure by reseeking the file writer. Panic if the reseek fails as well.
 
 ### Public API Changes
 
