@@ -564,7 +564,7 @@ enum BufState {
     /// version.
     /// # Content
     /// (header_offset, entries_len)
-    Prepare(usize, usize),
+    Encoded(usize, usize),
     /// Buffer is undergoing writes. User operation will panic under this state.
     Incomplete,
 }
@@ -802,10 +802,9 @@ impl LogBatch {
         match self.buf_state {
             BufState::Sealed(header_offset, entries_len) => {
                 if let Err(e) = LogItemBatch::prepare_write(&mut self.buf, file_context) {
-                    error!("Failed to make preparations for write, err: {}", e);
                     return Err(e);
                 }
-                self.buf_state = BufState::Prepare(header_offset, entries_len);
+                self.buf_state = BufState::Encoded(header_offset, entries_len);
             }
             _ => unreachable!(),
         }
@@ -816,7 +815,7 @@ impl LogBatch {
     /// Assumes called after a successful call of [`prepare_write`].
     pub(crate) fn encoded_bytes(&self) -> &[u8] {
         match self.buf_state {
-            BufState::Prepare(header_offset, _) => &self.buf[header_offset..],
+            BufState::Encoded(header_offset, _) => &self.buf[header_offset..],
             _ => unreachable!(),
         }
     }
@@ -825,12 +824,12 @@ impl LogBatch {
     ///
     /// Internally sets the file locations of each log entry indexes.
     pub(crate) fn finish_write(&mut self, mut handle: FileBlockHandle) {
-        debug_assert!(matches!(self.buf_state, BufState::Prepare(_, _)));
+        debug_assert!(matches!(self.buf_state, BufState::Encoded(_, _)));
         if !self.is_empty() {
             // adjust log batch handle to log entries handle.
             handle.offset += LOG_BATCH_HEADER_LEN as u64;
             match self.buf_state {
-                BufState::Prepare(_, entries_len) => {
+                BufState::Encoded(_, entries_len) => {
                     debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
                     handle.len = entries_len;
                 }
@@ -861,7 +860,7 @@ impl LogBatch {
                     self.buf.len() + LOG_BATCH_CHECKSUM_LEN + self.item_batch.approximate_size()
                 }
                 BufState::Sealed(header_offset, _) => self.buf.len() - header_offset,
-                BufState::Prepare(header_offset, _) => self.buf.len() - header_offset,
+                BufState::Encoded(header_offset, _) => self.buf.len() - header_offset,
                 s => {
                     error!("querying incomplete log batch with state {:?}", s);
                     0
@@ -922,7 +921,7 @@ impl LogBatch {
     }
 }
 
-/// Verifies the checksum of a slice of bytes that sequentially holds data.
+/// Verifies the checksum of a slice of bytes that sequentially holds data and checksum.
 fn verify_checksum(buf: &[u8]) -> Result<()> {
     if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
         return Err(Error::Corruption(format!(

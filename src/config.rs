@@ -170,7 +170,7 @@ impl Config {
     }
 
     /// Returns the capacity for recycling log files.
-    pub fn recycle_capacity(&self) -> usize {
+    pub(crate) fn recycle_capacity(&self) -> usize {
         // Attention please, log files with Version::V1 could not be recycled, it might
         // cause LogBatchs in a mess in the recycled file, where the reader might get
         // an obsolete entries (unexpected) from the recycled file.

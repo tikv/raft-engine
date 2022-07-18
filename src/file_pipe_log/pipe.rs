@@ -395,33 +395,31 @@ impl<F: FileSystem> SinglePipe<F> {
             let mut files = self.files.write();
             if file_seq >= files.first_seq + files.fds.len() as u64 {
                 return Err(box_err!("Purge active or newer files"));
+            } else if file_seq <= files.first_seq_in_use {
+                return Ok(0);
             }
 
-            let first_purge_seq: u64;
-            let purged: usize;
-            let mut recycled: usize = 0;
-            if files.capacity == 0 {
-                // Not capable for Recycle
-                first_purge_seq = files.first_seq;
-                purged = file_seq.saturating_sub(files.first_seq) as usize;
-                files.fds.drain(..purged);
-                files.first_seq = file_seq;
-                files.first_seq_in_use = file_seq;
+            // If capacity == 0, `files` not support to `recycle`.
+            let logically_purged = if files.capacity == 0 {
+                0
             } else {
-                // Capable for recycling log files. It means that the
-                // FileCollections has a finite volume for storing recycled files.
-                let rest_volume = (files.capacity as u64)
-                    .saturating_sub(files.first_seq_in_use - files.first_seq)
-                    as usize;
-                let expected_purge_count = file_seq.saturating_sub(files.first_seq_in_use) as usize;
-                recycled = std::cmp::min(rest_volume, expected_purge_count);
-                purged = std::cmp::max(rest_volume, expected_purge_count) - rest_volume;
-                first_purge_seq = files.first_seq;
-                files.first_seq += purged as u64;
-                files.first_seq_in_use = file_seq;
-                files.fds.drain(..purged);
-            }
-            (first_purge_seq, purged, recycled, files.fds.len())
+                (file_seq - files.first_seq_in_use) as usize
+            };
+            // Remove some obsolete files if capacity is exceeded.
+            let obsolete_files = (file_seq - files.first_seq) as usize;
+            // When capacity is zero, always remove logically deleted files.
+            let capacity_exceeded = files.fds.len().saturating_sub(files.capacity);
+            let purged = std::cmp::min(capacity_exceeded, obsolete_files);
+            // Update
+            files.first_seq += purged as u64;
+            files.first_seq_in_use = file_seq;
+            files.fds.drain(..purged);
+            (
+                files.first_seq - purged as u64,
+                purged,
+                logically_purged,
+                files.fds.len(),
+            )
         };
         self.flush_metrics(remained);
         for seq in first_purge_seq..first_purge_seq + purged as u64 {

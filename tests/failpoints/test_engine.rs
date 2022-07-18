@@ -529,7 +529,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     let cfg_err = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
-        purge_threshold: ReadableSize::kb(2),
+        purge_threshold: ReadableSize::kb(4),
         enable_log_recycle: true,
         ..Default::default()
     };
@@ -557,18 +557,22 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     }
     // Do not truncate the active_file when exit
     let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
-    assert_eq!(cfg_err.recycle_capacity(), 1);
+    // assert_eq!(cfg_err.recycle_capacity(), 1);
     assert_eq!(cfg_err.format_version, Version::V1);
     let engine = Engine::open(cfg_err.clone()).unwrap();
-    append(&engine, rid, 1, 2, Some(&data));
+    append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
     append(&engine, rid, 2, 3, Some(&data));
-    append(&engine, rid, 3, 4, Some(&data));
+    append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
+    append(&engine, rid, 4, 5, Some(&data));
+    append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
     let append_first = engine.file_span(LogQueue::Append).0;
     engine.compact_to(rid, 3);
     engine.purge_expired_files().unwrap();
     assert!(engine.file_span(LogQueue::Append).0 > append_first);
-    append(&engine, rid, 4, 5, Some(&data)); // written into seq: 2
-    append(&engine, rid, 5, 6, Some(&data)); // written into seq: 3
+    // append, written into seq: 3
+    append(&engine, rid, 4, 5, Some(&data));
+    // recycle, written into seq: 1
+    append(&engine, rid, 5, 6, Some(&data));
     drop(engine);
     // Recover the engine with invalid Version::default().
     // Causing the final log file is a recycled file, containing rewritten
