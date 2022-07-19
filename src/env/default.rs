@@ -279,7 +279,8 @@ impl FileSystem for DefaultFileSystem {
         std::fs::remove_file(path)
     }
 
-    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> IoResult<()> {
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P, keep_data: bool) -> IoResult<()> {
+        debug_assert!(!keep_data);
         std::fs::rename(src_path, dst_path)
     }
 

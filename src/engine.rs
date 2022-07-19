@@ -1860,8 +1860,14 @@ mod tests {
             Ok(())
         }
 
-        fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> std::io::Result<()> {
-            self.inner.rename(src_path.as_ref(), dst_path.as_ref())?;
+        fn rename<P: AsRef<Path>>(
+            &self,
+            src_path: P,
+            dst_path: P,
+            keep_data: bool,
+        ) -> std::io::Result<()> {
+            self.inner
+                .rename(src_path.as_ref(), dst_path.as_ref(), keep_data)?;
             self.update_metadata(src_path.as_ref(), true);
             self.update_metadata(dst_path.as_ref(), false);
             Ok(())
@@ -2093,14 +2099,17 @@ mod tests {
             let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
             let (start, end) = engine.file_span(LogQueue::Append);
             assert_eq!((start, end), (1, 11));
-            for rid in 1..=5 {
+            for rid in 6..=10 {
+                engine.append(rid, 11, 20, Some(&entry_data));
+            }
+            // Mark region_id -> 6 obsolete.
+            for rid in 6..=6 {
                 engine.clean(rid);
             }
-            // the [1, 11] files are recycled
+            // the [1, 12] files are recycled
             engine.purge_expired_files().unwrap();
-            assert!(start < engine.file_span(LogQueue::Append).0);
-            assert_eq!(start + 15, engine.file_span(LogQueue::Append).0);
-            assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), 5);
+            assert_eq!(start + 12, engine.file_span(LogQueue::Append).0);
         }
     }
 }

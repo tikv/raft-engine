@@ -62,16 +62,13 @@ impl<F: FileSystem> FileCollection<F> {
         if self.fds.pop_front().is_some() {
             let src_path = first_file_id.build_file_path(dir_path); // src filepath
             let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
-            match file_system.rename(&src_path, &dst_path) {
-                Ok(_) => {
-                    // Update the first_seq
-                    self.first_seq += 1;
-                    ret = true;
-                }
-                Err(e) => {
-                    ret = false;
-                    error!("error while trying to recycle one expired file: {}", e);
-                }
+            if let Err(e) = file_system.rename(&src_path, &dst_path, false) {
+                error!("error while trying to recycle one expired file: {}", e);
+                ret = false;
+            } else {
+                // Update the first_seq
+                self.first_seq += 1;
+                ret = true;
             }
         }
         // Only if the `rename` made sense, we could return success.
@@ -385,11 +382,13 @@ impl<F: FileSystem> SinglePipe<F> {
         self.rotate_imp(&mut self.active_file.lock())
     }
 
+    /// Purge obsolete log files to the specific `FileSeq`.
+    ///
+    /// Return the actual removed count of purged files.
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
         let (
             first_purge_seq, /* first seq for purging */
             purged,          /* count of purged files */
-            recycled,        /* count of recycled files */
             remained,        /* count of remained files */
         ) = {
             let mut files = self.files.write();
@@ -399,39 +398,33 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok(0);
             }
 
-            // If capacity == 0, `files` not support to `recycle`.
-            let logically_purged = if files.capacity == 0 {
-                0
-            } else {
-                (file_seq - files.first_seq_in_use) as usize
-            };
             // Remove some obsolete files if capacity is exceeded.
             let obsolete_files = (file_seq - files.first_seq) as usize;
             // When capacity is zero, always remove logically deleted files.
             let capacity_exceeded = files.fds.len().saturating_sub(files.capacity);
             let purged = std::cmp::min(capacity_exceeded, obsolete_files);
 
-            // The files marked with `recycle` but with format_version V1 should also
-            // be removed.
-            files.first_seq += purged as u64;
             let extra_purged = {
+                // The files with format_version `V1` cannot be chosen as recycle
+                // candidates, which should also be removed.
                 let mut count = 0;
-                for recycle_idx in 0..(file_seq - files.first_seq) as usize {
+                for recycle_idx in purged..obsolete_files {
                     if !files.fds[recycle_idx].context.version.has_log_signing() {
                         count += 1;
+                    } else {
+                        break;
                     }
                 }
                 count
             };
             let final_purge_count = purged + extra_purged;
             // Update metadata of files
-            files.first_seq += extra_purged as u64;
+            files.first_seq += final_purge_count as u64;
             files.first_seq_in_use = file_seq;
             files.fds.drain(..final_purge_count);
             (
                 files.first_seq - final_purge_count as u64,
                 final_purge_count,
-                logically_purged.saturating_sub(extra_purged),
                 files.fds.len(),
             )
         };
@@ -454,15 +447,13 @@ impl<F: FileSystem> SinglePipe<F> {
             }
             self.file_system.delete(&path)?;
         }
-        Ok(purged + recycled)
+        Ok(purged)
     }
 
     fn fetch_active_file(&self) -> LogFileContext {
         let files = self.files.read();
-        match files.fds.back() {
-            Some(active_fd) => LogFileContext::new(active_fd.context.id, active_fd.context.version),
-            _ => unreachable!(),
-        }
+        let active_fd = files.fds.back().unwrap();
+        LogFileContext::new(active_fd.context.id, active_fd.context.version)
     }
 }
 
@@ -875,8 +866,8 @@ mod tests {
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 3);
 
-        // purge file 1
-        assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
+        // Purge to file 1, this file would be recycled
+        assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 0);
         assert_eq!(pipe_log.file_span(queue).0, 2);
 
         // cannot purge active file

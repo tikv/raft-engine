@@ -114,8 +114,9 @@ impl FileSystem for ObfuscatedFileSystem {
         r
     }
 
-    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> IoResult<()> {
-        self.inner.rename(src_path, dst_path)
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P, keep_data: bool) -> IoResult<()> {
+        debug_assert!(!keep_data);
+        self.inner.rename(src_path, dst_path, keep_data)
     }
 
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
