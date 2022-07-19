@@ -27,7 +27,6 @@ pub trait FileSystem: Send + Sync {
     /// `keep_data` is introduced to be compatible with user-defined
     /// `FileSystem`, which means whether the data are allowed to be
     /// modified by user-defined implementation on `rename` or not.
-    /// Defautly, `keep_data` is `false`.
     fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P, keep_data: bool) -> Result<()>;
 
     /// Deletes user implemented metadata associated with `path`. Returns

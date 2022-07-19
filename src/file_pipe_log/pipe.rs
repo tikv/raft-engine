@@ -54,25 +54,23 @@ impl<F: FileSystem> FileCollection<F> {
         if self.capacity == 0 || self.first_seq >= self.first_seq_in_use {
             return false;
         }
-        let mut ret = false;
+        debug_assert!(!self.fds.is_empty());
         let first_file_id = FileId {
             queue: dst_fd.queue,
             seq: self.first_seq,
         };
-        if self.fds.pop_front().is_some() {
-            let src_path = first_file_id.build_file_path(dir_path); // src filepath
-            let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
-            if let Err(e) = file_system.rename(&src_path, &dst_path, false) {
-                error!("error while trying to recycle one expired file: {}", e);
-                ret = false;
-            } else {
-                // Update the first_seq
-                self.first_seq += 1;
-                ret = true;
-            }
+        let src_path = first_file_id.build_file_path(dir_path); // src filepath
+        let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
+        if let Err(e) = file_system.rename(&src_path, &dst_path, true) {
+            error!("error while trying to recycle one expired file: {}", e);
+            false
+        } else {
+            // Only if `rename` made sense, could we update the first_seq and return
+            // success.
+            self.fds.pop_front().unwrap();
+            self.first_seq += 1;
+            true
         }
-        // Only if the `rename` made sense, we could return success.
-        ret
     }
 }
 
@@ -402,31 +400,21 @@ impl<F: FileSystem> SinglePipe<F> {
             let obsolete_files = (file_seq - files.first_seq) as usize;
             // When capacity is zero, always remove logically deleted files.
             let capacity_exceeded = files.fds.len().saturating_sub(files.capacity);
-            let purged = std::cmp::min(capacity_exceeded, obsolete_files);
-
-            let extra_purged = {
-                // The files with format_version `V1` cannot be chosen as recycle
-                // candidates, which should also be removed.
-                let mut count = 0;
-                for recycle_idx in purged..obsolete_files {
-                    if !files.fds[recycle_idx].context.version.has_log_signing() {
-                        count += 1;
-                    } else {
-                        break;
-                    }
+            let mut purged = std::cmp::min(capacity_exceeded, obsolete_files);
+            // The files with format_version `V1` cannot be chosen as recycle
+            // candidates, which should also be removed.
+            // Find the newest obsolete `V1` file and refresh purge count.
+            for recycle_idx in (purged..obsolete_files).rev() {
+                if !files.fds[recycle_idx].context.version.has_log_signing() {
+                    purged = recycle_idx + 1;
+                    break;
                 }
-                count
-            };
-            let final_purge_count = purged + extra_purged;
+            }
             // Update metadata of files
-            files.first_seq += final_purge_count as u64;
+            files.first_seq += purged as u64;
             files.first_seq_in_use = file_seq;
-            files.fds.drain(..final_purge_count);
-            (
-                files.first_seq - final_purge_count as u64,
-                final_purge_count,
-                files.fds.len(),
-            )
+            files.fds.drain(..purged);
+            (files.first_seq - purged as u64, purged, files.fds.len())
         };
         self.flush_metrics(remained);
         for seq in first_purge_seq..first_purge_seq + purged as u64 {
@@ -767,7 +755,7 @@ mod tests {
                 validate_content_of_file(file_system.as_ref(), path, new_file_id, &data[..])
                     .unwrap()
             );
-            // rewrite and validate the cotent
+            // rewrite then rename with validation on the content.
             {
                 let refreshed_data = vec![b'm'; 1024];
                 let fd = Arc::new(
@@ -786,13 +774,51 @@ mod tests {
                     &refreshed_data[..]
                 )
                 .unwrap());
+                // rename with `keep_data == true`
+                {
+                    let dst_file_id = FileId {
+                        seq: new_file_id.seq + 1,
+                        ..new_file_id
+                    };
+                    let src_path = new_file_id.build_file_path(path); // src filepath
+                    let dst_path = dst_file_id.build_file_path(path); // dst filepath
+                    file_system.rename(&src_path, &dst_path, true).unwrap();
+                    assert!(validate_content_of_file(
+                        file_system.as_ref(),
+                        path,
+                        dst_file_id,
+                        &refreshed_data[..]
+                    )
+                    .unwrap());
+                }
+                // rename with `keep_data == false`
+                {
+                    let src_file_id = FileId {
+                        seq: new_file_id.seq + 1,
+                        ..new_file_id
+                    };
+                    let dst_file_id = FileId {
+                        seq: src_file_id.seq + 1,
+                        ..src_file_id
+                    };
+                    let src_path = src_file_id.build_file_path(path); // src filepath
+                    let dst_path = dst_file_id.build_file_path(path); // dst filepath
+                    file_system.rename(&src_path, &dst_path, false).unwrap();
+                    assert!(!validate_content_of_file(
+                        file_system.as_ref(),
+                        path,
+                        dst_file_id,
+                        &refreshed_data[..]
+                    )
+                    .unwrap());
+                }
             }
         }
-        // test FileCollection with abnormal `recycle_one_file`
+        // Test FileCollection with abnormal `recycle_one_file`.
         {
             let fake_file_id = FileId {
                 queue: LogQueue::Append,
-                seq: 12,
+                seq: 11,
             };
             let _ = prepare_file(file_system.as_ref(), path, fake_file_id, &data[..]); // prepare old file
             let mut recycle_collections = FileCollection::<DefaultFileSystem> {
@@ -807,8 +833,10 @@ mod tests {
                         .open(&fake_file_id.build_file_path(path))
                         .unwrap(),
                 ),
-                context: LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default()),
+                context: LogFileContext::new(fake_file_id, Version::default()),
             });
+            let first_file_id = recycle_collections.fds.front().unwrap().context.id;
+            assert_eq!(first_file_id, fake_file_id);
             // mock the failure on `rename`
             assert!(file_system
                 .delete(&fake_file_id.build_file_path(path))
@@ -817,10 +845,15 @@ mod tests {
                 queue: LogQueue::Append,
                 seq: 13,
             };
-            // `rename` is failed
+            // `rename` is failed, and no stale files in recycle_collections could be
+            // recycled.
             assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
-            // no stale files in recycle_collections could be recycled
-            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert_eq!(recycle_collections.fds.len(), 1);
+            assert_eq!(first_file_id, fake_file_id);
+            // rebuild the file for recycle
+            prepare_file(file_system.as_ref(), path, fake_file_id, &data[..]).unwrap();
+            assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(recycle_collections.fds.is_empty());
         }
     }
 

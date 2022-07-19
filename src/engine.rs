@@ -2064,17 +2064,24 @@ mod tests {
             .unwrap();
         let entry_data = vec![b'x'; 128];
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
+        let cfg_v1 = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1024),
+            format_version: Version::V1,
+            ..Default::default()
+        };
+        let cfg_v2 = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(15),
+            format_version: Version::V2,
+            enable_log_recycle: true,
+            ..Default::default()
+        };
         // Prepare files with format_version V1
         {
-            let cfg = Config {
-                dir: dir.path().to_str().unwrap().to_owned(),
-                target_file_size: ReadableSize(1),
-                purge_threshold: ReadableSize(1024),
-                format_version: Version::V1,
-                ..Default::default()
-            };
-            let fs = Arc::new(DeleteMonitoredFileSystem::new());
-            let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+            let engine = RaftLogEngine::open_with_file_system(cfg_v1.clone(), fs.clone()).unwrap();
             for rid in 1..=10 {
                 engine.append(rid, 1, 11, Some(&entry_data));
             }
@@ -2083,15 +2090,7 @@ mod tests {
         }
         // Reopen the Engine with V2 and purge
         {
-            let cfg = Config {
-                dir: dir.path().to_str().unwrap().to_owned(),
-                target_file_size: ReadableSize(1),
-                purge_threshold: ReadableSize(15),
-                format_version: Version::V2,
-                enable_log_recycle: true,
-                ..Default::default()
-            };
-            let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+            let engine = RaftLogEngine::open_with_file_system(cfg_v2.clone(), fs.clone()).unwrap();
             let (start, end) = engine.file_span(LogQueue::Append);
             assert_eq!((start, end), (1, 11));
             for rid in 6..=10 {
@@ -2105,6 +2104,35 @@ mod tests {
             engine.purge_expired_files().unwrap();
             assert_eq!(engine.file_count(Some(LogQueue::Append)), 5);
             assert_eq!(start + 12, engine.file_span(LogQueue::Append).0);
+        }
+        // Reopen the Engine with V1 -> V2 and purge
+        {
+            let engine = RaftLogEngine::open_with_file_system(cfg_v1, fs.clone()).unwrap();
+            let (start, _) = engine.file_span(LogQueue::Append);
+            for rid in 6..=10 {
+                engine.append(rid, 20, 30, Some(&entry_data));
+            }
+            for rid in 6..=10 {
+                engine.append(rid, 30, 40, Some(&entry_data));
+            }
+            for rid in 1..=5 {
+                engine.append(rid, 11, 20, Some(&entry_data));
+            }
+            assert_eq!(engine.file_span(LogQueue::Append).0, start);
+            let file_count = engine.file_count(Some(LogQueue::Append));
+            drop(engine);
+            let engine = RaftLogEngine::open_with_file_system(cfg_v2, fs).unwrap();
+            assert_eq!(engine.file_span(LogQueue::Append).0, start);
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), file_count);
+            // Mark all regions obsolete.
+            for rid in 1..=10 {
+                engine.clean(rid);
+            }
+            let (start, _) = engine.file_span(LogQueue::Append);
+            // the [13, 32] files are purged
+            engine.purge_expired_files().unwrap();
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
+            assert!(engine.file_span(LogQueue::Append).0 > start);
         }
     }
 }

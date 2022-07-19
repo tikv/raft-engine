@@ -115,7 +115,6 @@ impl FileSystem for ObfuscatedFileSystem {
     }
 
     fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P, keep_data: bool) -> IoResult<()> {
-        debug_assert!(!keep_data);
         self.inner.rename(src_path, dst_path, keep_data)
     }
 
