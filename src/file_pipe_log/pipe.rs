@@ -528,11 +528,6 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext {
         self.pipes[queue as usize].fetch_active_file()
     }
-
-    #[inline]
-    fn fetch_format_version(&self, file_id: FileId) -> Result<Version> {
-        self.pipes[file_id.queue as usize].get_format_version(file_id.seq)
-    }
 }
 
 #[cfg(test)]
@@ -909,7 +904,7 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
+        let file_context = pipe_log.fetch_active_file(queue);
         assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
     }

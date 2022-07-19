@@ -214,12 +214,7 @@ where
 
     /// Synchronizes the Raft engine.
     pub fn sync(&self) -> Result<()> {
-        if let Err(e) = self.write(&mut LogBatch::default(), true) {
-            return Err(Error::Corruption(format!(
-                "failed to sync data to disk, due to err: {}",
-                e
-            )));
-        }
+        self.write(&mut LogBatch::default(), true)?;
         Ok(())
     }
 
