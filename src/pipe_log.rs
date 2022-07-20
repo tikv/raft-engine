@@ -132,12 +132,6 @@ impl LogFileContext {
     ///
     /// `None` will be returned only if `self.version` is invalid.
     pub fn get_signature(&self) -> Option<u32> {
-        fail_point!("pipe_log::version::force_get_signature", |_| {
-            match self.version {
-                Version::V1 => None,
-                Version::V2 => Some(self.id.seq as u32),
-            }
-        });
         if self.version.has_log_signing() {
             // Here, the count of files will be always limited to less than
             // `UINT32_MAX`. So, we just use the low 32 bit as the `signature`

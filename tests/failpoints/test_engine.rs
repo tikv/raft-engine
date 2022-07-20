@@ -533,33 +533,15 @@ fn test_recycle_with_stale_logbatch_at_tail() {
         enable_log_recycle: true,
         ..Default::default()
     };
-    // Force enable_log_recycle with Version::V1.
-    let _f = FailGuard::new("pipe_log::version::force_enable", "return");
-    // Force setting signature with Version::V1.
-    let _f = FailGuard::new("pipe_log::version::force_get_signature", "return");
-    {
-        let v1 = LogFileContext::new(
-            FileId {
-                seq: 10,
-                queue: LogQueue::Append,
-            },
-            Version::V1,
-        );
-        let v2 = LogFileContext::new(
-            FileId {
-                seq: 10,
-                queue: LogQueue::Append,
-            },
-            Version::V2,
-        );
-        assert!(v1.get_signature().is_none());
-        assert_eq!(v2.get_signature().unwrap() as u64, v2.id.seq);
-    }
+    // Force open Engine with `enable_log_recycle == true` and
+    // `format_version == Version::V1`.
+    let engine = {
+        let _f = FailGuard::new("pipe_log::version::force_enable", "return");
+        Engine::open(cfg_err.clone()).unwrap()
+    };
     // Do not truncate the active_file when exit
     let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
-    // assert_eq!(cfg_err.recycle_capacity(), 1);
     assert_eq!(cfg_err.format_version, Version::V1);
-    let engine = Engine::open(cfg_err.clone()).unwrap();
     append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
     append(&engine, rid, 2, 3, Some(&data));
     append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
@@ -579,7 +561,11 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     // LogBatchs and end with stale LogBatchs, `Engine::open(...)` should
     // `panic` when recovering the relate `Memtable`.
     assert!(catch_unwind_silent(|| {
-        Engine::open(cfg_err).unwrap();
+        let cfg_v2 = Config {
+            format_version: Version::V2,
+            ..cfg_err
+        };
+        Engine::open(cfg_v2)
     })
     .is_err());
 }

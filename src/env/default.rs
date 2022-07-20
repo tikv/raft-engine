@@ -279,16 +279,6 @@ impl FileSystem for DefaultFileSystem {
         std::fs::remove_file(path)
     }
 
-    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P, keep_data: bool) -> IoResult<()> {
-        if keep_data {
-            std::fs::rename(src_path, dst_path)
-        } else {
-            self.delete(src_path)?;
-            self.create(dst_path)?;
-            Ok(())
-        }
-    }
-
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
         Ok(LogFile::new(handle))
     }

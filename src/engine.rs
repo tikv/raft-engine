@@ -1855,14 +1855,14 @@ mod tests {
             Ok(())
         }
 
-        fn rename<P: AsRef<Path>>(
+        fn reuse<P: AsRef<Path>>(
             &self,
             src_path: P,
             dst_path: P,
             keep_data: bool,
         ) -> std::io::Result<()> {
             self.inner
-                .rename(src_path.as_ref(), dst_path.as_ref(), keep_data)?;
+                .reuse(src_path.as_ref(), dst_path.as_ref(), keep_data)?;
             self.update_metadata(src_path.as_ref(), true);
             self.update_metadata(dst_path.as_ref(), false);
             Ok(())
@@ -1893,6 +1893,76 @@ mod tests {
 
         fn new_writer(&self, h: Arc<Self::Handle>) -> std::io::Result<Self::Writer> {
             self.inner.new_writer(h)
+        }
+    }
+
+    #[test]
+    fn test_filesystem_file_reuse() {
+        use std::io::{Read, Write};
+
+        let dir = tempfile::Builder::new()
+            .prefix("test_filesystem_file_reuse")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let entry_data = vec![b'x'; 128];
+        let fs = Arc::new(DeleteMonitoredFileSystem::new());
+        // Reuse file with `keep_data == true`
+        {
+            let src_file_id = FileId {
+                seq: 12,
+                queue: LogQueue::Append,
+            };
+            let dst_file_id = FileId {
+                seq: src_file_id.seq + 1,
+                ..src_file_id
+            };
+            let src_path = src_file_id.build_file_path(path); // src filepath
+            let dst_path = dst_file_id.build_file_path(path); // dst filepath
+            {
+                // Create file and write data with DeleteMonitoredFileSystem
+                let fd = Arc::new(fs.create(&src_file_id.build_file_path(path)).unwrap());
+                let mut writer = fs.new_writer(fd).unwrap();
+                writer.write_all(&entry_data[..]).unwrap();
+            }
+            fs.reuse(&src_path, &dst_path, true).unwrap();
+            {
+                // Reopen the file and check data
+                let mut buf = vec![0; 1024];
+                let fd = Arc::new(fs.open(&dst_file_id.build_file_path(path)).unwrap());
+                let mut new_reader = fs.new_reader(fd).unwrap();
+                let actual_len = new_reader.read(&mut buf[..]).unwrap();
+                assert_eq!(actual_len, 1);
+                assert!(buf[0] == entry_data[0]);
+            }
+        }
+        // Reuse file with `keep_data == false`
+        {
+            let src_file_id = FileId {
+                seq: 14,
+                queue: LogQueue::Append,
+            };
+            let dst_file_id = FileId {
+                seq: src_file_id.seq + 1,
+                ..src_file_id
+            };
+            let src_path = src_file_id.build_file_path(path); // src filepath
+            let dst_path = dst_file_id.build_file_path(path); // dst filepath
+            {
+                // Create file and write data with DeleteMonitoredFileSystem
+                let fd = Arc::new(fs.create(&src_file_id.build_file_path(path)).unwrap());
+                let mut writer = fs.new_writer(fd).unwrap();
+                writer.write_all(&entry_data[..]).unwrap();
+            }
+            fs.reuse(&src_path, &dst_path, false).unwrap();
+            {
+                // Reopen the file and check whether the file is empty
+                let mut buf = vec![0; 1024];
+                let fd = Arc::new(fs.open(&dst_file_id.build_file_path(path)).unwrap());
+                let mut new_reader = fs.new_reader(fd).unwrap();
+                let actual_len = new_reader.read(&mut buf[..]).unwrap();
+                assert_eq!(actual_len, 0);
+            }
         }
     }
 
@@ -1948,9 +2018,9 @@ mod tests {
     }
 
     #[test]
-    fn test_managed_file_rename() {
+    fn test_managed_file_reuse() {
         let dir = tempfile::Builder::new()
-            .prefix("test_managed_file_rename")
+            .prefix("test_managed_file_reuse")
             .tempdir()
             .unwrap();
         let entry_data = vec![b'x'; 128];
@@ -2059,7 +2129,7 @@ mod tests {
     #[test]
     fn test_recycle_no_signing_files() {
         let dir = tempfile::Builder::new()
-            .prefix("test_managed_file_rename")
+            .prefix("test_recycle_no_signing_files")
             .tempdir()
             .unwrap();
         let entry_data = vec![b'x'; 128];
@@ -2085,14 +2155,11 @@ mod tests {
             for rid in 1..=10 {
                 engine.append(rid, 1, 11, Some(&entry_data));
             }
-            let (start, end) = engine.file_span(LogQueue::Append);
-            assert_eq!((start, end), (1, 11));
         }
         // Reopen the Engine with V2 and purge
         {
             let engine = RaftLogEngine::open_with_file_system(cfg_v2.clone(), fs.clone()).unwrap();
-            let (start, end) = engine.file_span(LogQueue::Append);
-            assert_eq!((start, end), (1, 11));
+            let (start, _) = engine.file_span(LogQueue::Append);
             for rid in 6..=10 {
                 engine.append(rid, 11, 20, Some(&entry_data));
             }
@@ -2103,7 +2170,7 @@ mod tests {
             // the [1, 12] files are recycled
             engine.purge_expired_files().unwrap();
             assert_eq!(engine.file_count(Some(LogQueue::Append)), 5);
-            assert_eq!(start + 12, engine.file_span(LogQueue::Append).0);
+            assert!(start < engine.file_span(LogQueue::Append).0);
         }
         // Reopen the Engine with V1 -> V2 and purge
         {

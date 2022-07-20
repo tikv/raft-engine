@@ -61,13 +61,13 @@ impl<F: FileSystem> FileCollection<F> {
         };
         let src_path = first_file_id.build_file_path(dir_path); // src filepath
         let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
-        if let Err(e) = file_system.rename(&src_path, &dst_path, true) {
+        if let Err(e) = file_system.reuse(&src_path, &dst_path, false) {
             error!("error while trying to recycle one expired file: {}", e);
             false
         } else {
             // Only if `rename` made sense, could we update the first_seq and return
             // success.
-            self.fds.pop_front().unwrap();
+            debug_assert!(self.fds.pop_front().unwrap().context.id.queue == dst_fd.queue);
             self.first_seq += 1;
             true
         }
@@ -774,44 +774,6 @@ mod tests {
                     &refreshed_data[..]
                 )
                 .unwrap());
-                // rename with `keep_data == true`
-                {
-                    let dst_file_id = FileId {
-                        seq: new_file_id.seq + 1,
-                        ..new_file_id
-                    };
-                    let src_path = new_file_id.build_file_path(path); // src filepath
-                    let dst_path = dst_file_id.build_file_path(path); // dst filepath
-                    file_system.rename(&src_path, &dst_path, true).unwrap();
-                    assert!(validate_content_of_file(
-                        file_system.as_ref(),
-                        path,
-                        dst_file_id,
-                        &refreshed_data[..]
-                    )
-                    .unwrap());
-                }
-                // rename with `keep_data == false`
-                {
-                    let src_file_id = FileId {
-                        seq: new_file_id.seq + 1,
-                        ..new_file_id
-                    };
-                    let dst_file_id = FileId {
-                        seq: src_file_id.seq + 1,
-                        ..src_file_id
-                    };
-                    let src_path = src_file_id.build_file_path(path); // src filepath
-                    let dst_path = dst_file_id.build_file_path(path); // dst filepath
-                    file_system.rename(&src_path, &dst_path, false).unwrap();
-                    assert!(!validate_content_of_file(
-                        file_system.as_ref(),
-                        path,
-                        dst_file_id,
-                        &refreshed_data[..]
-                    )
-                    .unwrap());
-                }
             }
         }
         // Test FileCollection with abnormal `recycle_one_file`.
