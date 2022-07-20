@@ -6,9 +6,11 @@ use std::cmp::Ordering;
 
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
+use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
 
+use crate::file_pipe_log::LogFileFormat;
 use crate::Result;
 
 /// The type of log queue.
@@ -114,17 +116,48 @@ impl Default for Version {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u8)]
+pub enum DataLayout {
+    NoAlignment,
+    Alignment,
+}
+
+impl Default for DataLayout {
+    fn default() -> Self {
+        DataLayout::NoAlignment
+    }
+}
+
+impl DataLayout {
+    pub fn from_u8(val: u8) -> Option<DataLayout> {
+        match val {
+            0 => Some(DataLayout::NoAlignment),
+            1 => Some(DataLayout::Alignment),
+            _ => None,
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            DataLayout::NoAlignment => 0,
+            DataLayout::Alignment => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LogFileContext {
     pub id: FileId,
-    pub version: Version,
+    pub format: LogFileFormat,
 }
 
 impl LogFileContext {
-    pub fn new(file_id: FileId, version: Version) -> Self {
+    pub fn new(file_id: FileId, format: LogFileFormat) -> Self {
         Self {
             id: file_id,
-            version,
+            format,
         }
     }
 
@@ -132,7 +165,7 @@ impl LogFileContext {
     ///
     /// `None` will be returned only if `self.version` is invalid.
     pub fn get_signature(&self) -> Option<u32> {
-        if self.version.has_log_signing() {
+        if self.format.version().has_log_signing() {
             // Here, the count of files will be always limited to less than
             // `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
             // by default.

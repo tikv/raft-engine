@@ -16,7 +16,7 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{FileId, FileSeq, LogFileContext, LogQueue, Version};
+use crate::pipe_log::{DataLayout, FileId, FileSeq, LogFileContext, LogQueue, Version};
 use crate::util::Factory;
 use crate::{Error, Result};
 
@@ -59,6 +59,7 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 pub struct RecoveryConfig {
     pub queue: LogQueue,
     pub mode: RecoveryMode,
+    pub data_layout: DataLayout,
     pub concurrency: usize,
     pub read_block_size: u64,
 }
@@ -66,7 +67,7 @@ pub struct RecoveryConfig {
 struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
     handle: Arc<F::Handle>,
-    version: Option<Version>,
+    format: Option<LogFileFormat>,
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
@@ -198,7 +199,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         files.push(FileToRecover {
                             seq,
                             handle,
-                            version: None,
+                            format: None,
                         });
                     }
                 }
@@ -232,6 +233,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
+            data_layout: self.cfg.format_data_layout,
             concurrency: append_concurrency,
             read_block_size: self.cfg.recovery_read_block_size.0,
         };
@@ -283,6 +285,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let queue = recovery_cfg.queue;
         let concurrency = recovery_cfg.concurrency;
         let recovery_mode = recovery_cfg.mode;
+        let format_data_layout = recovery_cfg.data_layout;
         let recovery_read_block_size = recovery_cfg.read_block_size as usize;
 
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
@@ -309,7 +312,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(0)?;
-                                f.version = Some(Version::default());
+                                f.format = Some(LogFileFormat::new(Version::default(), format_data_layout));
                                 continue;
                             } else {
                                 error!(
@@ -323,8 +326,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             reader.open(FileId { queue, seq: f.seq }, file_reader)?;
                         }
                     }
-                    // Update file version of each log file.
-                    f.version = Some(reader.file_format().unwrap().version());
+                    // Update file format of each log file.
+                    f.format = reader.file_format();
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -408,7 +411,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .iter()
             .map(|f| FileHandler {
                 handle: f.handle.clone(),
-                context: LogFileContext::new(FileId { seq: f.seq, queue }, f.version.unwrap()),
+                context: LogFileContext::new(
+                    FileId { seq: f.seq, queue },
+                    *f.format.as_ref().unwrap(),
+                ),
             })
             .collect();
         SinglePipe::open(

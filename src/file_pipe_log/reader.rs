@@ -42,7 +42,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
 
     /// Opens a file that can be accessed through the given reader.
     pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
-        self.file_context = Some(LogFileContext::new(file_id, reader.file_format().version()));
+        self.file_context = Some(LogFileContext::new(file_id, *reader.file_format()));
         self.size = reader.file_size()?;
         self.reader = Some(reader);
         self.buffer.clear();
@@ -151,8 +151,6 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     }
 
     pub fn file_format(&self) -> Option<LogFileFormat> {
-        self.reader
-            .as_ref()
-            .map(|reader| reader.file_format().clone())
+        self.reader.as_ref().map(|reader| *reader.file_format())
     }
 }

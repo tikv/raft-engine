@@ -10,7 +10,7 @@ use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, LogFileContext, Version};
+use crate::pipe_log::{FileBlockHandle, LogFileContext};
 use crate::{Error, Result};
 
 use super::format::LogFileFormat;
@@ -28,16 +28,16 @@ pub struct FileHandler<F: FileSystem> {
 /// Build a file writer.
 ///
 /// * `handle`: standard handle of a log file.
-/// * `version`: format version of the log file.
+/// * `format`: format infos of the log file.
 /// * `force_reset`: if true => rewrite the header of this file.
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-    version: Version,
+    format: LogFileFormat,
     force_reset: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    LogFileWriter::open(handle, writer, version, force_reset)
+    LogFileWriter::open(handle, writer, format, force_reset)
 }
 
 /// Append-only writer for log file.
@@ -54,12 +54,12 @@ impl<F: FileSystem> LogFileWriter<F> {
     fn open(
         handle: Arc<F::Handle>,
         writer: F::Writer,
-        version: Version,
+        format: LogFileFormat,
         force_reset: bool,
     ) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
-            header: LogFileFormat::from_version(version),
+            header: format,
             writer,
             written: file_size,
             capacity: file_size,
@@ -152,16 +152,16 @@ impl<F: FileSystem> LogFileWriter<F> {
 /// Attention please, the reader do not need a specified `[LogFileFormat]` from
 /// users.
 ///
-/// * `[handle]`: standard handle of a log file.
-/// * `[version]`: if `[None]`, reloads the log file header and parse
-/// the relevant `Version` before building the `reader`.
+/// * `handle`: standard handle of a log file.
+/// * `format`: if `[None]`, reloads the log file header and parse
+/// the relevant `LogFileFormat` before building the `reader`.
 pub(super) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-    version: Option<Version>,
+    format: Option<LogFileFormat>,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
-    LogFileReader::open(handle, reader, version)
+    LogFileReader::open(handle, reader, format)
 }
 
 /// Random-access reader for log file.
@@ -174,10 +174,14 @@ pub struct LogFileReader<F: FileSystem> {
 }
 
 impl<F: FileSystem> LogFileReader<F> {
-    fn open(handle: Arc<F::Handle>, reader: F::Reader, version: Option<Version>) -> Result<Self> {
-        match version {
-            Some(ver) => Ok(Self {
-                format: LogFileFormat::from_version(ver),
+    fn open(
+        handle: Arc<F::Handle>,
+        reader: F::Reader,
+        format: Option<LogFileFormat>,
+    ) -> Result<Self> {
+        match format {
+            Some(fmt) => Ok(Self {
+                format: fmt,
                 handle,
                 reader,
                 // Set to an invalid offset to force a reseek at first read.
@@ -185,7 +189,7 @@ impl<F: FileSystem> LogFileReader<F> {
             }),
             None => {
                 let mut reader = Self {
-                    format: LogFileFormat::from_version(Version::default()),
+                    format: LogFileFormat::default(),
                     handle,
                     reader,
                     // Set to an invalid offset to force a reseek at first read.
@@ -245,7 +249,7 @@ impl<F: FileSystem> LogFileReader<F> {
         let mut container = vec![0; header_len];
         self.read_to(0, &mut container[..])?;
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
-        Ok(self.format.clone())
+        Ok(self.format)
     }
 
     #[inline]

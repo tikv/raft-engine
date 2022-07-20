@@ -458,6 +458,7 @@ where
             ..Default::default()
         };
         let recovery_mode = cfg.recovery_mode;
+        let format_data_layout = cfg.format_data_layout;
         let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;
@@ -469,6 +470,7 @@ where
                 RecoveryConfig {
                     queue: LogQueue::Append,
                     mode: recovery_mode,
+                    data_layout: format_data_layout,
                     concurrency: 1,
                     read_block_size,
                 },
@@ -481,6 +483,7 @@ where
                 RecoveryConfig {
                     queue: LogQueue::Rewrite,
                     mode: recovery_mode,
+                    data_layout: format_data_layout,
                     concurrency: 1,
                     read_block_size,
                 },
