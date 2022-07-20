@@ -255,14 +255,14 @@ impl RhaiFilterMachine {
                 // Backup file and set up a guard to recover on exit.
                 let target_path = f.file_id.build_file_path(path);
                 let bak_path = target_path.with_extension("bak");
-                system.reuse(&target_path, &bak_path, true)?;
+                system.rename(&target_path, &bak_path)?;
                 guards.push((
                     bak_path.clone(),
                     guard(f.file_id, |f| {
                         let original = f.build_file_path(path);
                         let bak = original.with_extension("bak");
                         if bak.exists() {
-                            system.reuse(&bak, &original, true).unwrap_or_else(|e| {
+                            system.rename(&bak, &original).unwrap_or_else(|e| {
                                 panic!(
                                     "Failed to recover original log file {} ({}),
                                 you should manually replace it with {}.bak.",

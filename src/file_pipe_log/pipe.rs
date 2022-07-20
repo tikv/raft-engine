@@ -61,13 +61,13 @@ impl<F: FileSystem> FileCollection<F> {
         };
         let src_path = first_file_id.build_file_path(dir_path); // src filepath
         let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
-        if let Err(e) = file_system.reuse(&src_path, &dst_path, false) {
+        if let Err(e) = file_system.reuse(&src_path, &dst_path) {
             error!("error while trying to recycle one expired file: {}", e);
             false
         } else {
             // Only if `rename` made sense, could we update the first_seq and return
             // success.
-            debug_assert!(self.fds.pop_front().unwrap().context.id.queue == dst_fd.queue);
+            self.fds.pop_front().unwrap();
             self.first_seq += 1;
             true
         }

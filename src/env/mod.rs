@@ -22,15 +22,14 @@ pub trait FileSystem: Send + Sync {
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> Result<()>;
 
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<()>;
+
     /// Reuse the old `src_path` with new `dst_path` filepath.
     ///
-    /// `keep_data` is introduced to be compatible with user-defined
-    /// `FileSystem`, which means whether the data are allowed to be
-    /// modified by user-defined implementation on `rename` or not.
-    ///
-    /// Default implemented by `std::fs::rename`.
-    fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P, _keep_data: bool) -> Result<()> {
-        std::fs::rename(src_path, dst_path)
+    /// It's an open interface for user-defined implementation.
+    /// Default implemented by `self.rename(...)`.
+    fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<()> {
+        self.rename(src_path, dst_path)
     }
 
     /// Deletes user implemented metadata associated with `path`. Returns

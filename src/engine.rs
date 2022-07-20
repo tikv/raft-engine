@@ -1855,14 +1855,15 @@ mod tests {
             Ok(())
         }
 
-        fn reuse<P: AsRef<Path>>(
-            &self,
-            src_path: P,
-            dst_path: P,
-            keep_data: bool,
-        ) -> std::io::Result<()> {
-            self.inner
-                .reuse(src_path.as_ref(), dst_path.as_ref(), keep_data)?;
+        fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> std::io::Result<()> {
+            self.inner.rename(src_path.as_ref(), dst_path.as_ref())?;
+            self.update_metadata(src_path.as_ref(), true);
+            self.update_metadata(dst_path.as_ref(), false);
+            Ok(())
+        }
+
+        fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> std::io::Result<()> {
+            self.inner.reuse(src_path.as_ref(), dst_path.as_ref())?;
             self.update_metadata(src_path.as_ref(), true);
             self.update_metadata(dst_path.as_ref(), false);
             Ok(())
@@ -1897,7 +1898,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filesystem_file_reuse() {
+    fn test_filesystem_move_file() {
         use std::io::{Read, Write};
 
         let dir = tempfile::Builder::new()
@@ -1907,7 +1908,7 @@ mod tests {
         let path = dir.path().to_str().unwrap();
         let entry_data = vec![b'x'; 128];
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        // Reuse file with `keep_data == true`
+        // Move file from src to dst by `rename`
         {
             let src_file_id = FileId {
                 seq: 12,
@@ -1925,7 +1926,7 @@ mod tests {
                 let mut writer = fs.new_writer(fd).unwrap();
                 writer.write_all(&entry_data[..]).unwrap();
             }
-            fs.reuse(&src_path, &dst_path, true).unwrap();
+            fs.rename(&src_path, &dst_path).unwrap();
             {
                 // Reopen the file and check data
                 let mut buf = vec![0; 1024];
@@ -1936,7 +1937,7 @@ mod tests {
                 assert!(buf[0] == entry_data[0]);
             }
         }
-        // Reuse file with `keep_data == false`
+        // Move file from src to dst by `reuse`
         {
             let src_file_id = FileId {
                 seq: 14,
@@ -1954,7 +1955,7 @@ mod tests {
                 let mut writer = fs.new_writer(fd).unwrap();
                 writer.write_all(&entry_data[..]).unwrap();
             }
-            fs.reuse(&src_path, &dst_path, false).unwrap();
+            fs.reuse(&src_path, &dst_path).unwrap();
             {
                 // Reopen the file and check whether the file is empty
                 let mut buf = vec![0; 1024];

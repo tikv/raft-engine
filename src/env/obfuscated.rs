@@ -114,14 +114,14 @@ impl FileSystem for ObfuscatedFileSystem {
         r
     }
 
-    fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P, keep_data: bool) -> IoResult<()> {
-        if keep_data {
-            std::fs::rename(src_path, dst_path)
-        } else {
-            self.delete(src_path)?;
-            self.create(dst_path)?;
-            Ok(())
-        }
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> IoResult<()> {
+        self.inner.rename(src_path, dst_path)
+    }
+
+    fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> IoResult<()> {
+        self.delete(src_path)?;
+        self.create(dst_path)?;
+        Ok(())
     }
 
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
