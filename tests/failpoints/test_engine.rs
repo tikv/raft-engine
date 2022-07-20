@@ -411,6 +411,7 @@ fn test_tail_corruption() {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
             ..Default::default()
         };
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
@@ -515,4 +516,56 @@ fn test_concurrent_write_perf_context() {
         assert_ne!(old.log_write_duration, new.log_write_duration);
         assert_ne!(old.apply_duration, new.apply_duration);
     }
+}
+
+#[test]
+fn test_recycle_with_stale_logbatch_at_tail() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_recycle_with_stale_log_batch_at_tail")
+        .tempdir()
+        .unwrap();
+    let data = vec![b'x'; 1024];
+    let rid = 1;
+    let cfg_err = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::kb(2),
+        purge_threshold: ReadableSize::kb(4),
+        enable_log_recycle: true,
+        ..Default::default()
+    };
+    // Force open Engine with `enable_log_recycle == true` and
+    // `format_version == Version::V1`.
+    let engine = {
+        let _f = FailGuard::new("pipe_log::version::force_enable", "return");
+        Engine::open(cfg_err.clone()).unwrap()
+    };
+    // Do not truncate the active_file when exit
+    let _f = FailGuard::new("file_pipe_log::log_file_writer::skip_truncate", "return");
+    assert_eq!(cfg_err.format_version, Version::V1);
+    append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
+    append(&engine, rid, 2, 3, Some(&data));
+    append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
+    append(&engine, rid, 4, 5, Some(&data));
+    append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
+    let append_first = engine.file_span(LogQueue::Append).0;
+    engine.compact_to(rid, 3);
+    engine.purge_expired_files().unwrap();
+    assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    // append, written into seq: 3
+    append(&engine, rid, 4, 5, Some(&data));
+    // recycle, written into seq: 1
+    append(&engine, rid, 5, 6, Some(&data));
+    drop(engine);
+    // Recover the engine with invalid Version::default().
+    // Causing the final log file is a recycled file, containing rewritten
+    // LogBatchs and end with stale LogBatchs, `Engine::open(...)` should
+    // `panic` when recovering the relate `Memtable`.
+    assert!(catch_unwind_silent(|| {
+        let cfg_v2 = Config {
+            format_version: Version::V2,
+            ..cfg_err
+        };
+        Engine::open(cfg_v2)
+    })
+    .is_err());
 }

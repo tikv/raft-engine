@@ -16,11 +16,11 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileId, FileSeq, LogFileContext, LogQueue, Version};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileFormat, Version};
+use super::format::{lock_file_path, FileNameExt, LogFileFormat};
 use super::log_file::{build_file_reader, FileHandler};
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
@@ -377,6 +377,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Manually reads through log items in all available log files of the
     /// specified `[LogQueue]`, and replays them to specific
     /// [`ReplayMachine`]s that can be constructed via `machine_factory`.
+    #[allow(dead_code)]
     pub fn recover_queue<M: ReplayMachine, FA: Factory<M>>(
         &mut self,
         file_system: Arc<F>,
@@ -407,7 +408,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .iter()
             .map(|f| FileHandler {
                 handle: f.handle.clone(),
-                version: f.version.unwrap(),
+                context: LogFileContext::new(FileId { seq: f.seq, queue }, f.version.unwrap()),
             })
             .collect();
         SinglePipe::open(
@@ -417,6 +418,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             queue,
             first_seq,
             files,
+            match queue {
+                LogQueue::Append => self.cfg.recycle_capacity(),
+                LogQueue::Rewrite => 0,
+            },
         )
     }
 

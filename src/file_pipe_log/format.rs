@@ -5,11 +5,10 @@
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
-use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 use crate::codec::{self, NumberEncoder};
-use crate::pipe_log::{FileId, LogQueue};
+use crate::pipe_log::{FileId, LogQueue, Version};
 use crate::{Error, Result};
 
 /// Width to format log sequence number.
@@ -79,25 +78,6 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     path
 }
 
-/// Version of log file format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, FromPrimitive, ToPrimitive)]
-#[repr(u64)]
-pub enum Version {
-    V1 = 1,
-}
-
-impl Version {
-    pub fn is_valid(version: u64) -> bool {
-        Version::from_u64(version).is_some()
-    }
-}
-
-impl Default for Version {
-    fn default() -> Self {
-        Version::V1
-    }
-}
-
 /// In-memory representation of `Format` in log files.
 #[derive(Clone, Default)]
 pub struct LogFileFormat {
@@ -158,6 +138,7 @@ impl LogFileFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipe_log::LogFileContext;
 
     #[test]
     fn test_file_name() {
@@ -189,8 +170,6 @@ mod tests {
         assert_eq!(Version::V1.to_u64().unwrap(), version.to_u64().unwrap());
         let version2 = Version::from_u64(1).unwrap();
         assert_eq!(version, version2);
-        assert!(Version::is_valid(1));
-        assert!(!Version::is_valid(2));
     }
 
     #[test]
@@ -201,5 +180,19 @@ mod tests {
         assert_eq!(header2.version().to_u64(), header1.version().to_u64());
         let header3 = LogFileFormat::from_version(Version::default());
         assert_eq!(header3.version(), header1.version());
+    }
+
+    #[test]
+    fn test_file_context() {
+        let mut file_context =
+            LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
+        assert_eq!(file_context.get_signature(), None);
+        file_context.id.seq = 10;
+        file_context.version = Version::V2;
+        assert_eq!(file_context.get_signature().unwrap(), 10);
+        let abnormal_seq = (file_context.id.seq << 32) as u64 + 100_u64;
+        file_context.id.seq = abnormal_seq;
+        assert_ne!(file_context.get_signature().unwrap() as u64, abnormal_seq);
+        assert_eq!(file_context.get_signature().unwrap(), 100);
     }
 }

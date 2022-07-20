@@ -10,6 +10,7 @@
 ### New Features
 
 * Add `PerfContext` which records detailed time breakdown of the write process to thread-local storage.
+* Support recycling obsolete log files to reduce the cost of `fallocate`-ing new ones.
 
 ### Public API Changes
 

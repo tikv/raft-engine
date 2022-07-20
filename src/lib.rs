@@ -67,6 +67,7 @@ pub use engine::Engine;
 pub use errors::{Error, Result};
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use metrics::{get_perf_context, set_perf_context, take_perf_context, PerfContext};
+pub use pipe_log::Version;
 pub use util::ReadableSize;
 
 #[cfg(feature = "internals")]
