@@ -1902,7 +1902,7 @@ mod tests {
         use std::io::{Read, Write};
 
         let dir = tempfile::Builder::new()
-            .prefix("test_filesystem_file_reuse")
+            .prefix("test_filesystem_move_file")
             .tempdir()
             .unwrap();
         let path = dir.path().to_str().unwrap();
