@@ -5,14 +5,15 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
+use fail::fail_point;
 use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
-use crate::pipe_log::FileBlockHandle;
+use crate::pipe_log::{FileBlockHandle, LogFileContext, Version};
 use crate::{Error, Result};
 
-use super::format::{LogFileFormat, Version};
+use super::format::LogFileFormat;
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
@@ -21,20 +22,22 @@ const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 #[derive(Debug)]
 pub struct FileHandler<F: FileSystem> {
     pub handle: Arc<F::Handle>,
-    pub version: Version,
+    pub context: LogFileContext,
 }
 
 /// Build a file writer.
 ///
-/// * `[handle]`: standard handle of a log file.
-/// * `[version]`: format version of the log file.
+/// * `handle`: standard handle of a log file.
+/// * `version`: format version of the log file.
+/// * `force_reset`: if true => rewrite the header of this file.
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
     version: Version,
+    force_reset: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    LogFileWriter::open(handle, writer, version)
+    LogFileWriter::open(handle, writer, version, force_reset)
 }
 
 /// Append-only writer for log file.
@@ -48,7 +51,12 @@ pub struct LogFileWriter<F: FileSystem> {
 }
 
 impl<F: FileSystem> LogFileWriter<F> {
-    fn open(handle: Arc<F::Handle>, writer: F::Writer, version: Version) -> Result<Self> {
+    fn open(
+        handle: Arc<F::Handle>,
+        writer: F::Writer,
+        version: Version,
+        force_reset: bool,
+    ) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
             header: LogFileFormat::from_version(version),
@@ -57,7 +65,7 @@ impl<F: FileSystem> LogFileWriter<F> {
             capacity: file_size,
             last_sync: file_size,
         };
-        if file_size < LogFileFormat::len() {
+        if file_size < LogFileFormat::len() || force_reset {
             f.write_header()?;
         } else {
             f.writer.seek(SeekFrom::Start(file_size as u64))?;
@@ -82,6 +90,9 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     pub fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
+            fail_point!("file_pipe_log::log_file_writer::skip_truncate", |_| {
+                Ok(())
+            });
             self.writer.truncate(self.written)?;
             self.capacity = self.written;
         }

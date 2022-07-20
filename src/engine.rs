@@ -147,12 +147,13 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
+                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
-                    let log_batch = writer.get_payload();
+                    let log_batch = writer.get_mut_payload();
                     let res = if !log_batch.is_empty() {
-                        // @TODO(lucasliang): bind `Version` to each `LogBatch`
+                        log_batch.prepare_write(&file_context)?;
                         self.pipe_log
                             .append(LogQueue::Append, log_batch.encoded_bytes())
                     } else {
@@ -165,6 +166,9 @@ where
                     };
                     writer.set_output(res);
                 }
+                debug_assert!(
+                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
+                );
                 perf_context!(log_write_duration).observe_since(now);
                 if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                     panic!(
@@ -210,8 +214,8 @@ where
 
     /// Synchronizes the Raft engine.
     pub fn sync(&self) -> Result<()> {
-        // TODO(tabokie): use writer.
-        self.pipe_log.maybe_sync(LogQueue::Append, true)
+        self.write(&mut LogBatch::default(), true)?;
+        Ok(())
     }
 
     pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
@@ -361,7 +365,9 @@ where
         self.memtables.is_empty()
     }
 
-    // For testing.
+    /// Returns the range of sequence number of `active` files of the
+    /// specific `LogQueue`.
+    /// For testing only.
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
     }
@@ -589,6 +595,7 @@ mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
+    use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
@@ -1458,6 +1465,91 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_combination_of_version_and_recycle() {
+        fn test_engine_ops(cfg_v1: &Config, cfg_v2: &Config) {
+            let rid = 1;
+            let data = vec![b'7'; 1024];
+            {
+                // open engine with format_version - Version::V1
+                let engine = RaftLogEngine::open(cfg_v1.clone()).unwrap();
+                engine.append(rid, 0, 20, Some(&data));
+                let append_first = engine.file_span(LogQueue::Append).0;
+                engine.compact_to(rid, 18);
+                engine.purge_expired_files().unwrap();
+                assert!(engine.file_span(LogQueue::Append).0 > append_first);
+                assert_eq!(engine.first_index(rid).unwrap(), 18);
+                assert_eq!(engine.last_index(rid).unwrap(), 19);
+            }
+            {
+                // open engine with format_version - Version::V2
+                let engine = RaftLogEngine::open(cfg_v2.clone()).unwrap();
+                assert_eq!(engine.first_index(rid).unwrap(), 18);
+                assert_eq!(engine.last_index(rid).unwrap(), 19);
+                engine.append(rid, 20, 40, Some(&data));
+                let append_first = engine.file_span(LogQueue::Append).0;
+                engine.compact_to(rid, 38);
+                engine.purge_expired_files().unwrap();
+                assert!(engine.file_span(LogQueue::Append).0 > append_first);
+                assert_eq!(engine.first_index(rid).unwrap(), 38);
+                assert_eq!(engine.last_index(rid).unwrap(), 39);
+            }
+            {
+                // reopen engine with format_version - Version::V1
+                let engine = RaftLogEngine::open(cfg_v1.clone()).unwrap();
+                assert_eq!(engine.first_index(rid).unwrap(), 38);
+                assert_eq!(engine.last_index(rid).unwrap(), 39);
+            }
+        }
+        // test engine on mutable versions
+        {
+            let dir = tempfile::Builder::new()
+                .prefix("test_mutable_format_version")
+                .tempdir()
+                .unwrap();
+            // config with v1
+            let cfg_v1 = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                purge_threshold: ReadableSize(1),
+                ..Default::default()
+            };
+            // config with v2
+            let cfg_v2 = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                purge_threshold: ReadableSize(1),
+                format_version: Version::V2,
+                ..Default::default()
+            };
+            test_engine_ops(&cfg_v1, &cfg_v2);
+        }
+        // test engine when enable_log_recycle == true
+        {
+            let dir = tempfile::Builder::new()
+                .prefix("test_enable_log_recycle")
+                .tempdir()
+                .unwrap();
+            // config with v1
+            let cfg_v1 = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                purge_threshold: ReadableSize(1),
+                ..Default::default()
+            };
+            // config with v2
+            let cfg_v2 = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                purge_threshold: ReadableSize(1),
+                format_version: Version::V2,
+                enable_log_recycle: true,
+                ..Default::default()
+            };
+            test_engine_ops(&cfg_v1, &cfg_v2);
+        }
+    }
+
     /// Test cases related to tools ///
 
     #[test]
@@ -1864,6 +1956,20 @@ mod tests {
             Ok(())
         }
 
+        fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> std::io::Result<()> {
+            self.inner.rename(src_path.as_ref(), dst_path.as_ref())?;
+            self.update_metadata(src_path.as_ref(), true);
+            self.update_metadata(dst_path.as_ref(), false);
+            Ok(())
+        }
+
+        fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> std::io::Result<()> {
+            self.inner.reuse(src_path.as_ref(), dst_path.as_ref())?;
+            self.update_metadata(src_path.as_ref(), true);
+            self.update_metadata(dst_path.as_ref(), false);
+            Ok(())
+        }
+
         fn delete_metadata<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
             self.inner.delete_metadata(&path)?;
             self.update_metadata(path.as_ref(), true);
@@ -1893,6 +1999,76 @@ mod tests {
     }
 
     #[test]
+    fn test_filesystem_move_file() {
+        use std::io::{Read, Write};
+
+        let dir = tempfile::Builder::new()
+            .prefix("test_filesystem_move_file")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let entry_data = vec![b'x'; 128];
+        let fs = Arc::new(DeleteMonitoredFileSystem::new());
+        // Move file from src to dst by `rename`
+        {
+            let src_file_id = FileId {
+                seq: 12,
+                queue: LogQueue::Append,
+            };
+            let dst_file_id = FileId {
+                seq: src_file_id.seq + 1,
+                ..src_file_id
+            };
+            let src_path = src_file_id.build_file_path(path); // src filepath
+            let dst_path = dst_file_id.build_file_path(path); // dst filepath
+            {
+                // Create file and write data with DeleteMonitoredFileSystem
+                let fd = Arc::new(fs.create(&src_file_id.build_file_path(path)).unwrap());
+                let mut writer = fs.new_writer(fd).unwrap();
+                writer.write_all(&entry_data[..]).unwrap();
+            }
+            fs.rename(&src_path, &dst_path).unwrap();
+            {
+                // Reopen the file and check data
+                let mut buf = vec![0; 1024];
+                let fd = Arc::new(fs.open(&dst_file_id.build_file_path(path)).unwrap());
+                let mut new_reader = fs.new_reader(fd).unwrap();
+                let actual_len = new_reader.read(&mut buf[..]).unwrap();
+                assert_eq!(actual_len, 1);
+                assert!(buf[0] == entry_data[0]);
+            }
+        }
+        // Move file from src to dst by `reuse`
+        {
+            let src_file_id = FileId {
+                seq: 14,
+                queue: LogQueue::Append,
+            };
+            let dst_file_id = FileId {
+                seq: src_file_id.seq + 1,
+                ..src_file_id
+            };
+            let src_path = src_file_id.build_file_path(path); // src filepath
+            let dst_path = dst_file_id.build_file_path(path); // dst filepath
+            {
+                // Create file and write data with DeleteMonitoredFileSystem
+                let fd = Arc::new(fs.create(&src_file_id.build_file_path(path)).unwrap());
+                let mut writer = fs.new_writer(fd).unwrap();
+                writer.write_all(&entry_data[..]).unwrap();
+            }
+            fs.reuse(&src_path, &dst_path).unwrap();
+            {
+                // Reopen the file and check whether the file is empty
+                let mut buf = vec![0; 1024];
+                let fd = Arc::new(fs.open(&dst_file_id.build_file_path(path)).unwrap());
+                let mut new_reader = fs.new_reader(fd).unwrap();
+                let actual_len = new_reader.read(&mut buf[..]).unwrap();
+                assert_eq!(actual_len, 0);
+            }
+        }
+    }
+
+    #[test]
     fn test_managed_file_deletion() {
         let dir = tempfile::Builder::new()
             .prefix("test_managed_file_deletion")
@@ -1906,7 +2082,6 @@ mod tests {
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
@@ -1918,7 +2093,85 @@ mod tests {
         engine.purge_expired_files().unwrap();
         assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(None), fs.inner.file_count());
+        let start = engine.file_span(LogQueue::Append).0;
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
+
+        let engine = engine.reopen();
+        assert_eq!(engine.file_count(None), fs.inner.file_count());
         let (start, _) = engine.file_span(LogQueue::Append);
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
+
+        // Simulate stale metadata.
+        for i in start / 2..start {
+            fs.append_metadata.lock().unwrap().insert(i);
+        }
+        let engine = engine.reopen();
+        let (start, _) = engine.file_span(LogQueue::Append);
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
+    }
+
+    #[test]
+    fn test_managed_file_reuse() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_managed_file_reuse")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(2),
+            format_version: Version::V2,
+            enable_log_recycle: true,
+            ..Default::default()
+        };
+        let fs = Arc::new(DeleteMonitoredFileSystem::new());
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        for rid in 1..=10 {
+            engine.append(rid, 1, 11, Some(&entry_data));
+        }
+        for rid in 1..=5 {
+            engine.clean(rid);
+        }
+        let (start, _) = engine.file_span(LogQueue::Append);
+        // the [start - 1] files are recycled
+        engine.purge_expired_files().unwrap();
+        assert!(start < engine.file_span(LogQueue::Append).0);
+        let file_count = fs.inner.file_count();
+        assert_eq!(engine.file_count(None) + 1, file_count);
+        let start = engine.file_span(LogQueue::Append).0 - 1;
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
+        // reopen the engine and validate the stale files are removed
+        let engine = engine.reopen();
+        assert_eq!(fs.inner.file_count(), file_count - 1);
+        assert_eq!(engine.file_span(LogQueue::Append).0, start + 1);
+        let start = engine.file_span(LogQueue::Append).0;
+        assert_eq!(
+            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            &start
+        );
+        // rewrite the recycled files
+        for rid in 1..=2 {
+            engine.clean(rid);
+        }
+        engine.purge_expired_files().unwrap();
+        for rid in 1..=2 {
+            engine.append(rid, 1, 11, Some(&entry_data));
+        }
+        assert_eq!(engine.file_count(None), fs.inner.file_count());
+        let start = engine.file_span(LogQueue::Append).0;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -1973,5 +2226,82 @@ mod tests {
             old_perf_context.apply_duration,
             new_perf_context.apply_duration
         );
+    }
+
+    #[test]
+    fn test_recycle_no_signing_files() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_recycle_no_signing_files")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 128];
+        let fs = Arc::new(DeleteMonitoredFileSystem::new());
+        let cfg_v1 = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1024),
+            format_version: Version::V1,
+            ..Default::default()
+        };
+        let cfg_v2 = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(15),
+            format_version: Version::V2,
+            enable_log_recycle: true,
+            ..Default::default()
+        };
+        // Prepare files with format_version V1
+        {
+            let engine = RaftLogEngine::open_with_file_system(cfg_v1.clone(), fs.clone()).unwrap();
+            for rid in 1..=10 {
+                engine.append(rid, 1, 11, Some(&entry_data));
+            }
+        }
+        // Reopen the Engine with V2 and purge
+        {
+            let engine = RaftLogEngine::open_with_file_system(cfg_v2.clone(), fs.clone()).unwrap();
+            let (start, _) = engine.file_span(LogQueue::Append);
+            for rid in 6..=10 {
+                engine.append(rid, 11, 20, Some(&entry_data));
+            }
+            // Mark region_id -> 6 obsolete.
+            for rid in 6..=6 {
+                engine.clean(rid);
+            }
+            // the [1, 12] files are recycled
+            engine.purge_expired_files().unwrap();
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), 5);
+            assert!(start < engine.file_span(LogQueue::Append).0);
+        }
+        // Reopen the Engine with V1 -> V2 and purge
+        {
+            let engine = RaftLogEngine::open_with_file_system(cfg_v1, fs.clone()).unwrap();
+            let (start, _) = engine.file_span(LogQueue::Append);
+            for rid in 6..=10 {
+                engine.append(rid, 20, 30, Some(&entry_data));
+            }
+            for rid in 6..=10 {
+                engine.append(rid, 30, 40, Some(&entry_data));
+            }
+            for rid in 1..=5 {
+                engine.append(rid, 11, 20, Some(&entry_data));
+            }
+            assert_eq!(engine.file_span(LogQueue::Append).0, start);
+            let file_count = engine.file_count(Some(LogQueue::Append));
+            drop(engine);
+            let engine = RaftLogEngine::open_with_file_system(cfg_v2, fs).unwrap();
+            assert_eq!(engine.file_span(LogQueue::Append).0, start);
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), file_count);
+            // Mark all regions obsolete.
+            for rid in 1..=10 {
+                engine.clean(rid);
+            }
+            let (start, _) = engine.file_span(LogQueue::Append);
+            // the [13, 32] files are purged
+            engine.purge_expired_files().unwrap();
+            assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
+            assert!(engine.file_span(LogQueue::Append).0 > start);
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{FileBlockHandle, FileId};
+use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
 use crate::{Error, Result};
 
 use super::format::LogFileFormat;
@@ -10,7 +10,7 @@ use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {
-    file_id: Option<FileId>,
+    file_context: Option<LogFileContext>,
     reader: Option<LogFileReader<F>>,
     size: usize,
 
@@ -28,7 +28,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Creates a new reader.
     pub fn new(read_block_size: usize) -> Self {
         Self {
-            file_id: None,
+            file_context: None,
             reader: None,
             size: 0,
 
@@ -42,7 +42,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
 
     /// Opens a file that can be accessed through the given reader.
     pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
-        self.file_id = Some(file_id);
+        self.file_context = Some(LogFileContext::new(file_id, reader.file_format().version()));
         self.size = reader.file_size()?;
         self.reader = Some(reader);
         self.buffer.clear();
@@ -53,12 +53,12 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
 
     /// Closes any ongoing file access.
     pub fn reset(&mut self) {
-        self.file_id = None;
         self.reader = None;
         self.size = 0;
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
+        self.file_context = None;
     }
 
     /// Returns the next [`LogItemBatch`] in current opened file. Returns
@@ -78,9 +78,9 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             if self.valid_offset + len > self.size {
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
-
+            let file_context = self.file_context.as_ref().unwrap().clone();
             let handle = FileBlockHandle {
-                id: self.file_id.unwrap(),
+                id: file_context.id,
                 offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
                 len: footer_offset - LOG_BATCH_HEADER_LEN,
             };
@@ -92,6 +92,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 )?,
                 handle,
                 compression_type,
+                &file_context,
             )?;
             self.valid_offset += len;
             return Ok(Some(item_batch));

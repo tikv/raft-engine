@@ -22,6 +22,16 @@ pub trait FileSystem: Send + Sync {
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> Result<()>;
 
+    fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<()>;
+
+    /// Reuse the old `src_path` with new `dst_path` filepath.
+    ///
+    /// It's an open interface for user-defined implementation.
+    /// Default implemented by `self.rename(...)`.
+    fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<()> {
+        self.rename(src_path, dst_path)
+    }
+
     /// Deletes user implemented metadata associated with `path`. Returns
     /// `true` if any metadata is deleted.
     ///

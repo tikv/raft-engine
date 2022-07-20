@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{FileNameExt, LogFileFormat, Version};
+pub use format::{FileNameExt, LogFileFormat};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
@@ -25,10 +25,10 @@ pub mod debug {
 
     use crate::env::FileSystem;
     use crate::log_batch::LogItem;
-    use crate::pipe_log::FileId;
+    use crate::pipe_log::{FileId, Version};
     use crate::{Error, Result};
 
-    use super::format::{FileNameExt, Version};
+    use super::format::FileNameExt;
     use super::log_file::{LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
 
@@ -47,7 +47,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd, version)
+        super::log_file::build_file_writer(file_system, fd, version, create)
     }
 
     /// Opens a log file for read.
@@ -172,9 +172,8 @@ pub mod debug {
     mod tests {
         use super::*;
         use crate::env::DefaultFileSystem;
-        use crate::file_pipe_log::format::Version;
         use crate::log_batch::{Command, LogBatch};
-        use crate::pipe_log::{FileBlockHandle, LogQueue};
+        use crate::pipe_log::{FileBlockHandle, LogFileContext, LogQueue, Version};
         use crate::test_util::generate_entries;
         use raft::eraftpb::Entry;
 
@@ -217,11 +216,13 @@ pub mod debug {
                     true, /* create */
                 )
                 .unwrap();
+                let log_file_format = LogFileContext::new(file_id, Version::default());
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
                     let len = batch
                         .finish_populate(1 /* compression_threshold */)
                         .unwrap();
+                    assert!(batch.prepare_write(&log_file_format).is_ok());
                     writer
                         .write(batch.encoded_bytes(), 0 /* target_file_hint */)
                         .unwrap();

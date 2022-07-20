@@ -50,7 +50,7 @@ impl fmt::Display for Config {
             self.batch_size,
             self.item_size,
             self.entry_size,
-            self.batch_compression_threshold
+            self.batch_compression_threshold,
         )
     }
 }
