@@ -9,9 +9,9 @@ use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
 use clap::{crate_authors, crate_version, Parser};
-
 use const_format::formatcp;
 use hdrhistogram::Histogram;
+use num_traits::FromPrimitive;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::internals::{EventListener, FileBlockHandle};
@@ -236,7 +236,7 @@ struct ControlOpt {
         default_value = "1",
         help = "Format version of log files"
     )]
-    format_version: String,
+    format_version: u64,
 
     #[clap(
         long = "enable-log-recycle",
@@ -591,7 +591,7 @@ fn main() {
     config.batch_compression_threshold =
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     config.enable_log_recycle = opts.enable_log_recycle;
-    config.format_version = serde_json::from_str::<Version>(&opts.format_version).unwrap();
+    config.format_version = Version::from_u64(opts.format_version).unwrap();
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);

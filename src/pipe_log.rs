@@ -3,9 +3,11 @@
 //! A generic log storage.
 
 use std::cmp::Ordering;
+use std::fmt::{self, Display};
 
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::ToPrimitive;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
 
@@ -114,6 +116,12 @@ impl Default for Version {
     }
 }
 
+impl Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_u64().unwrap())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LogFileContext {
     pub id: FileId,
@@ -134,7 +142,7 @@ impl LogFileContext {
     pub fn get_signature(&self) -> Option<u32> {
         if self.version.has_log_signing() {
             // Here, the count of files will be always limited to less than
-            // `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
+            // `u32::MAX`. So, we just use the low 32 bit as the `signature`
             // by default.
             Some(self.id.seq as u32)
         } else {

@@ -505,7 +505,7 @@ impl LogItemBatch {
         file_context: &LogFileContext,
     ) -> Result<LogItemBatch> {
         // Validate the checksum of each LogItemBatch by the signature.
-        verify_checksum_with_context(buf, file_context)?;
+        verify_checksum_with_signature(buf, file_context.get_signature())?;
         *buf = &buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN];
         let count = codec::decode_var_u64(buf)?;
         let mut items = LogItemBatch::with_capacity(count as usize);
@@ -887,7 +887,7 @@ impl LogBatch {
         compression: CompressionType,
     ) -> Result<Vec<u8>> {
         if handle.len > 0 {
-            verify_checksum(&buf[0..handle.len])?;
+            verify_checksum_with_signature(&buf[0..handle.len], None)?;
             match compression {
                 CompressionType::None => Ok(buf[..handle.len - LOG_BATCH_CHECKSUM_LEN].to_owned()),
                 CompressionType::Lz4 => {
@@ -903,28 +903,8 @@ impl LogBatch {
 }
 
 /// Verifies the checksum of a slice of bytes that sequentially holds data and
-/// checksum.
-fn verify_checksum(buf: &[u8]) -> Result<()> {
-    if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
-        return Err(Error::Corruption(format!(
-            "Content too short {}",
-            buf.len()
-        )));
-    }
-    let expected = codec::decode_u32_le(&mut &buf[buf.len() - LOG_BATCH_CHECKSUM_LEN..])?;
-    let actual = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
-    if actual != expected {
-        return Err(Error::Corruption(format!(
-            "Checksum expected {} but got {}",
-            expected, actual
-        )));
-    }
-    Ok(())
-}
-
-/// Verifies the checksum of a slice of bytes that sequentially holds data and
-/// checksum generated with the given `file_context`.
-fn verify_checksum_with_context(buf: &[u8], file_context: &LogFileContext) -> Result<()> {
+/// checksum. The checksum field may be signed by XOR-ing with an u32.
+fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<()> {
     if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
         return Err(Error::Corruption(format!(
             "Content too short {}",
@@ -933,13 +913,13 @@ fn verify_checksum_with_context(buf: &[u8], file_context: &LogFileContext) -> Re
     }
     let expected = codec::decode_u32_le(&mut &buf[buf.len() - LOG_BATCH_CHECKSUM_LEN..])?;
     let mut actual = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
-    if let Some(signature) = file_context.get_signature() {
+    if let Some(signature) = signature {
         actual ^= signature;
     }
     if actual != expected {
         return Err(Error::Corruption(format!(
-            "Checksum expected {} but got {}, format_version: {:?}",
-            expected, actual, file_context.version
+            "Checksum expected {} but got {}",
+            expected, actual
         )));
     }
     Ok(())
@@ -1194,6 +1174,45 @@ mod tests {
             entries_handle.offset = LOG_BATCH_HEADER_LEN as u64;
             entries_handle.len = offset - LOG_BATCH_HEADER_LEN;
             let file_context = LogFileContext::new(entries_handle.id, version);
+            {
+                // Decoding with wrong compression type is okay.
+                LogItemBatch::decode(
+                    &mut &encoded[offset..],
+                    entries_handle,
+                    if compression_type == CompressionType::None {
+                        CompressionType::Lz4
+                    } else {
+                        CompressionType::None
+                    },
+                    &file_context,
+                )
+                .unwrap();
+                // Decode with wrong file number.
+                if version.has_log_signing() {
+                    LogItemBatch::decode(
+                        &mut &encoded[offset..],
+                        entries_handle,
+                        compression_type,
+                        &LogFileContext::new(FileId::new(LogQueue::Append, u64::MAX), version),
+                    )
+                    .unwrap_err();
+                }
+                // Decode with wrong version.
+                LogItemBatch::decode(
+                    &mut &encoded[offset..],
+                    entries_handle,
+                    compression_type,
+                    &LogFileContext::new(
+                        file_context.id,
+                        if version == Version::V1 {
+                            Version::V2
+                        } else {
+                            Version::V1
+                        },
+                    ),
+                )
+                .unwrap_err();
+            }
             let decoded_item_batch = LogItemBatch::decode(
                 &mut &encoded[offset..],
                 entries_handle,
@@ -1245,9 +1264,10 @@ mod tests {
 
         // Validate with different Versions
         for version in Version::iter() {
-            for (batch, entry_data) in batches.clone().into_iter() {
-                decode_and_encode(batch.clone(), true, version, &entry_data);
-                decode_and_encode(batch, false, version, &entry_data);
+            for compress in [true, false] {
+                for (batch, entry_data) in batches.clone().into_iter() {
+                    decode_and_encode(batch, compress, version, &entry_data);
+                }
             }
         }
     }
@@ -1342,68 +1362,6 @@ mod tests {
         assert!(batch.is_empty());
         batch.add_raw_entries(0, Vec::new(), Vec::new()).unwrap();
         assert!(batch.is_empty());
-    }
-
-    #[test]
-    fn test_verify_checksum() {
-        use rand::{thread_rng, Rng};
-        // Invalid header
-        let invalid_data: Vec<u8> = (0..LOG_BATCH_CHECKSUM_LEN)
-            .map(|_| thread_rng().gen())
-            .collect();
-        assert!(verify_checksum_with_context(
-            &invalid_data[..],
-            &LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default())
-        )
-        .is_err());
-        {
-            // Sign checksum and verify it with Version::V1
-            let mut data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
-            let checksum = crc32(&data[..]);
-            data.encode_u32_le(checksum).unwrap();
-            assert!(verify_checksum_with_context(
-                &data[..],
-                &LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default())
-            )
-            .is_ok());
-            // file_context.signature() == 0
-            assert!(verify_checksum_with_context(
-                &data[..],
-                &LogFileContext::new(FileId::dummy(LogQueue::Rewrite), Version::V2),
-            )
-            .is_ok());
-            let file_context = LogFileContext::new(
-                FileId {
-                    seq: 11,
-                    queue: LogQueue::Rewrite,
-                },
-                Version::default(),
-            );
-            assert!(verify_checksum_with_context(&data[..], &file_context).is_ok());
-        }
-        {
-            // Sign checksum and verify it with Version::V2
-            let file_context_v1 = LogFileContext::new(
-                FileId {
-                    seq: 11,
-                    queue: LogQueue::Rewrite,
-                },
-                Version::V1,
-            );
-            let file_context_v2 = LogFileContext::new(
-                FileId {
-                    seq: 11,
-                    queue: LogQueue::Rewrite,
-                },
-                Version::V2,
-            );
-            let mut data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
-            let checksum = crc32(&data[..]);
-            data.encode_u32_le(checksum ^ file_context_v2.get_signature().unwrap())
-                .unwrap();
-            assert!(verify_checksum_with_context(&data[..], &file_context_v1).is_err());
-            assert!(verify_checksum_with_context(&data[..], &file_context_v2).is_ok());
-        }
     }
 
     #[cfg(feature = "nightly")]

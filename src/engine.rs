@@ -1999,76 +1999,6 @@ mod tests {
     }
 
     #[test]
-    fn test_filesystem_move_file() {
-        use std::io::{Read, Write};
-
-        let dir = tempfile::Builder::new()
-            .prefix("test_filesystem_move_file")
-            .tempdir()
-            .unwrap();
-        let path = dir.path().to_str().unwrap();
-        let entry_data = vec![b'x'; 128];
-        let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        // Move file from src to dst by `rename`
-        {
-            let src_file_id = FileId {
-                seq: 12,
-                queue: LogQueue::Append,
-            };
-            let dst_file_id = FileId {
-                seq: src_file_id.seq + 1,
-                ..src_file_id
-            };
-            let src_path = src_file_id.build_file_path(path); // src filepath
-            let dst_path = dst_file_id.build_file_path(path); // dst filepath
-            {
-                // Create file and write data with DeleteMonitoredFileSystem
-                let fd = Arc::new(fs.create(&src_file_id.build_file_path(path)).unwrap());
-                let mut writer = fs.new_writer(fd).unwrap();
-                writer.write_all(&entry_data[..]).unwrap();
-            }
-            fs.rename(&src_path, &dst_path).unwrap();
-            {
-                // Reopen the file and check data
-                let mut buf = vec![0; 1024];
-                let fd = Arc::new(fs.open(&dst_file_id.build_file_path(path)).unwrap());
-                let mut new_reader = fs.new_reader(fd).unwrap();
-                let actual_len = new_reader.read(&mut buf[..]).unwrap();
-                assert_eq!(actual_len, 1);
-                assert!(buf[0] == entry_data[0]);
-            }
-        }
-        // Move file from src to dst by `reuse`
-        {
-            let src_file_id = FileId {
-                seq: 14,
-                queue: LogQueue::Append,
-            };
-            let dst_file_id = FileId {
-                seq: src_file_id.seq + 1,
-                ..src_file_id
-            };
-            let src_path = src_file_id.build_file_path(path); // src filepath
-            let dst_path = dst_file_id.build_file_path(path); // dst filepath
-            {
-                // Create file and write data with DeleteMonitoredFileSystem
-                let fd = Arc::new(fs.create(&src_file_id.build_file_path(path)).unwrap());
-                let mut writer = fs.new_writer(fd).unwrap();
-                writer.write_all(&entry_data[..]).unwrap();
-            }
-            fs.reuse(&src_path, &dst_path).unwrap();
-            {
-                // Reopen the file and check whether the file is empty
-                let mut buf = vec![0; 1024];
-                let fd = Arc::new(fs.open(&dst_file_id.build_file_path(path)).unwrap());
-                let mut new_reader = fs.new_reader(fd).unwrap();
-                let actual_len = new_reader.read(&mut buf[..]).unwrap();
-                assert_eq!(actual_len, 0);
-            }
-        }
-    }
-
-    #[test]
     fn test_managed_file_deletion() {
         let dir = tempfile::Builder::new()
             .prefix("test_managed_file_deletion")
@@ -2246,7 +2176,7 @@ mod tests {
         let cfg_v2 = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(15),
+            purge_threshold: ReadableSize(15), // recycle capacity = 15
             format_version: Version::V2,
             enable_log_recycle: true,
             ..Default::default()
