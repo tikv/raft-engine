@@ -3,9 +3,11 @@
 //! Representations of objects in filesystem.
 
 use std::io::BufRead;
+use std::mem;
 use std::path::{Path, PathBuf};
 
 use num_traits::{FromPrimitive, ToPrimitive};
+use strum::EnumIter;
 
 use crate::codec::{self, NumberEncoder};
 use crate::pipe_log::{DataLayout, FileId, LogQueue, Version};
@@ -19,8 +21,11 @@ const LOG_APPEND_SUFFIX: &str = ".raftlog";
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-/// Mask of Version
+/// Mask of Version.
 const LOG_FILE_HEADER_VERSION_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+
+/// Default aligned block size for reading header from a log file.
+pub(crate) const LOG_FILE_HEADER_ALIGNMENT_SIZE: usize = 4096; // 4 kb as default
 
 /// `FileNameExt` offers file name formatting extensions to [`FileId`].
 pub trait FileNameExt: Sized {
@@ -163,10 +168,38 @@ impl LogFileFormat {
     }
 }
 
+/// Types of records in the log file.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum LogRecordType {
+    Full = 0,
+    First = 1,
+    Middle = 2,
+    Last = 3,
+}
+
+impl LogRecordType {
+    #[allow(dead_code)]
+    pub fn from_u8(t: u8) -> Option<Self> {
+        if t <= LogRecordType::Last as u8 {
+            Some(unsafe { mem::transmute(t) })
+        } else {
+            None
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipe_log::LogFileContext;
+    use strum::IntoEnumIterator;
 
     #[test]
     fn test_file_name() {
@@ -248,5 +281,14 @@ mod tests {
         file_context.id.seq = abnormal_seq;
         assert_ne!(file_context.get_signature().unwrap() as u64, abnormal_seq);
         assert_eq!(file_context.get_signature().unwrap(), 100);
+    }
+
+    #[test]
+    fn test_log_record_type() {
+        assert!(LogRecordType::from_u8(10).is_none());
+        for t in LogRecordType::iter() {
+            let t_u8: u8 = t.to_u8();
+            assert_eq!(LogRecordType::from_u8(t_u8).unwrap(), t);
+        }
     }
 }

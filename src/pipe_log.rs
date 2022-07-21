@@ -82,6 +82,7 @@ impl FileBlockHandle {
 }
 
 /// Version of log file format.
+#[repr(u64)]
 #[derive(
     Clone,
     Copy,
@@ -94,7 +95,6 @@ impl FileBlockHandle {
     Deserialize_repr,
     EnumIter,
 )]
-#[repr(u64)]
 pub enum Version {
     V1 = 1,
     V2 = 2,
@@ -116,9 +116,9 @@ impl Default for Version {
     }
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[repr(u8)]
 pub enum DataLayout {
     NoAlignment,
     Alignment,
@@ -131,7 +131,7 @@ impl Default for DataLayout {
 }
 
 impl DataLayout {
-    pub fn from_u8(val: u8) -> Option<DataLayout> {
+    pub fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(DataLayout::NoAlignment),
             1 => Some(DataLayout::Alignment),

@@ -325,6 +325,16 @@ pub trait Factory<Target>: Send + Sync {
     fn new_target(&self) -> Target;
 }
 
+/// Return an aligned `offset`.
+///
+/// Example:
+/// * round_up(18, 4) => 20
+/// * round_up(64, 16) => 64
+#[inline]
+pub fn round_up(offset: usize, alignment: usize) -> usize {
+    (offset + alignment - 1) / alignment * alignment
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +444,12 @@ mod tests {
     #[test]
     fn test_unhash() {
         assert_eq!(unhash_u64(hash_u64(777)), 777);
+    }
+
+    #[test]
+    fn test_rounding() {
+        assert_eq!(round_up(18, 4), 20);
+        assert_eq!(round_up(64, 16), 64);
+        assert_eq!(round_up(79, 4096), 4096);
     }
 }

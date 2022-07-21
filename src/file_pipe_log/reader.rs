@@ -2,7 +2,7 @@
 
 use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
+use crate::pipe_log::{DataLayout, FileBlockHandle, FileId, LogFileContext};
 use crate::{Error, Result};
 
 use super::format::LogFileFormat;
@@ -65,37 +65,50 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// `None` if there is no more data or no opened file.
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
         if self.valid_offset < self.size {
-            if self.valid_offset < LOG_BATCH_HEADER_LEN {
-                return Err(Error::Corruption(
-                    "attempt to read file with broken header".to_owned(),
-                ));
+            debug_assert!(self.file_context.is_some());
+            match self.file_context.as_ref().unwrap().format.data_layout() {
+                // Original layout of data in log file: no alignment.
+                DataLayout::NoAlignment => {
+                    if self.valid_offset < LOG_BATCH_HEADER_LEN {
+                        return Err(Error::Corruption(
+                            "attempt to read file with broken header".to_owned(),
+                        ));
+                    }
+                    let (footer_offset, compression_type, len) = LogBatch::decode_header(
+                        &mut self.peek(self.valid_offset, LOG_BATCH_HEADER_LEN, 0)?,
+                    )?;
+                    if self.valid_offset + len > self.size {
+                        return Err(Error::Corruption("log batch header broken".to_owned()));
+                    }
+                    let file_context = self.file_context.as_ref().unwrap().clone();
+                    let handle = FileBlockHandle {
+                        id: file_context.id,
+                        offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
+                        len: footer_offset - LOG_BATCH_HEADER_LEN,
+                    };
+                    let item_batch = LogItemBatch::decode(
+                        &mut self.peek(
+                            self.valid_offset + footer_offset,
+                            len - footer_offset,
+                            LOG_BATCH_HEADER_LEN,
+                        )?,
+                        handle,
+                        compression_type,
+                        &file_context,
+                    )?;
+                    self.valid_offset += len;
+                    return Ok(Some(item_batch));
+                }
+                // @TODO: lucasliang
+                // Implement the reading strategy for DataLayout::Alignment.
+                // Referring to the design of WAL in rocksdb:
+                // [https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format],
+                // this strategy will introduce LogRecordType as the candidate
+                // mark to remark each fragment of serialized LogBatchs in the log.
+                _ => {
+                    panic!("unrecognized DataLayout for recovery.");
+                }
             }
-            let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
-                self.valid_offset,
-                LOG_BATCH_HEADER_LEN,
-                0,
-            )?)?;
-            if self.valid_offset + len > self.size {
-                return Err(Error::Corruption("log batch header broken".to_owned()));
-            }
-            let file_context = self.file_context.as_ref().unwrap().clone();
-            let handle = FileBlockHandle {
-                id: file_context.id,
-                offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
-                len: footer_offset - LOG_BATCH_HEADER_LEN,
-            };
-            let item_batch = LogItemBatch::decode(
-                &mut self.peek(
-                    self.valid_offset + footer_offset,
-                    len - footer_offset,
-                    LOG_BATCH_HEADER_LEN,
-                )?,
-                handle,
-                compression_type,
-                &file_context,
-            )?;
-            self.valid_offset += len;
-            return Ok(Some(item_batch));
         }
         Ok(None)
     }

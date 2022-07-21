@@ -11,9 +11,10 @@ use log::warn;
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, LogFileContext};
+use crate::util::round_up;
 use crate::{Error, Result};
 
-use super::format::LogFileFormat;
+use super::format::{LogFileFormat, LOG_FILE_HEADER_ALIGNMENT_SIZE};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
@@ -246,7 +247,7 @@ impl<F: FileSystem> LogFileReader<F> {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
         // [2] Parse the header of the file.
-        let mut container = vec![0; header_len];
+        let mut container = vec![0; round_up(header_len, LOG_FILE_HEADER_ALIGNMENT_SIZE)];
         self.read_to(0, &mut container[..])?;
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.format)
