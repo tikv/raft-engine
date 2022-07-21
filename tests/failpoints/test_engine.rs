@@ -573,7 +573,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
 #[test]
 fn test_build_with_alignment_datalayout() {
     let dir = tempfile::Builder::new()
-        .prefix("test_build_with_unimplemented_datalayout")
+        .prefix("test_build_with_alignment_datalayout")
         .tempdir()
         .unwrap();
     let data = vec![b'x'; 1024];
@@ -593,5 +593,4 @@ fn test_build_with_alignment_datalayout() {
     append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
     drop(engine);
     assert!(Engine::open(cfg).is_ok());
-    // assert!(catch_unwind_silent(|| { Engine::open(cfg_err) }).is_err());
 }
