@@ -15,7 +15,9 @@ use hdrhistogram::Histogram;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
 use raft_engine::internals::{EventListener, FileBlockHandle};
-use raft_engine::{Command, Config, Engine, LogBatch, MessageExt, ReadableSize, Version};
+use raft_engine::{
+    Command, Config, DataLayout, Engine, LogBatch, MessageExt, ReadableSize, Version,
+};
 use rand::{thread_rng, Rng, RngCore};
 
 type WriteBatch = LogBatch;
@@ -237,6 +239,12 @@ struct ControlOpt {
         help = "Format version of log files"
     )]
     format_version: String,
+
+    #[clap(
+        long = "alignment-mode",
+        help = "Align the data with default 32kb block size"
+    )]
+    alignment_mode: bool,
 
     #[clap(
         long = "enable-log-recycle",
@@ -592,6 +600,9 @@ fn main() {
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     config.enable_log_recycle = opts.enable_log_recycle;
     config.format_version = serde_json::from_str::<Version>(&opts.format_version).unwrap();
+    if opts.alignment_mode {
+        config.format_data_layout = DataLayout::Alignment;
+    }
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);
