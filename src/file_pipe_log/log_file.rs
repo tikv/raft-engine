@@ -10,14 +10,17 @@ use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, LogFileContext};
-use crate::util::round_up;
+use crate::pipe_log::{DataLayout, FileBlockHandle, LogFileContext};
+use crate::util::{round_down, round_up};
 use crate::{Error, Result};
 
 use super::format::{LogFileFormat, LOG_FILE_HEADER_ALIGNMENT_SIZE};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
+
+/// Default alignment size.
+pub(crate) const FILE_ALIGNMENT_SIZE: usize = 32768; // 16kb as default
 
 /// Combination of `[Handle]` and `[Version]`, specifying a handler of a file.
 #[derive(Debug)]
@@ -203,15 +206,40 @@ impl<F: FileSystem> LogFileReader<F> {
     }
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        let mut buf = vec![0; handle.len as usize];
-        let size = self.read_to(handle.offset, &mut buf)?;
+        let (start_offset, length) = {
+            match self.format.data_layout() {
+                DataLayout::NoAlignment => (handle.offset as usize, handle.len),
+                DataLayout::Alignment => {
+                    // @TODO: lucasliang,
+                    // Currently, it's an implementation with integrated `read`.
+                    // This part should be compatible to fragmented records in LogRecordType.
+                    let start_offset = round_down(handle.offset as usize, FILE_ALIGNMENT_SIZE);
+                    let end_offset =
+                        round_up(handle.offset as usize + handle.len, FILE_ALIGNMENT_SIZE);
+                    (start_offset, end_offset - start_offset)
+                }
+            }
+        };
+        let mut buf = vec![0; length];
+        let size = self.read_to(start_offset as u64, &mut buf)?;
         buf.truncate(size);
+        if buf.len() > handle.len {
+            // Drain redundant parts of data in the buffer.
+            buf.drain(..handle.offset as usize - start_offset); // head
+            buf.drain(handle.len..); // tail
+        }
         Ok(buf)
     }
 
     /// Polls bytes from the file. Stops only when the buffer is filled or
     /// reaching the "end of file".
     pub fn read_to(&mut self, offset: u64, mut buf: &mut [u8]) -> Result<usize> {
+        if DataLayout::Alignment == self.format.data_layout() {
+            // Meet the prerequisite when `data_layout == Alignment`.
+            debug_assert!(offset == 0 || offset & (offset - 1) == 0);
+            let len = buf.len();
+            debug_assert!(len & (len - 1) == 0);
+        }
         if offset != self.offset {
             self.reader.seek(SeekFrom::Start(offset))?;
             self.offset = offset;
