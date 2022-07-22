@@ -571,26 +571,46 @@ fn test_recycle_with_stale_logbatch_at_tail() {
 }
 
 #[test]
-fn test_build_with_alignment_datalayout() {
+fn test_build_with_datalayout() {
     let dir = tempfile::Builder::new()
-        .prefix("test_build_with_alignment_datalayout")
+        .prefix("test_build_with_datalayout")
         .tempdir()
         .unwrap();
     let data = vec![b'x'; 1024];
     let rid = 1;
+    // DataLayout with default config => NoAlignment
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
         purge_threshold: ReadableSize::kb(4),
-        format_data_layout: DataLayout::Alignment,
         ..Default::default()
     };
     let engine = Engine::open(cfg.clone()).unwrap();
-    append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
+    append(&engine, rid, 1, 2, Some(&data));
     append(&engine, rid, 2, 3, Some(&data));
-    append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
-    append(&engine, rid, 4, 5, Some(&data));
-    append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
     drop(engine);
-    assert!(Engine::open(cfg).is_ok());
+    assert!(Engine::open(cfg.clone()).is_ok());
+    // DataLayout config => AlignWithIntegration
+    let cfg_integration = Config {
+        format_data_layout: DataLayout::AlignWithIntegration,
+        ..cfg.clone()
+    };
+    let engine = Engine::open(cfg_integration).unwrap();
+    append(&engine, rid, 3, 4, Some(&data));
+    append(&engine, rid, 4, 5, Some(&data));
+    append(&engine, rid, 5, 6, Some(&data));
+    append(&engine, rid, 6, 7, Some(&data));
+    drop(engine);
+    // DataLayout config => AlignWithFragments
+    let _f = FailGuard::new("pipe_log::data_layout::force_enable", "return");
+    let cfg_fragments = Config {
+        format_data_layout: DataLayout::AlignWithFragments,
+        ..cfg
+    };
+    let engine = Engine::open(cfg_fragments.clone()).unwrap();
+    append(&engine, rid, 7, 8, Some(&data));
+    append(&engine, rid, 8, 9, Some(&data));
+    append(&engine, rid, 9, 10, Some(&data));
+    drop(engine);
+    assert!(catch_unwind_silent(|| { Engine::open(cfg_fragments) }).is_err());
 }

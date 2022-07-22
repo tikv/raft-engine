@@ -241,10 +241,12 @@ struct ControlOpt {
     format_version: String,
 
     #[clap(
-        long = "alignment-mode",
-        help = "Align the data with default 32kb block size"
+        long = "format-data-layout",
+        takes_value = true,
+        default_value = "no-alignment",
+        help = "Format data layout of log files"
     )]
-    alignment_mode: bool,
+    format_data_layout: String,
 
     #[clap(
         long = "enable-log-recycle",
@@ -600,9 +602,8 @@ fn main() {
         ReadableSize::from_str(&opts.batch_compression_threshold).unwrap();
     config.enable_log_recycle = opts.enable_log_recycle;
     config.format_version = serde_json::from_str::<Version>(&opts.format_version).unwrap();
-    if opts.alignment_mode {
-        config.format_data_layout = DataLayout::Alignment;
-    }
+    config.format_data_layout =
+        serde_json::from_str::<DataLayout>(&format!(r#""{}""#, opts.format_data_layout)).unwrap();
     args.time = Duration::from_secs(opts.time);
     args.regions = opts.regions;
     args.purge_interval = Duration::from_secs(opts.purge_interval);

@@ -253,19 +253,11 @@ mod tests {
             assert!(file_format.encode(&mut buf).is_ok());
             LogFileFormat::decode(&mut &buf[..])
         }
-        // DataLayout::default() -> NoAlignment
-        {
-            let mut file_format = LogFileFormat::new(Version::default(), DataLayout::default());
-            assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
-            file_format = LogFileFormat::new(Version::V2, DataLayout::default());
-            assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
-        }
-        // DataLayout::Alignment
-        {
-            let mut file_format = LogFileFormat::new(Version::default(), DataLayout::Alignment);
-            assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
-            file_format = LogFileFormat::new(Version::V2, DataLayout::Alignment);
-            assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
+        for version in Version::iter() {
+            for layout in DataLayout::iter() {
+                let file_format = LogFileFormat::new(version, layout);
+                assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
+            }
         }
     }
 

@@ -67,44 +67,58 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
         if self.valid_offset < self.size {
             debug_assert!(self.file_context.is_some());
-            // @TODO: lucasliang
-            // Implement the reading strategy for DataLayout::Alignment, considering
-            // that records in log files might be fragmented.
-            // Referring to the design of WAL in rocksdb:
-            // [https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format],
-            // this strategy will introduce LogRecordType as the candidate
-            // mark to remark each fragment of serialized LogBatchs in the log.
-            if self.valid_offset < LOG_BATCH_HEADER_LEN {
-                return Err(Error::Corruption(
-                    "attempt to read file with broken header".to_owned(),
-                ));
+            match self.file_context.as_ref().unwrap().format.data_layout() {
+                DataLayout::NoAlignment | DataLayout::AlignWithIntegration => {
+                    if self.valid_offset < LOG_BATCH_HEADER_LEN {
+                        return Err(Error::Corruption(
+                            "attempt to read file with broken header".to_owned(),
+                        ));
+                    }
+                    let (footer_offset, compression_type, len) = LogBatch::decode_header(
+                        &mut self.peek(self.valid_offset, LOG_BATCH_HEADER_LEN, 0)?,
+                    )?;
+                    if self.valid_offset + len > self.size {
+                        return Err(Error::Corruption("log batch header broken".to_owned()));
+                    }
+                    let file_context = self.file_context.as_ref().unwrap().clone();
+                    let handle = FileBlockHandle {
+                        id: file_context.id,
+                        offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
+                        len: footer_offset - LOG_BATCH_HEADER_LEN,
+                    };
+                    let item_batch = LogItemBatch::decode(
+                        &mut self.peek(
+                            self.valid_offset + footer_offset,
+                            len - footer_offset,
+                            LOG_BATCH_HEADER_LEN,
+                        )?,
+                        handle,
+                        compression_type,
+                        &file_context,
+                    )?;
+                    self.valid_offset += len;
+                    return Ok(Some(item_batch));
+                }
+                DataLayout::AlignWithFragments => {
+                    // @TODO: lucasliang
+                    // Implement the reading strategy for DataLayout::AlignWithFragments,
+                    // considering that records in log files might be fragmented.
+                    // Referring to the design of WAL in rocksdb:
+                    // [https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format],
+                    // this strategy will introduce LogRecordType as the candidate
+                    // mark to remark each fragment of serialized LogBatchs in the log.
+                    //
+                    // Expected fragemented records should be aligned and typed with
+                    // `LogRecordType`, default with LogRecordType::Full. And we need
+                    // supply extra necessary structure to annotate each
+                    // part of one fragmented record, i.e.
+                    //
+                    // | <------------------ 32kb --------------------> | 32kb | ...
+                    // |len(32bit)|type(8bit)| serialized LogBatch(...) |  ... | ...
+                    //
+                    panic!("attempt to read file with an unimplemented DataLayout");
+                }
             }
-            let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
-                self.valid_offset,
-                LOG_BATCH_HEADER_LEN,
-                0,
-            )?)?;
-            if self.valid_offset + len > self.size {
-                return Err(Error::Corruption("log batch header broken".to_owned()));
-            }
-            let file_context = self.file_context.as_ref().unwrap().clone();
-            let handle = FileBlockHandle {
-                id: file_context.id,
-                offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
-                len: footer_offset - LOG_BATCH_HEADER_LEN,
-            };
-            let item_batch = LogItemBatch::decode(
-                &mut self.peek(
-                    self.valid_offset + footer_offset,
-                    len - footer_offset,
-                    LOG_BATCH_HEADER_LEN,
-                )?,
-                handle,
-                compression_type,
-                &file_context,
-            )?;
-            self.valid_offset += len;
-            return Ok(Some(item_batch));
         }
         Ok(None)
     }
@@ -126,7 +140,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                         self.buffer_offset,
                         std::cmp::max(size + prefetch, self.read_block_size),
                     ),
-                    DataLayout::Alignment => (
+                    _ => (
                         round_down(self.buffer_offset, FILE_ALIGNMENT_SIZE),
                         round_up(
                             std::cmp::max(size + prefetch, self.read_block_size),
@@ -161,7 +175,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                             read_offset,
                             std::cmp::max(should_read, self.read_block_size),
                         ),
-                        DataLayout::Alignment => (
+                        _ => (
                             round_down(read_offset, FILE_ALIGNMENT_SIZE),
                             round_up(
                                 std::cmp::max(should_read, self.read_block_size),

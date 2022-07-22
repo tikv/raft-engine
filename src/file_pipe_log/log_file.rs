@@ -209,7 +209,7 @@ impl<F: FileSystem> LogFileReader<F> {
         let (start_offset, length) = {
             match self.format.data_layout() {
                 DataLayout::NoAlignment => (handle.offset as usize, handle.len),
-                DataLayout::Alignment => {
+                _ => {
                     // @TODO: lucasliang,
                     // Currently, it's an implementation with integrated `read`.
                     // This part should be compatible to fragmented records in LogRecordType.
@@ -234,11 +234,14 @@ impl<F: FileSystem> LogFileReader<F> {
     /// Polls bytes from the file. Stops only when the buffer is filled or
     /// reaching the "end of file".
     pub fn read_to(&mut self, offset: u64, mut buf: &mut [u8]) -> Result<usize> {
-        if DataLayout::Alignment == self.format.data_layout() {
-            // Meet the prerequisite when `data_layout == Alignment`.
-            debug_assert!(offset == 0 || offset & (offset - 1) == 0);
-            let len = buf.len();
-            debug_assert!(len & (len - 1) == 0);
+        match self.format.data_layout() {
+            DataLayout::AlignWithFragments | DataLayout::AlignWithIntegration => {
+                // Meet the prerequisite when `data_layout == AlignWithXXX`.
+                debug_assert!(offset == 0 || offset & (offset - 1) == 0);
+                let len = buf.len();
+                debug_assert!(len & (len - 1) == 0);
+            }
+            _ => {}
         }
         if offset != self.offset {
             self.reader.seek(SeekFrom::Start(offset))?;

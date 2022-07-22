@@ -168,6 +168,12 @@ impl Config {
                 ));
             }
         }
+        if !self.format_data_layout.is_enabled() {
+            return Err(box_err!(
+                "format_data_layout: {:?} is not support to be enabled",
+                self.format_data_layout
+            ));
+        }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is not enabled");
@@ -285,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_setting_on_alignment_mode() {
+    fn test_format_data_layout() {
         // "no-alignment" data_layout - default
         {
             let default_cfg = r#"
@@ -295,14 +301,22 @@ mod tests {
             load.sanitize().unwrap();
             assert_eq!(load.format_data_layout, DataLayout::NoAlignment);
         }
-        // "alignment"
+        // "align-with-integration"
         {
             let cfg = r#"
-                format-data-layout = "alignment"
+                format-data-layout = "align-with-integration"
             "#;
             let mut load: Config = toml::from_str(cfg).unwrap();
             load.sanitize().unwrap();
-            assert_eq!(load.format_data_layout, DataLayout::Alignment);
+            assert_eq!(load.format_data_layout, DataLayout::AlignWithIntegration);
+        }
+        // "align-with-fragments"
+        {
+            let cfg = r#"
+                format-data-layout = "align-with-fragments"
+            "#;
+            let mut load: Config = toml::from_str(cfg).unwrap();
+            assert!(load.sanitize().is_err());
         }
         // abnormal
         {
@@ -314,7 +328,7 @@ mod tests {
             assert_eq!(load.format_data_layout, DataLayout::NoAlignment);
 
             let abnormal_cfg_2 = r#"
-                format-data-layout = "alignments"
+                format-data-layout = "aligned-with-fragment"
             "#;
             assert!(toml::from_str::<Config>(abnormal_cfg_2).is_err());
         }

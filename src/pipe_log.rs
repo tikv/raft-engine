@@ -117,11 +117,12 @@ impl Default for Version {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DataLayout {
     NoAlignment,
-    Alignment,
+    AlignWithIntegration,
+    AlignWithFragments,
 }
 
 impl Default for DataLayout {
@@ -134,7 +135,8 @@ impl DataLayout {
     pub fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(DataLayout::NoAlignment),
-            1 => Some(DataLayout::Alignment),
+            1 => Some(DataLayout::AlignWithIntegration),
+            2 => Some(DataLayout::AlignWithFragments),
             _ => None,
         }
     }
@@ -142,7 +144,18 @@ impl DataLayout {
     pub fn to_u8(self) -> u8 {
         match self {
             DataLayout::NoAlignment => 0,
-            DataLayout::Alignment => 1,
+            DataLayout::AlignWithIntegration => 1,
+            DataLayout::AlignWithFragments => 2,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        fail_point!("pipe_log::data_layout::force_enable", |_| { true });
+        match self {
+            DataLayout::NoAlignment => true,
+            DataLayout::AlignWithIntegration => true,
+            // @TODO: lucasliang, support for it
+            DataLayout::AlignWithFragments => false,
         }
     }
 }
