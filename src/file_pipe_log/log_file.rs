@@ -20,7 +20,7 @@ use super::format::{LogFileFormat, LOG_FILE_HEADER_ALIGNMENT_SIZE};
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 /// Default alignment size.
-pub(crate) const FILE_ALIGNMENT_SIZE: usize = 32768; // 16kb as default
+pub(crate) const FILE_ALIGNMENT_SIZE: usize = 32768; // 32kb as default
 
 /// Combination of `[Handle]` and `[Version]`, specifying a handler of a file.
 #[derive(Debug)]
@@ -240,9 +240,8 @@ impl<F: FileSystem> LogFileReader<F> {
         match self.format.data_layout() {
             DataLayout::AlignWithFragments | DataLayout::AlignWithIntegration => {
                 // Meet the prerequisite when `data_layout == AlignWithXXX`.
-                debug_assert!(offset == 0 || offset & (offset - 1) == 0);
-                let len = buf.len();
-                debug_assert!(len & (len - 1) == 0);
+                debug_assert!(offset % FILE_ALIGNMENT_SIZE as u64 == 0);
+                debug_assert!(buf.len() % FILE_ALIGNMENT_SIZE == 0);
             }
             _ => {}
         }

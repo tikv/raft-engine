@@ -1342,36 +1342,45 @@ mod tests {
 
     #[test]
     fn test_large_rewrite_batch() {
-        let dir = tempfile::Builder::new()
-            .prefix("test_large_rewrite_batch")
-            .tempdir()
-            .unwrap();
-        let cfg = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize(1),
-            ..Default::default()
-        };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+        for data_layout in DataLayout::iter() {
+            if data_layout == DataLayout::AlignWithFragments {
+                // Not support yet.
+                continue;
+            }
+            let dir = tempfile::Builder::new()
+                .prefix("test_large_rewrite_batch")
+                .tempdir()
                 .unwrap();
-        let data = vec![b'x'; 2 * 1024 * 1024];
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                format_data_layout: data_layout,
+                ..Default::default()
+            };
+            let engine = RaftLogEngine::open_with_file_system(
+                cfg,
+                Arc::new(ObfuscatedFileSystem::default()),
+            )
+            .unwrap();
+            let data = vec![b'x'; 2 * 1024 * 1024];
 
-        for rid in 1..=3 {
-            engine.append(rid, 1, 11, Some(&data));
-        }
+            for rid in 1..=3 {
+                engine.append(rid, 1, 11, Some(&data));
+            }
 
-        let old_active_file = engine.file_span(LogQueue::Append).1;
-        engine.purge_manager.must_rewrite_append_queue(None, None);
-        assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
-        let old_active_file = engine.file_span(LogQueue::Rewrite).1;
-        engine.purge_manager.must_rewrite_rewrite_queue();
-        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+            let old_active_file = engine.file_span(LogQueue::Append).1;
+            engine.purge_manager.must_rewrite_append_queue(None, None);
+            assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+            let old_active_file = engine.file_span(LogQueue::Rewrite).1;
+            engine.purge_manager.must_rewrite_rewrite_queue();
+            assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
 
-        let engine = engine.reopen();
-        for rid in 1..=3 {
-            engine.scan_entries(rid, 1, 11, |_, _, d| {
-                assert_eq!(d, &data);
-            });
+            let engine = engine.reopen();
+            for rid in 1..=3 {
+                engine.scan_entries(rid, 1, 11, |_, _, d| {
+                    assert_eq!(d, &data);
+                });
+            }
         }
     }
 
