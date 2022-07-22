@@ -59,6 +59,8 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 pub struct RecoveryConfig {
     pub queue: LogQueue,
     pub mode: RecoveryMode,
+    /// @lucasliang
+    /// TODO: This opt should defined by whether open DIO or not.
     pub data_layout: DataLayout,
     pub concurrency: usize,
     pub read_block_size: u64,
@@ -233,7 +235,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
-            data_layout: self.cfg.format_data_layout,
+            data_layout: DataLayout::default(),
             concurrency: append_concurrency,
             read_block_size: self.cfg.recovery_read_block_size.0,
         };

@@ -14,7 +14,9 @@ use crate::config::Config;
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog};
+use crate::pipe_log::{
+    DataLayout, FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog,
+};
 use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
@@ -145,7 +147,11 @@ impl<F: FileSystem> SinglePipe<F> {
                 handle: fd,
                 context: LogFileContext::new(
                     file_id,
-                    LogFileFormat::new(cfg.format_version, cfg.format_data_layout),
+                    LogFileFormat::new(
+                        cfg.format_version,
+                        /* @lucasliang, TODO: should determined by whether DIO is open. */
+                        DataLayout::default(),
+                    ),
                 ),
             });
             first_seq
@@ -175,7 +181,11 @@ impl<F: FileSystem> SinglePipe<F> {
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
-            file_format: LogFileFormat::new(cfg.format_version, cfg.format_data_layout),
+            file_format: LogFileFormat::new(
+                cfg.format_version,
+                /* @lucasliang, TODO: should determined by whether DIO is open. */
+                DataLayout::default(),
+            ),
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,

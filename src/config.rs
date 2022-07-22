@@ -3,7 +3,7 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::pipe_log::{DataLayout, Version};
+use crate::pipe_log::Version;
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
@@ -37,7 +37,7 @@ pub struct Config {
     pub recovery_mode: RecoveryMode,
     /// Minimum I/O size for reading log files during recovery.
     ///
-    /// Default: "4KB". Minimum: "512B".
+    /// Default: "16KB". Minimum: "512B".
     pub recovery_read_block_size: ReadableSize,
     /// The number of threads used to scan and recovery log files.
     ///
@@ -59,11 +59,6 @@ pub struct Config {
     ///
     /// Default: 1
     pub format_version: Version,
-
-    /// Layout of data in log file.
-    ///
-    /// Default: "no-alignment"
-    pub format_data_layout: DataLayout,
 
     /// Target file size for rotating log files.
     ///
@@ -109,7 +104,6 @@ impl Default for Config {
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
             format_version: Version::V1,
-            format_data_layout: DataLayout::NoAlignment,
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
@@ -168,12 +162,6 @@ impl Config {
                 ));
             }
         }
-        if !self.format_data_layout.is_enabled() {
-            return Err(box_err!(
-                "format_data_layout: {:?} is not support to be enabled",
-                self.format_data_layout
-            ));
-        }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is not enabled");
@@ -227,7 +215,6 @@ mod tests {
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
         assert_eq!(load.format_version, Version::V1);
         assert!(!load.enable_log_recycle);
-        assert_eq!(load.format_data_layout, DataLayout::NoAlignment);
     }
 
     #[test]
@@ -288,49 +275,5 @@ mod tests {
         assert!(toml::to_string(&load)
             .unwrap()
             .contains("tolerate-corrupted-tail-records"));
-    }
-
-    #[test]
-    fn test_format_data_layout() {
-        // "no-alignment" data_layout - default
-        {
-            let default_cfg = r#"
-                format-data-layout = "no-alignment"
-            "#;
-            let mut load: Config = toml::from_str(default_cfg).unwrap();
-            load.sanitize().unwrap();
-            assert_eq!(load.format_data_layout, DataLayout::NoAlignment);
-        }
-        // "align-with-integration"
-        {
-            let cfg = r#"
-                format-data-layout = "align-with-integration"
-            "#;
-            let mut load: Config = toml::from_str(cfg).unwrap();
-            load.sanitize().unwrap();
-            assert_eq!(load.format_data_layout, DataLayout::AlignWithIntegration);
-        }
-        // "align-with-fragments"
-        {
-            let cfg = r#"
-                format-data-layout = "align-with-fragments"
-            "#;
-            let mut load: Config = toml::from_str(cfg).unwrap();
-            assert!(load.sanitize().is_err());
-        }
-        // abnormal
-        {
-            let abnormal_cfg_1 = r#"
-                data-layout = "align"
-            "#;
-            let mut load: Config = toml::from_str(abnormal_cfg_1).unwrap();
-            load.sanitize().unwrap();
-            assert_eq!(load.format_data_layout, DataLayout::NoAlignment);
-
-            let abnormal_cfg_2 = r#"
-                format-data-layout = "aligned-with-fragment"
-            "#;
-            assert!(toml::from_str::<Config>(abnormal_cfg_2).is_err());
-        }
     }
 }

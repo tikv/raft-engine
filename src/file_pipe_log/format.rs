@@ -3,11 +3,9 @@
 //! Representations of objects in filesystem.
 
 use std::io::BufRead;
-use std::mem;
 use std::path::{Path, PathBuf};
 
 use num_traits::{FromPrimitive, ToPrimitive};
-use strum::EnumIter;
 
 use crate::codec::{self, NumberEncoder};
 use crate::pipe_log::{DataLayout, FileId, LogQueue, Version};
@@ -168,33 +166,6 @@ impl LogFileFormat {
     }
 }
 
-/// Types of records in the log file.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
-#[allow(dead_code)]
-pub enum LogRecordType {
-    Full = 0,
-    First = 1,
-    Middle = 2,
-    Last = 3,
-}
-
-impl LogRecordType {
-    #[allow(dead_code)]
-    pub fn from_u8(t: u8) -> Option<Self> {
-        if t <= LogRecordType::Last as u8 {
-            Some(unsafe { mem::transmute(t) })
-        } else {
-            None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +236,7 @@ mod tests {
             let mut buf = Vec::with_capacity(LogFileFormat::len());
             let format_content: u64 = {
                 (100 & LOG_FILE_HEADER_VERSION_MASK) /* abnormal version */
-                    | ((DataLayout::AlignWithFragments as u64) << 56)
+                    | ((DataLayout::Alignment as u64) << 56)
             };
             buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
             assert!(buf.encode_u64(format_content).is_ok());
@@ -296,14 +267,5 @@ mod tests {
         file_context.id.seq = abnormal_seq;
         assert_ne!(file_context.get_signature().unwrap() as u64, abnormal_seq);
         assert_eq!(file_context.get_signature().unwrap(), 100);
-    }
-
-    #[test]
-    fn test_log_record_type() {
-        assert!(LogRecordType::from_u8(10).is_none());
-        for t in LogRecordType::iter() {
-            let t_u8: u8 = t.to_u8();
-            assert_eq!(LogRecordType::from_u8(t_u8).unwrap(), t);
-        }
     }
 }

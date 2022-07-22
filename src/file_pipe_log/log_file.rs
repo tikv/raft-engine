@@ -20,13 +20,20 @@ use super::format::{LogFileFormat, LOG_FILE_HEADER_ALIGNMENT_SIZE};
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
 /// Default alignment size.
-pub(crate) const FILE_ALIGNMENT_SIZE: usize = 32768; // 32kb as default
+const FILE_ALIGNMENT_SIZE: usize = 32768; // 32kb as default
 
 /// Combination of `[Handle]` and `[Version]`, specifying a handler of a file.
 #[derive(Debug)]
 pub struct FileHandler<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub context: LogFileContext,
+}
+
+#[inline]
+pub(crate) fn get_system_block_size() -> usize {
+    fail_point!("pipe_log::log_file::abnormal_block_size", |_| 16);
+    // @lucasliang, TODO: needs to get the block_size from file_system.
+    FILE_ALIGNMENT_SIZE
 }
 
 /// Build a file writer.
@@ -82,6 +89,13 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.last_sync = 0;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileFormat::len());
+        let force_rewrite_header = || {
+            fail_point!("pipe_log::log_file_writer::force_rewrite_header", |_| true);
+            false
+        };
+        if force_rewrite_header() {
+            self.header = LogFileFormat::new(self.header.version(), DataLayout::Alignment);
+        }
         self.header.encode(&mut buf)?;
         self.write(&buf, 0)
     }
@@ -104,6 +118,11 @@ impl<F: FileSystem> LogFileWriter<F> {
     }
 
     pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> Result<()> {
+        // @lucasliang, TODO:
+        // Implement the writing strategy for DataLayout::Alignment,
+        // considering that records in log files might be fragmented.
+        // Referring to the design of WAL in rocksdb:
+        // [https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format].
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
             let _t = StopWatch::new(&*LOG_ALLOCATE_DURATION_HISTOGRAM);
@@ -207,19 +226,13 @@ impl<F: FileSystem> LogFileReader<F> {
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         let (start_offset, length) = {
+            let fs_block_size = get_system_block_size();
             match self.format.data_layout() {
                 DataLayout::NoAlignment => (handle.offset as usize, handle.len),
-                DataLayout::AlignWithIntegration => {
-                    let start_offset = round_down(handle.offset as usize, FILE_ALIGNMENT_SIZE);
-                    let end_offset =
-                        round_up(handle.offset as usize + handle.len, FILE_ALIGNMENT_SIZE);
+                DataLayout::Alignment => {
+                    let start_offset = round_down(handle.offset as usize, fs_block_size);
+                    let end_offset = round_up(handle.offset as usize + handle.len, fs_block_size);
                     (start_offset, end_offset - start_offset)
-                }
-                DataLayout::AlignWithFragments => {
-                    // @TODO: lucasliang,
-                    // Currently, it's an implementation with integrated `read`.
-                    // This part should be compatible to fragmented records in LogRecordType.
-                    unimplemented!()
                 }
             }
         };
@@ -237,13 +250,11 @@ impl<F: FileSystem> LogFileReader<F> {
     /// Polls bytes from the file. Stops only when the buffer is filled or
     /// reaching the "end of file".
     pub fn read_to(&mut self, offset: u64, mut buf: &mut [u8]) -> Result<usize> {
-        match self.format.data_layout() {
-            DataLayout::AlignWithFragments | DataLayout::AlignWithIntegration => {
-                // Meet the prerequisite when `data_layout == AlignWithXXX`.
-                debug_assert!(offset % FILE_ALIGNMENT_SIZE as u64 == 0);
-                debug_assert!(buf.len() % FILE_ALIGNMENT_SIZE == 0);
-            }
-            _ => {}
+        if DataLayout::Alignment == self.format.data_layout() {
+            let fs_block_size = get_system_block_size();
+            // Meet the prerequisite when `data_layout == AlignWithXXX`.
+            debug_assert!(offset % fs_block_size as u64 == 0);
+            debug_assert!(buf.len() % fs_block_size == 0);
         }
         if offset != self.offset {
             self.reader.seek(SeekFrom::Start(offset))?;
@@ -348,13 +359,10 @@ mod tests {
         let path = dir.path().to_str().unwrap();
         let target_file_size = ReadableSize::mb(4);
         let file_system = Arc::new(DefaultFileSystem);
+        let fs_block_size = get_system_block_size();
 
         for version in Version::iter() {
             for data_layout in DataLayout::iter() {
-                if data_layout == DataLayout::AlignWithFragments {
-                    // Not implemented yet.
-                    continue;
-                }
                 let file_format = LogFileFormat::new(version, data_layout);
                 let file_id = FileId {
                     seq: version.to_u64().unwrap(),
@@ -371,8 +379,8 @@ mod tests {
                 // mocked file_block_handle
                 let file_block_handle = FileBlockHandle {
                     id: file_id,
-                    offset: (FILE_ALIGNMENT_SIZE + 77) as u64,
-                    len: FILE_ALIGNMENT_SIZE + 77,
+                    offset: (fs_block_size + 77) as u64,
+                    len: fs_block_size + 77,
                 };
                 let buf = read_data_from_mocked_log_file(
                     file_system.as_ref(),

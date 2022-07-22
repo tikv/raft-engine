@@ -571,14 +571,13 @@ fn test_recycle_with_stale_logbatch_at_tail() {
 }
 
 #[test]
-fn test_build_with_datalayout() {
+fn test_build_with_aligned_datalayout() {
     let dir = tempfile::Builder::new()
-        .prefix("test_build_with_datalayout")
+        .prefix("test_build_with_aligned_datalayout")
         .tempdir()
         .unwrap();
-    let data = vec![b'x'; 1024];
-    let rid = 1;
-    // DataLayout with default config => NoAlignment
+    let data = vec![b'x'; (rand::random::<u64>() % 32768) as usize];
+    // Defaultly, File with DataLayout::NoAlignment.
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
@@ -586,31 +585,19 @@ fn test_build_with_datalayout() {
         ..Default::default()
     };
     let engine = Engine::open(cfg.clone()).unwrap();
-    append(&engine, rid, 1, 2, Some(&data));
-    append(&engine, rid, 2, 3, Some(&data));
+    for rid in 1..=3 {
+        append(&engine, rid, 1, 11, Some(&data));
+    }
     drop(engine);
-    assert!(Engine::open(cfg.clone()).is_ok());
-    // DataLayout config => AlignWithIntegration
-    let cfg_integration = Config {
-        format_data_layout: DataLayout::AlignWithIntegration,
-        ..cfg.clone()
-    };
-    let engine = Engine::open(cfg_integration).unwrap();
-    append(&engine, rid, 3, 4, Some(&data));
-    append(&engine, rid, 4, 5, Some(&data));
-    append(&engine, rid, 5, 6, Some(&data));
-    append(&engine, rid, 6, 7, Some(&data));
+
+    // File with DataLayout::Alignment
+    let _f1 = FailGuard::new("pipe_log::log_file::abnormal_block_size", "return");
+    let _f2 = FailGuard::new("pipe_log::log_file_writer::force_rewrite_header", "return");
+    let engine = Engine::open(cfg.clone()).unwrap();
+
+    for rid in 1..=3 {
+        append(&engine, rid, 11, 20, Some(&data));
+    }
     drop(engine);
-    // DataLayout config => AlignWithFragments
-    let _f = FailGuard::new("pipe_log::data_layout::force_enable", "return");
-    let cfg_fragments = Config {
-        format_data_layout: DataLayout::AlignWithFragments,
-        ..cfg
-    };
-    let engine = Engine::open(cfg_fragments.clone()).unwrap();
-    append(&engine, rid, 7, 8, Some(&data));
-    append(&engine, rid, 8, 9, Some(&data));
-    append(&engine, rid, 9, 10, Some(&data));
-    drop(engine);
-    assert!(catch_unwind_silent(|| { Engine::open(cfg_fragments) }).is_err());
+    assert!(Engine::open(cfg).is_ok());
 }

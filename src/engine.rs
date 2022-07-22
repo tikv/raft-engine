@@ -444,6 +444,7 @@ where
         file_system: Arc<F>,
     ) -> Result<()> {
         use crate::file_pipe_log::{RecoveryConfig, ReplayMachine};
+        use crate::pipe_log::DataLayout;
 
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
@@ -458,7 +459,7 @@ where
             ..Default::default()
         };
         let recovery_mode = cfg.recovery_mode;
-        let format_data_layout = cfg.format_data_layout;
+        let format_data_layout = DataLayout::default();
         let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;
@@ -594,7 +595,7 @@ mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
-    use crate::pipe_log::{DataLayout, Version};
+    use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
@@ -602,7 +603,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs::OpenOptions;
     use std::path::PathBuf;
-    use strum::IntoEnumIterator;
 
     type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
     impl<F: FileSystem> RaftLogEngine<F> {
@@ -722,52 +722,45 @@ mod tests {
         let normal_batch_size = 10;
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size, compressed_batch_size] {
-            for data_layout in DataLayout::iter() {
-                if data_layout == DataLayout::AlignWithFragments {
-                    // Not support yet.
-                    continue;
-                }
-                let dir = tempfile::Builder::new()
-                    .prefix("test_get_entry")
-                    .tempdir()
-                    .unwrap();
-                let cfg = Config {
-                    dir: dir.path().to_str().unwrap().to_owned(),
-                    target_file_size: ReadableSize(1),
-                    format_data_layout: data_layout,
-                    ..Default::default()
-                };
-
-                let engine = RaftLogEngine::open_with_file_system(
-                    cfg.clone(),
-                    Arc::new(ObfuscatedFileSystem::default()),
-                )
+            let dir = tempfile::Builder::new()
+                .prefix("test_get_entry")
+                .tempdir()
                 .unwrap();
-                let data = vec![b'x'; entry_size];
-                for i in 10..20 {
-                    let rid = i;
-                    let index = i;
-                    engine.append(rid, index, index + 2, Some(&data));
-                }
-                for i in 10..20 {
-                    let rid = i;
-                    let index = i;
-                    engine.scan_entries(rid, index, index + 2, |_, q, d| {
-                        assert_eq!(q, LogQueue::Append);
-                        assert_eq!(d, &data);
-                    });
-                }
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                ..Default::default()
+            };
 
-                // Recover the engine.
-                let engine = engine.reopen();
-                for i in 10..20 {
-                    let rid = i;
-                    let index = i;
-                    engine.scan_entries(rid, index, index + 2, |_, q, d| {
-                        assert_eq!(q, LogQueue::Append);
-                        assert_eq!(d, &data);
-                    });
-                }
+            let engine = RaftLogEngine::open_with_file_system(
+                cfg.clone(),
+                Arc::new(ObfuscatedFileSystem::default()),
+            )
+            .unwrap();
+            let data = vec![b'x'; entry_size];
+            for i in 10..20 {
+                let rid = i;
+                let index = i;
+                engine.append(rid, index, index + 2, Some(&data));
+            }
+            for i in 10..20 {
+                let rid = i;
+                let index = i;
+                engine.scan_entries(rid, index, index + 2, |_, q, d| {
+                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(d, &data);
+                });
+            }
+
+            // Recover the engine.
+            let engine = engine.reopen();
+            for i in 10..20 {
+                let rid = i;
+                let index = i;
+                engine.scan_entries(rid, index, index + 2, |_, q, d| {
+                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(d, &data);
+                });
             }
         }
     }
@@ -1342,45 +1335,36 @@ mod tests {
 
     #[test]
     fn test_large_rewrite_batch() {
-        for data_layout in DataLayout::iter() {
-            if data_layout == DataLayout::AlignWithFragments {
-                // Not support yet.
-                continue;
-            }
-            let dir = tempfile::Builder::new()
-                .prefix("test_large_rewrite_batch")
-                .tempdir()
-                .unwrap();
-            let cfg = Config {
-                dir: dir.path().to_str().unwrap().to_owned(),
-                target_file_size: ReadableSize(1),
-                format_data_layout: data_layout,
-                ..Default::default()
-            };
-            let engine = RaftLogEngine::open_with_file_system(
-                cfg,
-                Arc::new(ObfuscatedFileSystem::default()),
-            )
+        let dir = tempfile::Builder::new()
+            .prefix("test_large_rewrite_batch")
+            .tempdir()
             .unwrap();
-            let data = vec![b'x'; 2 * 1024 * 1024];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+                .unwrap();
+        let data = vec![b'x'; 2 * 1024 * 1024];
 
-            for rid in 1..=3 {
-                engine.append(rid, 1, 11, Some(&data));
-            }
+        for rid in 1..=3 {
+            engine.append(rid, 1, 11, Some(&data));
+        }
 
-            let old_active_file = engine.file_span(LogQueue::Append).1;
-            engine.purge_manager.must_rewrite_append_queue(None, None);
-            assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
-            let old_active_file = engine.file_span(LogQueue::Rewrite).1;
-            engine.purge_manager.must_rewrite_rewrite_queue();
-            assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+        let old_active_file = engine.file_span(LogQueue::Append).1;
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+        let old_active_file = engine.file_span(LogQueue::Rewrite).1;
+        engine.purge_manager.must_rewrite_rewrite_queue();
+        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
 
-            let engine = engine.reopen();
-            for rid in 1..=3 {
-                engine.scan_entries(rid, 1, 11, |_, _, d| {
-                    assert_eq!(d, &data);
-                });
-            }
+        let engine = engine.reopen();
+        for rid in 1..=3 {
+            engine.scan_entries(rid, 1, 11, |_, _, d| {
+                assert_eq!(d, &data);
+            });
         }
     }
 
