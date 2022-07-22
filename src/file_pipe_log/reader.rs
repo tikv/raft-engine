@@ -65,6 +65,11 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Returns the next [`LogItemBatch`] in current opened file. Returns
     /// `None` if there is no more data or no opened file.
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
+        // @lucasliang.
+        // TODO: [Fulfilled in writing progress when DIO is open.]
+        // We should also consider that there might exists broken blocks when DIO
+        // is open, and the following reading strategy should tolerate reading broken
+        // blocks until it finds an accessible header of `LogBatch`.
         if self.valid_offset < self.size {
             debug_assert!(self.file_context.is_some());
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
@@ -97,6 +102,16 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 &file_context,
             )?;
             self.valid_offset += len;
+            if DataLayout::Alignment == self.file_context.as_ref().unwrap().format.data_layout() {
+                // In DataLayout::Alignment mode, the rest data in reading buffer may be aligned
+                // with paddings, that is '0'. So, we need to skip these redundant content and
+                // get the next valid header of `LogBatch`.
+                if self.valid_offset < self.buffer_offset + self.buffer.len()
+                    && self.buffer[self.valid_offset - self.buffer_offset] == 0
+                {
+                    self.valid_offset = self.buffer_offset + self.buffer.len();
+                }
+            }
             return Ok(Some(item_batch));
         }
         Ok(None)
