@@ -267,6 +267,7 @@ mod tests {
                 (100 & LOG_FILE_HEADER_VERSION_MASK) /* abnormal version */
                     | ((DataLayout::AlignWithFragments as u64) << 56)
             };
+            buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
             assert!(buf.encode_u64(format_content).is_ok());
             assert!(LogFileFormat::decode(&mut &buf[..]).is_err());
         }
@@ -277,6 +278,7 @@ mod tests {
                 (Version::V2.to_u64().unwrap() & LOG_FILE_HEADER_VERSION_MASK) | ((100_u64) << 56)
                 /* abnormal data_layout */
             };
+            buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
             assert!(buf.encode_u64(format_content).is_ok());
             assert!(LogFileFormat::decode(&mut &buf[..]).is_err());
         }
