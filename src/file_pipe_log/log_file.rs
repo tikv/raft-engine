@@ -209,14 +209,17 @@ impl<F: FileSystem> LogFileReader<F> {
         let (start_offset, length) = {
             match self.format.data_layout() {
                 DataLayout::NoAlignment => (handle.offset as usize, handle.len),
-                _ => {
-                    // @TODO: lucasliang,
-                    // Currently, it's an implementation with integrated `read`.
-                    // This part should be compatible to fragmented records in LogRecordType.
+                DataLayout::AlignWithIntegration => {
                     let start_offset = round_down(handle.offset as usize, FILE_ALIGNMENT_SIZE);
                     let end_offset =
                         round_up(handle.offset as usize + handle.len, FILE_ALIGNMENT_SIZE);
                     (start_offset, end_offset - start_offset)
+                }
+                DataLayout::AlignWithFragments => {
+                    // @TODO: lucasliang,
+                    // Currently, it's an implementation with integrated `read`.
+                    // This part should be compatible to fragmented records in LogRecordType.
+                    unimplemented!()
                 }
             }
         };
@@ -292,5 +295,96 @@ impl<F: FileSystem> LogFileReader<F> {
     #[inline]
     pub fn file_format(&self) -> &LogFileFormat {
         &self.format
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use num_traits::ToPrimitive;
+    use strum::IntoEnumIterator;
+    use tempfile::Builder;
+
+    use crate::env::DefaultFileSystem;
+    use crate::file_pipe_log::format::{FileNameExt, LogFileFormat};
+    use crate::pipe_log::{DataLayout, FileId, LogQueue, Version};
+    use crate::util::ReadableSize;
+
+    fn prepare_mocked_log_file<F: FileSystem>(
+        file_system: &F,
+        path: &str,
+        file_id: FileId,
+        format: LogFileFormat,
+        file_size: usize,
+    ) -> Result<LogFileWriter<F>> {
+        let data = vec![b'm'; 1024];
+        let fd = Arc::new(file_system.create(&file_id.build_file_path(path))?);
+        let mut writer = build_file_writer(file_system, fd, format, true)?;
+        let mut offset: usize = 0;
+        while offset < file_size {
+            writer.write(&data[..], file_size)?;
+            offset += data.len();
+        }
+        Ok(writer)
+    }
+
+    fn read_data_from_mocked_log_file<F: FileSystem>(
+        file_system: &F,
+        path: &str,
+        file_id: FileId,
+        format: Option<LogFileFormat>,
+        file_block_handle: FileBlockHandle,
+    ) -> Result<Vec<u8>> {
+        let fd = Arc::new(file_system.open(&file_id.build_file_path(path))?);
+        let mut reader = build_file_reader(file_system, fd, format)?;
+        reader.read(file_block_handle)
+    }
+
+    #[test]
+    fn test_log_file_write_read() {
+        let dir = Builder::new()
+            .prefix("test_log_file_write_read")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let target_file_size = ReadableSize::mb(4);
+        let file_system = Arc::new(DefaultFileSystem);
+
+        for version in Version::iter() {
+            for data_layout in DataLayout::iter() {
+                if data_layout == DataLayout::AlignWithFragments {
+                    // Not implemented yet.
+                    continue;
+                }
+                let file_format = LogFileFormat::new(version, data_layout);
+                let file_id = FileId {
+                    seq: version.to_u64().unwrap(),
+                    queue: LogQueue::Append,
+                };
+                assert!(prepare_mocked_log_file(
+                    file_system.as_ref(),
+                    path,
+                    file_id,
+                    file_format,
+                    target_file_size.0 as usize,
+                )
+                .is_ok());
+                // mocked file_block_handle
+                let file_block_handle = FileBlockHandle {
+                    id: file_id,
+                    offset: (FILE_ALIGNMENT_SIZE + 77) as u64,
+                    len: FILE_ALIGNMENT_SIZE + 77,
+                };
+                let buf = read_data_from_mocked_log_file(
+                    file_system.as_ref(),
+                    path,
+                    file_id,
+                    None,
+                    file_block_handle,
+                )
+                .unwrap();
+                assert_eq!(buf.len(), file_block_handle.len);
+            }
+        }
     }
 }

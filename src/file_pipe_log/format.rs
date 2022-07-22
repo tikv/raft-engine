@@ -253,11 +253,32 @@ mod tests {
             assert!(file_format.encode(&mut buf).is_ok());
             LogFileFormat::decode(&mut &buf[..])
         }
+        // normal header
         for version in Version::iter() {
             for layout in DataLayout::iter() {
                 let file_format = LogFileFormat::new(version, layout);
                 assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
             }
+        }
+        // header with abnormal version
+        {
+            let mut buf = Vec::with_capacity(LogFileFormat::len());
+            let format_content: u64 = {
+                (100 & LOG_FILE_HEADER_VERSION_MASK) /* abnormal version */
+                    | ((DataLayout::AlignWithFragments as u64) << 56)
+            };
+            assert!(buf.encode_u64(format_content).is_ok());
+            assert!(LogFileFormat::decode(&mut &buf[..]).is_err());
+        }
+        // header with abnormal data_layout
+        {
+            let mut buf = Vec::with_capacity(LogFileFormat::len());
+            let format_content: u64 = {
+                (Version::V2.to_u64().unwrap() & LOG_FILE_HEADER_VERSION_MASK) | ((100_u64) << 56)
+                /* abnormal data_layout */
+            };
+            assert!(buf.encode_u64(format_content).is_ok());
+            assert!(LogFileFormat::decode(&mut &buf[..]).is_err());
         }
     }
 

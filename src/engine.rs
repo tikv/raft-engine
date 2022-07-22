@@ -594,7 +594,7 @@ mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
-    use crate::pipe_log::Version;
+    use crate::pipe_log::{DataLayout, Version};
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
@@ -602,6 +602,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs::OpenOptions;
     use std::path::PathBuf;
+    use strum::IntoEnumIterator;
 
     type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
     impl<F: FileSystem> RaftLogEngine<F> {
@@ -721,45 +722,52 @@ mod tests {
         let normal_batch_size = 10;
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size, compressed_batch_size] {
-            let dir = tempfile::Builder::new()
-                .prefix("test_get_entry")
-                .tempdir()
+            for data_layout in DataLayout::iter() {
+                if data_layout == DataLayout::AlignWithFragments {
+                    // Not support yet.
+                    continue;
+                }
+                let dir = tempfile::Builder::new()
+                    .prefix("test_get_entry")
+                    .tempdir()
+                    .unwrap();
+                let cfg = Config {
+                    dir: dir.path().to_str().unwrap().to_owned(),
+                    target_file_size: ReadableSize(1),
+                    format_data_layout: data_layout,
+                    ..Default::default()
+                };
+
+                let engine = RaftLogEngine::open_with_file_system(
+                    cfg.clone(),
+                    Arc::new(ObfuscatedFileSystem::default()),
+                )
                 .unwrap();
-            let cfg = Config {
-                dir: dir.path().to_str().unwrap().to_owned(),
-                target_file_size: ReadableSize(1),
-                ..Default::default()
-            };
+                let data = vec![b'x'; entry_size];
+                for i in 10..20 {
+                    let rid = i;
+                    let index = i;
+                    engine.append(rid, index, index + 2, Some(&data));
+                }
+                for i in 10..20 {
+                    let rid = i;
+                    let index = i;
+                    engine.scan_entries(rid, index, index + 2, |_, q, d| {
+                        assert_eq!(q, LogQueue::Append);
+                        assert_eq!(d, &data);
+                    });
+                }
 
-            let engine = RaftLogEngine::open_with_file_system(
-                cfg.clone(),
-                Arc::new(ObfuscatedFileSystem::default()),
-            )
-            .unwrap();
-            let data = vec![b'x'; entry_size];
-            for i in 10..20 {
-                let rid = i;
-                let index = i;
-                engine.append(rid, index, index + 2, Some(&data));
-            }
-            for i in 10..20 {
-                let rid = i;
-                let index = i;
-                engine.scan_entries(rid, index, index + 2, |_, q, d| {
-                    assert_eq!(q, LogQueue::Append);
-                    assert_eq!(d, &data);
-                });
-            }
-
-            // Recover the engine.
-            let engine = engine.reopen();
-            for i in 10..20 {
-                let rid = i;
-                let index = i;
-                engine.scan_entries(rid, index, index + 2, |_, q, d| {
-                    assert_eq!(q, LogQueue::Append);
-                    assert_eq!(d, &data);
-                });
+                // Recover the engine.
+                let engine = engine.reopen();
+                for i in 10..20 {
+                    let rid = i;
+                    let index = i;
+                    engine.scan_entries(rid, index, index + 2, |_, q, d| {
+                        assert_eq!(q, LogQueue::Append);
+                        assert_eq!(d, &data);
+                    });
+                }
             }
         }
     }
