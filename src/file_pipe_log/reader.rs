@@ -70,18 +70,35 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // We should also consider that there might exists broken blocks when DIO
         // is open, and the following reading strategy should tolerate reading broken
         // blocks until it finds an accessible header of `LogBatch`.
-        if self.valid_offset < self.size {
+        while self.valid_offset < self.size {
             debug_assert!(self.file_context.is_some());
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
                 return Err(Error::Corruption(
                     "attempt to read file with broken header".to_owned(),
                 ));
             }
-            let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
-                self.valid_offset,
-                LOG_BATCH_HEADER_LEN,
-                0,
-            )?)?;
+            let (footer_offset, compression_type, len) = {
+                match LogBatch::decode_header(&mut self.peek(
+                    self.valid_offset,
+                    LOG_BATCH_HEADER_LEN,
+                    0,
+                )?) {
+                    Err(e) => {
+                        // In DataLayout::Alignment mode, tail data in the previous block may be aligned
+                        // with paddings, that is '0'. So, we need to skip these redundant content and
+                        // get the next valid header of `LogBatch`.
+                        if DataLayout::Alignment
+                            == self.file_context.as_ref().unwrap().format.data_layout()
+                        {
+                            self.valid_offset = round_up(self.valid_offset, LOG_BATCH_HEADER_LEN);
+                            continue;
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                    Ok((offset, t, l)) => (offset, t, l),
+                }
+            };
             if self.valid_offset + len > self.size {
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
@@ -102,16 +119,6 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 &file_context,
             )?;
             self.valid_offset += len;
-            if DataLayout::Alignment == self.file_context.as_ref().unwrap().format.data_layout() {
-                // In DataLayout::Alignment mode, the rest data in reading buffer may be aligned
-                // with paddings, that is '0'. So, we need to skip these redundant content and
-                // get the next valid header of `LogBatch`.
-                if self.valid_offset < self.buffer_offset + self.buffer.len()
-                    && self.buffer[self.valid_offset - self.buffer_offset] == 0
-                {
-                    self.valid_offset = self.buffer_offset + self.buffer.len();
-                }
-            }
             return Ok(Some(item_batch));
         }
         Ok(None)
@@ -152,12 +159,12 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                     self.buffer_offset + read
                 )));
             }
+            self.buffer.truncate(read);
             // Calibrate the first redundant part read from the log file by
             // removing it when `cfg.format_data_layout = DataLayout::Alignment`.
             if calibrate_offset != self.buffer_offset {
                 self.buffer.drain(..self.buffer_offset - calibrate_offset);
             }
-            self.buffer.truncate(read);
             Ok(&self.buffer[..size])
         } else {
             let should_read = (offset + size + prefetch).saturating_sub(end);
@@ -187,13 +194,13 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                         calibrate_offset + read,
                     )));
                 }
+                self.buffer.truncate(prev_len + read);
                 // Calibrate the first redundant part read from the log file by
                 // removing it when `cfg.format_data_layout = DataLayout::Alignment`.
                 if read_offset != calibrate_offset {
                     self.buffer
                         .drain(prev_len..prev_len + read_offset - calibrate_offset);
                 }
-                self.buffer.truncate(prev_len + read);
             }
             Ok(&self.buffer[offset - self.buffer_offset..offset - self.buffer_offset + size])
         }

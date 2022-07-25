@@ -571,17 +571,18 @@ fn test_recycle_with_stale_logbatch_at_tail() {
 }
 
 #[test]
-fn test_build_with_aligned_datalayout() {
+fn test_build_engine_with_aligned_datalayout() {
     let dir = tempfile::Builder::new()
-        .prefix("test_build_with_aligned_datalayout")
+        .prefix("test_build_engine_with_aligned_datalayout")
         .tempdir()
         .unwrap();
-    let data = vec![b'x'; (rand::random::<u64>() % 32768) as usize];
+    let data = vec![b'x'; (12827) as usize];
     // Defaultly, File with DataLayout::NoAlignment.
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
         purge_threshold: ReadableSize::kb(4),
+        recovery_mode: RecoveryMode::AbsoluteConsistency,
         ..Default::default()
     };
     let engine = Engine::open(cfg.clone()).unwrap();
@@ -593,8 +594,9 @@ fn test_build_with_aligned_datalayout() {
     // File with DataLayout::Alignment
     let _f1 = FailGuard::new("pipe_log::log_file::abnormal_block_size", "return");
     let _f2 = FailGuard::new("pipe_log::log_file_writer::force_rewrite_header", "return");
-    let engine = Engine::open(cfg.clone()).unwrap();
+    let _f3 = FailGuard::new("file_pipe_log::append::force_aligned_write", "return");
 
+    let engine = Engine::open(cfg.clone()).unwrap();
     for rid in 1..=3 {
         append(&engine, rid, 11, 20, Some(&data));
     }

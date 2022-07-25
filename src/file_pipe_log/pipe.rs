@@ -17,10 +17,13 @@ use crate::metrics::*;
 use crate::pipe_log::{
     DataLayout, FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog,
 };
+use crate::util::round_up;
 use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
-use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
+use super::log_file::{
+    build_file_reader, build_file_writer, get_system_block_size, FileHandler, LogFileWriter,
+};
 
 struct FileCollection<F: FileSystem> {
     /// Sequence number of the first file.
@@ -333,7 +336,21 @@ impl<F: FileSystem> SinglePipe<F> {
         let seq = active_file.seq;
         let writer = &mut active_file.writer;
 
-        let start_offset = writer.offset();
+        let force_aligned_write = || {
+            fail_point!("file_pipe_log::append::force_aligned_write", |_| { true });
+            false
+        };
+        let start_offset = {
+            if force_aligned_write() {
+                let s_off = round_up(writer.offset(), get_system_block_size());
+                // Append head paddings.
+                if s_off > writer.offset() {
+                    let paddings = vec![0; s_off - writer.offset()];
+                    writer.write(&paddings[..], self.target_file_size)?;
+                }
+            }
+            writer.offset()
+        };
         if let Err(e) = writer.write(bytes, self.target_file_size) {
             if let Err(te) = writer.truncate() {
                 panic!(
