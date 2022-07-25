@@ -577,7 +577,6 @@ fn test_build_engine_with_aligned_datalayout() {
         .tempdir()
         .unwrap();
     let data = vec![b'x'; 12827];
-    // Defaultly, File with DataLayout::NoAlignment.
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
@@ -585,12 +584,12 @@ fn test_build_engine_with_aligned_datalayout() {
         recovery_mode: RecoveryMode::AbsoluteConsistency,
         ..Default::default()
     };
+    // Defaultly, File with DataLayout::NoAlignment.
     let engine = Engine::open(cfg.clone()).unwrap();
     for rid in 1..=3 {
         append(&engine, rid, 1, 11, Some(&data));
     }
     drop(engine);
-
     // File with DataLayout::Alignment
     let _f1 = FailGuard::new("pipe_log::log_file::abnormal_block_size", "return");
     let _f2 = FailGuard::new("pipe_log::log_file_writer::force_rewrite_header", "return");

@@ -70,8 +70,10 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // We should also consider that there might exists broken blocks when DIO
         // is open, and the following reading strategy should tolerate reading broken
         // blocks until it finds an accessible header of `LogBatch`.
+        let fs_block_size = get_system_block_size();
         while self.valid_offset < self.size {
             debug_assert!(self.file_context.is_some());
+            let data_layout = self.file_context.as_ref().unwrap().format.data_layout();
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
                 return Err(Error::Corruption(
                     "attempt to read file with broken header".to_owned(),
@@ -80,17 +82,24 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             let (footer_offset, compression_type, len) = {
                 match LogBatch::decode_header(&mut self.peek(
                     self.valid_offset,
-                    LOG_BATCH_HEADER_LEN,
+                    match data_layout {
+                        DataLayout::NoAlignment => LOG_BATCH_HEADER_LEN,
+                        DataLayout::Alignment => {
+                            // In DataLayout::Alignment mode, tail data in this block maybe
+                            // contain an valid header of the adjacent LogBatch or paddings
+                            // with `0`.
+                            round_up(self.valid_offset, fs_block_size) - self.valid_offset
+                                + LOG_BATCH_HEADER_LEN
+                        }
+                    },
                     0,
                 )?) {
                     Err(e) => {
                         // In DataLayout::Alignment mode, tail data in the previous block may be
                         // aligned with paddings, that is '0'. So, we need to skip these
                         // redundant content and get the next valid header of `LogBatch`.
-                        if DataLayout::Alignment
-                            == self.file_context.as_ref().unwrap().format.data_layout()
-                        {
-                            self.valid_offset = round_up(self.valid_offset, LOG_BATCH_HEADER_LEN);
+                        if DataLayout::Alignment == data_layout {
+                            self.valid_offset = round_up(self.valid_offset, fs_block_size);
                             continue;
                         } else {
                             return Err(e);
