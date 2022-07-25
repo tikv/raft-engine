@@ -84,9 +84,9 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                     0,
                 )?) {
                     Err(e) => {
-                        // In DataLayout::Alignment mode, tail data in the previous block may be aligned
-                        // with paddings, that is '0'. So, we need to skip these redundant content and
-                        // get the next valid header of `LogBatch`.
+                        // In DataLayout::Alignment mode, tail data in the previous block may be
+                        // aligned with paddings, that is '0'. So, we need to skip these
+                        // redundant content and get the next valid header of `LogBatch`.
                         if DataLayout::Alignment
                             == self.file_context.as_ref().unwrap().format.data_layout()
                         {

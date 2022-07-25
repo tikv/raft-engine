@@ -576,7 +576,7 @@ fn test_build_engine_with_aligned_datalayout() {
         .prefix("test_build_engine_with_aligned_datalayout")
         .tempdir()
         .unwrap();
-    let data = vec![b'x'; (12827) as usize];
+    let data = vec![b'x'; 12827];
     // Defaultly, File with DataLayout::NoAlignment.
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
