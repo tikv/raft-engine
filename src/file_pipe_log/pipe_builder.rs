@@ -305,7 +305,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
-                            let is_local_tail = f.handle.file_size()? <= LogFileFormat::len();
+                            let is_local_tail = f.handle.file_size()? <= LogFileFormat::header_len();
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
                                 && is_last_file && is_local_tail {

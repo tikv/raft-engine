@@ -340,6 +340,7 @@ pub fn round_up(offset: usize, alignment: usize) -> usize {
 /// Example:
 /// * round_down(18, 4) => 16
 /// * round_down(64, 16) => 64
+#[allow(dead_code)]
 #[inline]
 pub fn round_down(offset: usize, alignment: usize) -> usize {
     offset / alignment * alignment

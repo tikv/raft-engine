@@ -115,13 +115,14 @@ impl Default for Version {
     }
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, EnumIter, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataLayout {
     NoAlignment,
-    /// Alignment mode for DataLayout will make sense when DIO
-    /// is open.
-    Alignment,
+    /// Alignment(block_size) mode in memory for DataLayout will make sense
+    /// when DIO is open.
+    ///
+    /// `block_size` will be dumped into the header of each log file.
+    Alignment(u64),
 }
 
 impl Default for DataLayout {
@@ -131,19 +132,22 @@ impl Default for DataLayout {
 }
 
 impl DataLayout {
-    pub fn from_u8(val: u8) -> Option<Self> {
+    pub fn from_u64(val: u64) -> Self {
         match val {
-            0 => Some(DataLayout::NoAlignment),
-            1 => Some(DataLayout::Alignment),
-            _ => None,
+            0 => DataLayout::NoAlignment,
+            aligned => DataLayout::Alignment(aligned),
         }
     }
 
-    pub fn to_u8(self) -> u8 {
+    pub fn to_u64(self) -> u64 {
         match self {
             DataLayout::NoAlignment => 0,
-            DataLayout::Alignment => 1,
+            DataLayout::Alignment(aligned) => aligned,
         }
+    }
+
+    pub const fn len() -> usize {
+        8 /* serialized in u64. */
     }
 }
 

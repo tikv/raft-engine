@@ -19,11 +19,6 @@ const LOG_APPEND_SUFFIX: &str = ".raftlog";
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-/// Mask of Version.
-const LOG_FILE_HEADER_VERSION_MASK: u64 = 0x00FFFFFFFFFFFFFF;
-
-/// Default aligned block size for reading header from a log file.
-pub(crate) const LOG_FILE_HEADER_ALIGNMENT_SIZE: usize = 4096; // 4 kb as default
 
 /// `FileNameExt` offers file name formatting extensions to [`FileId`].
 pub trait FileNameExt: Sized {
@@ -98,9 +93,23 @@ impl LogFileFormat {
         }
     }
 
+    /// Length of whole `LogFileFormat` written on storage.
+    pub fn enc_len(&self) -> usize {
+        if self.version.has_log_signing() {
+            Self::header_len() + Self::payload_len()
+        } else {
+            Self::header_len()
+        }
+    }
+
     /// Length of header written on storage.
-    pub const fn len() -> usize {
+    pub const fn header_len() -> usize {
         LOG_FILE_MAGIC_HEADER.len() + std::mem::size_of::<Version>()
+    }
+
+    /// Length of serialized `DataLayout` written on storage.
+    pub const fn payload_len() -> usize {
+        DataLayout::len()
     }
 
     pub fn from_version(version: Version) -> Self {
@@ -120,7 +129,8 @@ impl LogFileFormat {
 
     /// Decodes a slice of bytes into a `LogFileFormat`.
     pub fn decode(buf: &mut &[u8]) -> Result<LogFileFormat> {
-        if buf.len() < Self::len() {
+        let buf_len = buf.len();
+        if buf_len < Self::header_len() {
             return Err(Error::Corruption("log file header too short".to_owned()));
         }
         if !buf.starts_with(LOG_FILE_MAGIC_HEADER) {
@@ -129,32 +139,45 @@ impl LogFileFormat {
             ));
         }
         buf.consume(LOG_FILE_MAGIC_HEADER.len());
-        // Raw content of LogFileFormat
-        let format_content = codec::decode_u64(buf)?;
-        let version = Version::from_u64(format_content & LOG_FILE_HEADER_VERSION_MASK);
-        let data_layout =
-            DataLayout::from_u8(((format_content & !LOG_FILE_HEADER_VERSION_MASK) >> 56) as u8);
-        if version.is_none() || data_layout.is_none() {
-            return Err(Error::Corruption(format!(
-                "unrecognized log file header, version: {}, data_layout: {}",
-                format_content & LOG_FILE_HEADER_VERSION_MASK,
-                ((format_content & !LOG_FILE_HEADER_VERSION_MASK) >> 56) as u8
-            )));
+        // Parse `Version` of LogFileFormat from header of the file.
+        let version = {
+            let dec_version = codec::decode_u64(buf)?;
+            if let Some(v) = Version::from_u64(dec_version) {
+                v
+            } else {
+                return Err(Error::Corruption(format!(
+                    "unrecognized log file version: {}",
+                    dec_version
+                )));
+            }
+        };
+        // If the decoded `Version::has_log_signing() == true`, serialized data_layout
+        // should be extracted from the file.
+        if version.has_log_signing() && buf_len >= Self::header_len() + Self::payload_len() {
+            let layout_block_size = codec::decode_u64(buf)?;
+            Ok(Self {
+                version,
+                data_layout: if layout_block_size == 0 {
+                    DataLayout::default()
+                } else {
+                    DataLayout::Alignment(layout_block_size)
+                },
+            })
+        } else {
+            Ok(Self {
+                version,
+                data_layout: DataLayout::default(),
+            })
         }
-        Ok(Self {
-            version: version.unwrap(),
-            data_layout: data_layout.unwrap(),
-        })
     }
 
     /// Encodes this header and appends the bytes to the provided buffer.
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
-        let format_content: u64 = {
-            (self.version.to_u64().unwrap() & LOG_FILE_HEADER_VERSION_MASK)
-                | ((self.data_layout.to_u8() as u64) << 56)
-        };
-        buf.encode_u64(format_content)?;
+        buf.encode_u64(self.version.to_u64().unwrap())?; // encode version
+        if self.version.has_log_signing() {
+            buf.encode_u64(self.data_layout.to_u64())?; // encode datay_layout
+        }
         let corrupted = || {
             fail::fail_point!("log_file_header::corrupted", |_| true);
             false
@@ -164,13 +187,18 @@ impl LogFileFormat {
         }
         Ok(())
     }
+
+    /// Return the aligned block size.
+    #[inline]
+    pub fn get_aligned_block_size(&self) -> usize {
+        self.data_layout.to_u64() as usize
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipe_log::LogFileContext;
-    use strum::IntoEnumIterator;
 
     #[test]
     fn test_file_name() {
@@ -205,53 +233,89 @@ mod tests {
     }
 
     #[test]
+    fn test_data_layout() {
+        let data_layout = DataLayout::default();
+        assert_eq!(data_layout.to_u64(), DataLayout::NoAlignment.to_u64());
+        assert_eq!(DataLayout::Alignment(16).to_u64(), 16);
+        assert_eq!(DataLayout::from_u64(0), DataLayout::default());
+        assert_eq!(DataLayout::from_u64(4096), DataLayout::Alignment(4096));
+        assert_eq!(DataLayout::len(), 8);
+    }
+
+    #[test]
     fn test_file_header() {
         let header1 = LogFileFormat::default();
         assert_eq!(header1.version().to_u64().unwrap(), 1);
-        assert_eq!(header1.data_layout().to_u8(), 0);
+        assert_eq!(header1.data_layout().to_u64(), 0);
         let header2 = LogFileFormat::from_version(Version::default());
         assert_eq!(header2.version().to_u64(), header1.version().to_u64());
-        assert_eq!(header1.data_layout().to_u8(), 0);
+        assert_eq!(header1.data_layout().to_u64(), 0);
         let header3 = LogFileFormat::from_version(header1.version());
         assert_eq!(header3.version(), header1.version());
-        assert_eq!(header1.data_layout().to_u8(), 0);
+        assert_eq!(header1.data_layout().to_u64(), 0);
+        assert_eq!(header1.enc_len(), LogFileFormat::header_len());
+        assert_eq!(header2.enc_len(), LogFileFormat::header_len());
+        assert_eq!(header3.enc_len(), LogFileFormat::header_len());
+        let header4 = LogFileFormat {
+            version: Version::V2,
+            data_layout: DataLayout::Alignment(16),
+        };
+        assert_eq!(
+            header4.enc_len(),
+            LogFileFormat::header_len() + LogFileFormat::payload_len()
+        );
     }
 
     #[test]
     fn test_encoding_decoding_file_format() {
         fn enc_dec_file_format(file_format: LogFileFormat) -> Result<LogFileFormat> {
-            let mut buf = Vec::with_capacity(LogFileFormat::len());
+            let mut buf =
+                Vec::with_capacity(LogFileFormat::header_len() + LogFileFormat::payload_len());
             assert!(file_format.encode(&mut buf).is_ok());
             LogFileFormat::decode(&mut &buf[..])
         }
-        // normal header
-        for version in Version::iter() {
-            for layout in DataLayout::iter() {
-                let file_format = LogFileFormat::new(version, layout);
-                assert_eq!(file_format, enc_dec_file_format(file_format).unwrap());
-            }
+        // header with aligned-sized data_layout
+        {
+            let mut buf = Vec::with_capacity(LogFileFormat::header_len());
+            let version = Version::V2;
+            let data_layout = DataLayout::Alignment(4096);
+            buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
+            assert!(buf.encode_u64(version.to_u64().unwrap()).is_ok());
+            assert!(buf.encode_u64(data_layout.to_u64()).is_ok());
+            assert_eq!(
+                LogFileFormat::decode(&mut &buf[..]).unwrap(),
+                LogFileFormat::new(version, data_layout)
+            );
         }
         // header with abnormal version
         {
-            let mut buf = Vec::with_capacity(LogFileFormat::len());
-            let format_content: u64 = {
-                (100 & LOG_FILE_HEADER_VERSION_MASK) /* abnormal version */
-                    | ((DataLayout::Alignment as u64) << 56)
-            };
+            let mut buf = Vec::with_capacity(LogFileFormat::header_len());
+            let abnormal_version = 4_u64; /* abnormal version */
             buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
-            assert!(buf.encode_u64(format_content).is_ok());
+            assert!(buf.encode_u64(abnormal_version).is_ok());
+            assert!(buf.encode_u64(16).is_ok());
             assert!(LogFileFormat::decode(&mut &buf[..]).is_err());
         }
-        // header with abnormal data_layout
+        // header with Version::default and DataLayout::Alignment(_)
         {
-            let mut buf = Vec::with_capacity(LogFileFormat::len());
-            let format_content: u64 = {
-                (Version::V2.to_u64().unwrap() & LOG_FILE_HEADER_VERSION_MASK) | ((100_u64) << 56)
-                /* abnormal data_layout */
-            };
-            buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
-            assert!(buf.encode_u64(format_content).is_ok());
-            assert!(LogFileFormat::decode(&mut &buf[..]).is_err());
+            let file_format = LogFileFormat::new(Version::default(), DataLayout::Alignment(0));
+            assert_eq!(
+                LogFileFormat::new(Version::default(), DataLayout::NoAlignment),
+                enc_dec_file_format(file_format).unwrap()
+            );
+            let file_format = LogFileFormat::new(Version::default(), DataLayout::Alignment(4096));
+            assert_eq!(
+                LogFileFormat::new(Version::default(), DataLayout::NoAlignment),
+                enc_dec_file_format(file_format).unwrap()
+            );
+        }
+        // header with Version::V2 and DataLayout::Alignment(0)
+        {
+            let file_format = LogFileFormat::new(Version::V2, DataLayout::Alignment(0));
+            assert_eq!(
+                LogFileFormat::new(Version::V2, DataLayout::NoAlignment),
+                enc_dec_file_format(file_format).unwrap()
+            );
         }
     }
 

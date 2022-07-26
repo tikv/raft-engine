@@ -138,6 +138,17 @@ impl<F: FileSystem> SinglePipe<F> {
         mut fds: VecDeque<FileHandler<F>>,
         capacity: usize,
     ) -> Result<Self> {
+        let data_layout = {
+            let force_aligned_write = || {
+                fail_point!("file_pipe_log::append::force_aligned_write", |_| { true });
+                false
+            };
+            if force_aligned_write() && cfg.format_version.has_log_signing() {
+                DataLayout::Alignment(get_system_block_size() as u64)
+            } else {
+                DataLayout::default()
+            }
+        };
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
@@ -150,11 +161,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 handle: fd,
                 context: LogFileContext::new(
                     file_id,
-                    LogFileFormat::new(
-                        cfg.format_version,
-                        /* @lucasliang, TODO: should determined by whether DIO is open. */
-                        DataLayout::default(),
-                    ),
+                    LogFileFormat::new(cfg.format_version, data_layout),
                 ),
             });
             first_seq
@@ -184,11 +191,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
-            file_format: LogFileFormat::new(
-                cfg.format_version,
-                /* @lucasliang, TODO: should determined by whether DIO is open. */
-                DataLayout::default(),
-            ),
+            file_format: LogFileFormat::new(cfg.format_version, data_layout),
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,
@@ -336,13 +339,11 @@ impl<F: FileSystem> SinglePipe<F> {
         let seq = active_file.seq;
         let writer = &mut active_file.writer;
 
-        let force_aligned_write = || {
-            fail_point!("file_pipe_log::append::force_aligned_write", |_| { true });
-            false
-        };
         let start_offset = {
-            if force_aligned_write() {
-                let s_off = round_up(writer.offset(), get_system_block_size());
+            if writer.header.version().has_log_signing()
+                && writer.header.get_aligned_block_size() > 0
+            {
+                let s_off = round_up(writer.offset(), writer.header.get_aligned_block_size());
                 // Append head paddings.
                 if s_off > writer.offset() {
                     let paddings = vec![0; s_off - writer.offset()];
@@ -619,7 +620,7 @@ mod tests {
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
-        let header_size = LogFileFormat::len() as u64;
+        let header_size = LogFileFormat::header_len() as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
@@ -878,7 +879,7 @@ mod tests {
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
-        let header_size = LogFileFormat::len() as u64;
+        let header_size = (LogFileFormat::header_len() + LogFileFormat::payload_len()) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];

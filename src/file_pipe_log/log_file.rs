@@ -10,11 +10,10 @@ use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
-use crate::pipe_log::{DataLayout, FileBlockHandle, LogFileContext};
-use crate::util::{round_down, round_up};
+use crate::pipe_log::{FileBlockHandle, LogFileContext};
 use crate::{Error, Result};
 
-use super::format::{LogFileFormat, LOG_FILE_HEADER_ALIGNMENT_SIZE};
+use super::format::LogFileFormat;
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
@@ -76,7 +75,7 @@ impl<F: FileSystem> LogFileWriter<F> {
             capacity: file_size,
             last_sync: file_size,
         };
-        if file_size < LogFileFormat::len() || force_reset {
+        if file_size < LogFileFormat::header_len() || force_reset {
             f.write_header()?;
         } else {
             f.writer.seek(SeekFrom::Start(file_size as u64))?;
@@ -88,14 +87,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.writer.seek(SeekFrom::Start(0))?;
         self.last_sync = 0;
         self.written = 0;
-        let mut buf = Vec::with_capacity(LogFileFormat::len());
-        let force_rewrite_header = || {
-            fail_point!("pipe_log::log_file_writer::force_rewrite_header", |_| true);
-            false
-        };
-        if force_rewrite_header() {
-            self.header = LogFileFormat::new(self.header.version(), DataLayout::Alignment);
-        }
+        let mut buf = Vec::with_capacity(LogFileFormat::header_len());
         self.header.encode(&mut buf)?;
         self.write(&buf, 0)
     }
@@ -225,37 +217,15 @@ impl<F: FileSystem> LogFileReader<F> {
     }
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        let (start_offset, length) = {
-            let fs_block_size = get_system_block_size();
-            match self.format.data_layout() {
-                DataLayout::NoAlignment => (handle.offset as usize, handle.len),
-                DataLayout::Alignment => {
-                    let start_offset = round_down(handle.offset as usize, fs_block_size);
-                    let end_offset = round_up(handle.offset as usize + handle.len, fs_block_size);
-                    (start_offset, end_offset - start_offset)
-                }
-            }
-        };
-        let mut buf = vec![0; length];
-        let size = self.read_to(start_offset as u64, &mut buf)?;
+        let mut buf = vec![0; handle.len as usize];
+        let size = self.read_to(handle.offset, &mut buf)?;
         buf.truncate(size);
-        if buf.len() > handle.len {
-            // Drain redundant parts of data in the buffer.
-            buf.drain(..handle.offset as usize - start_offset); // head
-            buf.drain(handle.len..); // tail
-        }
         Ok(buf)
     }
 
     /// Polls bytes from the file. Stops only when the buffer is filled or
     /// reaching the "end of file".
     pub fn read_to(&mut self, offset: u64, mut buf: &mut [u8]) -> Result<usize> {
-        if DataLayout::Alignment == self.format.data_layout() {
-            let fs_block_size = get_system_block_size();
-            // Meet the prerequisite when `data_layout == AlignWithXXX`.
-            debug_assert!(offset % fs_block_size as u64 == 0);
-            debug_assert!(buf.len() % fs_block_size == 0);
-        }
         if offset != self.offset {
             self.reader.seek(SeekFrom::Start(offset))?;
             self.offset = offset;
@@ -285,13 +255,13 @@ impl<F: FileSystem> LogFileReader<F> {
         // a log file with valid format. Otherwise, it should return with
         // `Err`.
         let file_size = self.handle.file_size()?;
-        // [1] If the length lessed than the standard `LogFileFormat::len()`.
-        let header_len = LogFileFormat::len();
+        // [1] If the length lessed than the standard `LogFileFormat::header_len()`.
+        let header_len = LogFileFormat::header_len();
         if file_size < header_len {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
-        // [2] Parse the header of the file.
-        let mut container = vec![0; round_up(header_len, LOG_FILE_HEADER_ALIGNMENT_SIZE)];
+        // [2] Parse the format of the file.
+        let mut container = vec![0; LogFileFormat::header_len() + LogFileFormat::payload_len()];
         self.read_to(0, &mut container[..])?;
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.format)
@@ -362,7 +332,7 @@ mod tests {
         let fs_block_size = get_system_block_size();
 
         for version in Version::iter() {
-            for data_layout in DataLayout::iter() {
+            for data_layout in [DataLayout::NoAlignment, DataLayout::Alignment(64)] {
                 let file_format = LogFileFormat::new(version, data_layout);
                 let file_id = FileId {
                     seq: version.to_u64().unwrap(),

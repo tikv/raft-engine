@@ -596,13 +596,15 @@ fn test_build_engine_with_aligned_datalayout() {
     drop(engine);
     // File with DataLayout::Alignment
     let _f1 = FailGuard::new("pipe_log::log_file::abnormal_block_size", "return");
-    let _f2 = FailGuard::new("pipe_log::log_file_writer::force_rewrite_header", "return");
-    let _f3 = FailGuard::new("file_pipe_log::append::force_aligned_write", "return");
-
-    let engine = Engine::open(cfg.clone()).unwrap();
+    let _f2 = FailGuard::new("file_pipe_log::append::force_aligned_write", "return");
+    let cfg_v2 = Config {
+        format_version: Version::V2,
+        ..cfg
+    };
+    let engine = Engine::open(cfg_v2.clone()).unwrap();
     for rid in 1..=3 {
         append(&engine, rid, 11, 20, Some(&data));
     }
     drop(engine);
-    assert!(Engine::open(cfg).is_ok());
+    assert!(Engine::open(cfg_v2).is_ok());
 }

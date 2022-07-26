@@ -3,11 +3,11 @@
 use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{DataLayout, FileBlockHandle, FileId, LogFileContext};
-use crate::util::{round_down, round_up};
+use crate::util::round_up;
 use crate::{Error, Result};
 
 use super::format::LogFileFormat;
-use super::log_file::{get_system_block_size, LogFileReader};
+use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {
@@ -43,12 +43,12 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
 
     /// Opens a file that can be accessed through the given reader.
     pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
+        self.valid_offset = reader.file_format().enc_len();
         self.file_context = Some(LogFileContext::new(file_id, *reader.file_format()));
         self.size = reader.file_size()?;
         self.reader = Some(reader);
         self.buffer.clear();
         self.buffer_offset = 0;
-        self.valid_offset = LogFileFormat::len();
         Ok(())
     }
 
@@ -70,7 +70,6 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // We should also consider that there might exists broken blocks when DIO
         // is open, and the following reading strategy should tolerate reading broken
         // blocks until it finds an accessible header of `LogBatch`.
-        let fs_block_size = get_system_block_size();
         while self.valid_offset < self.size {
             debug_assert!(self.file_context.is_some());
             let data_layout = self.file_context.as_ref().unwrap().format.data_layout();
@@ -80,32 +79,43 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 ));
             }
             let (footer_offset, compression_type, len) = {
-                match LogBatch::decode_header(&mut self.peek(
-                    self.valid_offset,
-                    match data_layout {
-                        DataLayout::NoAlignment => LOG_BATCH_HEADER_LEN,
-                        DataLayout::Alignment => {
-                            // In DataLayout::Alignment mode, tail data in this block maybe
-                            // contain an valid header of the adjacent LogBatch or paddings
-                            // with `0`.
-                            round_up(self.valid_offset, fs_block_size) - self.valid_offset
-                                + LOG_BATCH_HEADER_LEN
-                        }
-                    },
-                    0,
-                )?) {
-                    Err(e) => {
-                        // In DataLayout::Alignment mode, tail data in the previous block may be
-                        // aligned with paddings, that is '0'. So, we need to skip these
-                        // redundant content and get the next valid header of `LogBatch`.
-                        if DataLayout::Alignment == data_layout {
-                            self.valid_offset = round_up(self.valid_offset, fs_block_size);
-                            continue;
-                        } else {
-                            return Err(e);
+                match data_layout {
+                    DataLayout::NoAlignment | DataLayout::Alignment(0) => {
+                        let (offset, t, l) = LogBatch::decode_header(&mut self.peek(
+                            self.valid_offset,
+                            LOG_BATCH_HEADER_LEN,
+                            0,
+                        )?)?;
+                        (offset, t, l)
+                    }
+                    DataLayout::Alignment(fs_block_size) => {
+                        // In DataLayout::Alignment mode, tail data in this block maybe
+                        // contain an valid header of the adjacent LogBatch or paddings
+                        // with `0`.
+                        match LogBatch::decode_header(&mut self.peek(
+                            self.valid_offset,
+                            round_up(self.valid_offset, fs_block_size as usize) - self.valid_offset
+                                + LOG_BATCH_HEADER_LEN,
+                            0,
+                        )?) {
+                            Err(e) => {
+                                // In DataLayout::Alignment mode, tail data in the previous block
+                                // may be aligned with paddings, that is '0'. So, we need to
+                                // skip these redundant content and get the next valid header
+                                // of `LogBatch`.
+                                let aligned_next_offset =
+                                    round_up(self.valid_offset, fs_block_size as usize);
+                                if self.valid_offset == aligned_next_offset {
+                                    // If we continued with aligned offset and get a parsed err,
+                                    // it means that the header is broken.
+                                    return Err(e);
+                                }
+                                self.valid_offset = aligned_next_offset;
+                                continue;
+                            }
+                            Ok((offset, t, l)) => (offset, t, l),
                         }
                     }
-                    Ok((offset, t, l)) => (offset, t, l),
                 }
             };
             if self.valid_offset + len > self.size {
@@ -140,28 +150,13 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Returns a slice of internal buffer with specified size.
     fn peek(&mut self, offset: usize, size: usize, prefetch: usize) -> Result<&[u8]> {
         debug_assert!(offset >= self.buffer_offset);
-        let fs_block_size = get_system_block_size();
         let reader = self.reader.as_mut().unwrap();
         let end = self.buffer_offset + self.buffer.len();
         if offset > end {
             self.buffer_offset = offset;
-            let (calibrate_offset, calibrate_len) = {
-                match self.file_context.as_ref().unwrap().format.data_layout() {
-                    DataLayout::NoAlignment => (
-                        self.buffer_offset,
-                        std::cmp::max(size + prefetch, self.read_block_size),
-                    ),
-                    _ => (
-                        round_down(self.buffer_offset, fs_block_size),
-                        round_up(
-                            std::cmp::max(size + prefetch, self.read_block_size),
-                            fs_block_size,
-                        ),
-                    ),
-                }
-            };
-            self.buffer.resize(calibrate_len, 0);
-            let read = reader.read_to(calibrate_offset as u64, &mut self.buffer)?;
+            self.buffer
+                .resize(std::cmp::max(size + prefetch, self.read_block_size), 0);
+            let read = reader.read_to(self.buffer_offset as u64, &mut self.buffer)?;
             if read < size {
                 return Err(Error::Corruption(format!(
                     "Unexpected eof at {}",
@@ -169,47 +164,24 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 )));
             }
             self.buffer.truncate(read);
-            // Calibrate the first redundant part read from the log file by
-            // removing it when `cfg.format_data_layout = DataLayout::Alignment`.
-            if calibrate_offset != self.buffer_offset {
-                self.buffer.drain(..self.buffer_offset - calibrate_offset);
-            }
             Ok(&self.buffer[..size])
         } else {
             let should_read = (offset + size + prefetch).saturating_sub(end);
             if should_read > 0 {
                 let read_offset = self.buffer_offset + self.buffer.len();
                 let prev_len = self.buffer.len();
-                let (calibrate_offset, calibrate_len) = {
-                    match self.file_context.as_ref().unwrap().format.data_layout() {
-                        DataLayout::NoAlignment => (
-                            read_offset,
-                            std::cmp::max(should_read, self.read_block_size),
-                        ),
-                        _ => (
-                            round_down(read_offset, fs_block_size),
-                            round_up(
-                                std::cmp::max(should_read, self.read_block_size),
-                                fs_block_size,
-                            ),
-                        ),
-                    }
-                };
-                self.buffer.resize(prev_len + calibrate_len, 0);
-                let read = reader.read_to(calibrate_offset as u64, &mut self.buffer[prev_len..])?;
+                self.buffer.resize(
+                    prev_len + std::cmp::max(should_read, self.read_block_size),
+                    0,
+                );
+                let read = reader.read_to(read_offset as u64, &mut self.buffer[prev_len..])?;
                 if read + prefetch < should_read {
                     return Err(Error::Corruption(format!(
                         "Unexpected eof at {}",
-                        calibrate_offset + read,
+                        read_offset + read,
                     )));
                 }
                 self.buffer.truncate(prev_len + read);
-                // Calibrate the first redundant part read from the log file by
-                // removing it when `cfg.format_data_layout = DataLayout::Alignment`.
-                if read_offset != calibrate_offset {
-                    self.buffer
-                        .drain(prev_len..prev_len + read_offset - calibrate_offset);
-                }
             }
             Ok(&self.buffer[offset - self.buffer_offset..offset - self.buffer_offset + size])
         }
