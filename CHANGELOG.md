@@ -1,10 +1,11 @@
 # Raft Engine Change Log
 
-## [Unreleased]
+## [0.2.2] - 2022-07-26
 
 ### Bug Fixes
 
 * Avoid leaving fractured write after failure by reseeking the file writer. Panic if the reseek fails as well.
+* Fix a parallel recovery panic bug.
 
 ## [0.2.1] - 2022-07-12
 
