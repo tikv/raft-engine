@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 
+use fail::fail_point;
 use fs2::FileExt;
 use log::{error, info, warn};
 use rayon::prelude::*;
@@ -231,13 +232,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
                 _ => (threads, threads),
             };
-
+        let get_read_block_size = || {
+            fail_point!("file_pipe_log::recover::reset_read_block_size", |_| 16);
+            self.cfg.recovery_read_block_size.0
+        };
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
             data_layout: DataLayout::default(),
             concurrency: append_concurrency,
-            read_block_size: self.cfg.recovery_read_block_size.0,
+            read_block_size: get_read_block_size(),
         };
         let rewrite_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Rewrite,

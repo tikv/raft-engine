@@ -6,7 +6,7 @@ use crate::pipe_log::{DataLayout, FileBlockHandle, FileId, LogFileContext};
 use crate::util::round_up;
 use crate::{Error, Result};
 
-use super::format::LogFileFormat;
+use super::format::{is_valid_paddings, LogFileFormat};
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
@@ -80,34 +80,35 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             }
             let (footer_offset, compression_type, len) = {
                 match data_layout {
-                    DataLayout::NoAlignment | DataLayout::Alignment(0) => {
-                        let (offset, t, l) = LogBatch::decode_header(&mut self.peek(
-                            self.valid_offset,
-                            LOG_BATCH_HEADER_LEN,
-                            0,
-                        )?)?;
-                        (offset, t, l)
-                    }
+                    DataLayout::NoAlignment | DataLayout::Alignment(0) => LogBatch::decode_header(
+                        &mut self.peek(self.valid_offset, LOG_BATCH_HEADER_LEN, 0)?,
+                    )?,
                     DataLayout::Alignment(fs_block_size) => {
                         // In DataLayout::Alignment mode, tail data in this block maybe
                         // contain an valid header of the adjacent LogBatch or paddings
                         // with `0`.
+                        let aligned_next_offset =
+                            round_up(self.valid_offset, fs_block_size as usize);
                         match LogBatch::decode_header(&mut self.peek(
                             self.valid_offset,
-                            round_up(self.valid_offset, fs_block_size as usize) - self.valid_offset
-                                + LOG_BATCH_HEADER_LEN,
-                            0,
+                            LOG_BATCH_HEADER_LEN,
+                            aligned_next_offset - self.valid_offset,
                         )?) {
                             Err(e) => {
                                 // In DataLayout::Alignment mode, tail data in the previous block
                                 // may be aligned with paddings, that is '0'. So, we need to
                                 // skip these redundant content and get the next valid header
                                 // of `LogBatch`.
-                                let aligned_next_offset =
-                                    round_up(self.valid_offset, fs_block_size as usize);
-                                if self.valid_offset == aligned_next_offset {
+                                if self.valid_offset == aligned_next_offset
+                                    || !is_valid_paddings(
+                                        &self.buffer[..],
+                                        self.valid_offset - self.buffer_offset,
+                                        aligned_next_offset - self.valid_offset,
+                                    )?
+                                {
                                     // If we continued with aligned offset and get a parsed err,
-                                    // it means that the header is broken.
+                                    // it means that the header is broken or the padding is filled
+                                    // with non-zero bytes.
                                     return Err(e);
                                 }
                                 self.valid_offset = aligned_next_offset;

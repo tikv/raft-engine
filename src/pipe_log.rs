@@ -147,7 +147,7 @@ impl DataLayout {
     }
 
     pub const fn len() -> usize {
-        8 /* serialized in u64. */
+        std::mem::size_of::<u64>() /* serialized in u64. */
     }
 }
 

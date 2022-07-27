@@ -10,7 +10,7 @@ use log::warn;
 
 use crate::env::{FileSystem, Handle, WriteExt};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, LogFileContext};
+use crate::pipe_log::{FileBlockHandle, LogFileContext, Version};
 use crate::{Error, Result};
 
 use super::format::LogFileFormat;
@@ -18,21 +18,11 @@ use super::format::LogFileFormat;
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;
 
-/// Default alignment size.
-const FILE_ALIGNMENT_SIZE: usize = 32768; // 32kb as default
-
 /// Combination of `[Handle]` and `[Version]`, specifying a handler of a file.
 #[derive(Debug)]
 pub struct FileHandler<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub context: LogFileContext,
-}
-
-#[inline]
-pub(crate) fn get_system_block_size() -> usize {
-    fail_point!("pipe_log::log_file::abnormal_block_size", |_| 16);
-    // @lucasliang, TODO: needs to get the block_size from file_system.
-    FILE_ALIGNMENT_SIZE
 }
 
 /// Build a file writer.
@@ -261,7 +251,8 @@ impl<F: FileSystem> LogFileReader<F> {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
         // [2] Parse the format of the file.
-        let mut container = vec![0; LogFileFormat::header_len() + LogFileFormat::payload_len()];
+        let mut container =
+            vec![0; LogFileFormat::header_len() + LogFileFormat::payload_len(Version::V2)];
         self.read_to(0, &mut container[..])?;
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.format)
@@ -329,7 +320,7 @@ mod tests {
         let path = dir.path().to_str().unwrap();
         let target_file_size = ReadableSize::mb(4);
         let file_system = Arc::new(DefaultFileSystem);
-        let fs_block_size = get_system_block_size();
+        let fs_block_size = 32768;
 
         for version in Version::iter() {
             for data_layout in [DataLayout::NoAlignment, DataLayout::Alignment(64)] {

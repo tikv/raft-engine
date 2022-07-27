@@ -21,9 +21,7 @@ use crate::util::round_up;
 use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
-use super::log_file::{
-    build_file_reader, build_file_writer, get_system_block_size, FileHandler, LogFileWriter,
-};
+use super::log_file::{build_file_reader, build_file_writer, FileHandler, LogFileWriter};
 
 struct FileCollection<F: FileSystem> {
     /// Sequence number of the first file.
@@ -139,12 +137,19 @@ impl<F: FileSystem> SinglePipe<F> {
         capacity: usize,
     ) -> Result<Self> {
         let data_layout = {
-            let force_aligned_write = || {
-                fail_point!("file_pipe_log::append::force_aligned_write", |_| { true });
+            let force_aligned_layout = || {
+                fail_point!("file_pipe_log::open::force_aligned_layout", |_| { true });
                 false
             };
-            if force_aligned_write() && cfg.format_version.has_log_signing() {
-                DataLayout::Alignment(get_system_block_size() as u64)
+            let force_set_fs_block_size = || {
+                fail_point!("file_pipe_log::open::force_set_fs_block_size", |_| 16);
+                // @lucasliang, TODO: needs to get the block_size from file_system.
+                0
+            };
+            // @lucasliang, TODO: also need to check whether DIO is open or not. If DIO
+            // == `on`, we could set the data_layout with `Alignment(_)`.
+            if force_aligned_layout() && LogFileFormat::payload_len(cfg.format_version) > 0 {
+                DataLayout::Alignment(force_set_fs_block_size() as u64)
             } else {
                 DataLayout::default()
             }
@@ -339,14 +344,29 @@ impl<F: FileSystem> SinglePipe<F> {
         let seq = active_file.seq;
         let writer = &mut active_file.writer;
 
+        let force_no_alignment = || {
+            fail_point!("file_pipe_log::append::force_no_alignment", |_| true);
+            false
+        };
+        let force_abnormal_paddings = || {
+            fail_point!("file_pipe_log::append::force_abnormal_paddings", |_| true);
+            false
+        };
         let start_offset = {
-            if writer.header.version().has_log_signing()
+            if !force_no_alignment()
+                && writer.header.version().has_log_signing()
                 && writer.header.get_aligned_block_size() > 0
             {
                 let s_off = round_up(writer.offset(), writer.header.get_aligned_block_size());
                 // Append head paddings.
                 if s_off > writer.offset() {
-                    let paddings = vec![0; s_off - writer.offset()];
+                    let len = s_off - writer.offset();
+                    let mut paddings = vec![0; len];
+                    if force_abnormal_paddings() {
+                        paddings[len - 1] = 8_u8;
+                    } else {
+                        paddings[len - 1] = 0;
+                    }
                     writer.write(&paddings[..], self.target_file_size)?;
                 }
             }
@@ -879,7 +899,8 @@ mod tests {
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
-        let header_size = (LogFileFormat::header_len() + LogFileFormat::payload_len()) as u64;
+        let header_size =
+            (LogFileFormat::header_len() + LogFileFormat::payload_len(cfg.format_version)) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];

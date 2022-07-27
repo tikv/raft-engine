@@ -575,9 +575,9 @@ fn test_recycle_with_stale_logbatch_at_tail() {
 }
 
 #[test]
-fn test_build_engine_with_aligned_datalayout() {
+fn test_build_engine_with_multi_datalayout() {
     let dir = tempfile::Builder::new()
-        .prefix("test_build_engine_with_aligned_datalayout")
+        .prefix("test_build_engine_with_multi_datalayout")
         .tempdir()
         .unwrap();
     let data = vec![b'x'; 12827];
@@ -595,8 +595,8 @@ fn test_build_engine_with_aligned_datalayout() {
     }
     drop(engine);
     // File with DataLayout::Alignment
-    let _f1 = FailGuard::new("pipe_log::log_file::abnormal_block_size", "return");
-    let _f2 = FailGuard::new("file_pipe_log::append::force_aligned_write", "return");
+    let _f1 = FailGuard::new("file_pipe_log::open::force_aligned_layout", "return");
+    let _f2 = FailGuard::new("file_pipe_log::open::force_set_fs_block_size", "return");
     let cfg_v2 = Config {
         format_version: Version::V2,
         ..cfg
@@ -607,4 +607,46 @@ fn test_build_engine_with_aligned_datalayout() {
     }
     drop(engine);
     assert!(Engine::open(cfg_v2).is_ok());
+}
+
+#[test]
+fn test_build_engine_with_datalayout_abnormal() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_datalayout_abnormal")
+        .tempdir()
+        .unwrap();
+    let data = vec![b'x'; 1024];
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::kb(2),
+        purge_threshold: ReadableSize::kb(4),
+        recovery_mode: RecoveryMode::AbsoluteConsistency,
+        format_version: Version::V2,
+        ..Default::default()
+    };
+    let _f = FailGuard::new("file_pipe_log::open::force_aligned_layout", "return");
+    let _f1 = FailGuard::new("file_pipe_log::open::force_set_fs_block_size", "return");
+    let _f2 = FailGuard::new("file_pipe_log::recover::reset_read_block_size", "return");
+    let engine = Engine::open(cfg.clone()).unwrap();
+    // Content durable with DataLayout::Alignment.
+    append(&engine, 1, 1, 11, Some(&data));
+    append(&engine, 2, 1, 11, Some(&data));
+    {
+        // Set failpoint to dump content with invalid paddings into log file.
+        let _f3 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
+        append(&engine, 3, 1, 11, Some(&data));
+        drop(engine);
+        assert!(Engine::open(cfg.clone()).is_err());
+    }
+    {
+        // Reopen the Engine with TolerateXXX mode.
+        let mut cfg_v2 = cfg.clone();
+        cfg_v2.recovery_mode = RecoveryMode::TolerateTailCorruption;
+        let engine = Engine::open(cfg_v2).unwrap();
+        for rid in 4..=8 {
+            append(&engine, rid, 1, 11, Some(&data));
+        }
+        drop(engine);
+        assert!(Engine::open(cfg).is_ok());
+    }
 }

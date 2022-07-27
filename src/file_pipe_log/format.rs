@@ -2,6 +2,7 @@
 
 //! Representations of objects in filesystem.
 
+use std::cmp::Ordering;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,48 @@ const LOG_APPEND_SUFFIX: &str = ".raftlog";
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
+
+pub(crate) fn is_valid_paddings(buf: &[u8], start_off: usize, len: usize) -> Result<bool> {
+    if buf.len() >= start_off + len {
+        let thd_len = std::mem::size_of::<u64>(); // u64 size
+        if len == 0 {
+            return Ok(true);
+        }
+        match len.cmp(&thd_len) {
+            Ordering::Less => {
+                // len < 8
+                for ele in buf.iter().skip(start_off).take(len) {
+                    if *ele != 0 {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            Ordering::Equal => {
+                // len == 8
+                let paddings = buf[start_off..start_off + len].to_vec();
+                if codec::decode_u64(&mut &paddings[..])? == 0 {
+                    return Ok(true);
+                } else {
+                    return Ok(false);
+                }
+            }
+            Ordering::Greater => {
+                // len > 8
+                let head_paddings = buf[start_off..start_off + thd_len].to_vec();
+                let tail_paddings = buf[start_off + len - thd_len..].to_vec();
+                if codec::decode_u64(&mut &head_paddings[..])? == 0
+                    && codec::decode_u64(&mut &tail_paddings[..])? == 0
+                {
+                    return Ok(true);
+                } else {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
 
 /// `FileNameExt` offers file name formatting extensions to [`FileId`].
 pub trait FileNameExt: Sized {
@@ -95,11 +138,7 @@ impl LogFileFormat {
 
     /// Length of whole `LogFileFormat` written on storage.
     pub fn enc_len(&self) -> usize {
-        if self.version.has_log_signing() {
-            Self::header_len() + Self::payload_len()
-        } else {
-            Self::header_len()
-        }
+        Self::header_len() + Self::payload_len(self.version)
     }
 
     /// Length of header written on storage.
@@ -108,8 +147,11 @@ impl LogFileFormat {
     }
 
     /// Length of serialized `DataLayout` written on storage.
-    pub const fn payload_len() -> usize {
-        DataLayout::len()
+    pub const fn payload_len(version: Version) -> usize {
+        match version {
+            Version::V1 => 0,
+            Version::V2 => DataLayout::len(),
+        }
     }
 
     pub fn from_version(version: Version) -> Self {
@@ -153,7 +195,8 @@ impl LogFileFormat {
         };
         // If the decoded `Version::has_log_signing() == true`, serialized data_layout
         // should be extracted from the file.
-        if version.has_log_signing() && buf_len >= Self::header_len() + Self::payload_len() {
+        let payload_len = Self::payload_len(version);
+        if payload_len > 0 && buf_len >= Self::header_len() + payload_len {
             let layout_block_size = codec::decode_u64(buf)?;
             Ok(Self {
                 version,
@@ -175,7 +218,7 @@ impl LogFileFormat {
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
         buf.encode_u64(self.version.to_u64().unwrap())?; // encode version
-        if self.version.has_log_signing() {
+        if Self::payload_len(self.version) > 0 {
             buf.encode_u64(self.data_layout.to_u64())?; // encode datay_layout
         }
         let corrupted = || {
@@ -199,6 +242,35 @@ impl LogFileFormat {
 mod tests {
     use super::*;
     use crate::pipe_log::LogFileContext;
+
+    #[test]
+    fn test_check_paddings_is_valid() {
+        {
+            // normal buffer
+            let mut buf = vec![0; 128];
+            // len < 8
+            assert!(is_valid_paddings(&buf[..], 126, 2).unwrap());
+            // len == 8
+            assert!(is_valid_paddings(&buf[..], 120, 8).unwrap());
+            // len > 8
+            assert!(is_valid_paddings(&buf[..], 110, 16).unwrap());
+            buf[125] = 3_u8;
+            assert!(is_valid_paddings(&buf[..], 126, 2).unwrap());
+            assert!(!is_valid_paddings(&buf[..], 120, 8).unwrap());
+            assert!(!is_valid_paddings(&buf[..], 110, 16).unwrap());
+            assert!(!is_valid_paddings(&buf[..], 128, 10).unwrap());
+        }
+        {
+            // abnormal buffer
+            let buf = vec![0; 7];
+            // len < 8
+            assert!(is_valid_paddings(&buf[..], 0, 2).unwrap());
+            // len == 8
+            assert!(!is_valid_paddings(&buf[..], 0, 8).unwrap());
+            // len > 8
+            assert!(!is_valid_paddings(&buf[..], 3, 6).unwrap());
+        }
+    }
 
     #[test]
     fn test_file_name() {
@@ -262,15 +334,16 @@ mod tests {
         };
         assert_eq!(
             header4.enc_len(),
-            LogFileFormat::header_len() + LogFileFormat::payload_len()
+            LogFileFormat::header_len() + LogFileFormat::payload_len(header4.version)
         );
     }
 
     #[test]
     fn test_encoding_decoding_file_format() {
         fn enc_dec_file_format(file_format: LogFileFormat) -> Result<LogFileFormat> {
-            let mut buf =
-                Vec::with_capacity(LogFileFormat::header_len() + LogFileFormat::payload_len());
+            let mut buf = Vec::with_capacity(
+                LogFileFormat::header_len() + LogFileFormat::payload_len(file_format.version),
+            );
             assert!(file_format.encode(&mut buf).is_ok());
             LogFileFormat::decode(&mut &buf[..])
         }
