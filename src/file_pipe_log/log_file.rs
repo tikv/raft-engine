@@ -100,11 +100,6 @@ impl<F: FileSystem> LogFileWriter<F> {
     }
 
     pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> Result<()> {
-        // @lucasliang, TODO:
-        // Implement the writing strategy for DataLayout::Alignment,
-        // considering that records in log files might be fragmented.
-        // Referring to the design of WAL in rocksdb:
-        // [https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format].
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
             let _t = StopWatch::new(&*LOG_ALLOCATE_DURATION_HISTOGRAM);

@@ -65,7 +65,6 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Returns the next [`LogItemBatch`] in current opened file. Returns
     /// `None` if there is no more data or no opened file.
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
-        // @lucasliang.
         // TODO: [Fulfilled in writing progress when DIO is open.]
         // We should also consider that there might exists broken blocks when DIO
         // is open, and the following reading strategy should tolerate reading broken

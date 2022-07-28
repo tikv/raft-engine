@@ -59,7 +59,6 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 pub struct RecoveryConfig {
     pub queue: LogQueue,
     pub mode: RecoveryMode,
-    /// @lucasliang
     /// TODO: This opt should defined by whether open DIO or not.
     pub file_format: LogFileFormat,
     pub concurrency: usize,
@@ -288,8 +287,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let recovery_mode = recovery_cfg.mode;
         let file_format = recovery_cfg.file_format;
         let recovery_read_block_size = recovery_cfg.read_block_size as usize;
-        let default_format_len =
-            LogFileFormat::header_len() + LogFileFormat::payload_len(file_format.version());
 
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks_mut(max_chunk_size);
@@ -306,7 +303,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
-                            let is_local_tail = f.handle.file_size()? <= default_format_len;
+                            let mut is_local_tail = f.handle.file_size()? <= LogFileFormat::header_len();
+                            // If we parsed and got an corrupted `payload` from this file,
+                            // we also should mark it `is_local_tail = true`.
+                            if let Error::InvalidArgument(_) = e {
+                                is_local_tail = true;
+                            }
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
                                 && is_last_file && is_local_tail {

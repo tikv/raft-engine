@@ -137,11 +137,11 @@ impl<F: FileSystem> SinglePipe<F> {
     ) -> Result<Self> {
         let data_layout = {
             let force_set_aligned_layout = || {
-                // @lucasliang, TODO: needs to get the block_size from file_system.
+                // TODO: needs to get the block_size from file_system.
                 fail_point!("file_pipe_log::open::force_set_aligned_layout", |_| { 16 });
                 0
             };
-            // @lucasliang, TODO: also need to check whether DIO is open or not. If DIO
+            // TODO: also need to check whether DIO is open or not. If DIO
             // == `on`, we could set the data_layout with `Alignment(_)`.
             let fs_block_size = force_set_aligned_layout();
             if fs_block_size > 0 && LogFileFormat::payload_len(cfg.format_version) > 0 {

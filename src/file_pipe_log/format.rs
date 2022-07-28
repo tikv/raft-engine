@@ -168,27 +168,34 @@ impl LogFileFormat {
         let payload_len = Self::payload_len(version);
         if payload_len == 0 {
             // No alignment.
-            Ok(Self {
+            return Ok(Self {
                 version,
                 data_layout: DataLayout::default(),
-            })
-        } else if payload_len > 0 && buf_len >= Self::header_len() + payload_len {
-            // If the decoded `payload_len > 0`, serialized data_layout
-            // should be extracted from the file.
-            let layout_block_size = codec::decode_u64(buf)?;
-            Ok(Self {
-                version,
-                data_layout: if layout_block_size == 0 {
-                    DataLayout::default()
-                } else {
-                    DataLayout::Alignment(layout_block_size)
-                },
-            })
-        } else {
-            Err(Error::Corruption(format!(
-                "unrecognized log file data_layout, len: {}",
-                buf_len - Self::header_len()
-            )))
+            });
+        }
+        if_chain::if_chain! {
+            if payload_len > 0;
+            if buf_len >= Self::header_len() + payload_len;
+            if let Ok(layout_block_size) = codec::decode_u64(buf);
+            then {
+                // If the decoded `payload_len > 0`, serialized data_layout
+                // should be extracted from the file.
+                Ok(Self {
+                    version,
+                    data_layout: if layout_block_size == 0 {
+                        DataLayout::default()
+                    } else {
+                        DataLayout::Alignment(layout_block_size)
+                    },
+                })
+            } else {
+                // Here, we mark this special err, that is, corrupted `payload`,
+                // with InvalidArgument.
+                Err(Error::InvalidArgument(format!(
+                    "invalid data_layout in the header, len: {}",
+                    buf_len - Self::header_len()
+                )))
+            }
         }
     }
 
