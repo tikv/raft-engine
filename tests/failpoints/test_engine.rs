@@ -450,7 +450,30 @@ fn test_tail_corruption() {
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         append(&engine, rid, 1, 5, Some(&data));
         drop(engine);
-        assert!(Engine::open_with_file_system(cfg, fs).is_err());
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_err());
+    }
+    // DataLayout in header is corrupted.
+    {
+        let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_4")
+            .tempdir()
+            .unwrap();
+        let cfg_err = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            recovery_mode: RecoveryMode::AbsoluteConsistency,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg_err.clone(), fs.clone()).unwrap();
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg_err, fs.clone()).is_err());
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        assert!(Engine::open_with_file_system(cfg, fs).is_ok());
     }
 }
 
@@ -626,14 +649,13 @@ fn test_build_engine_with_datalayout_abnormal() {
     };
     let _f = FailGuard::new("file_pipe_log::open::force_aligned_layout", "return");
     let _f1 = FailGuard::new("file_pipe_log::open::force_set_fs_block_size", "return");
-    let _f2 = FailGuard::new("file_pipe_log::recover::reset_read_block_size", "return");
     let engine = Engine::open(cfg.clone()).unwrap();
     // Content durable with DataLayout::Alignment.
     append(&engine, 1, 1, 11, Some(&data));
     append(&engine, 2, 1, 11, Some(&data));
     {
         // Set failpoint to dump content with invalid paddings into log file.
-        let _f3 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
+        let _f2 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
         append(&engine, 3, 1, 11, Some(&data));
         drop(engine);
         assert!(Engine::open(cfg.clone()).is_err());

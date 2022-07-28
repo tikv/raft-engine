@@ -21,46 +21,41 @@ const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 
-pub(crate) fn is_valid_paddings(buf: &[u8], start_off: usize, len: usize) -> Result<bool> {
-    if buf.len() >= start_off + len {
-        let thd_len = std::mem::size_of::<u64>(); // u64 size
-        if len == 0 {
-            return Ok(true);
+pub(crate) fn is_valid_paddings(buf: &[u8]) -> Result<bool> {
+    let len = buf.len();
+    let thd_len = std::mem::size_of::<u64>(); // u64 size
+    match len.cmp(&thd_len) {
+        Ordering::Less => {
+            // len < 8
+            for ele in buf.iter() {
+                if *ele != 0 {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
-        match len.cmp(&thd_len) {
-            Ordering::Less => {
-                // len < 8
-                for ele in buf.iter().skip(start_off).take(len) {
-                    if *ele != 0 {
-                        return Ok(false);
-                    }
-                }
-                return Ok(true);
+        Ordering::Equal => {
+            // len == 8
+            let paddings = buf[..].to_vec();
+            if codec::decode_u64(&mut &paddings[..])? == 0 {
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            Ordering::Equal => {
-                // len == 8
-                let paddings = buf[start_off..start_off + len].to_vec();
-                if codec::decode_u64(&mut &paddings[..])? == 0 {
-                    return Ok(true);
-                } else {
-                    return Ok(false);
-                }
-            }
-            Ordering::Greater => {
-                // len > 8
-                let head_paddings = buf[start_off..start_off + thd_len].to_vec();
-                let tail_paddings = buf[start_off + len - thd_len..].to_vec();
-                if codec::decode_u64(&mut &head_paddings[..])? == 0
-                    && codec::decode_u64(&mut &tail_paddings[..])? == 0
-                {
-                    return Ok(true);
-                } else {
-                    return Ok(false);
-                }
+        }
+        Ordering::Greater => {
+            // len > 8
+            let head_paddings = buf[0..thd_len].to_vec();
+            let tail_paddings = buf[len - thd_len..].to_vec();
+            if codec::decode_u64(&mut &head_paddings[..])? == 0
+                && codec::decode_u64(&mut &tail_paddings[..])? == 0
+            {
+                Ok(true)
+            } else {
+                Ok(false)
             }
         }
     }
-    Ok(false)
 }
 
 /// `FileNameExt` offers file name formatting extensions to [`FileId`].
@@ -193,10 +188,17 @@ impl LogFileFormat {
                 )));
             }
         };
-        // If the decoded `Version::has_log_signing() == true`, serialized data_layout
-        // should be extracted from the file.
+        // Parse `DataLayout` of LogFileFormat from header of the file.
         let payload_len = Self::payload_len(version);
-        if payload_len > 0 && buf_len >= Self::header_len() + payload_len {
+        if payload_len == 0 {
+            // No alignment.
+            Ok(Self {
+                version,
+                data_layout: DataLayout::default(),
+            })
+        } else if payload_len > 0 && buf_len >= Self::header_len() + payload_len {
+            // If the decoded `payload_len > 0`, serialized data_layout
+            // should be extracted from the file.
             let layout_block_size = codec::decode_u64(buf)?;
             Ok(Self {
                 version,
@@ -207,10 +209,10 @@ impl LogFileFormat {
                 },
             })
         } else {
-            Ok(Self {
-                version,
-                data_layout: DataLayout::default(),
-            })
+            Err(Error::Corruption(format!(
+                "unrecognized log file data_layout, len: {}",
+                buf_len - Self::header_len()
+            )))
         }
     }
 
@@ -220,6 +222,13 @@ impl LogFileFormat {
         buf.encode_u64(self.version.to_u64().unwrap())?; // encode version
         if Self::payload_len(self.version) > 0 {
             buf.encode_u64(self.data_layout.to_u64())?; // encode datay_layout
+            let corrupted_data_layout = || {
+                fail::fail_point!("log_file_header::corrupted_data_layout", |_| true);
+                false
+            };
+            if corrupted_data_layout() {
+                buf.pop();
+            }
         }
         let corrupted = || {
             fail::fail_point!("log_file_header::corrupted", |_| true);
@@ -245,31 +254,22 @@ mod tests {
 
     #[test]
     fn test_check_paddings_is_valid() {
-        {
-            // normal buffer
-            let mut buf = vec![0; 128];
-            // len < 8
-            assert!(is_valid_paddings(&buf[..], 126, 2).unwrap());
-            // len == 8
-            assert!(is_valid_paddings(&buf[..], 120, 8).unwrap());
-            // len > 8
-            assert!(is_valid_paddings(&buf[..], 110, 16).unwrap());
-            buf[125] = 3_u8;
-            assert!(is_valid_paddings(&buf[..], 126, 2).unwrap());
-            assert!(!is_valid_paddings(&buf[..], 120, 8).unwrap());
-            assert!(!is_valid_paddings(&buf[..], 110, 16).unwrap());
-            assert!(!is_valid_paddings(&buf[..], 128, 10).unwrap());
-        }
-        {
-            // abnormal buffer
-            let buf = vec![0; 7];
-            // len < 8
-            assert!(is_valid_paddings(&buf[..], 0, 2).unwrap());
-            // len == 8
-            assert!(!is_valid_paddings(&buf[..], 0, 8).unwrap());
-            // len > 8
-            assert!(!is_valid_paddings(&buf[..], 3, 6).unwrap());
-        }
+        // normal buffer
+        let mut buf = vec![0; 128];
+        // len < 8
+        assert!(is_valid_paddings(&buf[0..6]).unwrap());
+        // len == 8
+        assert!(is_valid_paddings(&buf[120..]).unwrap());
+        // len > 8
+        assert!(is_valid_paddings(&buf[..]).unwrap());
+
+        // abnormal buffer
+        buf[125] = 3_u8;
+        assert!(is_valid_paddings(&buf[120..125]).unwrap());
+        assert!(!is_valid_paddings(&buf[124..127]).unwrap());
+        assert!(!is_valid_paddings(&buf[120..]).unwrap());
+        assert!(!is_valid_paddings(&buf[110..]).unwrap());
+        assert!(!is_valid_paddings(&buf[..]).unwrap());
     }
 
     #[test]

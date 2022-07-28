@@ -253,7 +253,8 @@ impl<F: FileSystem> LogFileReader<F> {
         // [2] Parse the format of the file.
         let mut container =
             vec![0; LogFileFormat::header_len() + LogFileFormat::payload_len(Version::V2)];
-        self.read_to(0, &mut container[..])?;
+        let size = self.read_to(0, &mut container[..])?;
+        container.truncate(size);
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
         Ok(self.format)
     }

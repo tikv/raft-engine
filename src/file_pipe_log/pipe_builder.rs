@@ -8,7 +8,6 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 
-use fail::fail_point;
 use fs2::FileExt;
 use log::{error, info, warn};
 use rayon::prelude::*;
@@ -17,7 +16,7 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{DataLayout, FileId, FileSeq, LogFileContext, LogQueue, Version};
+use crate::pipe_log::{DataLayout, FileId, FileSeq, LogFileContext, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
@@ -62,7 +61,7 @@ pub struct RecoveryConfig {
     pub mode: RecoveryMode,
     /// @lucasliang
     /// TODO: This opt should defined by whether open DIO or not.
-    pub data_layout: DataLayout,
+    pub file_format: LogFileFormat,
     pub concurrency: usize,
     pub read_block_size: u64,
 }
@@ -232,16 +231,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
                 _ => (threads, threads),
             };
-        let get_read_block_size = || {
-            fail_point!("file_pipe_log::recover::reset_read_block_size", |_| 16);
-            self.cfg.recovery_read_block_size.0
-        };
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
-            data_layout: DataLayout::default(),
+            file_format: LogFileFormat::new(self.cfg.format_version, DataLayout::default()),
             concurrency: append_concurrency,
-            read_block_size: get_read_block_size(),
+            read_block_size: self.cfg.recovery_read_block_size.0,
         };
         let rewrite_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Rewrite,
@@ -251,8 +246,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let append_files = &mut self.append_files;
         let rewrite_files = &mut self.rewrite_files;
         let file_system = self.file_system.clone();
-        // As the `recover_queue` would update the `Version` of each log file in
-        // `apend_files` and `rewrite_files`, we re-design the implementation on
+        // As the `recover_queue` would update the `LogFileFormat` of each log file
+        // in `apend_files` and `rewrite_files`, we re-design the implementation on
         // `recover_queue` to make it compatiable to concurrent processing
         // with ThreadPool.
         let (append, rewrite) = pool.join(
@@ -291,8 +286,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let queue = recovery_cfg.queue;
         let concurrency = recovery_cfg.concurrency;
         let recovery_mode = recovery_cfg.mode;
-        let format_data_layout = recovery_cfg.data_layout;
+        let file_format = recovery_cfg.file_format;
         let recovery_read_block_size = recovery_cfg.read_block_size as usize;
+        let default_format_len =
+            LogFileFormat::header_len() + LogFileFormat::payload_len(file_format.version());
 
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
         let chunks = files.par_chunks_mut(max_chunk_size);
@@ -309,7 +306,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
-                            let is_local_tail = f.handle.file_size()? <= LogFileFormat::header_len();
+                            let is_local_tail = f.handle.file_size()? <= default_format_len;
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
                                 && is_last_file && is_local_tail {
@@ -318,7 +315,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(0)?;
-                                f.format = Some(LogFileFormat::new(Version::default(), format_data_layout));
+                                f.format = Some(file_format);
                                 continue;
                             } else {
                                 error!(

@@ -71,7 +71,6 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // is open, and the following reading strategy should tolerate reading broken
         // blocks until it finds an accessible header of `LogBatch`.
         while self.valid_offset < self.size {
-            debug_assert!(self.file_context.is_some());
             let data_layout = self.file_context.as_ref().unwrap().format.data_layout();
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
                 return Err(Error::Corruption(
@@ -89,33 +88,28 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                         // with `0`.
                         let aligned_next_offset =
                             round_up(self.valid_offset, fs_block_size as usize);
-                        match LogBatch::decode_header(&mut self.peek(
+                        let parser = LogBatch::decode_header(&mut self.peek(
                             self.valid_offset,
                             LOG_BATCH_HEADER_LEN,
                             aligned_next_offset - self.valid_offset,
-                        )?) {
-                            Err(e) => {
+                        )?);
+                        if_chain::if_chain! {
+                            if parser.is_err();
+                            if self.valid_offset != aligned_next_offset;
+                            if is_valid_paddings(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?)?;
+                            then {
                                 // In DataLayout::Alignment mode, tail data in the previous block
                                 // may be aligned with paddings, that is '0'. So, we need to
                                 // skip these redundant content and get the next valid header
                                 // of `LogBatch`.
-                                if self.valid_offset == aligned_next_offset
-                                    || !is_valid_paddings(
-                                        &self.buffer[..],
-                                        self.valid_offset - self.buffer_offset,
-                                        aligned_next_offset - self.valid_offset,
-                                    )?
-                                {
-                                    // If we continued with aligned offset and get a parsed err,
-                                    // it means that the header is broken or the padding is filled
-                                    // with non-zero bytes.
-                                    return Err(e);
-                                }
                                 self.valid_offset = aligned_next_offset;
                                 continue;
                             }
-                            Ok((offset, t, l)) => (offset, t, l),
+                            // If we continued with aligned offset and get a parsed err,
+                            // it means that the header is broken or the padding is filled
+                            // with non-zero bytes, and the err will be returned.
                         }
+                        parser?
                     }
                 }
             };
