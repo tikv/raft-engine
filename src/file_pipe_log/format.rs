@@ -2,7 +2,6 @@
 
 //! Representations of objects in filesystem.
 
-use std::cmp::Ordering;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -21,41 +20,18 @@ const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 
-pub(crate) fn is_valid_paddings(buf: &[u8]) -> Result<bool> {
-    let len = buf.len();
-    let thd_len = std::mem::size_of::<u64>(); // u64 size
-    match len.cmp(&thd_len) {
-        Ordering::Less => {
-            // len < 8
-            for ele in buf.iter() {
-                if *ele != 0 {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        Ordering::Equal => {
-            // len == 8
-            let paddings = buf[..].to_vec();
-            if codec::decode_u64(&mut &paddings[..])? == 0 {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-        Ordering::Greater => {
-            // len > 8
-            let head_paddings = buf[0..thd_len].to_vec();
-            let tail_paddings = buf[len - thd_len..].to_vec();
-            if codec::decode_u64(&mut &head_paddings[..])? == 0
-                && codec::decode_u64(&mut &tail_paddings[..])? == 0
-            {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-    }
+/// Check whether the given `buf` is a valid padding or not.
+///
+/// To simplify the checking strategy, we just check the first
+/// and last byte in the `buf`.
+///
+/// In most common cases, the paddings will be filled with `0`,
+/// and several corner cases, where there exists corrupted blocks
+/// in the disk, might pass through this rule, but will failed in
+/// followed processing. So, we can just keep it simplistic.
+#[inline]
+pub(crate) fn is_valid_paddings(buf: &[u8]) -> bool {
+    buf.is_empty() || (buf[0] == 0 && buf[buf.len() - 1] == 0)
 }
 
 /// `FileNameExt` offers file name formatting extensions to [`FileId`].
@@ -257,19 +233,19 @@ mod tests {
         // normal buffer
         let mut buf = vec![0; 128];
         // len < 8
-        assert!(is_valid_paddings(&buf[0..6]).unwrap());
+        assert!(is_valid_paddings(&buf[0..6]));
         // len == 8
-        assert!(is_valid_paddings(&buf[120..]).unwrap());
+        assert!(is_valid_paddings(&buf[120..]));
         // len > 8
-        assert!(is_valid_paddings(&buf[..]).unwrap());
+        assert!(is_valid_paddings(&buf[..]));
 
         // abnormal buffer
-        buf[125] = 3_u8;
-        assert!(is_valid_paddings(&buf[120..125]).unwrap());
-        assert!(!is_valid_paddings(&buf[124..127]).unwrap());
-        assert!(!is_valid_paddings(&buf[120..]).unwrap());
-        assert!(!is_valid_paddings(&buf[110..]).unwrap());
-        assert!(!is_valid_paddings(&buf[..]).unwrap());
+        buf[127] = 3_u8;
+        assert!(is_valid_paddings(&buf[0..110]));
+        assert!(is_valid_paddings(&buf[120..125]));
+        assert!(!is_valid_paddings(&buf[124..128]));
+        assert!(!is_valid_paddings(&buf[120..]));
+        assert!(!is_valid_paddings(&buf[..]));
     }
 
     #[test]

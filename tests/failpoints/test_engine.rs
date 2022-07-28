@@ -618,8 +618,7 @@ fn test_build_engine_with_multi_datalayout() {
     }
     drop(engine);
     // File with DataLayout::Alignment
-    let _f1 = FailGuard::new("file_pipe_log::open::force_aligned_layout", "return");
-    let _f2 = FailGuard::new("file_pipe_log::open::force_set_fs_block_size", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
     let cfg_v2 = Config {
         format_version: Version::V2,
         ..cfg
@@ -647,15 +646,14 @@ fn test_build_engine_with_datalayout_abnormal() {
         format_version: Version::V2,
         ..Default::default()
     };
-    let _f = FailGuard::new("file_pipe_log::open::force_aligned_layout", "return");
-    let _f1 = FailGuard::new("file_pipe_log::open::force_set_fs_block_size", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
     let engine = Engine::open(cfg.clone()).unwrap();
     // Content durable with DataLayout::Alignment.
     append(&engine, 1, 1, 11, Some(&data));
     append(&engine, 2, 1, 11, Some(&data));
     {
         // Set failpoint to dump content with invalid paddings into log file.
-        let _f2 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
+        let _f1 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
         append(&engine, 3, 1, 11, Some(&data));
         drop(engine);
         assert!(Engine::open(cfg.clone()).is_err());

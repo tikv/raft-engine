@@ -17,7 +17,6 @@ use crate::metrics::*;
 use crate::pipe_log::{
     DataLayout, FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog,
 };
-use crate::util::round_up;
 use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
@@ -137,19 +136,16 @@ impl<F: FileSystem> SinglePipe<F> {
         capacity: usize,
     ) -> Result<Self> {
         let data_layout = {
-            let force_aligned_layout = || {
-                fail_point!("file_pipe_log::open::force_aligned_layout", |_| { true });
-                false
-            };
-            let force_set_fs_block_size = || {
-                fail_point!("file_pipe_log::open::force_set_fs_block_size", |_| 16);
+            let force_set_aligned_layout = || {
                 // @lucasliang, TODO: needs to get the block_size from file_system.
+                fail_point!("file_pipe_log::open::force_set_aligned_layout", |_| { 16 });
                 0
             };
             // @lucasliang, TODO: also need to check whether DIO is open or not. If DIO
             // == `on`, we could set the data_layout with `Alignment(_)`.
-            if force_aligned_layout() && LogFileFormat::payload_len(cfg.format_version) > 0 {
-                DataLayout::Alignment(force_set_fs_block_size() as u64)
+            let fs_block_size = force_set_aligned_layout();
+            if fs_block_size > 0 && LogFileFormat::payload_len(cfg.format_version) > 0 {
+                DataLayout::Alignment(fs_block_size as u64)
             } else {
                 DataLayout::default()
             }
@@ -344,15 +340,18 @@ impl<F: FileSystem> SinglePipe<F> {
         let seq = active_file.seq;
         let writer = &mut active_file.writer;
 
-        let force_no_alignment = || {
-            fail_point!("file_pipe_log::append::force_no_alignment", |_| true);
-            false
-        };
-        let force_abnormal_paddings = || {
-            fail_point!("file_pipe_log::append::force_abnormal_paddings", |_| true);
-            false
-        };
-        let start_offset = {
+        #[cfg(feature = "failpoints")]
+        {
+            use crate::util::round_up;
+
+            let force_no_alignment = || {
+                fail_point!("file_pipe_log::append::force_no_alignment", |_| true);
+                false
+            };
+            let force_abnormal_paddings = || {
+                fail_point!("file_pipe_log::append::force_abnormal_paddings", |_| true);
+                false
+            };
             if !force_no_alignment()
                 && writer.header.version().has_log_signing()
                 && writer.header.get_aligned_block_size() > 0
@@ -370,8 +369,8 @@ impl<F: FileSystem> SinglePipe<F> {
                     writer.write(&paddings[..], self.target_file_size)?;
                 }
             }
-            writer.offset()
-        };
+        }
+        let start_offset = writer.offset();
         if let Err(e) = writer.write(bytes, self.target_file_size) {
             if let Err(te) = writer.truncate() {
                 panic!(

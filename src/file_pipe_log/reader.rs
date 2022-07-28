@@ -77,42 +77,31 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                     "attempt to read file with broken header".to_owned(),
                 ));
             }
-            let (footer_offset, compression_type, len) = {
-                match data_layout {
-                    DataLayout::NoAlignment | DataLayout::Alignment(0) => LogBatch::decode_header(
-                        &mut self.peek(self.valid_offset, LOG_BATCH_HEADER_LEN, 0)?,
-                    )?,
-                    DataLayout::Alignment(fs_block_size) => {
-                        // In DataLayout::Alignment mode, tail data in this block maybe
-                        // contain an valid header of the adjacent LogBatch or paddings
-                        // with `0`.
-                        let aligned_next_offset =
-                            round_up(self.valid_offset, fs_block_size as usize);
-                        let parser = LogBatch::decode_header(&mut self.peek(
-                            self.valid_offset,
-                            LOG_BATCH_HEADER_LEN,
-                            aligned_next_offset - self.valid_offset,
-                        )?);
-                        if_chain::if_chain! {
-                            if parser.is_err();
-                            if self.valid_offset != aligned_next_offset;
-                            if is_valid_paddings(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?)?;
-                            then {
-                                // In DataLayout::Alignment mode, tail data in the previous block
-                                // may be aligned with paddings, that is '0'. So, we need to
-                                // skip these redundant content and get the next valid header
-                                // of `LogBatch`.
-                                self.valid_offset = aligned_next_offset;
-                                continue;
-                            }
-                            // If we continued with aligned offset and get a parsed err,
-                            // it means that the header is broken or the padding is filled
-                            // with non-zero bytes, and the err will be returned.
-                        }
-                        parser?
-                    }
+            let header_parser = LogBatch::decode_header(&mut self.peek(
+                self.valid_offset,
+                LOG_BATCH_HEADER_LEN,
+                0,
+            )?);
+            if_chain::if_chain! {
+                if header_parser.is_err();
+                if let DataLayout::Alignment(fs_block_size) = data_layout;
+                if fs_block_size > 0;
+                let aligned_next_offset = round_up(self.valid_offset, fs_block_size as usize);
+                if self.valid_offset != aligned_next_offset;
+                if is_valid_paddings(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?);
+                then {
+                    // In DataLayout::Alignment mode, tail data in the previous block
+                    // may be aligned with paddings, that is '0'. So, we need to
+                    // skip these redundant content and get the next valid header
+                    // of `LogBatch`.
+                    self.valid_offset = aligned_next_offset;
+                    continue;
                 }
-            };
+                // If we continued with aligned offset and get a parsed err,
+                // it means that the header is broken or the padding is filled
+                // with non-zero bytes, and the err will be returned.
+            }
+            let (footer_offset, compression_type, len) = header_parser?;
             if self.valid_offset + len > self.size {
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
