@@ -452,11 +452,56 @@ fn test_tail_corruption() {
         drop(engine);
         assert!(Engine::open_with_file_system(cfg, fs.clone()).is_err());
     }
-    // DataLayout in header is corrupted.
+    // Version::V1 in header owns abnormal DataLayout.
+    {
+        let _f = FailGuard::new("log_file_header::force_abnormal_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_4")
+            .tempdir()
+            .unwrap();
+        let cfg_err = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            recovery_mode: RecoveryMode::AbsoluteConsistency,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg_err.clone(), fs.clone()).unwrap();
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg_err, fs.clone()).is_err());
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // DataLayout in header is corrupted for Version::V2
     {
         let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
         let dir = tempfile::Builder::new()
-            .prefix("test_tail_corruption_4")
+            .prefix("test_tail_corruption_5")
+            .tempdir()
+            .unwrap();
+        let cfg_err = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            recovery_mode: RecoveryMode::AbsoluteConsistency,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg_err.clone(), fs.clone()).unwrap();
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg_err, fs.clone()).is_err());
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // DataLayout in header is abnormal for Version::V2
+    {
+        let _f = FailGuard::new("log_file_header::force_abnormal_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_6")
             .tempdir()
             .unwrap();
         let cfg_err = Config {

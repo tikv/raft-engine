@@ -202,9 +202,10 @@ impl LogFileFormat {
     /// Encodes this header and appends the bytes to the provided buffer.
     pub fn encode(&self, buf: &mut Vec<u8>) -> Result<()> {
         buf.extend_from_slice(LOG_FILE_MAGIC_HEADER);
-        buf.encode_u64(self.version.to_u64().unwrap())?; // encode version
+        buf.encode_u64(self.version.to_u64().unwrap())?;
         if Self::payload_len(self.version) > 0 {
-            buf.encode_u64(self.data_layout.to_u64())?; // encode datay_layout
+            buf.encode_u64(self.data_layout.to_u64())?;
+            // Set corrupted DataLayout for `payload`.
             let corrupted_data_layout = || {
                 fail::fail_point!("log_file_header::corrupted_data_layout", |_| true);
                 false
@@ -213,6 +214,15 @@ impl LogFileFormat {
                 buf.pop();
             }
         }
+        // Set abnormal DataLayout.
+        let force_abnormal_data_layout = || {
+            fail::fail_point!("log_file_header::force_abnormal_data_layout", |_| true);
+            false
+        };
+        if force_abnormal_data_layout() {
+            buf.encode_u64(0_u64)?;
+        }
+        // Set header corrupted.
         let corrupted = || {
             fail::fail_point!("log_file_header::corrupted", |_| true);
             false
