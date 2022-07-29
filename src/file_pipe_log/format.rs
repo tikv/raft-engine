@@ -192,8 +192,8 @@ impl LogFileFormat {
                 // Here, we mark this special err, that is, corrupted `payload`,
                 // with InvalidArgument.
                 Err(Error::InvalidArgument(format!(
-                    "invalid data_layout in the header, len: {}",
-                    buf_len - Self::header_len()
+                    "invalid dataload in the header, len: {}, expected len: {}",
+                    buf_len - Self::header_len(), Self::payload_len(version)
                 )))
             }
         }
