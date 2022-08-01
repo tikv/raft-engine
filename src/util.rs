@@ -330,6 +330,8 @@ pub trait Factory<Target>: Send + Sync {
 /// # Example:
 ///
 /// ```
+/// use raft_engine::internals::round_up;
+///
 /// assert_eq!(round_up(18, 4), 20);
 /// assert_eq!(round_up(64, 16), 64);
 /// ```
@@ -343,6 +345,8 @@ pub fn round_up(offset: usize, alignment: usize) -> usize {
 /// # Example:
 ///
 /// ```
+/// use raft_engine::internals::round_down;
+///
 /// assert_eq!(round_down(18, 4), 16);
 /// assert_eq!(round_down(64, 16), 64);
 /// ```

@@ -80,6 +80,7 @@ pub mod internals {
     pub use crate::pipe_log::*;
     #[cfg(feature = "swap")]
     pub use crate::swappy_allocator::*;
+    pub use crate::util::{round_down, round_up};
     pub use crate::write_barrier::*;
 }
 
