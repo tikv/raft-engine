@@ -303,15 +303,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
-                            let mut is_local_tail = f.handle.file_size()? <= LogFileFormat::header_len();
-                            // If we parsed and got an corrupted `payload` from this file,
-                            // we also should mark it `is_local_tail = true`.
-                            if let Error::InvalidArgument(_) = e {
-                                is_local_tail = true;
-                            }
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
-                                && is_last_file && is_local_tail {
+                                && is_last_file {
                                 warn!(
                                     "File header is corrupted but ignored: {:?}:{}, {}",
                                     queue, f.seq, e

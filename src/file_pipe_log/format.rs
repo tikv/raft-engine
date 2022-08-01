@@ -256,6 +256,7 @@ impl LogFileFormat {
 mod tests {
     use super::*;
     use crate::pipe_log::LogFileContext;
+    use crate::test_util::catch_unwind_silent;
 
     #[test]
     fn test_check_paddings_is_valid() {
@@ -389,10 +390,7 @@ mod tests {
         // header with Version::V2 and DataLayout::Alignment(0)
         {
             let file_format = LogFileFormat::new(Version::V2, DataLayout::Alignment(0));
-            assert_eq!(
-                LogFileFormat::new(Version::V2, DataLayout::NoAlignment),
-                enc_dec_file_format(file_format).unwrap()
-            );
+            catch_unwind_silent(|| enc_dec_file_format(file_format)).unwrap_err();
         }
     }
 

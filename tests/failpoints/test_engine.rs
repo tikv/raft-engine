@@ -450,7 +450,7 @@ fn test_tail_corruption() {
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         append(&engine, rid, 1, 5, Some(&data));
         drop(engine);
-        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_err());
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
     }
     // Version::V1 in header owns abnormal DataLayout.
     {

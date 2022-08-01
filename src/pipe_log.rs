@@ -136,7 +136,10 @@ impl DataLayout {
     pub fn to_u64(self) -> u64 {
         match self {
             DataLayout::NoAlignment => 0,
-            DataLayout::Alignment(aligned) => aligned,
+            DataLayout::Alignment(aligned) => {
+                debug_assert!(aligned > 0);
+                aligned
+            }
         }
     }
 
