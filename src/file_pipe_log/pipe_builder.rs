@@ -233,7 +233,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
-            file_format: LogFileFormat::new(self.cfg.format_version, DataLayout::default()),
+            file_format: LogFileFormat::new(self.cfg.format_version, DataLayout::NoAlignment),
             concurrency: append_concurrency,
             read_block_size: self.cfg.recovery_read_block_size.0,
         };

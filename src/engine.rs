@@ -459,7 +459,7 @@ where
             ..Default::default()
         };
         let recovery_mode = cfg.recovery_mode;
-        let file_format = LogFileFormat::new(cfg.format_version, DataLayout::default());
+        let file_format = LogFileFormat::new(cfg.format_version, DataLayout::NoAlignment);
         let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;

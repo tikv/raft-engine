@@ -125,12 +125,6 @@ pub enum DataLayout {
     Alignment(u64),
 }
 
-impl Default for DataLayout {
-    fn default() -> Self {
-        DataLayout::NoAlignment
-    }
-}
-
 impl DataLayout {
     pub fn from_u64(val: u64) -> Self {
         match val {

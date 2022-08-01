@@ -93,10 +93,19 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 }
 
 /// In-memory representation of `Format` in log files.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct LogFileFormat {
     version: Version,
     data_layout: DataLayout,
+}
+
+impl Default for LogFileFormat {
+    fn default() -> Self {
+        Self {
+            version: Version::default(),
+            data_layout: DataLayout::NoAlignment,
+        }
+    }
 }
 
 impl LogFileFormat {
@@ -128,7 +137,7 @@ impl LogFileFormat {
     pub fn from_version(version: Version) -> Self {
         Self {
             version,
-            data_layout: DataLayout::default(),
+            data_layout: DataLayout::NoAlignment,
         }
     }
 
@@ -170,7 +179,7 @@ impl LogFileFormat {
             // No alignment.
             return Ok(Self {
                 version,
-                data_layout: DataLayout::default(),
+                data_layout: DataLayout::NoAlignment,
             });
         }
         if_chain::if_chain! {
@@ -183,7 +192,7 @@ impl LogFileFormat {
                 Ok(Self {
                     version,
                     data_layout: if layout_block_size == 0 {
-                        DataLayout::default()
+                        DataLayout::NoAlignment
                     } else {
                         DataLayout::Alignment(layout_block_size)
                     },
@@ -205,30 +214,33 @@ impl LogFileFormat {
         buf.encode_u64(self.version.to_u64().unwrap())?;
         if Self::payload_len(self.version) > 0 {
             buf.encode_u64(self.data_layout.to_u64())?;
+        }
+        #[cfg(feature = "failpoints")]
+        {
+            // Set header corrupted.
+            let corrupted = || {
+                fail::fail_point!("log_file_header::corrupted", |_| true);
+                false
+            };
+            // Set abnormal DataLayout.
+            let force_abnormal_data_layout = || {
+                fail::fail_point!("log_file_header::force_abnormal_data_layout", |_| true);
+                false
+            };
             // Set corrupted DataLayout for `payload`.
             let corrupted_data_layout = || {
                 fail::fail_point!("log_file_header::corrupted_data_layout", |_| true);
                 false
             };
+            if corrupted() {
+                buf[0] += 1;
+            }
+            if force_abnormal_data_layout() {
+                buf.encode_u64(0_u64)?;
+            }
             if corrupted_data_layout() {
                 buf.pop();
             }
-        }
-        // Set abnormal DataLayout.
-        let force_abnormal_data_layout = || {
-            fail::fail_point!("log_file_header::force_abnormal_data_layout", |_| true);
-            false
-        };
-        if force_abnormal_data_layout() {
-            buf.encode_u64(0_u64)?;
-        }
-        // Set header corrupted.
-        let corrupted = || {
-            fail::fail_point!("log_file_header::corrupted", |_| true);
-            false
-        };
-        if corrupted() {
-            buf[0] += 1;
         }
         Ok(())
     }
@@ -299,10 +311,9 @@ mod tests {
 
     #[test]
     fn test_data_layout() {
-        let data_layout = DataLayout::default();
-        assert_eq!(data_layout.to_u64(), DataLayout::NoAlignment.to_u64());
+        assert_eq!(DataLayout::NoAlignment.to_u64(), 0);
         assert_eq!(DataLayout::Alignment(16).to_u64(), 16);
-        assert_eq!(DataLayout::from_u64(0), DataLayout::default());
+        assert_eq!(DataLayout::from_u64(0), DataLayout::NoAlignment);
         assert_eq!(DataLayout::from_u64(4096), DataLayout::Alignment(4096));
         assert_eq!(DataLayout::len(), 8);
     }

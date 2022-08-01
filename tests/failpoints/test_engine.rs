@@ -459,19 +459,19 @@ fn test_tail_corruption() {
             .prefix("test_tail_corruption_4")
             .tempdir()
             .unwrap();
-        let cfg_err = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            recovery_mode: RecoveryMode::AbsoluteConsistency,
-            ..Default::default()
-        };
-        let engine = Engine::open_with_file_system(cfg_err.clone(), fs.clone()).unwrap();
-        drop(engine);
-        assert!(Engine::open_with_file_system(cfg_err, fs.clone()).is_err());
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            format_version: Version::V2,
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1),
             ..Default::default()
         };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        // Version::V1 will be parsed successfully as the data_layout when the related
+        // `version == V1` will be ignored.
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        append(&engine, rid, 1, 5, Some(&data));
+        drop(engine);
         assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
     }
     // DataLayout in header is corrupted for Version::V2
@@ -481,20 +481,13 @@ fn test_tail_corruption() {
             .prefix("test_tail_corruption_5")
             .tempdir()
             .unwrap();
-        let cfg_err = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            format_version: Version::V2,
-            recovery_mode: RecoveryMode::AbsoluteConsistency,
-            ..Default::default()
-        };
-        let engine = Engine::open_with_file_system(cfg_err.clone(), fs.clone()).unwrap();
-        drop(engine);
-        assert!(Engine::open_with_file_system(cfg_err, fs.clone()).is_err());
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             format_version: Version::V2,
             ..Default::default()
         };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
         assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
     }
     // DataLayout in header is abnormal for Version::V2
@@ -504,21 +497,36 @@ fn test_tail_corruption() {
             .prefix("test_tail_corruption_6")
             .tempdir()
             .unwrap();
-        let cfg_err = Config {
-            dir: dir.path().to_str().unwrap().to_owned(),
-            format_version: Version::V2,
-            recovery_mode: RecoveryMode::AbsoluteConsistency,
-            ..Default::default()
-        };
-        let engine = Engine::open_with_file_system(cfg_err.clone(), fs.clone()).unwrap();
-        drop(engine);
-        assert!(Engine::open_with_file_system(cfg_err, fs.clone()).is_err());
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             format_version: Version::V2,
             ..Default::default()
         };
-        assert!(Engine::open_with_file_system(cfg, fs).is_ok());
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // DataLayout in header is corrupted for Version::V2, followed with records
+    {
+        let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_7")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        append(&engine, rid, 1, 2, Some(&data));
+        append(&engine, rid, 2, 3, Some(&data));
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs).is_err());
     }
 }
 

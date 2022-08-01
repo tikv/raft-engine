@@ -147,7 +147,7 @@ impl<F: FileSystem> SinglePipe<F> {
             if fs_block_size > 0 && LogFileFormat::payload_len(cfg.format_version) > 0 {
                 DataLayout::Alignment(fs_block_size as u64)
             } else {
-                DataLayout::default()
+                DataLayout::NoAlignment
             }
         };
         let create_file = first_seq == 0;
@@ -700,7 +700,7 @@ mod tests {
         // fetch active file
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.format.version(), Version::default());
-        assert_eq!(file_context.format.data_layout(), DataLayout::default());
+        assert_eq!(file_context.format.data_layout(), DataLayout::NoAlignment);
         assert_eq!(file_context.id.seq, 3);
     }
 
@@ -960,7 +960,7 @@ mod tests {
         // fetch active file
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.format.version(), Version::V2);
-        assert_eq!(file_context.format.data_layout(), DataLayout::default());
+        assert_eq!(file_context.format.data_layout(), DataLayout::NoAlignment);
         assert_eq!(file_context.id.seq, 3);
     }
 }
