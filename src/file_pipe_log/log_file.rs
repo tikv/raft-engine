@@ -28,16 +28,16 @@ pub struct FileHandler<F: FileSystem> {
 /// Build a file writer.
 ///
 /// * `handle`: standard handle of a log file.
-/// * `version`: format version of the log file.
+/// * `format`: format infos of the log file.
 /// * `force_reset`: if true => rewrite the header of this file.
 pub(super) fn build_file_writer<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-    version: Version,
+    format: LogFileFormat,
     force_reset: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    LogFileWriter::open(handle, writer, version, force_reset)
+    LogFileWriter::open(handle, writer, format, force_reset)
 }
 
 /// Append-only writer for log file.
@@ -54,18 +54,18 @@ impl<F: FileSystem> LogFileWriter<F> {
     fn open(
         handle: Arc<F::Handle>,
         writer: F::Writer,
-        version: Version,
+        format: LogFileFormat,
         force_reset: bool,
     ) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
-            header: LogFileFormat::from_version(version),
+            header: format,
             writer,
             written: file_size,
             capacity: file_size,
             last_sync: file_size,
         };
-        if file_size < LogFileFormat::len() || force_reset {
+        if file_size < LogFileFormat::header_len() || force_reset {
             f.write_header()?;
         } else {
             f.writer.seek(SeekFrom::Start(file_size as u64))?;
@@ -77,7 +77,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.writer.seek(SeekFrom::Start(0))?;
         self.last_sync = 0;
         self.written = 0;
-        let mut buf = Vec::with_capacity(LogFileFormat::len());
+        let mut buf = Vec::with_capacity(LogFileFormat::header_len());
         self.header.encode(&mut buf)?;
         self.write(&buf, 0)
     }
@@ -152,16 +152,16 @@ impl<F: FileSystem> LogFileWriter<F> {
 /// Attention please, the reader do not need a specified `[LogFileFormat]` from
 /// users.
 ///
-/// * `[handle]`: standard handle of a log file.
-/// * `[version]`: if `[None]`, reloads the log file header and parse
-/// the relevant `Version` before building the `reader`.
+/// * `handle`: standard handle of a log file.
+/// * `format`: if `[None]`, reloads the log file header and parse
+/// the relevant `LogFileFormat` before building the `reader`.
 pub(super) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-    version: Option<Version>,
+    format: Option<LogFileFormat>,
 ) -> Result<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
-    LogFileReader::open(handle, reader, version)
+    LogFileReader::open(handle, reader, format)
 }
 
 /// Random-access reader for log file.
@@ -174,10 +174,14 @@ pub struct LogFileReader<F: FileSystem> {
 }
 
 impl<F: FileSystem> LogFileReader<F> {
-    fn open(handle: Arc<F::Handle>, reader: F::Reader, version: Option<Version>) -> Result<Self> {
-        match version {
-            Some(ver) => Ok(Self {
-                format: LogFileFormat::from_version(ver),
+    fn open(
+        handle: Arc<F::Handle>,
+        reader: F::Reader,
+        format: Option<LogFileFormat>,
+    ) -> Result<Self> {
+        match format {
+            Some(fmt) => Ok(Self {
+                format: fmt,
                 handle,
                 reader,
                 // Set to an invalid offset to force a reseek at first read.
@@ -185,7 +189,7 @@ impl<F: FileSystem> LogFileReader<F> {
             }),
             None => {
                 let mut reader = Self {
-                    format: LogFileFormat::from_version(Version::default()),
+                    format: LogFileFormat::default(),
                     handle,
                     reader,
                     // Set to an invalid offset to force a reseek at first read.
@@ -236,16 +240,18 @@ impl<F: FileSystem> LogFileReader<F> {
         // a log file with valid format. Otherwise, it should return with
         // `Err`.
         let file_size = self.handle.file_size()?;
-        // [1] If the length lessed than the standard `LogFileFormat::len()`.
-        let header_len = LogFileFormat::len();
+        // [1] If the length lessed than the standard `LogFileFormat::header_len()`.
+        let header_len = LogFileFormat::header_len();
         if file_size < header_len {
             return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
         }
-        // [2] Parse the header of the file.
-        let mut container = vec![0; header_len];
-        self.read_to(0, &mut container[..])?;
+        // [2] Parse the format of the file.
+        let mut container =
+            vec![0; LogFileFormat::header_len() + LogFileFormat::payload_len(Version::V2)];
+        let size = self.read_to(0, &mut container[..])?;
+        container.truncate(size);
         self.format = LogFileFormat::decode(&mut container.as_slice())?;
-        Ok(self.format.clone())
+        Ok(self.format)
     }
 
     #[inline]
@@ -256,5 +262,93 @@ impl<F: FileSystem> LogFileReader<F> {
     #[inline]
     pub fn file_format(&self) -> &LogFileFormat {
         &self.format
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use num_traits::ToPrimitive;
+    use strum::IntoEnumIterator;
+    use tempfile::Builder;
+
+    use crate::env::DefaultFileSystem;
+    use crate::file_pipe_log::format::{FileNameExt, LogFileFormat};
+    use crate::pipe_log::{DataLayout, FileId, LogQueue, Version};
+    use crate::util::ReadableSize;
+
+    fn prepare_mocked_log_file<F: FileSystem>(
+        file_system: &F,
+        path: &str,
+        file_id: FileId,
+        format: LogFileFormat,
+        file_size: usize,
+    ) -> Result<LogFileWriter<F>> {
+        let data = vec![b'm'; 1024];
+        let fd = Arc::new(file_system.create(&file_id.build_file_path(path))?);
+        let mut writer = build_file_writer(file_system, fd, format, true)?;
+        let mut offset: usize = 0;
+        while offset < file_size {
+            writer.write(&data[..], file_size)?;
+            offset += data.len();
+        }
+        Ok(writer)
+    }
+
+    fn read_data_from_mocked_log_file<F: FileSystem>(
+        file_system: &F,
+        path: &str,
+        file_id: FileId,
+        format: Option<LogFileFormat>,
+        file_block_handle: FileBlockHandle,
+    ) -> Result<Vec<u8>> {
+        let fd = Arc::new(file_system.open(&file_id.build_file_path(path))?);
+        let mut reader = build_file_reader(file_system, fd, format)?;
+        reader.read(file_block_handle)
+    }
+
+    #[test]
+    fn test_log_file_write_read() {
+        let dir = Builder::new()
+            .prefix("test_log_file_write_read")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let target_file_size = ReadableSize::mb(4);
+        let file_system = Arc::new(DefaultFileSystem);
+        let fs_block_size = 32768;
+
+        for version in Version::iter() {
+            for data_layout in [DataLayout::NoAlignment, DataLayout::Alignment(64)] {
+                let file_format = LogFileFormat::new(version, data_layout);
+                let file_id = FileId {
+                    seq: version.to_u64().unwrap(),
+                    queue: LogQueue::Append,
+                };
+                assert!(prepare_mocked_log_file(
+                    file_system.as_ref(),
+                    path,
+                    file_id,
+                    file_format,
+                    target_file_size.0 as usize,
+                )
+                .is_ok());
+                // mocked file_block_handle
+                let file_block_handle = FileBlockHandle {
+                    id: file_id,
+                    offset: (fs_block_size + 77) as u64,
+                    len: fs_block_size + 77,
+                };
+                let buf = read_data_from_mocked_log_file(
+                    file_system.as_ref(),
+                    path,
+                    file_id,
+                    None,
+                    file_block_handle,
+                )
+                .unwrap();
+                assert_eq!(buf.len(), file_block_handle.len);
+            }
+        }
     }
 }

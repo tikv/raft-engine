@@ -946,7 +946,9 @@ fn verify_checksum_with_context(buf: &[u8], file_context: &LogFileContext) -> Re
     if actual != expected {
         return Err(Error::Corruption(format!(
             "Checksum expected {} but got {}, format_version: {:?}",
-            expected, actual, file_context.version
+            expected,
+            actual,
+            file_context.format.version()
         )));
     }
     Ok(())
@@ -955,6 +957,7 @@ fn verify_checksum_with_context(buf: &[u8], file_context: &LogFileContext) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_pipe_log::LogFileFormat;
     use crate::pipe_log::{LogQueue, Version};
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use protobuf::parse_from_bytes;
@@ -1136,7 +1139,7 @@ mod tests {
                 let mut encoded_batch = vec![];
                 batch.encode(&mut encoded_batch).unwrap();
                 let file_context =
-                    LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
+                    LogFileContext::new(FileId::dummy(LogQueue::Append), LogFileFormat::default());
                 let decoded_batch = LogItemBatch::decode(
                     &mut encoded_batch.as_slice(),
                     FileBlockHandle::dummy(LogQueue::Append),
@@ -1175,7 +1178,8 @@ mod tests {
             assert_eq!(batch.approximate_size(), len);
             let mut batch_handle = mocked_file_block_handle;
             batch_handle.len = len;
-            let file_context = LogFileContext::new(batch_handle.id, version);
+            let file_context =
+                LogFileContext::new(batch_handle.id, LogFileFormat::from_version(version));
             assert!(batch.prepare_write(&file_context).is_ok());
             batch.finish_write(batch_handle);
             let encoded = batch.encoded_bytes();
@@ -1200,7 +1204,8 @@ mod tests {
             let mut entries_handle = mocked_file_block_handle;
             entries_handle.offset = LOG_BATCH_HEADER_LEN as u64;
             entries_handle.len = offset - LOG_BATCH_HEADER_LEN;
-            let file_context = LogFileContext::new(entries_handle.id, version);
+            let file_context =
+                LogFileContext::new(entries_handle.id, LogFileFormat::from_version(version));
             let decoded_item_batch = LogItemBatch::decode(
                 &mut &encoded[offset..],
                 entries_handle,
@@ -1266,7 +1271,7 @@ mod tests {
         let mut kvs = Vec::new();
         let data = vec![b'x'; 1024];
         let file_id = FileId::dummy(LogQueue::Append);
-        let file_context = LogFileContext::new(file_id, Version::default());
+        let file_context = LogFileContext::new(file_id, LogFileFormat::default());
 
         let mut batch1 = LogBatch::default();
         entries.push(generate_entries(1, 11, Some(&data)));
@@ -1358,7 +1363,7 @@ mod tests {
             .collect();
         assert!(verify_checksum_with_context(
             &invalid_data[..],
-            &LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default())
+            &LogFileContext::new(FileId::dummy(LogQueue::Append), LogFileFormat::default())
         )
         .is_err());
         {
@@ -1368,13 +1373,16 @@ mod tests {
             data.encode_u32_le(checksum).unwrap();
             assert!(verify_checksum_with_context(
                 &data[..],
-                &LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default())
+                &LogFileContext::new(FileId::dummy(LogQueue::Append), LogFileFormat::default())
             )
             .is_ok());
             // file_context.signature() == 0
             assert!(verify_checksum_with_context(
                 &data[..],
-                &LogFileContext::new(FileId::dummy(LogQueue::Rewrite), Version::V2),
+                &LogFileContext::new(
+                    FileId::dummy(LogQueue::Rewrite),
+                    LogFileFormat::from_version(Version::V2),
+                ),
             )
             .is_ok());
             let file_context = LogFileContext::new(
@@ -1382,7 +1390,7 @@ mod tests {
                     seq: 11,
                     queue: LogQueue::Rewrite,
                 },
-                Version::default(),
+                LogFileFormat::default(),
             );
             assert!(verify_checksum_with_context(&data[..], &file_context).is_ok());
         }
@@ -1393,14 +1401,14 @@ mod tests {
                     seq: 11,
                     queue: LogQueue::Rewrite,
                 },
-                Version::V1,
+                LogFileFormat::from_version(Version::V1),
             );
             let file_context_v2 = LogFileContext::new(
                 FileId {
                     seq: 11,
                     queue: LogQueue::Rewrite,
                 },
-                Version::V2,
+                LogFileFormat::from_version(Version::V2),
             );
             let mut data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
             let checksum = crc32(&data[..]);
