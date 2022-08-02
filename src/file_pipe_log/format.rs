@@ -151,6 +151,13 @@ impl LogFileFormat {
 
     /// Decodes a slice of bytes into a `LogFileFormat`.
     pub fn decode(buf: &mut &[u8]) -> Result<LogFileFormat> {
+        #[cfg(feature = "failpoints")]
+        {
+            // Set parsed abnormal DataLayout for `payload`.
+            fail::fail_point!("log_file_header::abnormal_decoded_payload", |_| Err(
+                Error::InvalidArgument("abnormal_decoded_payload".to_string())
+            ));
+        }
         let buf_len = buf.len();
         if buf_len < Self::header_len() {
             return Err(Error::Corruption("log file header too short".to_owned()));
@@ -181,13 +188,6 @@ impl LogFileFormat {
                 version,
                 data_layout: DataLayout::NoAlignment,
             });
-        }
-        #[cfg(feature = "failpoints")]
-        {
-            // Set parsed abnormal DataLayout for `payload`.
-            fail::fail_point!("log_file_header::abnormal_decoded_payload", |_| Err(
-                Error::InvalidArgument("abnormal_decoded_payload".to_string())
-            ));
         }
         if_chain::if_chain! {
             if payload_len > 0;
