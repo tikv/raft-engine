@@ -506,11 +506,32 @@ fn test_tail_corruption() {
         drop(engine);
         assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
     }
-    // DataLayout in header is corrupted for Version::V2, followed with records
+    // DataLayout in header is corrupted(decoding) for Version::V2, followed
+    // with records
+    {
+        let _f = FailGuard::new("log_file_header::abnormal_decoded_payload", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_7")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        append(&engine, rid, 1, 5, Some(&data));
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_err());
+    }
+    // DataLayout in header is corrupted(encoding) for Version::V2, followed
+    // with records
     {
         let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
         let dir = tempfile::Builder::new()
-            .prefix("test_tail_corruption_7")
+            .prefix("test_tail_corruption_8")
             .tempdir()
             .unwrap();
         let cfg = Config {

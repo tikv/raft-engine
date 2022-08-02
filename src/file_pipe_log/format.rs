@@ -182,6 +182,13 @@ impl LogFileFormat {
                 data_layout: DataLayout::NoAlignment,
             });
         }
+        #[cfg(feature = "failpoints")]
+        {
+            // Set parsed abnormal DataLayout for `payload`.
+            fail::fail_point!("log_file_header::abnormal_decoded_payload", |_| Err(
+                Error::InvalidArgument("abnormal_decoded_payload".to_string())
+            ));
+        }
         if_chain::if_chain! {
             if payload_len > 0;
             if buf_len >= Self::header_len() + payload_len;
