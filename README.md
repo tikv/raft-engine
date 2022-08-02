@@ -75,10 +75,10 @@ Contributions are always welcome! Here are a few tips for making a PR:
 - Tests are automatically run against the changes, some of them can be run locally:
 
 ```
-cargo fmt --all -- --check
-cargo +nightly clippy --all --all-features --all-targets -- -D clippy::all
-cargo +nightly test --all --features all_except_failpoints
-cargo +nightly test --test failpoints --all-features -- --test-threads 1
+# rustup default nightly
+make
+# filter a specific test case
+env EXTRA_CARGO_ARGS=<testname> make test_nightly
 ```
 
 - For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.
