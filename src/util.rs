@@ -325,6 +325,37 @@ pub trait Factory<Target>: Send + Sync {
     fn new_target(&self) -> Target;
 }
 
+/// Return an aligned `offset`.
+///
+/// # Example:
+///
+/// ```
+/// use raft_engine::internals::round_up;
+///
+/// assert_eq!(round_up(18, 4), 20);
+/// assert_eq!(round_up(64, 16), 64);
+/// ```
+#[inline]
+pub fn round_up(offset: usize, alignment: usize) -> usize {
+    (offset + alignment - 1) / alignment * alignment
+}
+
+/// Return an aligned `offset`.
+///
+/// # Example:
+///
+/// ```
+/// use raft_engine::internals::round_down;
+///
+/// assert_eq!(round_down(18, 4), 16);
+/// assert_eq!(round_down(64, 16), 64);
+/// ```
+#[allow(dead_code)]
+#[inline]
+pub fn round_down(offset: usize, alignment: usize) -> usize {
+    offset / alignment * alignment
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +465,17 @@ mod tests {
     #[test]
     fn test_unhash() {
         assert_eq!(unhash_u64(hash_u64(777)), 777);
+    }
+
+    #[test]
+    fn test_rounding() {
+        // round_up
+        assert_eq!(round_up(18, 4), 20);
+        assert_eq!(round_up(64, 16), 64);
+        assert_eq!(round_up(79, 4096), 4096);
+        // round_down
+        assert_eq!(round_down(18, 4), 16);
+        assert_eq!(round_down(64, 16), 64);
+        assert_eq!(round_down(79, 4096), 0);
     }
 }

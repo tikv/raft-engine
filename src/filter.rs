@@ -13,7 +13,7 @@ use crate::file_pipe_log::{FileNameExt, ReplayMachine};
 use crate::log_batch::{
     Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
 };
-use crate::pipe_log::{FileId, LogFileContext, LogQueue, Version};
+use crate::pipe_log::{FileId, LogFileContext, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
@@ -278,10 +278,10 @@ impl RhaiFilterMachine {
                 let mut writer = build_file_writer(
                     system,
                     &target_path,
-                    Version::default(),
+                    *reader.file_format(),
                     true, /* create */
                 )?;
-                let log_file_format = LogFileContext::new(f.file_id, Version::default());
+                let log_file_context = LogFileContext::new(f.file_id, *reader.file_format());
                 // Write out new log file.
                 for item in f.items.into_iter() {
                     match item.content {
@@ -318,7 +318,7 @@ impl RhaiFilterMachine {
                     // Batch 64KB.
                     if log_batch.approximate_size() >= 64 * 1024 {
                         log_batch.finish_populate(0 /* compression_threshold */)?;
-                        log_batch.prepare_write(&log_file_format)?;
+                        log_batch.prepare_write(&log_file_context)?;
                         writer.write(
                             log_batch.encoded_bytes(),
                             usize::MAX, /* target_size_hint */
@@ -328,7 +328,7 @@ impl RhaiFilterMachine {
                 }
                 if !log_batch.is_empty() {
                     log_batch.finish_populate(0 /* compression_threshold */)?;
-                    log_batch.prepare_write(&log_file_format)?;
+                    log_batch.prepare_write(&log_file_context)?;
                     writer.write(
                         log_batch.encoded_bytes(),
                         usize::MAX, /* target_size_hint */

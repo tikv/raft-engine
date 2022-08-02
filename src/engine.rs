@@ -447,7 +447,8 @@ where
         script: String,
         file_system: Arc<F>,
     ) -> Result<()> {
-        use crate::file_pipe_log::{RecoveryConfig, ReplayMachine};
+        use crate::file_pipe_log::{LogFileFormat, RecoveryConfig, ReplayMachine};
+        use crate::pipe_log::DataLayout;
 
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
@@ -462,6 +463,7 @@ where
             ..Default::default()
         };
         let recovery_mode = cfg.recovery_mode;
+        let file_format = LogFileFormat::new(cfg.format_version, DataLayout::NoAlignment);
         let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;
@@ -473,6 +475,7 @@ where
                 RecoveryConfig {
                     queue: LogQueue::Append,
                     mode: recovery_mode,
+                    file_format,
                     concurrency: 1,
                     read_block_size,
                 },
@@ -485,6 +488,7 @@ where
                 RecoveryConfig {
                     queue: LogQueue::Rewrite,
                     mode: recovery_mode,
+                    file_format,
                     concurrency: 1,
                     read_block_size,
                 },

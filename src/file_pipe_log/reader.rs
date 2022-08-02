@@ -2,10 +2,11 @@
 
 use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
+use crate::pipe_log::{DataLayout, FileBlockHandle, FileId, LogFileContext};
+use crate::util::round_up;
 use crate::{Error, Result};
 
-use super::format::LogFileFormat;
+use super::format::{is_valid_paddings, LogFileFormat};
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
@@ -42,12 +43,12 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
 
     /// Opens a file that can be accessed through the given reader.
     pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
-        self.file_context = Some(LogFileContext::new(file_id, reader.file_format().version()));
+        self.valid_offset = reader.file_format().enc_len();
+        self.file_context = Some(LogFileContext::new(file_id, *reader.file_format()));
         self.size = reader.file_size()?;
         self.reader = Some(reader);
         self.buffer.clear();
         self.buffer_offset = 0;
-        self.valid_offset = LogFileFormat::len();
         Ok(())
     }
 
@@ -64,17 +65,42 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Returns the next [`LogItemBatch`] in current opened file. Returns
     /// `None` if there is no more data or no opened file.
     pub fn next(&mut self) -> Result<Option<LogItemBatch>> {
-        if self.valid_offset < self.size {
+        // TODO: [Fulfilled in writing progress when DIO is open.]
+        // We should also consider that there might exists broken blocks when DIO
+        // is open, and the following reading strategy should tolerate reading broken
+        // blocks until it finds an accessible header of `LogBatch`.
+        while self.valid_offset < self.size {
+            let data_layout = self.file_context.as_ref().unwrap().format.data_layout();
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
                 return Err(Error::Corruption(
                     "attempt to read file with broken header".to_owned(),
                 ));
             }
-            let (footer_offset, compression_type, len) = LogBatch::decode_header(&mut self.peek(
+            let header_parser = LogBatch::decode_header(&mut self.peek(
                 self.valid_offset,
                 LOG_BATCH_HEADER_LEN,
                 0,
-            )?)?;
+            )?);
+            if_chain::if_chain! {
+                if header_parser.is_err();
+                if let DataLayout::Alignment(fs_block_size) = data_layout;
+                if fs_block_size > 0;
+                let aligned_next_offset = round_up(self.valid_offset, fs_block_size as usize);
+                if self.valid_offset != aligned_next_offset;
+                if is_valid_paddings(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?);
+                then {
+                    // In DataLayout::Alignment mode, tail data in the previous block
+                    // may be aligned with paddings, that is '0'. So, we need to
+                    // skip these redundant content and get the next valid header
+                    // of `LogBatch`.
+                    self.valid_offset = aligned_next_offset;
+                    continue;
+                }
+                // If we continued with aligned offset and get a parsed err,
+                // it means that the header is broken or the padding is filled
+                // with non-zero bytes, and the err will be returned.
+            }
+            let (footer_offset, compression_type, len) = header_parser?;
             if self.valid_offset + len > self.size {
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
@@ -151,8 +177,6 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     }
 
     pub fn file_format(&self) -> Option<LogFileFormat> {
-        self.reader
-            .as_ref()
-            .map(|reader| reader.file_format().clone())
+        self.reader.as_ref().map(|reader| *reader.file_format())
     }
 }

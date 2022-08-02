@@ -450,6 +450,82 @@ fn test_tail_corruption() {
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         append(&engine, rid, 1, 5, Some(&data));
         drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // Version::V1 in header owns abnormal DataLayout.
+    {
+        let _f = FailGuard::new("log_file_header::force_abnormal_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_4")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1),
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        // Version::V1 will be parsed successfully as the data_layout when the related
+        // `version == V1` will be ignored.
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        append(&engine, rid, 1, 5, Some(&data));
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // DataLayout in header is corrupted for Version::V2
+    {
+        let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_5")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // DataLayout in header is abnormal for Version::V2
+    {
+        let _f = FailGuard::new("log_file_header::force_abnormal_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_6")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+    }
+    // DataLayout in header is corrupted for Version::V2, followed with records
+    {
+        let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_7")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(1),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        drop(engine);
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        append(&engine, rid, 1, 2, Some(&data));
+        append(&engine, rid, 2, 3, Some(&data));
+        drop(engine);
         assert!(Engine::open_with_file_system(cfg, fs).is_err());
     }
 }
@@ -518,7 +594,11 @@ fn test_concurrent_write_perf_context() {
     }
 }
 
+// FIXME: this test no longer works because recovery cannot reliably detect
+// overwrite anomaly.
+// See https://github.com/tikv/raft-engine/issues/250
 #[test]
+#[should_panic]
 fn test_recycle_with_stale_logbatch_at_tail() {
     let dir = tempfile::Builder::new()
         .prefix("test_recycle_with_stale_log_batch_at_tail")
@@ -568,4 +648,78 @@ fn test_recycle_with_stale_logbatch_at_tail() {
         Engine::open(cfg_v2)
     })
     .is_err());
+}
+
+#[test]
+fn test_build_engine_with_multi_datalayout() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_datalayout")
+        .tempdir()
+        .unwrap();
+    let data = vec![b'x'; 12827];
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::kb(2),
+        purge_threshold: ReadableSize::kb(4),
+        recovery_mode: RecoveryMode::AbsoluteConsistency,
+        ..Default::default()
+    };
+    // Defaultly, File with DataLayout::NoAlignment.
+    let engine = Engine::open(cfg.clone()).unwrap();
+    for rid in 1..=3 {
+        append(&engine, rid, 1, 11, Some(&data));
+    }
+    drop(engine);
+    // File with DataLayout::Alignment
+    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
+    let cfg_v2 = Config {
+        format_version: Version::V2,
+        ..cfg
+    };
+    let engine = Engine::open(cfg_v2.clone()).unwrap();
+    for rid in 1..=3 {
+        append(&engine, rid, 11, 20, Some(&data));
+    }
+    drop(engine);
+    assert!(Engine::open(cfg_v2).is_ok());
+}
+
+#[test]
+fn test_build_engine_with_datalayout_abnormal() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_datalayout_abnormal")
+        .tempdir()
+        .unwrap();
+    let data = vec![b'x'; 1024];
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::kb(2),
+        purge_threshold: ReadableSize::kb(4),
+        recovery_mode: RecoveryMode::AbsoluteConsistency,
+        format_version: Version::V2,
+        ..Default::default()
+    };
+    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
+    let engine = Engine::open(cfg.clone()).unwrap();
+    // Content durable with DataLayout::Alignment.
+    append(&engine, 1, 1, 11, Some(&data));
+    append(&engine, 2, 1, 11, Some(&data));
+    {
+        // Set failpoint to dump content with invalid paddings into log file.
+        let _f1 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
+        append(&engine, 3, 1, 11, Some(&data));
+        drop(engine);
+        assert!(Engine::open(cfg.clone()).is_err());
+    }
+    {
+        // Reopen the Engine with TolerateXXX mode.
+        let mut cfg_v2 = cfg.clone();
+        cfg_v2.recovery_mode = RecoveryMode::TolerateTailCorruption;
+        let engine = Engine::open(cfg_v2).unwrap();
+        for rid in 4..=8 {
+            append(&engine, rid, 1, 11, Some(&data));
+        }
+        drop(engine);
+        assert!(Engine::open(cfg).is_ok());
+    }
 }

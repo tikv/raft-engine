@@ -928,6 +928,7 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_pipe_log::LogFileFormat;
     use crate::pipe_log::{LogQueue, Version};
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use protobuf::parse_from_bytes;
@@ -1109,7 +1110,7 @@ mod tests {
                 let mut encoded_batch = vec![];
                 batch.encode(&mut encoded_batch).unwrap();
                 let file_context =
-                    LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
+                    LogFileContext::new(FileId::dummy(LogQueue::Append), LogFileFormat::default());
                 let decoded_batch = LogItemBatch::decode(
                     &mut encoded_batch.as_slice(),
                     FileBlockHandle::dummy(LogQueue::Append),
@@ -1148,7 +1149,8 @@ mod tests {
             assert_eq!(batch.approximate_size(), len);
             let mut batch_handle = mocked_file_block_handle;
             batch_handle.len = len;
-            let file_context = LogFileContext::new(batch_handle.id, version);
+            let file_context =
+                LogFileContext::new(batch_handle.id, LogFileFormat::from_version(version));
             assert!(batch.prepare_write(&file_context).is_ok());
             batch.finish_write(batch_handle);
             let encoded = batch.encoded_bytes();
@@ -1173,7 +1175,8 @@ mod tests {
             let mut entries_handle = mocked_file_block_handle;
             entries_handle.offset = LOG_BATCH_HEADER_LEN as u64;
             entries_handle.len = offset - LOG_BATCH_HEADER_LEN;
-            let file_context = LogFileContext::new(entries_handle.id, version);
+            let file_context =
+                LogFileContext::new(entries_handle.id, LogFileFormat::from_version(version));
             {
                 // Decoding with wrong compression type is okay.
                 LogItemBatch::decode(
@@ -1193,7 +1196,10 @@ mod tests {
                         &mut &encoded[offset..],
                         entries_handle,
                         compression_type,
-                        &LogFileContext::new(FileId::new(LogQueue::Append, u64::MAX), version),
+                        &LogFileContext::new(
+                            FileId::new(LogQueue::Append, u64::MAX),
+                            LogFileFormat::from_version(version),
+                        ),
                     )
                     .unwrap_err();
                 }
@@ -1205,9 +1211,9 @@ mod tests {
                     &LogFileContext::new(
                         file_context.id,
                         if version == Version::V1 {
-                            Version::V2
+                            LogFileFormat::from_version(Version::V2)
                         } else {
-                            Version::V1
+                            LogFileFormat::from_version(Version::V1)
                         },
                     ),
                 )
@@ -1279,7 +1285,7 @@ mod tests {
         let mut kvs = Vec::new();
         let data = vec![b'x'; 1024];
         let file_id = FileId::dummy(LogQueue::Append);
-        let file_context = LogFileContext::new(file_id, Version::default());
+        let file_context = LogFileContext::new(file_id, LogFileFormat::default());
 
         let mut batch1 = LogBatch::default();
         entries.push(generate_entries(1, 11, Some(&data)));

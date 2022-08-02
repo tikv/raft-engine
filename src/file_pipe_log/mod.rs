@@ -25,10 +25,10 @@ pub mod debug {
 
     use crate::env::FileSystem;
     use crate::log_batch::LogItem;
-    use crate::pipe_log::{FileId, Version};
+    use crate::pipe_log::FileId;
     use crate::{Error, Result};
 
-    use super::format::FileNameExt;
+    use super::format::{FileNameExt, LogFileFormat};
     use super::log_file::{LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
 
@@ -38,7 +38,7 @@ pub mod debug {
     pub fn build_file_writer<F: FileSystem>(
         file_system: &F,
         path: &Path,
-        version: Version,
+        format: LogFileFormat,
         create: bool,
     ) -> Result<LogFileWriter<F>> {
         let fd = if create {
@@ -47,7 +47,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd, version, create)
+        super::log_file::build_file_writer(file_system, fd, format, create)
     }
 
     /// Opens a log file for read.
@@ -212,11 +212,11 @@ pub mod debug {
                 let mut writer = build_file_writer(
                     file_system.as_ref(),
                     &file_path,
-                    Version::default(),
+                    LogFileFormat::default(),
                     true, /* create */
                 )
                 .unwrap();
-                let log_file_format = LogFileContext::new(file_id, Version::default());
+                let log_file_format = LogFileContext::new(file_id, LogFileFormat::default());
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
                     let len = batch
@@ -278,7 +278,7 @@ pub mod debug {
             let mut writer = build_file_writer(
                 file_system.as_ref(),
                 &empty_file_path,
-                Version::default(),
+                LogFileFormat::default(),
                 true, /* create */
             )
             .unwrap();

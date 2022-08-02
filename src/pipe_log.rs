@@ -11,6 +11,7 @@ use num_traits::ToPrimitive;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
 
+use crate::file_pipe_log::LogFileFormat;
 use crate::Result;
 
 /// The type of log queue.
@@ -82,6 +83,7 @@ impl FileBlockHandle {
 }
 
 /// Version of log file format.
+#[repr(u64)]
 #[derive(
     Clone,
     Copy,
@@ -94,7 +96,6 @@ impl FileBlockHandle {
     Deserialize_repr,
     EnumIter,
 )]
-#[repr(u64)]
 pub enum Version {
     V1 = 1,
     V2 = 2,
@@ -122,17 +123,50 @@ impl Display for Version {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataLayout {
+    NoAlignment,
+    /// Alignment(block_size) mode in memory for DataLayout will make sense
+    /// when DIO is open.
+    ///
+    /// `block_size` will be dumped into the header of each log file.
+    Alignment(u64),
+}
+
+impl DataLayout {
+    pub fn from_u64(val: u64) -> Self {
+        match val {
+            0 => DataLayout::NoAlignment,
+            aligned => DataLayout::Alignment(aligned),
+        }
+    }
+
+    pub fn to_u64(self) -> u64 {
+        match self {
+            DataLayout::NoAlignment => 0,
+            DataLayout::Alignment(aligned) => {
+                debug_assert!(aligned > 0);
+                aligned
+            }
+        }
+    }
+
+    pub const fn len() -> usize {
+        std::mem::size_of::<u64>() /* serialized in u64. */
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LogFileContext {
     pub id: FileId,
-    pub version: Version,
+    pub format: LogFileFormat,
 }
 
 impl LogFileContext {
-    pub fn new(file_id: FileId, version: Version) -> Self {
+    pub fn new(file_id: FileId, format: LogFileFormat) -> Self {
         Self {
             id: file_id,
-            version,
+            format,
         }
     }
 
@@ -140,7 +174,7 @@ impl LogFileContext {
     ///
     /// `None` will be returned only if `self.version` is invalid.
     pub fn get_signature(&self) -> Option<u32> {
-        if self.version.has_log_signing() {
+        if self.format.version().has_log_signing() {
             // Here, the count of files will be always limited to less than
             // `u32::MAX`. So, we just use the low 32 bit as the `signature`
             // by default.

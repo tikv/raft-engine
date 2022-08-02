@@ -37,7 +37,7 @@ pub struct Config {
     pub recovery_mode: RecoveryMode,
     /// Minimum I/O size for reading log files during recovery.
     ///
-    /// Default: "4KB". Minimum: "512B".
+    /// Default: "16KB". Minimum: "512B".
     pub recovery_read_block_size: ReadableSize,
     /// The number of threads used to scan and recovery log files.
     ///
