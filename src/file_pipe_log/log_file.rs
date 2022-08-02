@@ -243,15 +243,43 @@ impl<F: FileSystem> LogFileReader<F> {
         // [1] If the length lessed than the standard `LogFileFormat::header_len()`.
         let header_len = LogFileFormat::header_len();
         if file_size < header_len {
-            return Err(Error::Corruption("Invalid header of LogFile!".to_owned()));
+            return Err(Error::InvalidArgument(format!(
+                "invalid header len of log file, expected len: {}, actual len: {}",
+                header_len, file_size,
+            )));
         }
         // [2] Parse the format of the file.
-        let mut container =
-            vec![0; LogFileFormat::header_len() + LogFileFormat::payload_len(Version::V2)];
+        let expected_container_len =
+            LogFileFormat::header_len() + LogFileFormat::payload_len(Version::V2);
+        let mut container = vec![0; expected_container_len];
         let size = self.read_to(0, &mut container[..])?;
         container.truncate(size);
-        self.format = LogFileFormat::decode(&mut container.as_slice())?;
-        Ok(self.format)
+        match LogFileFormat::decode(&mut container.as_slice()) {
+            Err(Error::InvalidArgument(err_msg)) => {
+                if file_size <= expected_container_len {
+                    // Here, it means that we parsed an corrupted V2 header.
+                    Err(Error::InvalidArgument(err_msg))
+                } else {
+                    // Here, the `file_size` is not expected, representing the
+                    // whole file is corrupted.
+                    Err(Error::Corruption(err_msg))
+                }
+            }
+            Err(e) => {
+                if file_size == LogFileFormat::header_len() {
+                    // Here, it means that we parsed an corrupted V1 header. We
+                    // mark this special err with InvalidArgument, to represent
+                    // this log is corrupted on its header.
+                    Err(Error::InvalidArgument(e.to_string()))
+                } else {
+                    Err(e)
+                }
+            }
+            Ok(format) => {
+                self.format = format;
+                Ok(format)
+            }
+        }
     }
 
     #[inline]

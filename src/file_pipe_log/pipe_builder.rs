@@ -303,9 +303,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
                     match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
                         Err(e) => {
+                            let is_tail_fail = matches!(e, Error::InvalidArgument(_));
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
-                                && is_last_file {
+                                && is_last_file && is_tail_fail {
                                 warn!(
                                     "File header is corrupted but ignored: {:?}:{}, {}",
                                     queue, f.seq, e
