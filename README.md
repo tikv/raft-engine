@@ -77,8 +77,10 @@ Contributions are always welcome! Here are a few tips for making a PR:
 ```
 # rustup default nightly
 make
+# rustup default stable
+env WITH_STABLE_TOOLCHAIN=true make
 # filter a specific test case
-env EXTRA_CARGO_ARGS=<testname> make test_nightly
+env EXTRA_CARGO_ARGS=<testname> make test
 ```
 
 - For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.
