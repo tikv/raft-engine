@@ -54,7 +54,7 @@ Put this in your Cargo.toml:
 
 ```rust
 [dependencies]
-raft-engine = "0.2.0"
+raft-engine = "0.3.0"
 ```
 
 Available Cargo features:
