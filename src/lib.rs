@@ -67,7 +67,7 @@ pub use engine::Engine;
 pub use errors::{Error, Result};
 pub use log_batch::{Command, LogBatch, MessageExt};
 pub use metrics::{get_perf_context, set_perf_context, take_perf_context, PerfContext};
-pub use pipe_log::{DataLayout, Version};
+pub use pipe_log::Version;
 pub use util::ReadableSize;
 
 #[cfg(feature = "internals")]
@@ -80,7 +80,6 @@ pub mod internals {
     pub use crate::pipe_log::*;
     #[cfg(feature = "swap")]
     pub use crate::swappy_allocator::*;
-    pub use crate::util::{round_down, round_up};
     pub use crate::write_barrier::*;
 }
 

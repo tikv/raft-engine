@@ -3,13 +3,14 @@
 //! A generic log storage.
 
 use std::cmp::Ordering;
+use std::fmt::{self, Display};
 
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
+use num_traits::ToPrimitive;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
 
-use crate::file_pipe_log::LogFileFormat;
 use crate::Result;
 
 /// The type of log queue.
@@ -24,7 +25,7 @@ pub enum LogQueue {
 pub type FileSeq = u64;
 
 /// A unique identifier for a log file.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FileId {
     pub queue: LogQueue,
     pub seq: FileSeq,
@@ -61,7 +62,7 @@ impl std::cmp::PartialOrd for FileId {
 }
 
 /// A logical pointer to a chunk of log file data.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FileBlockHandle {
     pub id: FileId,
     pub offset: u64,
@@ -101,7 +102,7 @@ pub enum Version {
 
 impl Version {
     pub fn has_log_signing(&self) -> bool {
-        fail_point!("pipe_log::version::force_enable", |_| { true });
+        fail_point!("pipe_log::version::force_enable_log_signing", |_| { true });
         match self {
             Version::V1 => false,
             Version::V2 => true,
@@ -115,60 +116,28 @@ impl Default for Version {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DataLayout {
-    NoAlignment,
-    /// Alignment(block_size) mode in memory for DataLayout will make sense
-    /// when DIO is open.
-    ///
-    /// `block_size` will be dumped into the header of each log file.
-    Alignment(u64),
-}
-
-impl DataLayout {
-    pub fn from_u64(val: u64) -> Self {
-        match val {
-            0 => DataLayout::NoAlignment,
-            aligned => DataLayout::Alignment(aligned),
-        }
-    }
-
-    pub fn to_u64(self) -> u64 {
-        match self {
-            DataLayout::NoAlignment => 0,
-            DataLayout::Alignment(aligned) => {
-                debug_assert!(aligned > 0);
-                aligned
-            }
-        }
-    }
-
-    pub const fn len() -> usize {
-        std::mem::size_of::<u64>() /* serialized in u64. */
+impl Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_u64().unwrap())
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LogFileContext {
     pub id: FileId,
-    pub format: LogFileFormat,
+    pub version: Version,
 }
 
 impl LogFileContext {
-    pub fn new(file_id: FileId, format: LogFileFormat) -> Self {
-        Self {
-            id: file_id,
-            format,
-        }
+    pub fn new(id: FileId, version: Version) -> Self {
+        Self { id, version }
     }
 
-    /// Return the `signature` in `Option<u32>` format.
-    ///
-    /// `None` will be returned only if `self.version` is invalid.
+    /// Returns the `signature` in `u32` format.
     pub fn get_signature(&self) -> Option<u32> {
-        if self.format.version().has_log_signing() {
+        if self.version.has_log_signing() {
             // Here, the count of files will be always limited to less than
-            // `UINT32_MAX`. So, we just use the low 32 bit as the `signature`
+            // `u32::MAX`. So, we just use the low 32 bit as the `signature`
             // by default.
             Some(self.id.seq as u32)
         } else {
@@ -185,10 +154,7 @@ pub trait PipeLog: Sized {
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.
     ///
-    /// Incoming `bytes` will be appended to the `active_file`, which should
-    /// only be held by one thread, that is, the leader of the writer group.
-    /// Also, it's not permitted to change the `active_file` until the leader
-    /// confirms all bytes have been dumped into the file.
+    /// The result of `fetch_active_file` will not be affected by this method.
     fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle>;
 
     /// Hints it to synchronize buffered writes. The synchronization is
@@ -229,7 +195,7 @@ pub trait PipeLog: Sized {
     /// Returns the number of deleted files.
     fn purge_to(&self, file_id: FileId) -> Result<usize>;
 
-    /// Returns `[LogFileContext]` of the active file in the specific
+    /// Returns [`LogFileContext`] of the active file in the specific
     /// log queue.
     fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext;
 }

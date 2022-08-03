@@ -19,7 +19,7 @@ pub const GIB: u64 = MIB * BINARY_DATA_MAGNITUDE;
 pub const TIB: u64 = GIB * BINARY_DATA_MAGNITUDE;
 pub const PIB: u64 = TIB * BINARY_DATA_MAGNITUDE;
 
-#[derive(Clone, Debug, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd)]
 pub struct ReadableSize(pub u64);
 
 impl ReadableSize {
@@ -325,13 +325,11 @@ pub trait Factory<Target>: Send + Sync {
     fn new_target(&self) -> Target;
 }
 
-/// Return an aligned `offset`.
+/// Returns an aligned `offset`.
 ///
 /// # Example:
 ///
-/// ```
-/// use raft_engine::internals::round_up;
-///
+/// ```ignore
 /// assert_eq!(round_up(18, 4), 20);
 /// assert_eq!(round_up(64, 16), 64);
 /// ```
@@ -340,13 +338,11 @@ pub fn round_up(offset: usize, alignment: usize) -> usize {
     (offset + alignment - 1) / alignment * alignment
 }
 
-/// Return an aligned `offset`.
+/// Returns an aligned `offset`.
 ///
 /// # Example:
 ///
-/// ```
-/// use raft_engine::internals::round_down;
-///
+/// ```ignore
 /// assert_eq!(round_down(18, 4), 16);
 /// assert_eq!(round_down(64, 16), 64);
 /// ```

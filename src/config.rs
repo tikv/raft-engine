@@ -9,7 +9,7 @@ use crate::{util::ReadableSize, Result};
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecoveryMode {
     AbsoluteConsistency,
@@ -84,12 +84,11 @@ pub struct Config {
     /// Default: None
     pub memory_limit: Option<ReadableSize>,
 
-    /// Whether to recycle stale logs.
-    /// If `true`, `purge` operations on logs will firstly put stale
-    /// files into a list for recycle. It's only available if
-    /// `format_version` >= `2`.
+    /// Whether to recycle stale log files.
+    /// If `true`, logically purged log files will be reserved for recycling.
+    /// Only available for `format_version` 2 and above.
     ///
-    /// Default: false,
+    /// Default: false
     pub enable_log_recycle: bool,
 }
 
@@ -152,19 +151,19 @@ impl Config {
         if self.enable_log_recycle {
             if !self.format_version.has_log_signing() {
                 return Err(box_err!(
-                    "format_version: {:?} is invalid when 'enable_log_recycle' on, setting it to V2",
+                    "format version {} doesn't support log recycle, use 2 or above",
                     self.format_version
                 ));
             }
             if self.purge_threshold.0 / self.target_file_size.0 >= std::u32::MAX as u64 {
                 return Err(box_err!(
-                    "File count exceed UINT32_MAX, calculated by 'purge-threshold / target-file-size'"
+                    "File count exceed u32::MAX, calculated by `purge-threshold / target-file-size`"
                 ));
             }
         }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
-            warn!("memory-limit will be ignored because swap feature is not enabled");
+            warn!("memory-limit will be ignored because swap feature is disabled");
         }
         Ok(())
     }

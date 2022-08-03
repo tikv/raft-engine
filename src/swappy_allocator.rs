@@ -1067,7 +1067,7 @@ mod tests {
             // test_drain_leak
             static mut DROPS: i32 = 0;
 
-            #[derive(Debug, PartialEq)]
+            #[derive(Debug, PartialEq, Eq)]
             struct D(u32, bool);
 
             impl Drop for D {
