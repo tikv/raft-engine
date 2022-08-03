@@ -57,8 +57,8 @@ impl<F: FileSystem> LogFileWriter<F> {
             capacity: file_size,
             last_sync: file_size,
         };
-        // TODO: add tests for file_size in [header_len, max_encode_len].
-        if file_size < LogFileFormat::encode_len(format.version) || force_reset {
+        // TODO: add tests for file_size in [header_len, max_encoded_len].
+        if file_size < LogFileFormat::encoded_len(format.version) || force_reset {
             f.write_header(format)?;
         } else {
             f.writer.seek(SeekFrom::Start(file_size as u64))?;
@@ -70,7 +70,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.writer.seek(SeekFrom::Start(0))?;
         self.last_sync = 0;
         self.written = 0;
-        let mut buf = Vec::with_capacity(LogFileFormat::encode_len(format.version));
+        let mut buf = Vec::with_capacity(LogFileFormat::encoded_len(format.version));
         format.encode(&mut buf)?;
         self.write(&buf, 0)
     }
@@ -174,7 +174,7 @@ impl<F: FileSystem> LogFileReader<F> {
     /// to `0`, that is, the beginning of the file, to parse the
     /// related `[LogFileFormat]`.
     pub fn parse_format(&mut self) -> Result<LogFileFormat> {
-        let mut container = vec![0; LogFileFormat::max_encode_len()];
+        let mut container = vec![0; LogFileFormat::max_encoded_len()];
         let size = self.read_to(0, &mut container)?;
         container.truncate(size);
         LogFileFormat::decode(&mut container.as_slice())

@@ -315,8 +315,8 @@ pub mod debug {
             for from in formats {
                 for to in formats {
                     for shorter in [true, false] {
-                        if LogFileFormat::encode_len(to.version)
-                            < LogFileFormat::encode_len(from.version)
+                        if LogFileFormat::encoded_len(to.version)
+                            < LogFileFormat::encoded_len(from.version)
                         {
                             continue;
                         }
