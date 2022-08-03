@@ -46,14 +46,8 @@ impl<P, O> Writer<P, O> {
         }
     }
 
-    /// Returns an immutable reference to the payload.
-    #[cfg(test)]
-    pub fn get_payload(&self) -> &P {
-        unsafe { &*self.payload }
-    }
-
     /// Returns a mutable reference to the payload.
-    pub fn get_mut_payload(&mut self) -> &mut P {
+    pub fn mut_payload(&mut self) -> &mut P {
         unsafe { &mut *self.payload }
     }
 
@@ -305,7 +299,8 @@ mod tests {
                                 leader_enter_tx.send(()).unwrap();
                                 let mut n = 0;
                                 for w in wg.iter_mut() {
-                                    w.set_output(*w.get_payload());
+                                    let p = *w.mut_payload();
+                                    w.set_output(p);
                                     n += 1;
                                 }
                                 assert_eq!(n, 1);
@@ -339,7 +334,8 @@ mod tests {
                                 leader_enter_tx_clone.send(()).unwrap();
                                 let mut idx = 0;
                                 for w in wg.iter_mut() {
-                                    w.set_output(*w.get_payload());
+                                    let p = *w.mut_payload();
+                                    w.set_output(p);
                                     idx += 1;
                                 }
                                 assert_eq!(idx, n as u32);

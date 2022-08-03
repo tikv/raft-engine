@@ -16,13 +16,13 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{DataLayout, FileId, FileSeq, LogFileContext, LogQueue};
+use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
 use super::format::{lock_file_path, FileNameExt, LogFileFormat};
-use super::log_file::{build_file_reader, FileHandler};
-use super::pipe::{DualPipes, SinglePipe};
+use super::log_file::build_file_reader;
+use super::pipe::{DualPipes, FileWithFormat, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
 
@@ -59,8 +59,6 @@ impl<M: ReplayMachine + Default> Factory<M> for DefaultMachineFactory<M> {
 pub struct RecoveryConfig {
     pub queue: LogQueue,
     pub mode: RecoveryMode,
-    /// TODO: This opt should defined by whether open DIO or not.
-    pub file_format: LogFileFormat,
     pub concurrency: usize,
     pub read_block_size: u64,
 }
@@ -233,7 +231,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let append_recovery_cfg = RecoveryConfig {
             queue: LogQueue::Append,
             mode: self.cfg.recovery_mode,
-            file_format: LogFileFormat::new(self.cfg.format_version, DataLayout::NoAlignment),
             concurrency: append_concurrency,
             read_block_size: self.cfg.recovery_read_block_size.0,
         };
@@ -285,7 +282,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let queue = recovery_cfg.queue;
         let concurrency = recovery_cfg.concurrency;
         let recovery_mode = recovery_cfg.mode;
-        let file_format = recovery_cfg.file_format;
         let recovery_read_block_size = recovery_cfg.read_block_size as usize;
 
         let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
@@ -301,8 +297,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    match build_file_reader(file_system.as_ref(), f.handle.clone(), None) {
+                    let mut file_reader = build_file_reader(file_system.as_ref(), f.handle.clone())?;
+                    match file_reader.parse_format() {
                         Err(e) => {
+                            // TODO: More reliable tail detection.
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
                                 && is_last_file {
@@ -311,7 +309,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(0)?;
-                                f.format = Some(file_format);
+                                f.format = Some(LogFileFormat::default());
                                 continue;
                             } else {
                                 error!(
@@ -321,12 +319,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 return Err(e);
                             }
                         },
-                        Ok(file_reader) => {
-                            reader.open(FileId { queue, seq: f.seq }, file_reader)?;
+                        Ok(format) => {
+                            f.format = Some(format);
+                            reader.open(FileId { queue, seq: f.seq }, format, file_reader)?;
                         }
                     }
-                    // Update file format of each log file.
-                    f.format = reader.file_format();
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
@@ -406,14 +403,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             LogQueue::Rewrite => &self.rewrite_files,
         };
         let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<FileHandler<F>> = files
+        let files: VecDeque<FileWithFormat<F>> = files
             .iter()
-            .map(|f| FileHandler {
+            .map(|f| FileWithFormat {
                 handle: f.handle.clone(),
-                context: LogFileContext::new(
-                    FileId { seq: f.seq, queue },
-                    *f.format.as_ref().unwrap(),
-                ),
+                format: f.format.unwrap(),
             })
             .collect();
         SinglePipe::open(

@@ -275,13 +275,10 @@ impl RhaiFilterMachine {
                     }),
                 ));
                 let mut reader = build_file_reader(system, &bak_path)?;
-                let mut writer = build_file_writer(
-                    system,
-                    &target_path,
-                    *reader.file_format(),
-                    true, /* create */
-                )?;
-                let log_file_context = LogFileContext::new(f.file_id, *reader.file_format());
+                let format = reader.parse_format()?;
+                let mut writer =
+                    build_file_writer(system, &target_path, format, true /* create */)?;
+                let log_file_context = LogFileContext::new(f.file_id, format.version);
                 // Write out new log file.
                 for item in f.items.into_iter() {
                     match item.content {

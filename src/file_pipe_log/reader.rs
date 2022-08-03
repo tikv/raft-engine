@@ -2,16 +2,17 @@
 
 use crate::env::FileSystem;
 use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{DataLayout, FileBlockHandle, FileId, LogFileContext};
+use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
 use crate::util::round_up;
 use crate::{Error, Result};
 
-use super::format::{is_valid_paddings, LogFileFormat};
+use super::format::{is_zero_padded, LogFileFormat};
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {
-    file_context: Option<LogFileContext>,
+    file_id: Option<FileId>,
+    format: Option<LogFileFormat>,
     reader: Option<LogFileReader<F>>,
     size: usize,
 
@@ -29,7 +30,8 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// Creates a new reader.
     pub fn new(read_block_size: usize) -> Self {
         Self {
-            file_context: None,
+            file_id: None,
+            format: None,
             reader: None,
             size: 0,
 
@@ -42,9 +44,15 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     }
 
     /// Opens a file that can be accessed through the given reader.
-    pub fn open(&mut self, file_id: FileId, reader: LogFileReader<F>) -> Result<()> {
-        self.valid_offset = reader.file_format().enc_len();
-        self.file_context = Some(LogFileContext::new(file_id, *reader.file_format()));
+    pub fn open(
+        &mut self,
+        file_id: FileId,
+        format: LogFileFormat,
+        reader: LogFileReader<F>,
+    ) -> Result<()> {
+        self.valid_offset = LogFileFormat::encode_len(format.version);
+        self.file_id = Some(file_id);
+        self.format = Some(format);
         self.size = reader.file_size()?;
         self.reader = Some(reader);
         self.buffer.clear();
@@ -54,12 +62,13 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
 
     /// Closes any ongoing file access.
     pub fn reset(&mut self) {
+        self.file_id = None;
+        self.format = None;
         self.reader = None;
         self.size = 0;
         self.buffer.clear();
         self.buffer_offset = 0;
         self.valid_offset = 0;
-        self.file_context = None;
     }
 
     /// Returns the next [`LogItemBatch`] in current opened file. Returns
@@ -70,24 +79,23 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // is open, and the following reading strategy should tolerate reading broken
         // blocks until it finds an accessible header of `LogBatch`.
         while self.valid_offset < self.size {
-            let data_layout = self.file_context.as_ref().unwrap().format.data_layout();
+            let alignment = self.format.unwrap().alignment;
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
                 return Err(Error::Corruption(
                     "attempt to read file with broken header".to_owned(),
                 ));
             }
-            let header_parser = LogBatch::decode_header(&mut self.peek(
+            let r = LogBatch::decode_header(&mut self.peek(
                 self.valid_offset,
                 LOG_BATCH_HEADER_LEN,
                 0,
             )?);
             if_chain::if_chain! {
-                if header_parser.is_err();
-                if let DataLayout::Alignment(fs_block_size) = data_layout;
-                if fs_block_size > 0;
-                let aligned_next_offset = round_up(self.valid_offset, fs_block_size as usize);
+                if r.is_err();
+                if alignment > 0;
+                let aligned_next_offset = round_up(self.valid_offset, alignment as usize);
                 if self.valid_offset != aligned_next_offset;
-                if is_valid_paddings(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?);
+                if is_zero_padded(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?);
                 then {
                     // In DataLayout::Alignment mode, tail data in the previous block
                     // may be aligned with paddings, that is '0'. So, we need to
@@ -100,15 +108,18 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 // it means that the header is broken or the padding is filled
                 // with non-zero bytes, and the err will be returned.
             }
-            let (footer_offset, compression_type, len) = header_parser?;
+            let (footer_offset, compression_type, len) = r?;
             if self.valid_offset + len > self.size {
                 return Err(Error::Corruption("log batch header broken".to_owned()));
             }
-            let file_context = self.file_context.as_ref().unwrap().clone();
             let handle = FileBlockHandle {
-                id: file_context.id,
+                id: self.file_id.unwrap(),
                 offset: (self.valid_offset + LOG_BATCH_HEADER_LEN) as u64,
                 len: footer_offset - LOG_BATCH_HEADER_LEN,
+            };
+            let context = LogFileContext {
+                id: self.file_id.unwrap(),
+                version: self.format.unwrap().version,
             };
             let item_batch = LogItemBatch::decode(
                 &mut self.peek(
@@ -118,7 +129,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
                 )?,
                 handle,
                 compression_type,
-                &file_context,
+                &context,
             )?;
             self.valid_offset += len;
             return Ok(Some(item_batch));
@@ -174,9 +185,5 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     /// file. Returns zero if there is no file opened.
     pub fn valid_offset(&self) -> usize {
         self.valid_offset
-    }
-
-    pub fn file_format(&self) -> Option<LogFileFormat> {
-        self.reader.as_ref().map(|reader| *reader.file_format())
     }
 }

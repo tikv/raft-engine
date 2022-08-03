@@ -151,7 +151,7 @@ where
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
-                    let log_batch = writer.get_mut_payload();
+                    let log_batch = writer.mut_payload();
                     let res = if !log_batch.is_empty() {
                         log_batch.prepare_write(&file_context)?;
                         self.pipe_log
@@ -365,8 +365,8 @@ where
         self.memtables.is_empty()
     }
 
-    /// Returns the range of sequence number of `active` files of the
-    /// specific `LogQueue`.
+    /// Returns the sequence number range of active log files in the specific
+    /// log queue.
     /// For testing only.
     pub fn file_span(&self, queue: LogQueue) -> (u64, u64) {
         self.pipe_log.file_span(queue)
@@ -447,8 +447,7 @@ where
         script: String,
         file_system: Arc<F>,
     ) -> Result<()> {
-        use crate::file_pipe_log::{LogFileFormat, RecoveryConfig, ReplayMachine};
-        use crate::pipe_log::DataLayout;
+        use crate::file_pipe_log::{RecoveryConfig, ReplayMachine};
 
         if !path.exists() {
             return Err(Error::InvalidArgument(format!(
@@ -463,7 +462,6 @@ where
             ..Default::default()
         };
         let recovery_mode = cfg.recovery_mode;
-        let file_format = LogFileFormat::new(cfg.format_version, DataLayout::NoAlignment);
         let read_block_size = cfg.recovery_read_block_size.0;
         let mut builder = FilePipeLogBuilder::new(cfg, file_system.clone(), Vec::new());
         builder.scan()?;
@@ -475,7 +473,6 @@ where
                 RecoveryConfig {
                     queue: LogQueue::Append,
                     mode: recovery_mode,
-                    file_format,
                     concurrency: 1,
                     read_block_size,
                 },
@@ -488,7 +485,6 @@ where
                 RecoveryConfig {
                     queue: LogQueue::Rewrite,
                     mode: recovery_mode,
-                    file_format,
                     concurrency: 1,
                     read_block_size,
                 },
@@ -2180,11 +2176,12 @@ mod tests {
         let cfg_v2 = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(15), // recycle capacity = 15
+            purge_threshold: ReadableSize(15),
             format_version: Version::V2,
             enable_log_recycle: true,
             ..Default::default()
         };
+        assert_eq!(cfg_v2.recycle_capacity(), 15);
         // Prepare files with format_version V1
         {
             let engine = RaftLogEngine::open_with_file_system(cfg_v1.clone(), fs.clone()).unwrap();
@@ -2200,9 +2197,7 @@ mod tests {
                 engine.append(rid, 11, 20, Some(&entry_data));
             }
             // Mark region_id -> 6 obsolete.
-            for rid in 6..=6 {
-                engine.clean(rid);
-            }
+            engine.clean(6);
             // the [1, 12] files are recycled
             engine.purge_expired_files().unwrap();
             assert_eq!(engine.file_count(Some(LogQueue::Append)), 5);

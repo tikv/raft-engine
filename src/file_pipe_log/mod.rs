@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{FileNameExt, LogFileFormat};
+pub use format::FileNameExt;
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
@@ -47,7 +47,7 @@ pub mod debug {
             file_system.open(path)?
         };
         let fd = Arc::new(fd);
-        super::log_file::build_file_writer(file_system, fd, format, create)
+        super::log_file::build_file_writer(file_system, fd, format, create /* force_reset */)
     }
 
     /// Opens a log file for read.
@@ -56,7 +56,7 @@ pub mod debug {
         path: &Path,
     ) -> Result<LogFileReader<F>> {
         let fd = Arc::new(file_system.open(path)?);
-        super::log_file::build_file_reader(file_system, fd, None)
+        super::log_file::build_file_reader(file_system, fd)
     }
 
     /// An iterator over the log items in log files.
@@ -157,8 +157,9 @@ pub mod debug {
 
         fn find_next_readable_file(&mut self) -> Result<()> {
             while let Some((file_id, path)) = self.files.pop_front() {
-                self.batch_reader
-                    .open(file_id, build_file_reader(self.system.as_ref(), &path)?)?;
+                let mut reader = build_file_reader(self.system.as_ref(), &path)?;
+                let format = reader.parse_format()?;
+                self.batch_reader.open(file_id, format, reader)?;
                 if let Some(b) = self.batch_reader.next()? {
                     self.items.extend(b.into_items());
                     break;
@@ -174,7 +175,7 @@ pub mod debug {
         use crate::env::DefaultFileSystem;
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogFileContext, LogQueue, Version};
-        use crate::test_util::generate_entries;
+        use crate::test_util::{generate_entries, PanicGuard};
         use raft::eraftpb::Entry;
 
         #[test]
@@ -216,13 +217,13 @@ pub mod debug {
                     true, /* create */
                 )
                 .unwrap();
-                let log_file_format = LogFileContext::new(file_id, LogFileFormat::default());
+                let log_file_format = LogFileContext::new(file_id, Version::default());
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
                     let len = batch
                         .finish_populate(1 /* compression_threshold */)
                         .unwrap();
-                    assert!(batch.prepare_write(&log_file_format).is_ok());
+                    batch.prepare_write(&log_file_format).unwrap();
                     writer
                         .write(batch.encoded_bytes(), 0 /* target_file_hint */)
                         .unwrap();
@@ -233,7 +234,6 @@ pub mod debug {
                     });
                 }
                 writer.close().unwrap();
-                assert_eq!(writer.header.version(), Version::default());
                 // Read and verify.
                 let mut reader =
                     LogItemReader::new_file_reader(file_system.clone(), &file_path).unwrap();
@@ -291,11 +291,66 @@ pub mod debug {
             assert!(
                 LogItemReader::new_directory_reader(file_system.clone(), &empty_file_path).is_err()
             );
-            assert!(LogItemReader::new_file_reader(file_system.clone(), &empty_file_path).is_ok());
+            LogItemReader::new_file_reader(file_system.clone(), &empty_file_path).unwrap();
 
             let mut reader = LogItemReader::new_directory_reader(file_system, dir.path()).unwrap();
             assert!(reader.next().unwrap().is_err());
             assert!(reader.next().is_none());
+        }
+
+        #[test]
+        fn test_recover_from_partial_write() {
+            let dir = tempfile::Builder::new()
+                .prefix("test_debug_file_overwrite")
+                .tempdir()
+                .unwrap();
+            let file_system = Arc::new(DefaultFileSystem);
+
+            let path = FileId::dummy(LogQueue::Append).build_file_path(dir.path());
+
+            let formats = [
+                LogFileFormat::new(Version::V1, 0),
+                LogFileFormat::new(Version::V2, 1),
+            ];
+            for from in formats {
+                for to in formats {
+                    for shorter in [true, false] {
+                        if LogFileFormat::encode_len(to.version)
+                            < LogFileFormat::encode_len(from.version)
+                        {
+                            continue;
+                        }
+                        let _guard = PanicGuard::with_prompt(format!(
+                            "case: [{:?}, {:?}, {:?}]",
+                            from, to, shorter
+                        ));
+                        let mut writer = build_file_writer(
+                            file_system.as_ref(),
+                            &path,
+                            from,
+                            true, /* create */
+                        )
+                        .unwrap();
+                        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                        let len = writer.offset();
+                        writer.close().unwrap();
+                        if shorter {
+                            f.set_len(len as u64 - 1).unwrap();
+                        }
+                        let mut writer = build_file_writer(
+                            file_system.as_ref(),
+                            &path,
+                            to,
+                            false, /* create */
+                        )
+                        .unwrap();
+                        writer.close().unwrap();
+                        let mut reader = build_file_reader(file_system.as_ref(), &path).unwrap();
+                        assert_eq!(reader.parse_format().unwrap(), to);
+                        std::fs::remove_file(&path).unwrap();
+                    }
+                }
+            }
         }
     }
 }

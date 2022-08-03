@@ -450,11 +450,11 @@ fn test_tail_corruption() {
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         append(&engine, rid, 1, 5, Some(&data));
         drop(engine);
-        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+        Engine::open_with_file_system(cfg, fs.clone()).unwrap();
     }
     // Version::V1 in header owns abnormal DataLayout.
     {
-        let _f = FailGuard::new("log_file_header::force_abnormal_data_layout", "return");
+        let _f = FailGuard::new("log_file_header::too_large", "return");
         let dir = tempfile::Builder::new()
             .prefix("test_tail_corruption_4")
             .tempdir()
@@ -472,11 +472,11 @@ fn test_tail_corruption() {
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         append(&engine, rid, 1, 5, Some(&data));
         drop(engine);
-        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+        Engine::open_with_file_system(cfg, fs.clone()).unwrap();
     }
     // DataLayout in header is corrupted for Version::V2
     {
-        let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
+        let _f = FailGuard::new("log_file_header::too_small", "return");
         let dir = tempfile::Builder::new()
             .prefix("test_tail_corruption_5")
             .tempdir()
@@ -488,11 +488,11 @@ fn test_tail_corruption() {
         };
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         drop(engine);
-        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+        Engine::open_with_file_system(cfg, fs.clone()).unwrap();
     }
     // DataLayout in header is abnormal for Version::V2
     {
-        let _f = FailGuard::new("log_file_header::force_abnormal_data_layout", "return");
+        let _f = FailGuard::new("log_file_header::too_large", "return");
         let dir = tempfile::Builder::new()
             .prefix("test_tail_corruption_6")
             .tempdir()
@@ -504,11 +504,11 @@ fn test_tail_corruption() {
         };
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         drop(engine);
-        assert!(Engine::open_with_file_system(cfg, fs.clone()).is_ok());
+        Engine::open_with_file_system(cfg, fs.clone()).unwrap();
     }
     // DataLayout in header is corrupted for Version::V2, followed with records
     {
-        let _f = FailGuard::new("log_file_header::corrupted_data_layout", "return");
+        let _f = FailGuard::new("log_file_header::too_small", "return");
         let dir = tempfile::Builder::new()
             .prefix("test_tail_corruption_7")
             .tempdir()
@@ -616,7 +616,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     // Force open Engine with `enable_log_recycle == true` and
     // `format_version == Version::V1`.
     let engine = {
-        let _f = FailGuard::new("pipe_log::version::force_enable", "return");
+        let _f = FailGuard::new("pipe_log::version::force_enable_log_signing", "return");
         Engine::open(cfg_err.clone()).unwrap()
     };
     // Do not truncate the active_file when exit
@@ -681,7 +681,7 @@ fn test_build_engine_with_multi_datalayout() {
         append(&engine, rid, 11, 20, Some(&data));
     }
     drop(engine);
-    assert!(Engine::open(cfg_v2).is_ok());
+    Engine::open(cfg_v2).unwrap();
 }
 
 #[test]
@@ -706,7 +706,7 @@ fn test_build_engine_with_datalayout_abnormal() {
     append(&engine, 2, 1, 11, Some(&data));
     {
         // Set failpoint to dump content with invalid paddings into log file.
-        let _f1 = FailGuard::new("file_pipe_log::append::force_abnormal_paddings", "return");
+        let _f1 = FailGuard::new("file_pipe_log::append::corrupted_padding", "return");
         append(&engine, 3, 1, 11, Some(&data));
         drop(engine);
         assert!(Engine::open(cfg.clone()).is_err());
@@ -720,6 +720,6 @@ fn test_build_engine_with_datalayout_abnormal() {
             append(&engine, rid, 1, 11, Some(&data));
         }
         drop(engine);
-        assert!(Engine::open(cfg).is_ok());
+        Engine::open(cfg).unwrap();
     }
 }
