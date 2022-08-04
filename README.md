@@ -74,11 +74,11 @@ Contributions are always welcome! Here are a few tips for making a PR:
 - All commits must be signed off (with `git commit -s`) to pass the [DCO check](https://probot.github.io/apps/dco/).
 - Tests are automatically run against the changes, some of them can be run locally:
 
-```
-# rustup default nightly
+```bash
+# run tests with nightly features
 make
-# rustup default stable
-env WITH_STABLE_TOOLCHAIN=true make
+# run tests on stable toolchain
+env WITH_STABLE_TOOLCHAIN=force make
 # filter a specific test case
 env EXTRA_CARGO_ARGS=<testname> make test
 ```
