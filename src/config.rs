@@ -31,6 +31,15 @@ pub struct Config {
     /// Default: ""
     pub dir: String,
 
+    /// Assistant directory to store log files. Will create on startup if
+    /// set and not exists.
+    ///
+    /// Newly logs will be put into this dir when the main `dir` is full
+    /// or not accessible.
+    ///
+    /// Default: ""
+    pub sub_dir: Option<String>,
+
     /// How to deal with file corruption during recovery.
     ///
     /// Default: "tolerate-tail-corruption".
@@ -97,6 +106,7 @@ impl Default for Config {
         #[allow(unused_mut)]
         let mut cfg = Config {
             dir: "".to_owned(),
+            sub_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,

@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fs2::FileExt;
+use hashbrown::HashMap;
 use log::{error, info, warn};
 use rayon::prelude::*;
 
@@ -22,7 +23,7 @@ use crate::{Error, Result};
 
 use super::format::{lock_file_path, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
-use super::pipe::{DualPipes, FileWithFormat, SinglePipe};
+use super::pipe::{DualPipes, FileWithFormat, SinglePipe, StorageDirType};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
 
@@ -67,6 +68,7 @@ struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
     handle: Arc<F::Handle>,
     format: Option<LogFileFormat>,
+    storage_type: StorageDirType,
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
@@ -99,6 +101,189 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
+        fn validate_dir(dir: &str) -> Result<()> {
+            let path = Path::new(dir);
+            if !path.exists() {
+                info!("Create raft log directory: {}", dir);
+                fs::create_dir(dir)?;
+                return Ok(());
+            }
+            if !path.is_dir() {
+                return Err(box_err!("Not directory: {}", dir));
+            }
+            Ok(())
+        }
+
+        fn parse_file_range(
+            dir: &str,
+            dir_type: StorageDirType,
+            append_range: &mut FileSeqRange,
+            rewrite_range: &mut FileSeqRange,
+            append_dict: &mut FileSeqDict,
+            rewrite_dict: &mut FileSeqDict,
+        ) -> Result<()> {
+            let path = Path::new(dir);
+            fs::read_dir(path)?.for_each(|e| {
+                if let Ok(e) = e {
+                    let p = e.path();
+                    if p.is_file() {
+                        match FileId::parse_file_name(p.file_name().unwrap().to_str().unwrap()) {
+                            Some(FileId {
+                                queue: LogQueue::Append,
+                                seq,
+                            }) => {
+                                append_dict.insert(seq, dir_type);
+                                append_range.0 = std::cmp::min(append_range.0, seq);
+                                append_range.1 = std::cmp::max(append_range.1, seq);
+                            }
+                            Some(FileId {
+                                queue: LogQueue::Rewrite,
+                                seq,
+                            }) => {
+                                rewrite_dict.insert(seq, dir_type);
+                                rewrite_range.0 = std::cmp::min(rewrite_range.0, seq);
+                                rewrite_range.1 = std::cmp::max(rewrite_range.1, seq);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            });
+            Ok(())
+        }
+
+        // Validate main dir.
+        let dir = &self.cfg.dir;
+        validate_dir(dir)?;
+        self.dir_lock = Some(lock_dir(dir)?);
+        // Validate sub dir (secondary dir).
+        if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
+            validate_dir(sub_dir)?;
+        }
+
+        type FileSeqRange = (u64, u64); // (minimal_id, maximal_id)
+        type FileSeqDict = HashMap<FileSeq, StorageDirType>; // <seq, dir_type>
+        let mut append_id_range = (u64::MAX, 0_u64);
+        let mut rewrite_id_range = (u64::MAX, 0_u64);
+        let mut append_file_dict: HashMap<FileSeq, StorageDirType> = HashMap::default();
+        let mut rewrite_file_dict: HashMap<FileSeq, StorageDirType> = HashMap::default();
+
+        parse_file_range(
+            dir,
+            StorageDirType::Main,
+            &mut append_id_range,
+            &mut rewrite_id_range,
+            &mut append_file_dict,
+            &mut rewrite_file_dict,
+        )?;
+        if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
+            parse_file_range(
+                sub_dir,
+                StorageDirType::Secondary,
+                &mut append_id_range,
+                &mut rewrite_id_range,
+                &mut append_file_dict,
+                &mut rewrite_file_dict,
+            )?;
+        }
+
+        for (queue, min_id, max_id, files, file_dict) in [
+            (
+                LogQueue::Append,
+                append_id_range.0,
+                append_id_range.1,
+                &mut self.append_files,
+                &append_file_dict,
+            ),
+            (
+                LogQueue::Rewrite,
+                rewrite_id_range.0,
+                rewrite_id_range.1,
+                &mut self.rewrite_files,
+                &rewrite_file_dict,
+            ),
+        ] {
+            if max_id > 0 {
+                // Try to cleanup stale metadata left by the previous version.
+                let max_sample = 100;
+                // Find the first obsolete metadata.
+                let mut delete_start = None;
+                for i in 0..max_sample {
+                    let seq = i * min_id / max_sample;
+                    let file_id = FileId { queue, seq };
+                    // Main dir
+                    let path = file_id.build_file_path(&self.cfg.dir);
+                    if self.file_system.exists_metadata(&path) {
+                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
+                        break;
+                    }
+                    // Secondary dir
+                    if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
+                        let path = file_id.build_file_path(sub_dir);
+                        if self.file_system.exists_metadata(&path) {
+                            delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
+                            break;
+                        }
+                    }
+                }
+                // Delete metadata starting from the oldest. Abort on error.
+                if let Some(start) = delete_start {
+                    let mut success = 0;
+                    for seq in start..min_id {
+                        let file_id = FileId { queue, seq };
+                        // Main dir
+                        let path = file_id.build_file_path(&self.cfg.dir);
+                        if let Err(e) = self.file_system.delete_metadata(&path) {
+                            error!("failed to delete metadata of {}: {}.", path.display(), e);
+                            break;
+                        }
+                        // Secondary dir
+                        if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
+                            let path = file_id.build_file_path(sub_dir);
+                            if let Err(e) = self.file_system.delete_metadata(&path) {
+                                error!("failed to delete metadata of {}: {}.", path.display(), e);
+                                break;
+                            }
+                        }
+                        success += 1;
+                    }
+                    warn!(
+                        "deleted {} stale files of {:?} in range [{}, {}).",
+                        success, queue, start, min_id,
+                    );
+                }
+                for seq in min_id..=max_id {
+                    let file_id = FileId { queue, seq };
+                    let (dir, storage_type) = match file_dict.get(&seq) {
+                        Some(StorageDirType::Main) => (&self.cfg.dir, StorageDirType::Main),
+                        Some(StorageDirType::Secondary) => {
+                            debug_assert!(self.cfg.sub_dir.is_some());
+                            (
+                                self.cfg.sub_dir.as_ref().unwrap(),
+                                StorageDirType::Secondary,
+                            )
+                        }
+                        None => {
+                            warn!(
+                                "Detected a hole when scanning directory, discarding files before {:?}.",
+                                file_id,
+                            );
+                            files.clear();
+                            continue;
+                        }
+                    };
+                    let path = file_id.build_file_path(dir);
+                    let handle = Arc::new(self.file_system.open(&path)?);
+                    files.push(FileToRecover {
+                        seq,
+                        handle,
+                        format: None,
+                        storage_type,
+                    });
+                }
+            }
+        }
+        /*
         let dir = &self.cfg.dir;
         let path = Path::new(dir);
         if !path.exists() {
@@ -204,6 +389,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
             }
         }
+        */
         Ok(())
     }
 
@@ -408,6 +594,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .map(|f| FileWithFormat {
                 handle: f.handle.clone(),
                 format: f.format.unwrap(),
+                storage_type: f.storage_type,
             })
             .collect();
         SinglePipe::open(
