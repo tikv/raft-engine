@@ -231,9 +231,7 @@ where
     pub fn get(&self, region_id: u64, key: &[u8]) -> Option<Vec<u8>> {
         let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
-            if let Some(value) = memtable.read().get(key) {
-                return Some(value);
-            }
+            return memtable.read().get(key);
         }
         None
     }
