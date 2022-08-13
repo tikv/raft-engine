@@ -82,12 +82,6 @@ impl FilesView {
         }
     }
 
-    /// Returns whether the view contains any file in Append queue.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.id_by_channels.iter().any(|seq| seq.is_none())
-    }
-
     /// A simple view that contains default channel files with seqno no larger
     /// than `seq`.
     pub fn simple_view(seq: u64) -> Self {

@@ -109,7 +109,7 @@ pub mod debug {
                     dir.display()
                 )));
             }
-            let files: Vec<_> = std::fs::read_dir(dir)?
+            let mut files: Vec<_> = std::fs::read_dir(dir)?
                 .filter_map(|e| {
                     if let Ok(e) = e {
                         let p = e.path();
@@ -124,8 +124,13 @@ pub mod debug {
                     None
                 })
                 .collect();
-            // FIXME: best effort sort.
-            // files.sort_by_key(|pair| pair.0);
+            files.sort_by(|a, b| {
+                if a.0.queue == b.0.queue {
+                    a.0.seq.cmp(&b.0.seq)
+                } else {
+                    a.0.queue.i().cmp(&b.0.queue.i())
+                }
+            });
             Ok(Self {
                 system,
                 files: files.into(),
