@@ -17,7 +17,7 @@ use crate::log_batch::{
     OpType,
 };
 use crate::metrics::MEMORY_USAGE;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, FilesView, LogQueue};
 use crate::util::{hash_u64, Factory};
 use crate::{Error, GlobalStats, Result};
 
@@ -112,6 +112,7 @@ impl EntryIndex {
     }
 }
 
+/// An [`EntryIndex`] without the index field.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct ThinEntryIndex {
     entries: Option<FileBlockHandle>,
@@ -310,14 +311,14 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// Rewrites a key by marking its location to the `seq`-th log file in
     /// rewrite queue. No-op if the key does not exist.
     ///
-    /// When `gate` is present, only append data no newer than it will be
+    /// When `view` is present, only append data contained in it will be
     /// rewritten.
-    pub fn rewrite_key(&mut self, key: Vec<u8>, gate: Option<FileSeq>, seq: FileSeq) {
+    pub fn rewrite_key(&mut self, key: Vec<u8>, view: Option<&FilesView>, seq: FileSeq) {
         self.global_stats.add(LogQueue::REWRITE, 1);
         if let Some(origin) = self.kvs.get_mut(&key) {
             if origin.1.queue == LogQueue::DEFAULT {
-                if let Some(gate) = gate {
-                    if origin.1.seq <= gate {
+                if let Some(view) = view {
+                    if view.contains(&origin.1) {
                         origin.1 = FileId {
                             queue: LogQueue::REWRITE,
                             seq,
@@ -399,14 +400,14 @@ impl<A: AllocatorTrait> MemTable<A> {
 
     /// Rewrites some entries by modifying their location.
     ///
-    /// When `gate` is present, only append data no newer than it will be
+    /// When `view` is present, only append data contained in it will be
     /// rewritten.
     ///
     /// # Panics
     ///
     /// Panics if index of the first entry in `rewrite_indexes` is greater than
     /// largest existing rewritten index + 1 (hole).
-    pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, gate: Option<FileSeq>) {
+    pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, view: Option<&FilesView>) {
         if rewrite_indexes.is_empty() {
             return;
         }
@@ -443,9 +444,9 @@ impl<A: AllocatorTrait> MemTable<A> {
             .enumerate()
         {
             let index = &mut self.entry_indexes[i + pos];
-            if let Some(gate) = gate {
+            if let Some(view) = view {
                 debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::DEFAULT);
-                if index.entries.unwrap().id.seq > gate {
+                if !view.contains(&index.entries.unwrap().id) {
                     // Some entries are overwritten by new appends.
                     rewrite_len = i;
                     break;
@@ -459,7 +460,7 @@ impl<A: AllocatorTrait> MemTable<A> {
             *index = rindex.into();
         }
 
-        if gate.is_none() {
+        if view.is_none() {
             self.global_stats
                 .delete(LogQueue::REWRITE, rewrite_indexes.len());
         } else {
@@ -642,16 +643,17 @@ impl<A: AllocatorTrait> MemTable<A> {
         Ok(())
     }
 
-    /// Pulls all append entries older than or equal to `gate`, to the provided
+    /// Pulls all append entries older than or equal to `view`, to the provided
     /// buffer.
     pub fn fetch_entry_indexes_before(
         &self,
-        gate: FileSeq,
+        view: &FilesView,
         vec_idx: &mut Vec<EntryIndex>,
     ) -> Result<()> {
         if let Some((first, last)) = self.span() {
             let mut i = self.rewrite_count;
-            while first + i as u64 <= last && self.entry_indexes[i].entries.unwrap().id.seq <= gate
+            while first + i as u64 <= last
+                && view.contains(&self.entry_indexes[i].entries.unwrap().id)
             {
                 vec_idx.push(EntryIndex::from_thin(
                     first + i as u64,
@@ -674,11 +676,11 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
     }
 
-    /// Pulls all key value pairs older than or equal to `gate`, to the provided
+    /// Pulls all key value pairs in `view`, to the provided
     /// buffer.
-    pub fn fetch_kvs_before(&self, gate: FileSeq, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+    pub fn fetch_kvs_before(&self, view: &FilesView, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, file_id)) in &self.kvs {
-            if file_id.queue == LogQueue::DEFAULT && file_id.seq <= gate {
+            if file_id.queue == LogQueue::DEFAULT && view.contains(file_id) {
                 vec.push((key.clone(), value.clone()));
             }
         }
@@ -721,15 +723,13 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
     }
 
-    /// Returns the number of entries smaller than or equal to `gate`.
-    pub fn entries_count_before(&self, mut gate: FileId) -> usize {
-        gate.seq += 1;
-        let idx = self
-            .entry_indexes
-            .binary_search_by_key(&gate, |ei| ei.entries.unwrap().id);
-        match idx {
-            Ok(idx) => idx,
-            Err(idx) => idx,
+    /// Returns whether there are at least `n` entries contained in `view`.
+    pub fn has_at_least_some_entries_before(&self, view: &FilesView, n: usize) -> bool {
+        debug_assert!(n > 0);
+        if let Some(ei) = self.entry_indexes.get(n - 1) {
+            view.contains(&ei.entries.unwrap().id)
+        } else {
+            false
         }
     }
 
@@ -1084,7 +1084,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     pub fn apply_rewrite_writes(
         &self,
         log_items: LogItemDrain,
-        watermark: Option<FileSeq>,
+        watermark: Option<&FilesView>,
         new_file: FileSeq,
     ) {
         for item in log_items {
@@ -1619,9 +1619,9 @@ mod tests {
         memtable.consistency_check();
 
         // Rewrite k1.
-        memtable.rewrite_key(k1.to_vec(), Some(1), 50);
+        memtable.rewrite_key(k1.to_vec(), Some(&FilesView::simple_view(1)), 50);
         let mut kvs = Vec::new();
-        memtable.fetch_kvs_before(1, &mut kvs);
+        memtable.fetch_kvs_before(&FilesView::simple_view(1), &mut kvs);
         assert!(kvs.is_empty());
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert_eq!(kvs.len(), 1);
@@ -1629,13 +1629,13 @@ mod tests {
         // Rewrite deleted k1.
         memtable.delete(k1.as_ref());
         assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 1);
-        memtable.rewrite_key(k1.to_vec(), Some(1), 50);
+        memtable.rewrite_key(k1.to_vec(), Some(&FilesView::simple_view(1)), 50);
         assert_eq!(memtable.get(k1.as_ref()), None);
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert!(kvs.is_empty());
         assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 2);
         // Rewrite newer append k2/k3.
-        memtable.rewrite_key(k2.to_vec(), Some(1), 50);
+        memtable.rewrite_key(k2.to_vec(), Some(&FilesView::simple_view(1)), 50);
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert!(kvs.is_empty());
         memtable.rewrite_key(k3.to_vec(), None, 50); // Rewrite encounters newer append.
@@ -1643,9 +1643,9 @@ mod tests {
         assert!(kvs.is_empty());
         assert_eq!(memtable.global_stats.deleted_rewrite_entries(), 4);
         // Rewrite k3 multiple times.
-        memtable.rewrite_key(k3.to_vec(), Some(10), 50);
+        memtable.rewrite_key(k3.to_vec(), Some(&FilesView::simple_view(10)), 50);
         memtable.rewrite_key(k3.to_vec(), None, 51);
-        memtable.rewrite_key(k3.to_vec(), Some(11), 52);
+        memtable.rewrite_key(k3.to_vec(), Some(&FilesView::simple_view(11)), 52);
         memtable.fetch_rewritten_kvs(&mut kvs);
         assert_eq!(kvs.len(), 1);
         assert_eq!(kvs.pop().unwrap(), (k3.to_vec(), v3.to_vec()));
@@ -1655,19 +1655,19 @@ mod tests {
         // [10, 20) file_num = 2
         // [20, 25) file_num = 3
         let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::REWRITE, 1));
-        memtable.rewrite(ents_idx, Some(1));
+        memtable.rewrite(ents_idx, Some(&FilesView::simple_view(1)));
         assert_eq!(memtable.entries_size(), 25);
         memtable.consistency_check();
 
         let mut ents_idx = vec![];
         assert!(memtable
-            .fetch_entry_indexes_before(2, &mut ents_idx)
+            .fetch_entry_indexes_before(&FilesView::simple_view(2), &mut ents_idx)
             .is_ok());
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
         ents_idx.clear();
         assert!(memtable
-            .fetch_entry_indexes_before(1, &mut ents_idx)
+            .fetch_entry_indexes_before(&FilesView::simple_view(1), &mut ents_idx)
             .is_ok());
         assert!(ents_idx.is_empty());
 
@@ -1796,7 +1796,7 @@ mod tests {
 
         // Rewrite to empty table.
         let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::REWRITE, 1));
-        memtable.rewrite(ents_idx, Some(1));
+        memtable.rewrite(ents_idx, Some(&FilesView::simple_view(1)));
         expected_rewrite += 10;
         expected_deleted_rewrite += 10;
         assert_eq!(memtable.min_file_seq(LogQueue::REWRITE), None);
@@ -1868,8 +1868,8 @@ mod tests {
         // [30, 40) file_num = 4
         // kk1 -> 2, kk2 -> 3, kk3 -> 4
         let ents_idx = generate_entry_indexes(0, 10, FileId::new(LogQueue::REWRITE, 50));
-        memtable.rewrite(ents_idx, Some(1));
-        memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
+        memtable.rewrite(ents_idx, Some(&FilesView::simple_view(1)));
+        memtable.rewrite_key(b"kk0".to_vec(), Some(&FilesView::simple_view(1)), 50);
         expected_rewrite += 10 + 1;
         expected_deleted_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::DEFAULT).unwrap(), 2);
@@ -1895,15 +1895,15 @@ mod tests {
         // [30, 40) file_num = 4
         // kk1 -> 100(r), kk2 -> 101(r), kk3 -> 4
         let ents_idx = generate_entry_indexes(0, 20, FileId::new(LogQueue::REWRITE, 100));
-        memtable.rewrite(ents_idx, Some(2));
-        memtable.rewrite_key(b"kk0".to_vec(), Some(1), 50);
-        memtable.rewrite_key(b"kk1".to_vec(), Some(2), 100);
+        memtable.rewrite(ents_idx, Some(&FilesView::simple_view(2)));
+        memtable.rewrite_key(b"kk0".to_vec(), Some(&FilesView::simple_view(1)), 50);
+        memtable.rewrite_key(b"kk1".to_vec(), Some(&FilesView::simple_view(2)), 100);
         expected_append -= 10 + 1;
         expected_rewrite += 20 + 2;
         expected_deleted_rewrite += 10 + 1;
         let ents_idx = generate_entry_indexes(20, 30, FileId::new(LogQueue::REWRITE, 101));
-        memtable.rewrite(ents_idx, Some(3));
-        memtable.rewrite_key(b"kk2".to_vec(), Some(3), 101);
+        memtable.rewrite(ents_idx, Some(&FilesView::simple_view(3)));
+        memtable.rewrite_key(b"kk2".to_vec(), Some(&FilesView::simple_view(3)), 101);
         expected_append -= 10 + 1;
         expected_rewrite += 10 + 1;
         assert_eq!(memtable.min_file_seq(LogQueue::DEFAULT).unwrap(), 4);
@@ -1943,7 +1943,7 @@ mod tests {
         assert_eq!(memtable.last_index().unwrap(), 35);
         memtable.consistency_check();
         let ents_idx = generate_entry_indexes(30, 40, FileId::new(LogQueue::REWRITE, 102));
-        memtable.rewrite(ents_idx, Some(4));
+        memtable.rewrite(ents_idx, Some(&FilesView::simple_view(4)));
         expected_append -= 5;
         expected_rewrite += 10;
         expected_deleted_rewrite += 5;
@@ -2038,7 +2038,7 @@ mod tests {
                         ));
                         memtable.rewrite(
                             generate_entry_indexes(0, 10, FileId::new(LogQueue::REWRITE, 1)),
-                            Some(1),
+                            Some(&FilesView::simple_view(1)),
                         );
                     }
                     Some(LogQueue::DEFAULT) => {
@@ -2080,7 +2080,7 @@ mod tests {
                         ));
                         memtable.rewrite(
                             generate_entry_indexes(0, 10, FileId::new(LogQueue::REWRITE, 1)),
-                            Some(1),
+                            Some(&FilesView::simple_view(1)),
                         );
                         memtable.compact_to(10);
                     }
@@ -2120,7 +2120,7 @@ mod tests {
                         ));
                         memtable.rewrite(
                             generate_entry_indexes(0, 10, FileId::new(LogQueue::REWRITE, 1)),
-                            Some(1),
+                            Some(&FilesView::simple_view(1)),
                         );
                         memtable.append(generate_entry_indexes(
                             10,
@@ -2277,10 +2277,10 @@ mod tests {
             let mut merged_vec = Vec::new();
             let mut sequential_vec = Vec::new();
             merged
-                .fetch_entry_indexes_before(u64::MAX, &mut merged_vec)
+                .fetch_entry_indexes_before(&FilesView::simple_view(u64::MAX), &mut merged_vec)
                 .unwrap();
             sequential
-                .fetch_entry_indexes_before(u64::MAX, &mut sequential_vec)
+                .fetch_entry_indexes_before(&FilesView::simple_view(u64::MAX), &mut sequential_vec)
                 .unwrap();
             assert_eq!(merged_vec, sequential_vec);
             merged_vec.clear();
@@ -2294,8 +2294,8 @@ mod tests {
             assert_eq!(merged_vec, sequential_vec);
             let mut merged_vec = Vec::new();
             let mut sequential_vec = Vec::new();
-            merged.fetch_kvs_before(u64::MAX, &mut merged_vec);
-            sequential.fetch_kvs_before(u64::MAX, &mut sequential_vec);
+            merged.fetch_kvs_before(&FilesView::simple_view(u64::MAX), &mut merged_vec);
+            sequential.fetch_kvs_before(&FilesView::simple_view(u64::MAX), &mut sequential_vec);
             assert_eq!(merged_vec, sequential_vec);
             merged_vec.clear();
             sequential_vec.clear();

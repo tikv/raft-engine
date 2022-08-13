@@ -14,7 +14,7 @@ use crate::event_listener::EventListener;
 use crate::log_batch::LogBatch;
 use crate::memtable::{MemTableHandle, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, FilesView, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};
 
 // Force compact region with oldest 20% logs.
@@ -83,7 +83,7 @@ where
         }
 
         if self.needs_rewrite_log_files(LogQueue::DEFAULT) {
-            if let (Some(rewrite_watermark), Some(compact_watermark)) =
+            if let (Some(compact_watermark), Some(rewrite_watermark)) =
                 self.append_queue_watermarks()
             {
                 let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::DEFAULT);
@@ -102,8 +102,8 @@ where
                 //    restart.
                 self.rewrite_append_queue_tombstones()?;
                 should_compact.extend(self.rewrite_or_compact_append_queue(
-                    rewrite_watermark,
-                    compact_watermark,
+                    &compact_watermark,
+                    &rewrite_watermark,
                     &mut rewrite_candidate_regions,
                 )?);
 
@@ -121,20 +121,21 @@ where
     #[cfg(test)]
     pub fn must_rewrite_append_queue(
         &self,
-        watermark: Option<FileSeq>,
+        watermark: Option<FilesView>,
         exit_after_step: Option<u64>,
     ) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
-        let (_, last) = self.pipe_log.file_span(LogQueue::DEFAULT);
-        let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
-        if watermark == last {
+        let active = self.pipe_log.fetch_active_file(LogQueue::DEFAULT).id;
+        let watermark = watermark.unwrap_or_else(|| FilesView::simple_view(active.seq));
+        if watermark.contains(&active) {
             self.pipe_log.rotate(LogQueue::DEFAULT).unwrap();
+            assert!(!watermark.contains(&self.pipe_log.fetch_active_file(LogQueue::DEFAULT).id));
         }
         self.rewrite_append_queue_tombstones().unwrap();
         if exit_after_step == Some(1) {
             return;
         }
-        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(watermark))
+        self.rewrite_memtables(self.memtables.collect(|_| true), 0, Some(&watermark))
             .unwrap();
         if exit_after_step == Some(2) {
             return;
@@ -175,10 +176,10 @@ where
         }
     }
 
-    // Returns (rewrite_watermark, compact_watermark).
-    // Files older than compact_watermark should be compacted;
-    // Files between compact_watermark and rewrite_watermark should be rewritten.
-    fn append_queue_watermarks(&self) -> (Option<FileSeq>, Option<FileSeq>) {
+    // Returns (compact_watermark, rewrite_watermark).
+    // Files in (-inf, compact_watermark] should be compacted;
+    // Files in (compact_watermark, rewrite_watermark] should be rewritten.
+    fn append_queue_watermarks(&self) -> (Option<FilesView>, Option<FilesView>) {
         let queue = LogQueue::DEFAULT;
 
         let (first_file, active_file) = self.pipe_log.file_span(queue);
@@ -187,40 +188,37 @@ where
             return (None, None);
         }
 
-        let rewrite_watermark = self.pipe_log.file_at(queue, REWRITE_RATIO);
-        let compact_watermark = self.pipe_log.file_at(queue, FORCE_COMPACT_RATIO);
-        debug_assert!(active_file - 1 > 0);
-        (
-            Some(std::cmp::min(rewrite_watermark, active_file - 1)),
-            Some(std::cmp::min(compact_watermark, active_file - 1)),
-        )
+        let compact_watermark = self.pipe_log.history_files_view(FORCE_COMPACT_RATIO);
+        let rewrite_watermark = self.pipe_log.history_files_view(REWRITE_RATIO);
+        (compact_watermark, rewrite_watermark)
     }
 
     fn rewrite_or_compact_append_queue(
         &self,
-        rewrite_watermark: FileSeq,
-        compact_watermark: FileSeq,
+        compact_watermark: &FilesView,
+        rewrite_watermark: &FilesView,
         rewrite_candidates: &mut HashMap<u64, u32>,
     ) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
-        debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::with_capacity(16);
 
         let mut new_candidates = HashMap::with_capacity(rewrite_candidates.len());
         let memtables = self.memtables.collect(|t| {
-            if let Some(f) = t.min_file_seq(LogQueue::DEFAULT) {
-                let sparse = t
-                    .entries_count_before(FileId::new(LogQueue::DEFAULT, rewrite_watermark))
-                    < MAX_REWRITE_ENTRIES_PER_REGION;
+            if let Some(seq) = t.min_file_seq(LogQueue::DEFAULT) {
+                let f = FileId::new(LogQueue::DEFAULT, seq);
+                let sparse = !t.has_at_least_some_entries_before(
+                    rewrite_watermark,
+                    MAX_REWRITE_ENTRIES_PER_REGION,
+                );
                 // counter is the times that target region triggers force compact.
                 let compact_counter = rewrite_candidates.get(&t.region_id()).unwrap_or(&0);
-                if f < compact_watermark
+                if compact_watermark.contains(&f)
                     && !sparse
                     && *compact_counter < MAX_COUNT_BEFORE_FORCE_REWRITE
                 {
                     should_compact.push(t.region_id());
                     new_candidates.insert(t.region_id(), *compact_counter + 1);
-                } else if f < rewrite_watermark {
+                } else if rewrite_watermark.contains(&f) {
                     return sparse || *compact_counter >= MAX_COUNT_BEFORE_FORCE_REWRITE;
                 }
             }
@@ -291,7 +289,7 @@ where
         &self,
         memtables: Vec<MemTableHandle>,
         expect_rewrites_per_memtable: usize,
-        rewrite: Option<FileSeq>,
+        rewrite: Option<&FilesView>,
     ) -> Result<()> {
         let mut log_batch = LogBatch::default();
         let mut total_size = 0;
@@ -344,7 +342,7 @@ where
     fn rewrite_impl(
         &self,
         log_batch: &mut LogBatch,
-        rewrite_watermark: Option<FileSeq>,
+        rewrite_watermark: Option<&FilesView>,
         sync: bool,
     ) -> Result<()> {
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;

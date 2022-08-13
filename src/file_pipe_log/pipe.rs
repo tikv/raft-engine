@@ -14,7 +14,9 @@ use crate::config::Config;
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog};
+use crate::pipe_log::{
+    FileBlockHandle, FileId, FileSeq, FilesView, LogFileContext, LogQueue, PipeLog,
+};
 use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
@@ -512,6 +514,19 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
         self.pipes[queue.i() as usize].file_span()
+    }
+
+    #[inline]
+    fn history_files_view(&self, portion: f64) -> Option<FilesView> {
+        assert!((0.0..=1.0).contains(&portion));
+        let (first, active) = self.file_span(LogQueue::DEFAULT);
+        let count = active - first + 1;
+        let seq = first + (count as f64 * portion) as u64;
+        if seq == active {
+            None
+        } else {
+            Some(FilesView::simple_view(seq))
+        }
     }
 
     #[inline]

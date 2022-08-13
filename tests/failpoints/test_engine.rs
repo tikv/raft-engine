@@ -154,7 +154,7 @@ fn test_pipe_log_listeners() {
     assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), 32);
 
     engine.purge_expired_files().unwrap();
-    assert_eq!(hook.0[&LogQueue::DEFAULT].purged(), 13);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].purged(), 14);
     assert_eq!(hook.0[&LogQueue::REWRITE].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
@@ -374,7 +374,8 @@ fn test_incomplete_purge() {
 
     {
         let _f = FailGuard::new("file_pipe_log::remove_file_skipped", "return");
-        append(&engine, rid, 0, 20, Some(&data));
+        append(&engine, rid, 0, 10, Some(&data));
+        append(&engine, rid, 10, 20, Some(&data));
         let append_first = engine.file_span(LogQueue::DEFAULT).0;
         engine.compact_to(rid, 18);
         engine.purge_expired_files().unwrap();
@@ -382,13 +383,15 @@ fn test_incomplete_purge() {
     }
 
     // Create a hole.
-    append(&engine, rid, 20, 40, Some(&data));
+    append(&engine, rid, 20, 30, Some(&data));
+    append(&engine, rid, 30, 40, Some(&data));
     let append_first = engine.file_span(LogQueue::DEFAULT).0;
     engine.compact_to(rid, 38);
     engine.purge_expired_files().unwrap();
     assert!(engine.file_span(LogQueue::DEFAULT).0 > append_first);
 
-    append(&engine, rid, 40, 60, Some(&data));
+    append(&engine, rid, 40, 50, Some(&data));
+    append(&engine, rid, 50, 60, Some(&data));
     let append_first = engine.file_span(LogQueue::DEFAULT).0;
     drop(engine);
 

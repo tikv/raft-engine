@@ -1473,7 +1473,8 @@ mod tests {
             {
                 // open engine with format_version - Version::V1
                 let engine = RaftLogEngine::open(cfg_v1.clone()).unwrap();
-                engine.append(rid, 0, 20, Some(&data));
+                engine.append(rid, 0, 10, Some(&data));
+                engine.append(rid, 10, 20, Some(&data));
                 let append_first = engine.file_span(LogQueue::DEFAULT).0;
                 engine.compact_to(rid, 18);
                 engine.purge_expired_files().unwrap();
@@ -1486,7 +1487,8 @@ mod tests {
                 let engine = RaftLogEngine::open(cfg_v2.clone()).unwrap();
                 assert_eq!(engine.first_index(rid).unwrap(), 18);
                 assert_eq!(engine.last_index(rid).unwrap(), 19);
-                engine.append(rid, 20, 40, Some(&data));
+                engine.append(rid, 20, 30, Some(&data));
+                engine.append(rid, 30, 40, Some(&data));
                 let append_first = engine.file_span(LogQueue::DEFAULT).0;
                 engine.compact_to(rid, 38);
                 engine.purge_expired_files().unwrap();

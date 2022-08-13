@@ -51,19 +51,49 @@ impl FileId {
 }
 
 /// Order by freshness.
-impl std::cmp::Ord for FileId {
-    fn cmp(&self, other: &Self) -> Ordering {
+impl std::cmp::PartialOrd for FileId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self.queue, other.queue) {
-            (LogQueue::DEFAULT, LogQueue::REWRITE) => Ordering::Greater,
-            (LogQueue::REWRITE, LogQueue::DEFAULT) => Ordering::Less,
-            _ => self.seq.cmp(&other.seq),
+            (LogQueue::REWRITE, LogQueue::REWRITE) => Some(self.seq.cmp(&other.seq)),
+            (LogQueue::REWRITE, _) => Some(Ordering::Less),
+            (a, b) if a == b => Some(self.seq.cmp(&other.seq)),
+            _ => None,
         }
     }
 }
 
-impl std::cmp::PartialOrd for FileId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+/// A snapshot view of files in Append queue. Files in Rewrite queue are always
+/// included.
+pub struct FilesView {
+    /// Latest file IDs of all channels. `None` means the channel doesn't exist
+    /// at the moment.
+    id_by_channels: Vec<Option<FileSeq>>,
+}
+
+impl FilesView {
+    #[inline]
+    pub fn contains(&self, id: &FileId) -> bool {
+        if id.queue == LogQueue::REWRITE {
+            true
+        } else if let Some(Some(seq)) = self.id_by_channels.get(id.queue.i() as usize - 1) {
+            id.seq <= *seq
+        } else {
+            false
+        }
+    }
+
+    /// Returns whether the view contains any file in Append queue.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.id_by_channels.iter().any(|seq| seq.is_none())
+    }
+
+    /// A simple view that contains default channel files with seqno no larger
+    /// than `seq`.
+    pub fn simple_view(seq: u64) -> Self {
+        FilesView {
+            id_by_channels: vec![Some(seq)],
+        }
     }
 }
 
@@ -174,17 +204,11 @@ pub trait PipeLog: Sized {
     /// of the specified log queue.
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 
-    /// Returns the oldest file ID that is newer than `position`% of all files.
-    fn file_at(&self, queue: LogQueue, mut position: f64) -> FileSeq {
-        if position > 1.0 {
-            position = 1.0;
-        } else if position < 0.0 {
-            position = 0.0;
-        }
-        let (first, active) = self.file_span(queue);
-        let count = active - first + 1;
-        first + (count as f64 * position) as u64
-    }
+    /// Returns an approximate snapshot of the pipe when the total size of
+    /// Append queues is only `portion`% of current size. The snapshot must
+    /// only contains immutable files. Returns `None` if there is no file in
+    /// Append queue matching the requirement.
+    fn history_files_view(&self, portion: f64) -> Option<FilesView>;
 
     /// Returns total size of the specified log queue.
     fn total_size(&self, queue: LogQueue) -> usize;
