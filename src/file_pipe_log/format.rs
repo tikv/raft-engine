@@ -53,12 +53,12 @@ impl FileNameExt for FileId {
             if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
                 if file_name.ends_with(LOG_APPEND_SUFFIX) {
                     return Some(FileId {
-                        queue: LogQueue::Append,
+                        queue: LogQueue::DEFAULT,
                         seq,
                     });
                 } else if file_name.ends_with(LOG_REWRITE_SUFFIX) {
                     return Some(FileId {
-                        queue: LogQueue::Rewrite,
+                        queue: LogQueue::REWRITE,
                         seq,
                     });
                 }
@@ -69,16 +69,16 @@ impl FileNameExt for FileId {
 
     fn build_file_name(&self) -> String {
         match self.queue {
-            LogQueue::Append => format!(
-                "{:0width$}{}",
-                self.seq,
-                LOG_APPEND_SUFFIX,
-                width = LOG_SEQ_WIDTH
-            ),
-            LogQueue::Rewrite => format!(
+            LogQueue::REWRITE => format!(
                 "{:0width$}{}",
                 self.seq,
                 LOG_REWRITE_SUFFIX,
+                width = LOG_SEQ_WIDTH
+            ),
+            _ => format!(
+                "{:0width$}{}",
+                self.seq,
+                LOG_APPEND_SUFFIX,
                 width = LOG_SEQ_WIDTH
             ),
         }
@@ -226,7 +226,7 @@ mod tests {
     fn test_file_name() {
         let file_name: &str = "0000000000000123.raftlog";
         let file_id = FileId {
-            queue: LogQueue::Append,
+            queue: LogQueue::DEFAULT,
             seq: 123,
         };
         assert_eq!(FileId::parse_file_name(file_name).unwrap(), file_id,);
@@ -234,7 +234,7 @@ mod tests {
 
         let file_name: &str = "0000000000000123.rewrite";
         let file_id = FileId {
-            queue: LogQueue::Rewrite,
+            queue: LogQueue::REWRITE,
             seq: 123,
         };
         assert_eq!(FileId::parse_file_name(file_name).unwrap(), file_id,);
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn test_file_context() {
         let mut file_context =
-            LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
+            LogFileContext::new(FileId::dummy(LogQueue::DEFAULT), Version::default());
         assert_eq!(file_context.get_signature(), None);
         file_context.id.seq = 10;
         file_context.version = Version::V2;

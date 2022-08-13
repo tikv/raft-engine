@@ -14,11 +14,17 @@ use strum::EnumIter;
 use crate::Result;
 
 /// The type of log queue.
-#[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum LogQueue {
-    Append = 0,
-    Rewrite = 1,
+pub struct LogQueue(u8);
+
+impl LogQueue {
+    pub const REWRITE: LogQueue = LogQueue(0);
+    pub const DEFAULT: LogQueue = LogQueue(1);
+
+    #[inline]
+    pub fn i(&self) -> u8 {
+        self.0
+    }
 }
 
 /// Sequence number for log file. It is unique within a log queue.
@@ -48,8 +54,8 @@ impl FileId {
 impl std::cmp::Ord for FileId {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.queue, other.queue) {
-            (LogQueue::Append, LogQueue::Rewrite) => Ordering::Greater,
-            (LogQueue::Rewrite, LogQueue::Append) => Ordering::Less,
+            (LogQueue::DEFAULT, LogQueue::REWRITE) => Ordering::Greater,
+            (LogQueue::REWRITE, LogQueue::DEFAULT) => Ordering::Less,
             _ => self.seq.cmp(&other.seq),
         }
     }

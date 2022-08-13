@@ -290,8 +290,9 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Synchronizes current states to related metrics.
     fn flush_metrics(&self, len: usize) {
         match self.queue {
-            LogQueue::Append => LOG_FILE_COUNT.append.set(len as i64),
-            LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(len as i64),
+            LogQueue::DEFAULT => LOG_FILE_COUNT.append.set(len as i64),
+            LogQueue::REWRITE => LOG_FILE_COUNT.rewrite.set(len as i64),
+            _ => unreachable!(),
         }
     }
 }
@@ -477,11 +478,11 @@ impl<F: FileSystem> DualPipes<F> {
         rewriter: SinglePipe<F>,
     ) -> Result<Self> {
         // TODO: remove this dependency.
-        debug_assert_eq!(LogQueue::Append as usize, 0);
-        debug_assert_eq!(LogQueue::Rewrite as usize, 1);
+        debug_assert_eq!(LogQueue::REWRITE.i(), 0);
+        debug_assert_eq!(LogQueue::DEFAULT.i(), 1);
 
         Ok(Self {
-            pipes: [appender, rewriter],
+            pipes: [rewriter, appender],
             _dir_lock: dir_lock,
         })
     }
@@ -495,42 +496,42 @@ impl<F: FileSystem> DualPipes<F> {
 impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        self.pipes[handle.id.queue as usize].read_bytes(handle)
+        self.pipes[handle.id.queue.i() as usize].read_bytes(handle)
     }
 
     #[inline]
     fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle> {
-        self.pipes[queue as usize].append(bytes)
+        self.pipes[queue.i() as usize].append(bytes)
     }
 
     #[inline]
     fn maybe_sync(&self, queue: LogQueue, force: bool) -> Result<()> {
-        self.pipes[queue as usize].maybe_sync(force)
+        self.pipes[queue.i() as usize].maybe_sync(force)
     }
 
     #[inline]
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
-        self.pipes[queue as usize].file_span()
+        self.pipes[queue.i() as usize].file_span()
     }
 
     #[inline]
     fn total_size(&self, queue: LogQueue) -> usize {
-        self.pipes[queue as usize].total_size()
+        self.pipes[queue.i() as usize].total_size()
     }
 
     #[inline]
     fn rotate(&self, queue: LogQueue) -> Result<()> {
-        self.pipes[queue as usize].rotate()
+        self.pipes[queue.i() as usize].rotate()
     }
 
     #[inline]
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
-        self.pipes[file_id.queue as usize].purge_to(file_id.seq)
+        self.pipes[file_id.queue.i() as usize].purge_to(file_id.seq)
     }
 
     #[inline]
     fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext {
-        self.pipes[queue as usize].fetch_active_file()
+        self.pipes[queue.i() as usize].fetch_active_file()
     }
 }
 
@@ -555,8 +556,9 @@ mod tests {
             0,
             VecDeque::new(),
             match queue {
-                LogQueue::Append => cfg.recycle_capacity(),
-                LogQueue::Rewrite => 0,
+                LogQueue::DEFAULT => cfg.recycle_capacity(),
+                LogQueue::REWRITE => 0,
+                _ => unreachable!(),
             },
         )
     }
@@ -564,8 +566,8 @@ mod tests {
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
         DualPipes::open(
             lock_dir(&cfg.dir)?,
-            new_test_pipe(cfg, LogQueue::Append)?,
-            new_test_pipe(cfg, LogQueue::Rewrite)?,
+            new_test_pipe(cfg, LogQueue::DEFAULT)?,
+            new_test_pipe(cfg, LogQueue::REWRITE)?,
         )
     }
 
@@ -597,7 +599,7 @@ mod tests {
             bytes_per_sync: ReadableSize::kb(32),
             ..Default::default()
         };
-        let queue = LogQueue::Append;
+        let queue = LogQueue::DEFAULT;
 
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
@@ -661,7 +663,7 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
+        let file_context = pipe_log.fetch_active_file(LogQueue::DEFAULT);
         assert_eq!(file_context.version, Version::default());
         assert_eq!(file_context.id.seq, 3);
     }
@@ -719,15 +721,15 @@ mod tests {
         {
             // mock
             let old_file_id = FileId {
-                queue: LogQueue::Append,
+                queue: LogQueue::DEFAULT,
                 seq: 12,
             };
             let cur_file_id = FileId {
-                queue: LogQueue::Append,
+                queue: LogQueue::DEFAULT,
                 seq: 13,
             };
             let new_file_id = FileId {
-                queue: LogQueue::Append,
+                queue: LogQueue::DEFAULT,
                 seq: cur_file_id.seq + 1,
             };
             let _ = prepare_file(file_system.as_ref(), path, old_file_id, &data); // prepare old file
@@ -776,7 +778,7 @@ mod tests {
         // Test FileCollection with abnormal `recycle_one_file`.
         {
             let fake_file_id = FileId {
-                queue: LogQueue::Append,
+                queue: LogQueue::DEFAULT,
                 seq: 11,
             };
             let _ = prepare_file(file_system.as_ref(), path, fake_file_id, &data); // prepare old file
@@ -791,7 +793,7 @@ mod tests {
                 .delete(&fake_file_id.build_file_path(path))
                 .unwrap();
             let new_file_id = FileId {
-                queue: LogQueue::Append,
+                queue: LogQueue::DEFAULT,
                 seq: 13,
             };
             // `rename` is failed, and no stale files in recycle_collections could be
@@ -821,7 +823,7 @@ mod tests {
             format_version: Version::V2,
             ..Default::default()
         };
-        let queue = LogQueue::Append;
+        let queue = LogQueue::DEFAULT;
 
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
@@ -885,7 +887,7 @@ mod tests {
         assert_eq!(pipe_log.file_span(queue), (3, 3));
 
         // fetch active file
-        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
+        let file_context = pipe_log.fetch_active_file(LogQueue::DEFAULT);
         assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
     }

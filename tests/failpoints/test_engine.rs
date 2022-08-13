@@ -68,8 +68,8 @@ fn test_pipe_log_listeners() {
     impl Default for Hook {
         fn default() -> Hook {
             let mut hash = HashMap::default();
-            hash.insert(LogQueue::Append, QueueHook::default());
-            hash.insert(LogQueue::Rewrite, QueueHook::default());
+            hash.insert(LogQueue::DEFAULT, QueueHook::default());
+            hash.insert(LogQueue::REWRITE, QueueHook::default());
             Hook(hash)
         }
     }
@@ -109,8 +109,8 @@ fn test_pipe_log_listeners() {
 
     let hook = Arc::new(Hook::default());
     let engine = Arc::new(Engine::open_with_listeners(cfg.clone(), vec![hook.clone()]).unwrap());
-    assert_eq!(hook.0[&LogQueue::Append].files(), 1);
-    assert_eq!(hook.0[&LogQueue::Rewrite].files(), 1);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].files(), 1);
+    assert_eq!(hook.0[&LogQueue::REWRITE].files(), 1);
 
     let data = vec![b'x'; 64 * 1024];
 
@@ -124,15 +124,15 @@ fn test_pipe_log_listeners() {
             (i as u64 + 1) / 2 + 1,
             Some(&data),
         );
-        assert_eq!(hook.0[&LogQueue::Append].appends(), i);
-        assert_eq!(hook.0[&LogQueue::Append].applys(), i);
+        assert_eq!(hook.0[&LogQueue::DEFAULT].appends(), i);
+        assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), i);
     }
-    assert_eq!(hook.0[&LogQueue::Append].files(), 11);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].files(), 11);
 
     engine.purge_expired_files().unwrap();
-    assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].purged(), 8);
 
-    let rewrite_files = hook.0[&LogQueue::Rewrite].files();
+    let rewrite_files = hook.0[&LogQueue::REWRITE].files();
 
     // Append 5 logs for region 1, 5 logs for region 2.
     for i in 21..=30 {
@@ -144,18 +144,18 @@ fn test_pipe_log_listeners() {
             (i as u64 + 1) / 2 + 1,
             Some(&data),
         );
-        assert_eq!(hook.0[&LogQueue::Append].appends(), i);
-        assert_eq!(hook.0[&LogQueue::Append].applys(), i);
+        assert_eq!(hook.0[&LogQueue::DEFAULT].appends(), i);
+        assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), i);
     }
     // Compact so that almost all content of rewrite queue will become garbage.
     engine.compact_to(1, 14);
     engine.compact_to(2, 14);
-    assert_eq!(hook.0[&LogQueue::Append].appends(), 32);
-    assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].appends(), 32);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), 32);
 
     engine.purge_expired_files().unwrap();
-    assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
-    assert_eq!(hook.0[&LogQueue::Rewrite].purged(), rewrite_files as u64);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].purged(), 13);
+    assert_eq!(hook.0[&LogQueue::REWRITE].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
     let apply_memtable_region_3_fp = "memtable_accessor::apply_append_writes::region_3";
@@ -168,9 +168,9 @@ fn test_pipe_log_listeners() {
 
     // Sleep a while to wait the log batch `Append(3, [1])` to get written.
     std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(hook.0[&LogQueue::Append].appends(), 33);
-    let file_not_applied = engine.file_span(LogQueue::Append).1;
-    assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
+    assert_eq!(hook.0[&LogQueue::DEFAULT].appends(), 33);
+    let file_not_applied = engine.file_span(LogQueue::DEFAULT).1;
+    assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), 32);
 
     for i in 31..=40 {
         let region_id = (i as u64 - 1) % 2 + 1;
@@ -181,13 +181,13 @@ fn test_pipe_log_listeners() {
             (i as u64 + 1) / 2 + 1,
             Some(&data),
         );
-        assert_eq!(hook.0[&LogQueue::Append].appends(), i + 3);
-        assert_eq!(hook.0[&LogQueue::Append].applys(), i + 2);
+        assert_eq!(hook.0[&LogQueue::DEFAULT].appends(), i + 3);
+        assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), i + 2);
     }
 
     // Can't purge because region 3 is not yet applied.
     engine.purge_expired_files().unwrap();
-    let first = engine.file_span(LogQueue::Append).0;
+    let first = engine.file_span(LogQueue::DEFAULT).0;
     assert_eq!(file_not_applied, first);
 
     // Resume write on region 3.
@@ -196,7 +196,7 @@ fn test_pipe_log_listeners() {
 
     std::thread::sleep(Duration::from_millis(200));
     engine.purge_expired_files().unwrap();
-    let new_first = engine.file_span(LogQueue::Append).0;
+    let new_first = engine.file_span(LogQueue::DEFAULT).0;
     assert_ne!(file_not_applied, new_first);
 
     // Drop and then recover.
@@ -205,12 +205,12 @@ fn test_pipe_log_listeners() {
     let hook = Arc::new(Hook::default());
     let engine = Engine::open_with_listeners(cfg, vec![hook.clone()]).unwrap();
     assert_eq!(
-        hook.0[&LogQueue::Append].files() as u64,
-        engine.file_span(LogQueue::Append).1 - engine.file_span(LogQueue::Append).0 + 1
+        hook.0[&LogQueue::DEFAULT].files() as u64,
+        engine.file_span(LogQueue::DEFAULT).1 - engine.file_span(LogQueue::DEFAULT).0 + 1
     );
     assert_eq!(
-        hook.0[&LogQueue::Rewrite].files() as u64,
-        engine.file_span(LogQueue::Rewrite).1 - engine.file_span(LogQueue::Rewrite).0 + 1
+        hook.0[&LogQueue::REWRITE].files() as u64,
+        engine.file_span(LogQueue::REWRITE).1 - engine.file_span(LogQueue::REWRITE).0 + 1
     );
 }
 
@@ -375,25 +375,25 @@ fn test_incomplete_purge() {
     {
         let _f = FailGuard::new("file_pipe_log::remove_file_skipped", "return");
         append(&engine, rid, 0, 20, Some(&data));
-        let append_first = engine.file_span(LogQueue::Append).0;
+        let append_first = engine.file_span(LogQueue::DEFAULT).0;
         engine.compact_to(rid, 18);
         engine.purge_expired_files().unwrap();
-        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+        assert!(engine.file_span(LogQueue::DEFAULT).0 > append_first);
     }
 
     // Create a hole.
     append(&engine, rid, 20, 40, Some(&data));
-    let append_first = engine.file_span(LogQueue::Append).0;
+    let append_first = engine.file_span(LogQueue::DEFAULT).0;
     engine.compact_to(rid, 38);
     engine.purge_expired_files().unwrap();
-    assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    assert!(engine.file_span(LogQueue::DEFAULT).0 > append_first);
 
     append(&engine, rid, 40, 60, Some(&data));
-    let append_first = engine.file_span(LogQueue::Append).0;
+    let append_first = engine.file_span(LogQueue::DEFAULT).0;
     drop(engine);
 
     let engine = Engine::open(cfg).unwrap();
-    assert_eq!(engine.file_span(LogQueue::Append).0, append_first);
+    assert_eq!(engine.file_span(LogQueue::DEFAULT).0, append_first);
     assert_eq!(engine.first_index(rid).unwrap(), 38);
     assert_eq!(engine.last_index(rid).unwrap(), 59);
 }
@@ -627,10 +627,10 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
     append(&engine, rid, 4, 5, Some(&data));
     append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
-    let append_first = engine.file_span(LogQueue::Append).0;
+    let append_first = engine.file_span(LogQueue::DEFAULT).0;
     engine.compact_to(rid, 3);
     engine.purge_expired_files().unwrap();
-    assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    assert!(engine.file_span(LogQueue::DEFAULT).0 > append_first);
     // append, written into seq: 3
     append(&engine, rid, 4, 5, Some(&data));
     // recycle, written into seq: 1

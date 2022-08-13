@@ -150,7 +150,7 @@ fn test_file_rotate_error() {
     engine
         .write(&mut generate_batch(1, 3, 4, Some(&entry)), false)
         .unwrap();
-    assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+    assert_eq!(engine.file_span(LogQueue::DEFAULT).1, 1);
     // The next write will be followed by a rotate.
     {
         // Fail to sync old log file.
@@ -159,7 +159,7 @@ fn test_file_rotate_error() {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
-        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        assert_eq!(engine.file_span(LogQueue::DEFAULT).1, 1);
     }
     {
         // Fail to create new log file.
@@ -168,7 +168,7 @@ fn test_file_rotate_error() {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
-        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        assert_eq!(engine.file_span(LogQueue::DEFAULT).1, 1);
     }
     {
         // Fail to write header of new log file.
@@ -177,7 +177,7 @@ fn test_file_rotate_error() {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
-        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        assert_eq!(engine.file_span(LogQueue::DEFAULT).1, 1);
     }
     {
         // Fail to sync new log file. The old log file is already sync-ed at this point.
@@ -186,7 +186,7 @@ fn test_file_rotate_error() {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
-        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        assert_eq!(engine.file_span(LogQueue::DEFAULT).1, 1);
     }
 
     // We can continue writing after the incidents.

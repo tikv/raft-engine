@@ -983,7 +983,7 @@ mod tests {
         }
 
         let mut entry_indexes_with_file_id =
-            generate_entry_indexes_opt(7, 17, Some(FileId::new(LogQueue::Append, 7)));
+            generate_entry_indexes_opt(7, 17, Some(FileId::new(LogQueue::DEFAULT, 7)));
         let mut decoded = encode_and_decode(&mut entry_indexes_with_file_id);
         assert_ne!(entry_indexes_with_file_id, decoded.0);
         for i in decoded.0.iter_mut() {
@@ -1105,14 +1105,14 @@ mod tests {
             for compression_type in [CompressionType::Lz4, CompressionType::None] {
                 let mut batch = batch.clone();
                 batch.finish_populate(compression_type);
-                batch.finish_write(FileBlockHandle::dummy(LogQueue::Append));
+                batch.finish_write(FileBlockHandle::dummy(LogQueue::DEFAULT));
                 let mut encoded_batch = vec![];
                 batch.encode(&mut encoded_batch).unwrap();
                 let file_context =
-                    LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
+                    LogFileContext::new(FileId::dummy(LogQueue::DEFAULT), Version::default());
                 let decoded_batch = LogItemBatch::decode(
                     &mut encoded_batch.as_slice(),
-                    FileBlockHandle::dummy(LogQueue::Append),
+                    FileBlockHandle::dummy(LogQueue::DEFAULT),
                     compression_type,
                     &file_context,
                 )
@@ -1134,11 +1134,11 @@ mod tests {
             // Test call protocol violation.
             assert!(catch_unwind_silent(|| batch.encoded_bytes()).is_err());
             assert!(catch_unwind_silent(
-                || batch.finish_write(FileBlockHandle::dummy(LogQueue::Append))
+                || batch.finish_write(FileBlockHandle::dummy(LogQueue::DEFAULT))
             )
             .is_err());
             let mocked_file_block_handle = FileBlockHandle {
-                id: FileId::new(LogQueue::Append, 12),
+                id: FileId::new(LogQueue::DEFAULT, 12),
                 len: 0,
                 offset: 0,
             };
@@ -1193,7 +1193,7 @@ mod tests {
                         &mut &encoded[offset..],
                         entries_handle,
                         compression_type,
-                        &LogFileContext::new(FileId::new(LogQueue::Append, u64::MAX), version),
+                        &LogFileContext::new(FileId::new(LogQueue::DEFAULT, u64::MAX), version),
                     )
                     .unwrap_err();
                 }
@@ -1278,7 +1278,7 @@ mod tests {
         let mut entries = Vec::new();
         let mut kvs = Vec::new();
         let data = vec![b'x'; 1024];
-        let file_id = FileId::dummy(LogQueue::Append);
+        let file_id = FileId::dummy(LogQueue::DEFAULT);
         let file_context = LogFileContext::new(file_id, Version::default());
 
         let mut batch1 = LogBatch::default();

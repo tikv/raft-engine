@@ -66,7 +66,7 @@ impl RaftGroupState {
                     if self.count > 0 {
                         // hole
                         if first > self.first_index + self.count as u64 {
-                            if queue == LogQueue::Append {
+                            if queue == LogQueue::DEFAULT {
                                 return Err(Error::Corruption("Encountered hole".to_owned()));
                             } else {
                                 self.clear();
@@ -74,14 +74,14 @@ impl RaftGroupState {
                         }
                         // compacted
                         if first < self.first_index {
-                            if queue == LogQueue::Append {
+                            if queue == LogQueue::DEFAULT {
                                 return Err(Error::Corruption("Write to compacted".to_owned()));
                             } else {
                                 self.clear();
                             }
                         }
                         // non-contiguous rewrites
-                        if queue == LogQueue::Rewrite
+                        if queue == LogQueue::REWRITE
                             && self.first_index + (self.rewrite_count as u64) < first
                         {
                             return Err(Error::Corruption(
@@ -93,14 +93,14 @@ impl RaftGroupState {
                         // empty
                         self.first_index = first;
                         self.count = (last - first + 1) as usize;
-                        self.rewrite_count = if queue == LogQueue::Rewrite {
+                        self.rewrite_count = if queue == LogQueue::REWRITE {
                             self.count
                         } else {
                             0
                         };
                     } else {
                         self.count = (last - self.first_index + 1) as usize;
-                        if queue == LogQueue::Rewrite {
+                        if queue == LogQueue::REWRITE {
                             self.rewrite_count = self.count;
                         } else {
                             self.rewrite_count = (first - self.first_index) as usize;
@@ -175,7 +175,7 @@ impl RhaiFilter {
                         state.first_index as i64,
                         state.count as i64,
                         state.rewrite_count as i64,
-                        new_item_queue as i64,
+                        new_item_queue.i() as i64,
                         eis.first().unwrap().index as i64,
                         eis.last().unwrap().index as i64,
                     ),
@@ -190,7 +190,7 @@ impl RhaiFilter {
                     state.first_index as i64,
                     state.count as i64,
                     state.rewrite_count as i64,
-                    new_item_queue as i64,
+                    new_item_queue.i() as i64,
                     *index as i64,
                 ),
             ),
@@ -203,7 +203,7 @@ impl RhaiFilter {
                     state.first_index as i64,
                     state.count as i64,
                     state.rewrite_count as i64,
-                    new_item_queue as i64,
+                    new_item_queue.i() as i64,
                 ),
             ),
             _ => Ok(0),

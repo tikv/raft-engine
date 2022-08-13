@@ -147,7 +147,7 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
-                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
+                let file_context = self.pipe_log.fetch_active_file(LogQueue::DEFAULT);
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
@@ -155,11 +155,11 @@ where
                     let res = if !log_batch.is_empty() {
                         log_batch.prepare_write(&file_context)?;
                         self.pipe_log
-                            .append(LogQueue::Append, log_batch.encoded_bytes())
+                            .append(LogQueue::DEFAULT, log_batch.encoded_bytes())
                     } else {
                         // TODO(tabokie): use Option<FileBlockHandle> instead.
                         Ok(FileBlockHandle {
-                            id: FileId::new(LogQueue::Append, 0),
+                            id: FileId::new(LogQueue::DEFAULT, 0),
                             offset: 0,
                             len: 0,
                         })
@@ -167,13 +167,13 @@ where
                     writer.set_output(res);
                 }
                 debug_assert!(
-                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
+                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::DEFAULT).id
                 );
                 perf_context!(log_write_duration).observe_since(now);
-                if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
+                if let Err(e) = self.pipe_log.maybe_sync(LogQueue::DEFAULT, sync) {
                     panic!(
                         "Cannot sync {:?} queue due to IO error: {}",
-                        LogQueue::Append,
+                        LogQueue::DEFAULT,
                         e
                     );
                 }
@@ -373,7 +373,7 @@ where
     }
 
     pub fn get_used_size(&self) -> usize {
-        self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
+        self.pipe_log.total_size(LogQueue::DEFAULT) + self.pipe_log.total_size(LogQueue::REWRITE)
     }
 }
 
@@ -467,11 +467,11 @@ where
         builder.scan()?;
         let factory = crate::filter::RhaiFilterMachineFactory::from_script(script);
         let mut machine = None;
-        if queue.is_none() || queue.unwrap() == LogQueue::Append {
+        if queue.is_none() || queue.unwrap() == LogQueue::DEFAULT {
             machine = Some(builder.recover_queue(
                 file_system.clone(),
                 RecoveryConfig {
-                    queue: LogQueue::Append,
+                    queue: LogQueue::DEFAULT,
                     mode: recovery_mode,
                     concurrency: 1,
                     read_block_size,
@@ -479,11 +479,11 @@ where
                 &factory,
             )?);
         }
-        if queue.is_none() || queue.unwrap() == LogQueue::Rewrite {
+        if queue.is_none() || queue.unwrap() == LogQueue::REWRITE {
             let machine2 = builder.recover_queue(
                 file_system.clone(),
                 RecoveryConfig {
-                    queue: LogQueue::Rewrite,
+                    queue: LogQueue::REWRITE,
                     mode: recovery_mode,
                     concurrency: 1,
                     read_block_size,
@@ -491,7 +491,7 @@ where
                 &factory,
             )?;
             if let Some(machine) = &mut machine {
-                machine.merge(machine2, LogQueue::Rewrite)?;
+                machine.merge(machine2, LogQueue::REWRITE)?;
             }
         }
         if let Some(machine) = machine {
@@ -526,7 +526,7 @@ impl BlockCache {
     fn new() -> Self {
         BlockCache {
             key: Cell::new(FileBlockHandle {
-                id: FileId::new(LogQueue::Append, 0),
+                id: FileId::new(LogQueue::DEFAULT, 0),
                 offset: 0,
                 len: 0,
             }),
@@ -696,7 +696,7 @@ mod tests {
                 let (a, b) = self.file_span(queue);
                 (b - a + 1) as usize
             } else {
-                self.file_count(Some(LogQueue::Append)) + self.file_count(Some(LogQueue::Rewrite))
+                self.file_count(Some(LogQueue::DEFAULT)) + self.file_count(Some(LogQueue::REWRITE))
             }
         }
     }
@@ -747,7 +747,7 @@ mod tests {
                 let rid = i;
                 let index = i;
                 engine.scan_entries(rid, index, index + 2, |_, q, d| {
-                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(q, LogQueue::DEFAULT);
                     assert_eq!(d, &data);
                 });
             }
@@ -758,7 +758,7 @@ mod tests {
                 let rid = i;
                 let index = i;
                 engine.scan_entries(rid, index, index + 2, |_, q, d| {
-                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(q, LogQueue::DEFAULT);
                     assert_eq!(d, &data);
                 });
             }
@@ -1077,10 +1077,10 @@ mod tests {
         engine.write(&mut compact_log, true).unwrap();
         let engine = engine.reopen();
         engine.scan_entries(rid, 5, 10, |_, q, d| {
-            assert_eq!(q, LogQueue::Append);
+            assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
-        assert_eq!(engine.stats.live_entries(LogQueue::Append), 6); // 5 entries + 1 kv
+        assert_eq!(engine.stats.live_entries(LogQueue::DEFAULT), 6); // 5 entries + 1 kv
 
         // rewrite:   [20..25]
         // append: [10   ..25]
@@ -1101,12 +1101,12 @@ mod tests {
         engine.purge_manager.must_rewrite_rewrite_queue();
         let engine = engine.reopen();
         engine.scan_entries(rid, 10, 25, |_, q, d| {
-            assert_eq!(q, LogQueue::Append);
+            assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
-        assert_eq!(engine.stats.live_entries(LogQueue::Append), 22); // 20 entries + 2 kv
+        assert_eq!(engine.stats.live_entries(LogQueue::DEFAULT), 22); // 20 entries + 2 kv
         engine.clean(rid - 1);
-        assert_eq!(engine.stats.live_entries(LogQueue::Append), 16);
+        assert_eq!(engine.stats.live_entries(LogQueue::DEFAULT), 16);
         // rewrite: [20..25][10..25]
         // append: [10..25]
         engine
@@ -1114,7 +1114,7 @@ mod tests {
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
         engine.scan_entries(rid, 10, 25, |_, q, d| {
-            assert_eq!(q, LogQueue::Append);
+            assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
 
@@ -1135,7 +1135,7 @@ mod tests {
         engine.write(&mut compact_log, true).unwrap();
         let engine = engine.reopen();
         engine.scan_entries(rid, 20, 25, |_, q, d| {
-            assert_eq!(q, LogQueue::Append);
+            assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
 
@@ -1154,7 +1154,7 @@ mod tests {
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
         engine.scan_entries(rid, 10, 15, |_, q, d| {
-            assert_eq!(q, LogQueue::Append);
+            assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
     }
@@ -1185,7 +1185,7 @@ mod tests {
         assert_eq!(count, 100);
         assert!(!engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+            .needs_rewrite_log_files(LogQueue::DEFAULT));
 
         // Append more logs to make total size greater than `purge_threshold`.
         for index in 100..250 {
@@ -1197,11 +1197,11 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+            .needs_rewrite_log_files(LogQueue::DEFAULT));
 
-        let old_min_file_seq = engine.file_span(LogQueue::Append).0;
+        let old_min_file_seq = engine.file_span(LogQueue::DEFAULT).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
-        let new_min_file_seq = engine.file_span(LogQueue::Append).0;
+        let new_min_file_seq = engine.file_span(LogQueue::DEFAULT).0;
         // Some entries are rewritten.
         assert!(new_min_file_seq > old_min_file_seq);
         // No regions need to be force compacted because the threshold is not reached.
@@ -1213,7 +1213,7 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+            .needs_rewrite_log_files(LogQueue::DEFAULT));
         let will_force_compact = engine.purge_expired_files().unwrap();
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
@@ -1299,11 +1299,11 @@ mod tests {
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+            .needs_rewrite_log_files(LogQueue::DEFAULT));
         assert!(engine.purge_expired_files().unwrap().is_empty());
-        assert!(engine.file_span(LogQueue::Append).0 > 1);
+        assert!(engine.file_span(LogQueue::DEFAULT).0 > 1);
 
-        let rewrite_file_size = engine.pipe_log.total_size(LogQueue::Rewrite);
+        let rewrite_file_size = engine.pipe_log.total_size(LogQueue::REWRITE);
         assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
@@ -1334,7 +1334,7 @@ mod tests {
 
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+            .needs_rewrite_log_files(LogQueue::DEFAULT));
         assert!(engine.purge_expired_files().unwrap().is_empty());
     }
 
@@ -1450,12 +1450,12 @@ mod tests {
             engine.append(rid, 1, 11, Some(&data));
         }
 
-        let old_active_file = engine.file_span(LogQueue::Append).1;
+        let old_active_file = engine.file_span(LogQueue::DEFAULT).1;
         engine.purge_manager.must_rewrite_append_queue(None, None);
-        assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
-        let old_active_file = engine.file_span(LogQueue::Rewrite).1;
+        assert_eq!(engine.file_span(LogQueue::DEFAULT).0, old_active_file + 1);
+        let old_active_file = engine.file_span(LogQueue::REWRITE).1;
         engine.purge_manager.must_rewrite_rewrite_queue();
-        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+        assert_eq!(engine.file_span(LogQueue::REWRITE).0, old_active_file + 1);
 
         let engine = engine.reopen();
         for rid in 1..=3 {
@@ -1474,10 +1474,10 @@ mod tests {
                 // open engine with format_version - Version::V1
                 let engine = RaftLogEngine::open(cfg_v1.clone()).unwrap();
                 engine.append(rid, 0, 20, Some(&data));
-                let append_first = engine.file_span(LogQueue::Append).0;
+                let append_first = engine.file_span(LogQueue::DEFAULT).0;
                 engine.compact_to(rid, 18);
                 engine.purge_expired_files().unwrap();
-                assert!(engine.file_span(LogQueue::Append).0 > append_first);
+                assert!(engine.file_span(LogQueue::DEFAULT).0 > append_first);
                 assert_eq!(engine.first_index(rid).unwrap(), 18);
                 assert_eq!(engine.last_index(rid).unwrap(), 19);
             }
@@ -1487,10 +1487,10 @@ mod tests {
                 assert_eq!(engine.first_index(rid).unwrap(), 18);
                 assert_eq!(engine.last_index(rid).unwrap(), 19);
                 engine.append(rid, 20, 40, Some(&data));
-                let append_first = engine.file_span(LogQueue::Append).0;
+                let append_first = engine.file_span(LogQueue::DEFAULT).0;
                 engine.compact_to(rid, 38);
                 engine.purge_expired_files().unwrap();
-                assert!(engine.file_span(LogQueue::Append).0 > append_first);
+                assert!(engine.file_span(LogQueue::DEFAULT).0 > append_first);
                 assert_eq!(engine.first_index(rid).unwrap(), 38);
                 assert_eq!(engine.last_index(rid).unwrap(), 39);
             }
@@ -1604,7 +1604,7 @@ mod tests {
 
         //dump file
         let file_id = FileId {
-            queue: LogQueue::Rewrite,
+            queue: LogQueue::REWRITE,
             seq: 1,
         };
         let dump_it = Engine::dump_with_file_system(
@@ -1796,11 +1796,11 @@ mod tests {
         for rid in 25..=50 {
             engine.append(rid, 6, 11, Some(&entry_data));
         }
-        let (_, last_file_seq) = engine.file_span(LogQueue::Append);
+        let (_, last_file_seq) = engine.file_span(LogQueue::DEFAULT);
         drop(engine);
 
         let last_file = FileId {
-            queue: LogQueue::Append,
+            queue: LogQueue::DEFAULT,
             seq: last_file_seq,
         };
         let f = OpenOptions::new()
@@ -1921,7 +1921,7 @@ mod tests {
 
         fn update_metadata(&self, path: &Path, delete: bool) -> bool {
             let id = FileId::parse_file_name(path.file_name().unwrap().to_str().unwrap()).unwrap();
-            if id.queue == LogQueue::Append {
+            if id.queue == LogQueue::DEFAULT {
                 if delete {
                     self.append_metadata.lock().unwrap().remove(&id.seq)
                 } else {
@@ -1982,7 +1982,7 @@ mod tests {
             }
             let id = FileId::parse_file_name(path.as_ref().file_name().unwrap().to_str().unwrap())
                 .unwrap();
-            if id.queue == LogQueue::Append {
+            if id.queue == LogQueue::DEFAULT {
                 self.append_metadata.lock().unwrap().contains(&id.seq)
             } else {
                 false
@@ -2019,11 +2019,11 @@ mod tests {
         for rid in 1..=5 {
             engine.clean(rid);
         }
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let (start, _) = engine.file_span(LogQueue::DEFAULT);
         engine.purge_expired_files().unwrap();
-        assert!(start < engine.file_span(LogQueue::Append).0);
+        assert!(start < engine.file_span(LogQueue::DEFAULT).0);
         assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let start = engine.file_span(LogQueue::Append).0;
+        let start = engine.file_span(LogQueue::DEFAULT).0;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2031,7 +2031,7 @@ mod tests {
 
         let engine = engine.reopen();
         assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let (start, _) = engine.file_span(LogQueue::DEFAULT);
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2042,7 +2042,7 @@ mod tests {
             fs.append_metadata.lock().unwrap().insert(i);
         }
         let engine = engine.reopen();
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let (start, _) = engine.file_span(LogQueue::DEFAULT);
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2072,13 +2072,13 @@ mod tests {
         for rid in 1..=5 {
             engine.clean(rid);
         }
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let (start, _) = engine.file_span(LogQueue::DEFAULT);
         // the [start - 1] files are recycled
         engine.purge_expired_files().unwrap();
-        assert!(start < engine.file_span(LogQueue::Append).0);
+        assert!(start < engine.file_span(LogQueue::DEFAULT).0);
         let file_count = fs.inner.file_count();
         assert_eq!(engine.file_count(None) + 1, file_count);
-        let start = engine.file_span(LogQueue::Append).0 - 1;
+        let start = engine.file_span(LogQueue::DEFAULT).0 - 1;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2086,8 +2086,8 @@ mod tests {
         // reopen the engine and validate the stale files are removed
         let engine = engine.reopen();
         assert_eq!(fs.inner.file_count(), file_count - 1);
-        assert_eq!(engine.file_span(LogQueue::Append).0, start + 1);
-        let start = engine.file_span(LogQueue::Append).0;
+        assert_eq!(engine.file_span(LogQueue::DEFAULT).0, start + 1);
+        let start = engine.file_span(LogQueue::DEFAULT).0;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2101,7 +2101,7 @@ mod tests {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let start = engine.file_span(LogQueue::Append).0;
+        let start = engine.file_span(LogQueue::DEFAULT).0;
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2109,7 +2109,7 @@ mod tests {
 
         let engine = engine.reopen();
         assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let (start, _) = engine.file_span(LogQueue::DEFAULT);
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2120,7 +2120,7 @@ mod tests {
             fs.append_metadata.lock().unwrap().insert(i);
         }
         let engine = engine.reopen();
-        let (start, _) = engine.file_span(LogQueue::Append);
+        let (start, _) = engine.file_span(LogQueue::DEFAULT);
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2192,7 +2192,7 @@ mod tests {
         // Reopen the Engine with V2 and purge
         {
             let engine = RaftLogEngine::open_with_file_system(cfg_v2.clone(), fs.clone()).unwrap();
-            let (start, _) = engine.file_span(LogQueue::Append);
+            let (start, _) = engine.file_span(LogQueue::DEFAULT);
             for rid in 6..=10 {
                 engine.append(rid, 11, 20, Some(&entry_data));
             }
@@ -2200,13 +2200,13 @@ mod tests {
             engine.clean(6);
             // the [1, 12] files are recycled
             engine.purge_expired_files().unwrap();
-            assert_eq!(engine.file_count(Some(LogQueue::Append)), 5);
-            assert!(start < engine.file_span(LogQueue::Append).0);
+            assert_eq!(engine.file_count(Some(LogQueue::DEFAULT)), 5);
+            assert!(start < engine.file_span(LogQueue::DEFAULT).0);
         }
         // Reopen the Engine with V1 -> V2 and purge
         {
             let engine = RaftLogEngine::open_with_file_system(cfg_v1, fs.clone()).unwrap();
-            let (start, _) = engine.file_span(LogQueue::Append);
+            let (start, _) = engine.file_span(LogQueue::DEFAULT);
             for rid in 6..=10 {
                 engine.append(rid, 20, 30, Some(&entry_data));
             }
@@ -2216,21 +2216,21 @@ mod tests {
             for rid in 1..=5 {
                 engine.append(rid, 11, 20, Some(&entry_data));
             }
-            assert_eq!(engine.file_span(LogQueue::Append).0, start);
-            let file_count = engine.file_count(Some(LogQueue::Append));
+            assert_eq!(engine.file_span(LogQueue::DEFAULT).0, start);
+            let file_count = engine.file_count(Some(LogQueue::DEFAULT));
             drop(engine);
             let engine = RaftLogEngine::open_with_file_system(cfg_v2, fs).unwrap();
-            assert_eq!(engine.file_span(LogQueue::Append).0, start);
-            assert_eq!(engine.file_count(Some(LogQueue::Append)), file_count);
+            assert_eq!(engine.file_span(LogQueue::DEFAULT).0, start);
+            assert_eq!(engine.file_count(Some(LogQueue::DEFAULT)), file_count);
             // Mark all regions obsolete.
             for rid in 1..=10 {
                 engine.clean(rid);
             }
-            let (start, _) = engine.file_span(LogQueue::Append);
+            let (start, _) = engine.file_span(LogQueue::DEFAULT);
             // the [13, 32] files are purged
             engine.purge_expired_files().unwrap();
-            assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
-            assert!(engine.file_span(LogQueue::Append).0 > start);
+            assert_eq!(engine.file_count(Some(LogQueue::DEFAULT)), 1);
+            assert!(engine.file_span(LogQueue::DEFAULT).0 > start);
         }
     }
 }

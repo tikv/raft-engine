@@ -81,8 +81,8 @@ enum Cmd {
 
 fn convert_queue(queue: &str) -> Option<LogQueue> {
     match queue {
-        "append" => Some(LogQueue::Append),
-        "rewrite" => Some(LogQueue::Rewrite),
+        "append" => Some(LogQueue::DEFAULT),
+        "rewrite" => Some(LogQueue::REWRITE),
         "all" => None,
         _ => unreachable!(),
     }

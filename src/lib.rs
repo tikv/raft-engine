@@ -96,25 +96,27 @@ impl GlobalStats {
     #[inline]
     pub fn add(&self, queue: pipe_log::LogQueue, count: usize) {
         match queue {
-            pipe_log::LogQueue::Append => {
+            pipe_log::LogQueue::DEFAULT => {
                 self.live_append_entries.fetch_add(count, Ordering::Relaxed);
             }
-            pipe_log::LogQueue::Rewrite => {
+            pipe_log::LogQueue::REWRITE => {
                 self.rewrite_entries.fetch_add(count, Ordering::Relaxed);
             }
+            _ => unreachable!(),
         }
     }
 
     #[inline]
     pub fn delete(&self, queue: pipe_log::LogQueue, count: usize) {
         match queue {
-            pipe_log::LogQueue::Append => {
+            pipe_log::LogQueue::DEFAULT => {
                 self.live_append_entries.fetch_sub(count, Ordering::Relaxed);
             }
-            pipe_log::LogQueue::Rewrite => {
+            pipe_log::LogQueue::REWRITE => {
                 self.deleted_rewrite_entries
                     .fetch_add(count, Ordering::Relaxed);
             }
+            _ => unreachable!(),
         }
     }
 
@@ -139,13 +141,14 @@ impl GlobalStats {
     #[inline]
     pub fn live_entries(&self, queue: pipe_log::LogQueue) -> usize {
         match queue {
-            pipe_log::LogQueue::Append => self.live_append_entries.load(Ordering::Relaxed),
-            pipe_log::LogQueue::Rewrite => {
+            pipe_log::LogQueue::DEFAULT => self.live_append_entries.load(Ordering::Relaxed),
+            pipe_log::LogQueue::REWRITE => {
                 let op = self.rewrite_entries.load(Ordering::Relaxed);
                 let dop = self.deleted_rewrite_entries.load(Ordering::Relaxed);
                 debug_assert!(op >= dop);
                 op.saturating_sub(dop)
             }
+            _ => unreachable!(),
         }
     }
 
@@ -153,10 +156,10 @@ impl GlobalStats {
     pub fn flush_metrics(&self) {
         metrics::LOG_ENTRY_COUNT
             .rewrite
-            .set(self.live_entries(pipe_log::LogQueue::Rewrite) as i64);
+            .set(self.live_entries(pipe_log::LogQueue::REWRITE) as i64);
         metrics::LOG_ENTRY_COUNT
             .append
-            .set(self.live_entries(pipe_log::LogQueue::Append) as i64);
+            .set(self.live_entries(pipe_log::LogQueue::DEFAULT) as i64);
     }
 }
 

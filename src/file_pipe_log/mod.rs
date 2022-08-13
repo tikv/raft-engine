@@ -185,7 +185,7 @@ pub mod debug {
                 .tempdir()
                 .unwrap();
             let mut file_id = FileId {
-                queue: LogQueue::Rewrite,
+                queue: LogQueue::REWRITE,
                 seq: 7,
             };
             let file_system = Arc::new(DefaultFileSystem);
@@ -271,10 +271,10 @@ pub mod debug {
             let unrelated_file_path = dir.path().join(Path::new("random_file"));
             let _unrelated_file = std::fs::File::create(&unrelated_file_path).unwrap();
             // A corrupted log file.
-            let corrupted_file_path = FileId::dummy(LogQueue::Append).build_file_path(dir.path());
+            let corrupted_file_path = FileId::dummy(LogQueue::DEFAULT).build_file_path(dir.path());
             let _corrupted_file = std::fs::File::create(&corrupted_file_path).unwrap();
             // An empty log file.
-            let empty_file_path = FileId::dummy(LogQueue::Rewrite).build_file_path(dir.path());
+            let empty_file_path = FileId::dummy(LogQueue::REWRITE).build_file_path(dir.path());
             let mut writer = build_file_writer(
                 file_system.as_ref(),
                 &empty_file_path,
@@ -306,7 +306,7 @@ pub mod debug {
                 .unwrap();
             let file_system = Arc::new(DefaultFileSystem);
 
-            let path = FileId::dummy(LogQueue::Append).build_file_path(dir.path());
+            let path = FileId::dummy(LogQueue::DEFAULT).build_file_path(dir.path());
 
             let formats = [
                 LogFileFormat::new(Version::V1, 0),
