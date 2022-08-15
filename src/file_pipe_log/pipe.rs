@@ -248,7 +248,6 @@ struct ActiveFile<F: FileSystem> {
 /// A file-based log storage that arranges files as one single queue.
 pub(super) struct SinglePipe<F: FileSystem> {
     queue: LogQueue,
-    /* dir: String, */
     file_format: LogFileFormat,
     target_file_size: usize,
     bytes_per_sync: usize,
@@ -373,7 +372,6 @@ impl<F: FileSystem> SinglePipe<F> {
         let total_files = fds.len();
         let pipe = Self {
             queue,
-            /* dir: cfg.dir.clone(), */
             file_format: LogFileFormat::new(cfg.format_version, alignment),
             target_file_size: cfg.target_file_size.0 as usize,
             bytes_per_sync: cfg.bytes_per_sync.0 as usize,
@@ -396,11 +394,6 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
     fn sync_dir(&self) -> Result<()> {
-        /*
-        let path = PathBuf::from(&self.dir);
-        std::fs::File::open(path).and_then(|d| d.sync_all())?;
-        Ok(())
-        */
         let mut storage = self.storage.write();
         storage.sync_all_dir()
     }
@@ -433,21 +426,9 @@ impl<F: FileSystem> SinglePipe<F> {
             queue: self.queue,
             seq,
         };
-        /*
-        let path = file_id.build_file_path(&self.dir);
-        let fd = {
-            let mut files = self.files.write();
-            if files.recycle_one_file(&self.file_system, &self.dir, file_id) {
-                // Open the recycled file(file is already renamed)
-                Arc::new(self.file_system.open(&path)?)
-            } else {
-                // A new file is introduced.
-                Arc::new(self.file_system.create(&path)?)
-            }
-        };
-        */
+        // Generate a new fd from a newly chosen file, might be reused from a stale
+        // file or generated from a newly created file.
         let (fd, storage_type) = {
-            // Generate the file path.
             let mut storage = self.storage.write();
             let (dir, storage_type) = {
                 if let Some((d, t)) = storage.get_stale_files_dir() {
@@ -586,13 +567,14 @@ impl<F: FileSystem> SinglePipe<F> {
                     }
                 }
             };
+            let has_free_space = {
+                let storage = self.storage.read();
+                storage.get_stale_files_dir().is_some()
+                    || storage.get_free_dir(self.target_file_size).is_some()
+            };
             // If there still exists free space for this record, a special Err will
             // be returned to the caller.
-            let storage = self.storage.read();
-            if no_space_err
-                && (storage.get_stale_files_dir().is_some()
-                    || storage.get_free_dir(self.target_file_size).is_some())
-            {
+            if no_space_err && has_free_space {
                 return Err(Error::Other(box_err!(
                     "failed to write {} file, get {} try to flush it to other dir",
                     seq,

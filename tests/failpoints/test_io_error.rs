@@ -220,8 +220,7 @@ fn test_concurrent_write_error() {
     let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
     // The second of three writes will fail.
-    let _f1 = FailGuard::new("log_fd::write::err", "1*off->1*return->off");
-    let _f2 = FailGuard::new("file_pipe_log::force_no_free_space", "1*off->1*return->off");
+    fail::cfg("log_fd::write::err", "1*off->1*return->off").unwrap();
     let entry_clone = entry.clone();
     ctx.write_ext(move |e| {
         e.write(&mut generate_batch(1, 1, 11, Some(&entry_clone)), false)
@@ -286,6 +285,102 @@ fn test_concurrent_write_error() {
             .fetch_entries_to::<MessageExtTyped>(1, 1, 21, None, &mut vec![])
             .unwrap()
     );
+}
+
+#[test]
+fn test_no_space_write_error() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_no_space_write_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        ..Default::default()
+    };
+    let entry = vec![b'x'; 1024];
+    {
+        // If disk is full, a new Engine cannot be opened.
+        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+        assert!(Engine::open(cfg.clone()).is_err());
+    }
+    {
+        // If disk is full after writing, the old engine should be available
+        // for `read`.
+        let engine = Engine::open(cfg.clone()).unwrap();
+        engine
+            .write(&mut generate_batch(1, 11, 21, Some(&entry)), true)
+            .unwrap();
+        drop(engine);
+        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(1, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+    }
+    {
+        // `Write` is abnormal for no space left, Engine should panic at `rotate`.
+        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "off");
+        let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert!(catch_unwind_silent(|| {
+            engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .unwrap_err();
+        })
+        .is_err());
+    }
+    {
+        // Disk goes from `full` -> `spare`.
+        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*return->off");
+        let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        engine
+            .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+            .unwrap();
+        engine
+            .write(&mut generate_batch(3, 11, 21, Some(&entry)), true)
+            .unwrap();
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(3, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+    }
+    {
+        // Disk is `full`, the `write` operation should `panic` at `rotate_imp`.
+        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+        let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
+        let engine = Engine::open(cfg).unwrap();
+        assert!(catch_unwind_silent(|| {
+            engine
+                .write(&mut generate_batch(4, 11, 21, Some(&entry)), true)
+                .unwrap_err();
+        })
+        .is_err());
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(3, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+    }
 }
 
 #[test]

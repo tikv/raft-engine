@@ -196,7 +196,7 @@ where
             let ret = writer.finish();
             if let Err(Error::Other(e)) = ret {
                 warn!(
-                    "Append failed, err: {}, try to re-append this log_batch into other log",
+                    "Cannot append, err: {}, try to re-append this log_batch into other log",
                     e
                 );
                 log_batch.reset_to_encoded_state();
