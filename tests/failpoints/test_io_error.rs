@@ -220,7 +220,8 @@ fn test_concurrent_write_error() {
     let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
     // The second of three writes will fail.
-    fail::cfg("log_fd::write::err", "1*off->1*return->off").unwrap();
+    let _f1 = FailGuard::new("log_fd::write::err", "1*off->1*return->off");
+    let _f2 = FailGuard::new("file_pipe_log::force_no_free_space", "1*off->1*return->off");
     let entry_clone = entry.clone();
     ctx.write_ext(move |e| {
         e.write(&mut generate_batch(1, 1, 11, Some(&entry_clone)), false)

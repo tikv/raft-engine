@@ -122,7 +122,16 @@ impl LogFd {
             let bytes = match pwrite(self.0, &content[written..], offset as i64) {
                 Ok(bytes) => bytes,
                 Err(e) if e == Errno::EINTR => continue,
-                Err(e) => return Err(from_nix_error(e, "pwrite")),
+                Err(e) => {
+                    return {
+                        if e == Errno::ENOSPC {
+                            // no space left
+                            Err(from_nix_error(e, "nospace"))
+                        } else {
+                            Err(from_nix_error(e, "pwrite"))
+                        }
+                    };
+                }
             };
             if bytes == 0 {
                 break;
@@ -130,6 +139,9 @@ impl LogFd {
             written += bytes;
             offset += bytes;
         }
+        fail_point!("log_fd::write::no_space_err", |_| {
+            Err(from_nix_error(nix::Error::ENOSPC, "nospace"))
+        });
         fail_point!("log_fd::write::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });

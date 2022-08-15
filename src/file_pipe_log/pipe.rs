@@ -121,6 +121,10 @@ impl StorageInfo {
     }
 
     fn get_stale_files_dir(&self) -> Option<(String, StorageDirType)> {
+        #[cfg(feature = "failpoints")]
+        {
+            fail::fail_point!("file_pipe_log::force_no_free_space", |_| None);
+        }
         for t in StorageDirType::iter() {
             let idx = t as usize;
             if idx >= self.storage.len() {
@@ -134,6 +138,10 @@ impl StorageInfo {
     }
 
     fn get_free_dir(&self, target_size: usize) -> Option<(String, StorageDirType)> {
+        #[cfg(feature = "failpoints")]
+        {
+            fail::fail_point!("file_pipe_log::force_no_free_space", |_| { None });
+        }
         for t in StorageDirType::iter() {
             let idx = t as usize;
             if idx >= self.storage.len() {
@@ -564,20 +572,34 @@ impl<F: FileSystem> SinglePipe<F> {
                     seq, e, te
                 );
             }
-            return Err(e);
-            // TODO: if main dir is full, we should use the sec-dir and
-            // create a new file for appending bytes timely.
-            /*
-            // Dead lock
-            if let Err(re) = self.rotate_imp(&mut active_file) {
-                // ...
-                panic!("error when rotate {} after error: {}, get: {}", seq, e, re);
-            } else {
-                println!("Try to re-append bytes to new rotated file.");
-                self.active_file.force_unlock();
-                return self.append(bytes);
+            // TODO: Refine the following judgement if the error type
+            // `ErrorKind::StorageFull` is stable.
+            let no_space_err = {
+                if_chain::if_chain! {
+                    if let Error::Io(ref e) = e;
+                    let err_msg = format!("{}", e.get_ref().unwrap());
+                    if err_msg.contains("nospace");
+                    then {
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            // If there still exists free space for this record, a special Err will
+            // be returned to the caller.
+            let storage = self.storage.read();
+            if no_space_err
+                && (storage.get_stale_files_dir().is_some()
+                    || storage.get_free_dir(self.target_file_size).is_some())
+            {
+                return Err(Error::Other(box_err!(
+                    "failed to write {} file, get {} try to flush it to other dir",
+                    seq,
+                    e
+                )));
             }
-            */
+            return Err(e);
         }
         let handle = FileBlockHandle {
             id: FileId {

@@ -727,6 +727,9 @@ impl LogBatch {
     /// compression type to each entry index.
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         let _t = StopWatch::new(perf_context!(log_populating_duration));
+        if let BufState::Encoded(header_offset, _) = self.buf_state {
+            return Ok(self.buf.len() - header_offset);
+        }
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
             self.buf_state = BufState::Encoded(self.buf.len(), 0);
@@ -828,6 +831,16 @@ impl LogBatch {
         self.buf.truncate(LOG_BATCH_HEADER_LEN);
         self.buf_state = BufState::Open;
         self.item_batch.drain()
+    }
+
+    /// Resets the `LogBatch` state to `Encoded(_, _)`.
+    pub(crate) fn reset_to_encoded_state(&mut self) {
+        match self.buf_state {
+            BufState::Sealed(header_offset, entries_len) => {
+                self.buf_state = BufState::Encoded(header_offset, entries_len);
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// Returns approximate encoded size of this log batch. Might be larger

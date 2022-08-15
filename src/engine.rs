@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use log::{error, info};
+use log::{error, info, warn};
 use protobuf::{parse_from_bytes, Message};
 
 use crate::config::{Config, RecoveryMode};
@@ -191,7 +191,18 @@ where
             debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
-            writer.finish()?
+            // Retry if `writer.finish()` returns a special err, remarking there still
+            // exists free space for this `LogBatch`.
+            let ret = writer.finish();
+            if let Err(Error::Other(e)) = ret {
+                warn!(
+                    "Append failed, err: {}, try to re-append this log_batch into other log",
+                    e
+                );
+                log_batch.reset_to_encoded_state();
+                return self.write(log_batch, sync);
+            }
+            ret?
         };
 
         let mut now = Instant::now();
