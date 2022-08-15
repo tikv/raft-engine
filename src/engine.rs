@@ -239,6 +239,14 @@ where
         Ok(None)
     }
 
+    pub fn get(&self, region_id: u64, key: &[u8]) -> Option<Vec<u8>> {
+        let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
+        if let Some(memtable) = self.memtables.get(region_id) {
+            return memtable.read().get(key);
+        }
+        None
+    }
+
     /// Iterates over [start_key, end_key) range of Raft Group key-values and
     /// yields messages of the required type. Unparsable items are skipped.
     pub fn scan_messages<S, C>(
@@ -634,15 +642,6 @@ mod tests {
                     .unwrap();
                 self.write(&mut batch, true).unwrap();
             }
-        }
-
-        fn get(&self, rid: u64, key: &[u8]) -> Option<Vec<u8>> {
-            if let Some(memtable) = self.memtables.get(rid) {
-                if let Some(value) = memtable.read().get(key) {
-                    return Some(value);
-                }
-            }
-            None
         }
 
         fn clean(&self, rid: u64) {
