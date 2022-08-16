@@ -10,6 +10,8 @@ mod obfuscated;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
+pub(crate) use default::from_same_dev;
+
 /// FileSystem
 pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;

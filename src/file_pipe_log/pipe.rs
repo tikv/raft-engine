@@ -28,7 +28,7 @@ pub enum StorageDirType {
     Secondary = 1,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SingleStorageInfo {
     dir: String,
     stale_files: HashSet<FileSeq>,
@@ -73,14 +73,12 @@ impl SingleStorageInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct StorageInfo {
     storage: Vec<SingleStorageInfo>,
 }
 
 impl StorageInfo {
-    // fn get_disk_stat(&self, target: StorageDirType) -> Result<FsStat> {}
-
     fn new(dir: String, sub_dir: Option<String>) -> Self {
         let mut storage = vec![SingleStorageInfo::new(dir); 1];
         if let Some(sub) = sub_dir {
@@ -121,10 +119,6 @@ impl StorageInfo {
     }
 
     fn get_stale_files_dir(&self) -> Option<(String, StorageDirType)> {
-        #[cfg(feature = "failpoints")]
-        {
-            fail::fail_point!("file_pipe_log::force_no_free_space", |_| None);
-        }
         for t in StorageDirType::iter() {
             let idx = t as usize;
             if idx >= self.storage.len() {
@@ -140,6 +134,12 @@ impl StorageInfo {
     fn get_free_dir(&self, target_size: usize) -> Option<(String, StorageDirType)> {
         #[cfg(feature = "failpoints")]
         {
+            fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
+                Some((
+                    self.storage[StorageDirType::Secondary as usize].dir.clone(),
+                    StorageDirType::Secondary,
+                ))
+            });
             fail::fail_point!("file_pipe_log::force_no_free_space", |_| { None });
         }
         for t in StorageDirType::iter() {
@@ -282,7 +282,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
                 queue: self.queue,
                 seq,
             };
-            let path = file_id.build_file_path(&dir.unwrap().0);
+            let path = file_id.build_file_path(&dir.as_ref().unwrap().0);
             if let Err(e) = self.file_system.delete(&path) {
                 error!(
                     "error while deleting stale file: {}, err_msg: {}",
@@ -705,11 +705,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 Some(t) => {
                     storage.push_stale_file(seq, t);
                 }
-                None =>
-                // break,
-                {
-                    continue
-                }
+                None => break,
             }
         }
         Ok(purged)

@@ -3,6 +3,7 @@
 use log::warn;
 use serde::{Deserialize, Serialize};
 
+use crate::env::from_same_dev;
 use crate::pipe_log::Version;
 use crate::{util::ReadableSize, Result};
 
@@ -131,6 +132,23 @@ impl Default for Config {
 
 impl Config {
     pub fn sanitize(&mut self) -> Result<()> {
+        if let Some(ref sub_dir) = self.sub_dir {
+            match from_same_dev(&self.dir, sub_dir) {
+                Ok(false) => {
+                    // dir and sub-dir are on different device.
+                }
+                Ok(true) => {
+                    warn!(
+                        "sub-dir ({}) and dir ({}) are on same device, ignore it",
+                        sub_dir, self.dir
+                    );
+                    self.sub_dir = None;
+                }
+                Err(e) => {
+                    return Err(box_err!("invalid sub-dir or main dir, err: {}", e));
+                }
+            }
+        }
         if self.purge_threshold.0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
         }

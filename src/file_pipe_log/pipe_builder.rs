@@ -152,6 +152,49 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             Ok(())
         }
 
+        fn clean_stale_metadata<F: FileSystem>(
+            file_system: &F,
+            dir: &str,
+            min_id: u64,
+            queue: LogQueue,
+        ) {
+            // Try to cleanup stale metadata left by the previous version.
+            let max_sample = 100;
+            // Find the first obsolete metadata.
+            let mut delete_start = None;
+            for i in 0..max_sample {
+                let seq = i * min_id / max_sample;
+                let file_id = FileId { queue, seq };
+                // Main dir
+                let path = file_id.build_file_path(&dir);
+                if file_system.exists_metadata(&path) {
+                    delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
+                    break;
+                }
+            }
+            // Delete metadata starting from the oldest. Abort on error.
+            if let Some(start) = delete_start {
+                let mut success = 0;
+                for seq in start..min_id {
+                    let file_id = FileId { queue, seq };
+                    let path = file_id.build_file_path(&dir);
+                    if file_system.exists_metadata(&path) {
+                        if let Err(e) = file_system.delete_metadata(&path) {
+                            error!("failed to delete metadata of {}: {}.", path.display(), e);
+                            break;
+                        }
+                    } else {
+                        continue;
+                    }
+                    success += 1;
+                }
+                warn!(
+                    "deleted {} stale files of {:?} in range [{}, {}).",
+                    success, queue, start, min_id,
+                );
+            }
+        }
+
         // Validate main dir.
         let dir = &self.cfg.dir;
         validate_dir(dir)?;
@@ -204,53 +247,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             ),
         ] {
             if max_id > 0 {
-                // Try to cleanup stale metadata left by the previous version.
-                let max_sample = 100;
-                // Find the first obsolete metadata.
-                let mut delete_start = None;
-                for i in 0..max_sample {
-                    let seq = i * min_id / max_sample;
-                    let file_id = FileId { queue, seq };
-                    // Main dir
-                    let path = file_id.build_file_path(&self.cfg.dir);
-                    if self.file_system.exists_metadata(&path) {
-                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
-                        break;
-                    }
-                    // Secondary dir
-                    if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
-                        let path = file_id.build_file_path(sub_dir);
-                        if self.file_system.exists_metadata(&path) {
-                            delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
-                            break;
-                        }
-                    }
-                }
-                // Delete metadata starting from the oldest. Abort on error.
-                if let Some(start) = delete_start {
-                    let mut success = 0;
-                    for seq in start..min_id {
-                        let file_id = FileId { queue, seq };
-                        // Main dir
-                        let path = file_id.build_file_path(&self.cfg.dir);
-                        if let Err(e) = self.file_system.delete_metadata(&path) {
-                            error!("failed to delete metadata of {}: {}.", path.display(), e);
-                            break;
-                        }
-                        // Secondary dir
-                        if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
-                            let path = file_id.build_file_path(sub_dir);
-                            if let Err(e) = self.file_system.delete_metadata(&path) {
-                                error!("failed to delete metadata of {}: {}.", path.display(), e);
-                                break;
-                            }
-                        }
-                        success += 1;
-                    }
-                    warn!(
-                        "deleted {} stale files of {:?} in range [{}, {}).",
-                        success, queue, start, min_id,
-                    );
+                // Clean stale metadata in main dir.
+                clean_stale_metadata(self.file_system.as_ref(), &self.cfg.dir, min_id, queue);
+                // Clean stale metadata in secondary dir if it was specified.
+                if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
+                    clean_stale_metadata(self.file_system.as_ref(), sub_dir, min_id, queue);
                 }
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };

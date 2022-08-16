@@ -301,7 +301,7 @@ fn test_no_space_write_error() {
     let entry = vec![b'x'; 1024];
     {
         // If disk is full, a new Engine cannot be opened.
-        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+        let _f = FailGuard::new("file_pipe_log::force_no_free_space", "return");
         assert!(Engine::open(cfg.clone()).is_err());
     }
     {
@@ -312,7 +312,7 @@ fn test_no_space_write_error() {
             .write(&mut generate_batch(1, 11, 21, Some(&entry)), true)
             .unwrap();
         drop(engine);
-        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+        let _f = FailGuard::new("file_pipe_log::force_no_free_space", "return");
         let engine = Engine::open(cfg.clone()).unwrap();
         assert_eq!(
             10,
@@ -323,8 +323,7 @@ fn test_no_space_write_error() {
     }
     {
         // `Write` is abnormal for no space left, Engine should panic at `rotate`.
-        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "off");
-        let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
+        let _f = FailGuard::new("log_fd::write::no_space_err", "return");
         let engine = Engine::open(cfg.clone()).unwrap();
         assert!(catch_unwind_silent(|| {
             engine
@@ -338,6 +337,12 @@ fn test_no_space_write_error() {
         let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*return->off");
         let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
         let engine = Engine::open(cfg.clone()).unwrap();
+        assert!(catch_unwind_silent(|| {
+            engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .unwrap();
+        })
+        .is_err());
         engine
             .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
             .unwrap();

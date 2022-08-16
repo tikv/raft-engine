@@ -21,6 +21,31 @@ fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     std::io::Error::new(kind, custom)
 }
 
+pub fn from_same_dev<P: AsRef<Path>>(dir1: P, dir2: P) -> IoResult<bool> {
+    fail_point!("env::force_on_different_dev", |_| { Ok(false) });
+    if dir1.as_ref().starts_with(dir2.as_ref()) || dir2.as_ref().starts_with(dir1.as_ref()) {
+        return Ok(true);
+    }
+    #[cfg(any(target_os = "unix", target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta1 = std::fs::metadata(dir1.as_ref())?;
+        let meta2 = std::fs::metadata(dir2.as_ref())?;
+        Ok(meta1.dev() == meta2.dev())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::linux::fs::MetadataExt;
+        let meta1 = std::fs::metadata(dir1.as_ref())?;
+        let meta2 = std::fs::metadata(dir2.as_ref())?;
+        Ok(meta1.st_dev() == meta2.st_dev())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "unix", target_os = "macos")))]
+    {
+        unimplemented!()
+    }
+}
+
 /// A RAII-style low-level file. Errors occurred during automatic resource
 /// release are logged and ignored.
 ///

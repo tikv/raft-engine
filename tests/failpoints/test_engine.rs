@@ -723,3 +723,173 @@ fn test_build_engine_with_datalayout_abnormal() {
         Engine::open(cfg).unwrap();
     }
 }
+
+#[test]
+fn test_build_engine_with_multi_dir() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dir_1")
+        .tempdir()
+        .unwrap();
+    let sub_dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dir_2")
+        .tempdir()
+        .unwrap();
+    let data = vec![b'x'; 1024];
+    let rid = 1;
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        sub_dir: Some(sub_dir.path().to_str().unwrap().to_owned()),
+        target_file_size: ReadableSize::kb(2),
+        purge_threshold: ReadableSize::kb(4),
+        ..Default::default()
+    };
+    let mut start_seq: u64;
+    {
+        // Set config with abnormal settings
+        let abnormal_dir = "./abnormal_testing";
+        let path = std::path::Path::new(abnormal_dir);
+        if !path.exists() {
+            std::fs::create_dir(path).unwrap();
+        }
+        let cfg_err = Config {
+            sub_dir: Some(abnormal_dir.to_owned()),
+            ..cfg.clone()
+        };
+        let engine = Engine::open(cfg_err).unwrap();
+        append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
+        append(&engine, rid, 2, 3, Some(&data));
+        append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
+        append(&engine, rid, 4, 5, Some(&data));
+        append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
+        start_seq = engine.file_span(LogQueue::Append).0;
+        assert_eq!(
+            5,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(
+                    rid,  /* region */
+                    1,    /* begin */
+                    6,    /* end */
+                    None, /* max_size */
+                    &mut vec![],
+                )
+                .unwrap()
+        );
+        engine.compact_to(rid, 3);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > start_seq);
+        start_seq = engine.file_span(LogQueue::Append).0;
+    }
+    // Open engine with multi directories, main dir and secondary dir.
+    {
+        // (1) Write to main dir
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+        append(&engine, rid, 6, 7, Some(&data));
+        append(&engine, rid, 7, 8, Some(&data)); // file_seq: 4
+        append(&engine, rid, 8, 9, Some(&data));
+        append(&engine, rid, 9, 10, Some(&data)); // file_seq: 5
+        assert_eq!(
+            6,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 4, 10, None, &mut vec![],)
+                .unwrap()
+        );
+        engine.compact_to(rid, 8);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > start_seq);
+        start_seq = engine.file_span(LogQueue::Append).0;
+    }
+    {
+        // (2) Write to secondary dir
+        let _f1 = FailGuard::new("env::force_on_different_dev", "return");
+        let _f2 = FailGuard::new("file_pipe_log::force_use_secondary_dir", "return");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+        append(&engine, rid, 10, 11, Some(&data));
+        append(&engine, rid, 11, 12, Some(&data));
+        append(&engine, rid, 12, 13, Some(&data));
+        assert_eq!(
+            4,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 9, 13, None, &mut vec![],)
+                .unwrap()
+        );
+        engine.compact_to(rid, 11);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > start_seq);
+        start_seq = engine.file_span(LogQueue::Append).0;
+        drop(engine);
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+        append(&engine, rid, 13, 14, Some(&data));
+        append(&engine, rid, 14, 15, Some(&data));
+        assert_eq!(
+            3,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 12, 15, None, &mut vec![],)
+                .unwrap()
+        );
+    }
+    {
+        // (3) Back to main dir
+        let _f1 = FailGuard::new("env::force_on_different_dev", "return");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+        append(&engine, rid, 15, 16, Some(&data));
+        append(&engine, rid, 16, 17, Some(&data));
+        append(&engine, rid, 17, 18, Some(&data));
+        append(&engine, rid, 18, 19, Some(&data));
+        assert_eq!(
+            5,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 12, 17, None, &mut vec![],)
+                .unwrap()
+        );
+        let before = engine.file_span(LogQueue::Append);
+        drop(engine);
+        let engine = Engine::open(cfg.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append), before);
+    }
+    {
+        // (4) Open recycling logs feature.
+        let _f1 = FailGuard::new("env::force_on_different_dev", "return");
+        let cfg_rec = Config {
+            format_version: Version::V2,
+            enable_log_recycle: true,
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(4),
+            ..cfg
+        };
+        let engine = Engine::open(cfg_rec.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+        engine.compact_to(rid, 18);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > start_seq);
+        append(&engine, rid, 19, 20, Some(&data));
+        append(&engine, rid, 20, 21, Some(&data));
+        append(&engine, rid, 21, 22, Some(&data));
+        let before = engine.file_span(LogQueue::Append);
+        drop(engine);
+        // recycling stale files by compaction
+        let engine = Engine::open(cfg_rec.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append), before);
+        engine.compact_to(rid, 20);
+        engine.purge_expired_files().unwrap();
+        append(&engine, rid, 22, 23, Some(&data)); // reuse
+        append(&engine, rid, 23, 24, Some(&data)); // reuse
+        start_seq = engine.file_span(LogQueue::Append).0;
+        drop(engine);
+        let engine = Engine::open(cfg_rec.clone()).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+        // append records to secondary dir -> recycle -> reopen()
+        let _f = FailGuard::new("file_pipe_log::force_use_secondary_dir", "return");
+        append(&engine, rid, 24, 25, Some(&data));
+        append(&engine, rid, 25, 26, Some(&data));
+        engine.compact_to(rid, 21);
+        engine.purge_expired_files().unwrap();
+        start_seq = engine.file_span(LogQueue::Append).0;
+        drop(engine);
+        let engine = Engine::open(cfg_rec).unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, start_seq);
+    }
+}
