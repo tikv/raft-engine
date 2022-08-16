@@ -745,15 +745,13 @@ fn test_build_engine_with_multi_dir() {
     };
     let mut start_seq: u64;
     {
-        // Set config with abnormal settings
-        let abnormal_dir = "./abnormal_testing";
-        let path = std::path::Path::new(abnormal_dir);
-        if !path.exists() {
-            std::fs::create_dir(path).unwrap();
-        }
+        // Set config with abnormal settings => same prefix
+        let abnormal_dir = format!("{}/abnormal", dir.path().to_str().unwrap().to_owned());
+        let abnormal_sub_dir = format!("{}/testing", abnormal_dir);
         let cfg_err = Config {
-            sub_dir: Some(abnormal_dir.to_owned()),
-            ..cfg.clone()
+            dir: abnormal_dir,
+            sub_dir: Some(abnormal_sub_dir),
+            ..cfg
         };
         let engine = Engine::open(cfg_err).unwrap();
         append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
@@ -772,6 +770,35 @@ fn test_build_engine_with_multi_dir() {
                     None, /* max_size */
                     &mut vec![],
                 )
+                .unwrap()
+        );
+        engine.compact_to(rid, 3);
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > start_seq);
+        assert_eq!(
+            2,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 4, 6, None, &mut vec![],)
+                .unwrap()
+        );
+    }
+    {
+        // Set config with abnormal settings => same device
+        let cfg_err = Config {
+            sub_dir: Some("./abnormal_testing".to_owned()),
+            ..cfg.clone()
+        };
+        let engine = Engine::open(cfg_err).unwrap();
+        append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
+        append(&engine, rid, 2, 3, Some(&data));
+        append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
+        append(&engine, rid, 4, 5, Some(&data));
+        append(&engine, rid, 5, 6, Some(&data)); // file_seq: 3
+        start_seq = engine.file_span(LogQueue::Append).0;
+        assert_eq!(
+            5,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(rid, 1, 6, None, &mut vec![],)
                 .unwrap()
         );
         engine.compact_to(rid, 3);

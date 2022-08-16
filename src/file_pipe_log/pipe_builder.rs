@@ -14,7 +14,7 @@ use log::{error, info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
-use crate::env::FileSystem;
+use crate::env::{from_same_dev, FileSystem};
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
@@ -121,8 +121,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             rewrite_range: &mut FileSeqRange,
             append_dict: &mut FileSeqDict,
             rewrite_dict: &mut FileSeqDict,
-        ) -> Result<()> {
+        ) -> Result<u64> {
             let path = Path::new(dir);
+            let mut valid_file_count = 0_u64;
             fs::read_dir(path)?.for_each(|e| {
                 if let Ok(e) = e {
                     let p = e.path();
@@ -135,6 +136,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 append_dict.insert(seq, dir_type);
                                 append_range.0 = std::cmp::min(append_range.0, seq);
                                 append_range.1 = std::cmp::max(append_range.1, seq);
+                                valid_file_count += 1;
                             }
                             Some(FileId {
                                 queue: LogQueue::Rewrite,
@@ -143,13 +145,14 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 rewrite_dict.insert(seq, dir_type);
                                 rewrite_range.0 = std::cmp::min(rewrite_range.0, seq);
                                 rewrite_range.1 = std::cmp::max(rewrite_range.1, seq);
+                                valid_file_count += 1;
                             }
                             _ => {}
                         }
                     }
                 }
             });
-            Ok(())
+            Ok(valid_file_count)
         }
 
         fn clean_stale_metadata<F: FileSystem>(
@@ -204,13 +207,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             validate_dir(sub_dir)?;
         }
 
-        type FileSeqRange = (u64, u64); // (minimal_id, maximal_id)
-        type FileSeqDict = HashMap<FileSeq, StorageDirType>; // <seq, dir_type>
+        type FileSeqRange = (u64, u64); /* (minimal_id, maximal_id) */
+        type FileSeqDict = HashMap<FileSeq, StorageDirType>; /* HashMap<seq, dir_type> */
         let mut append_id_range = (u64::MAX, 0_u64);
         let mut rewrite_id_range = (u64::MAX, 0_u64);
         let mut append_file_dict: HashMap<FileSeq, StorageDirType> = HashMap::default();
         let mut rewrite_file_dict: HashMap<FileSeq, StorageDirType> = HashMap::default();
-
+        // Parse files in `dir`.
         parse_file_range(
             dir,
             StorageDirType::Main,
@@ -219,15 +222,27 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             &mut append_file_dict,
             &mut rewrite_file_dict,
         )?;
-        if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
-            parse_file_range(
-                sub_dir,
-                StorageDirType::Secondary,
-                &mut append_id_range,
-                &mut rewrite_id_range,
-                &mut append_file_dict,
-                &mut rewrite_file_dict,
-            )?;
+        // Parse files in `sub-dir`.
+        if_chain::if_chain! {
+            if let Some(sub_dir) = self.cfg.sub_dir.as_ref();
+            if let Ok(0) = parse_file_range(
+                    sub_dir,
+                    StorageDirType::Secondary,
+                    &mut append_id_range,
+                    &mut rewrite_id_range,
+                    &mut append_file_dict,
+                    &mut rewrite_file_dict,
+                );
+            if let Ok(true) = from_same_dev(&self.cfg.dir, sub_dir);
+            then {
+                // If the count of valid file in secondary dir was 0, we directly
+                // reset the `cfg.sub_dir` to None.
+                warn!(
+                    "sub-dir ({}) and dir ({}) are on same device, ignore it",
+                    sub_dir, self.cfg.dir
+                );
+                self.cfg.sub_dir = None; // reset to None
+            }
         }
 
         for (queue, min_id, max_id, files, file_dict) in [

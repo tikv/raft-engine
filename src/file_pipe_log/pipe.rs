@@ -73,7 +73,8 @@ impl SingleStorageInfo {
     }
 }
 
-#[derive(Clone)]
+/// Represents the info of storage dirs, including `main dir` and
+/// `secondary dir`.
 struct StorageInfo {
     storage: Vec<SingleStorageInfo>,
 }
@@ -1148,5 +1149,76 @@ mod tests {
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
+    }
+
+    #[test]
+    fn test_storage_info() {
+        let dir = Builder::new()
+            .prefix("test_storage_info")
+            .tempdir()
+            .unwrap();
+        let secondary_dir = Builder::new()
+            .prefix("test_storage_info_sec")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        let sec_path = secondary_dir.path().to_str().unwrap().to_owned();
+        {
+            // Tests SingleStorageInfo.
+            let mut main_storage = SingleStorageInfo::new(path.clone());
+            assert!(!main_storage.has_stale_file());
+            assert!(!main_storage.find_stale_file(10));
+            assert!(!main_storage.find_in_use_file(1));
+            main_storage.push_in_use_file(10);
+            main_storage.push_stale_file(1);
+            let mut cpy_storage = main_storage.clone();
+            assert!(cpy_storage.has_stale_file());
+            assert!(cpy_storage.find_stale_file(1));
+            assert!(cpy_storage.find_in_use_file(10));
+            assert!(!cpy_storage.pop_in_use_file(1));
+            assert!(cpy_storage.pop_stale_file(1));
+            assert!(cpy_storage.pop_in_use_file(10));
+        }
+        {
+            // Tests StorageInfo with main dir only.
+            let mut storage = StorageInfo::new(path.clone(), None);
+            assert!(storage.push_in_use_file(1, StorageDirType::Main));
+            assert!(!storage.push_in_use_file(2, StorageDirType::Secondary));
+            assert!(!storage.push_stale_file(2, StorageDirType::Secondary));
+            assert_eq!(storage.pop_file(1).unwrap(), StorageDirType::Main);
+            assert!(storage.pop_file(1).is_none());
+            assert!(storage.find_dir(1).is_none());
+            assert!(storage.push_stale_file(1, StorageDirType::Main));
+            assert_eq!(
+                storage.find_dir(1).unwrap(),
+                (path.clone(), StorageDirType::Main)
+            );
+            assert!(storage.get_free_dir(usize::MAX).is_none());
+            assert_eq!(
+                storage.get_free_dir(16).unwrap(),
+                (path.clone(), StorageDirType::Main)
+            );
+        }
+        {
+            // Tests StorageInfo with multi dirs.
+            let mut storage = StorageInfo::new(path.clone(), Some(sec_path.clone()));
+            assert!(storage.push_in_use_file(1, StorageDirType::Main));
+            assert!(storage.push_stale_file(4, StorageDirType::Main));
+            assert!(storage.push_in_use_file(2, StorageDirType::Secondary));
+            assert!(storage.push_stale_file(3, StorageDirType::Secondary));
+            assert_eq!(storage.pop_file(1).unwrap(), StorageDirType::Main);
+            assert_eq!(storage.pop_file(3).unwrap(), StorageDirType::Secondary);
+            assert!(storage.pop_file(1).is_none());
+            assert!(storage.find_dir(1).is_none());
+            assert_eq!(
+                storage.find_dir(2).unwrap(),
+                (sec_path, StorageDirType::Secondary)
+            );
+            assert!(storage.get_free_dir(usize::MAX).is_none());
+            assert_eq!(
+                storage.get_free_dir(16).unwrap(),
+                (path, StorageDirType::Main)
+            );
+        }
     }
 }
