@@ -242,11 +242,12 @@ where
 
         let mut force_compact_regions = vec![];
         let memtables = self.memtables.collect(|t| {
+            let rewritten = t.rewritten_entries_count();
             // if the region is force rewritten, we should also trigger compact.
-            if t.rewrite_count() > MAX_REWRITE_ENTRIES_PER_REGION {
+            if rewritten > MAX_REWRITE_ENTRIES_PER_REGION {
                 force_compact_regions.push(t.region_id());
             }
-            t.min_file_seq(LogQueue::REWRITE).is_some()
+            rewritten > 0
         });
 
         self.rewrite_memtables(memtables, 0 /* expect_rewrites_per_memtable */, None)?;
@@ -300,7 +301,7 @@ where
             let region_id = {
                 let m = memtable.read();
                 if let Some(rewrite) = rewrite {
-                    m.fetch_entry_indexes_before(rewrite, &mut entry_indexes)?;
+                    m.fetch_entries_before(rewrite, &mut entry_indexes)?;
                     m.fetch_kvs_before(rewrite, &mut kvs);
                 } else {
                     m.fetch_rewritten_entry_indexes(&mut entry_indexes)?;

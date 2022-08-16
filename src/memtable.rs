@@ -293,7 +293,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     }
 
     /// Deletes a key value pair.
-    pub fn delete(&mut self, key: &[u8]) {
+    fn delete(&mut self, key: &[u8]) {
         if let Some(value) = self.kvs.remove(key) {
             self.global_stats.delete(value.1.queue, 1);
         }
@@ -301,7 +301,7 @@ impl<A: AllocatorTrait> MemTable<A> {
 
     /// Puts a key value pair that has been written to the specified file. The
     /// old value for this key will be deleted if exists.
-    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
+    fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
         if let Some(origin) = self.kvs.insert(key, (value, file_id)) {
             self.global_stats.delete(origin.1.queue, 1);
         }
@@ -313,7 +313,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     ///
     /// When `view` is present, only append data contained in it will be
     /// rewritten.
-    pub fn rewrite_key(&mut self, key: Vec<u8>, view: Option<&FilesView>, seq: FileSeq) {
+    fn rewrite_key(&mut self, key: Vec<u8>, view: Option<&FilesView>, seq: FileSeq) {
         self.global_stats.add(LogQueue::REWRITE, 1);
         if let Some(origin) = self.kvs.get_mut(&key) {
             if origin.1.queue == LogQueue::DEFAULT {
@@ -361,7 +361,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     ///
     /// Panics if incoming entries contains indexes that might be compacted
     /// before (overwrite history).
-    pub fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
+    fn append(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
             self.prepare_append(
@@ -380,7 +380,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// rewrite data.
     ///
     /// This method is only used for recovery.
-    pub fn replay_append(&mut self, entry_indexes: Vec<EntryIndex>) {
+    fn replay_append(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
             debug_assert_eq!(self.rewrite_count, 0);
@@ -407,7 +407,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     ///
     /// Panics if index of the first entry in `rewrite_indexes` is greater than
     /// largest existing rewritten index + 1 (hole).
-    pub fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, view: Option<&FilesView>) {
+    fn rewrite(&mut self, rewrite_indexes: Vec<EntryIndex>, view: Option<&FilesView>) {
         if rewrite_indexes.is_empty() {
             return;
         }
@@ -476,7 +476,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// append data.
     ///
     /// This method is only used for recovery.
-    pub fn replay_rewrite(&mut self, entry_indexes: Vec<EntryIndex>) {
+    fn replay_rewrite(&mut self, entry_indexes: Vec<EntryIndex>) {
         let len = entry_indexes.len();
         if len > 0 {
             debug_assert_eq!(self.rewrite_count, self.entry_indexes.len());
@@ -499,7 +499,7 @@ impl<A: AllocatorTrait> MemTable<A> {
 
     /// Removes all entries with index smaller than `index`. Returns the number
     /// of deleted entries.
-    pub fn compact_to(&mut self, index: u64) -> u64 {
+    fn compact_to(&mut self, index: u64) -> u64 {
         if self.entry_indexes.is_empty() {
             return 0;
         }
@@ -645,7 +645,7 @@ impl<A: AllocatorTrait> MemTable<A> {
 
     /// Pulls all append entries older than or equal to `view`, to the provided
     /// buffer.
-    pub fn fetch_entry_indexes_before(
+    pub fn fetch_entries_before(
         &self,
         view: &FilesView,
         vec_idx: &mut Vec<EntryIndex>,
@@ -723,6 +723,12 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
     }
 
+    #[inline]
+    pub fn rewritten_entries_count(&self) -> usize {
+        self.rewrite_count
+    }
+
+    #[inline]
     /// Returns whether there are at least `n` entries contained in `view`.
     pub fn has_at_least_some_entries_before(&self, view: &FilesView, n: usize) -> bool {
         debug_assert!(n > 0);
@@ -736,10 +742,6 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// Returns the region ID.
     pub fn region_id(&self) -> u64 {
         self.region_id
-    }
-
-    pub(crate) fn rewrite_count(&self) -> usize {
-        self.rewrite_count
     }
 
     /// Returns the log index of the first log entry.
@@ -1661,13 +1663,13 @@ mod tests {
 
         let mut ents_idx = vec![];
         assert!(memtable
-            .fetch_entry_indexes_before(&FilesView::simple_view(2), &mut ents_idx)
+            .fetch_entries_before(&FilesView::simple_view(2), &mut ents_idx)
             .is_ok());
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
         ents_idx.clear();
         assert!(memtable
-            .fetch_entry_indexes_before(&FilesView::simple_view(1), &mut ents_idx)
+            .fetch_entries_before(&FilesView::simple_view(1), &mut ents_idx)
             .is_ok());
         assert!(ents_idx.is_empty());
 
@@ -2277,10 +2279,10 @@ mod tests {
             let mut merged_vec = Vec::new();
             let mut sequential_vec = Vec::new();
             merged
-                .fetch_entry_indexes_before(&FilesView::simple_view(u64::MAX), &mut merged_vec)
+                .fetch_entries_before(&FilesView::simple_view(u64::MAX), &mut merged_vec)
                 .unwrap();
             sequential
-                .fetch_entry_indexes_before(&FilesView::simple_view(u64::MAX), &mut sequential_vec)
+                .fetch_entries_before(&FilesView::simple_view(u64::MAX), &mut sequential_vec)
                 .unwrap();
             assert_eq!(merged_vec, sequential_vec);
             merged_vec.clear();
