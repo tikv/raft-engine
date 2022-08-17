@@ -15,7 +15,7 @@ use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
-    FileBlockHandle, FileId, FileSeq, FilesView, LogFileContext, LogQueue, PipeLog,
+    FileBlockHandle, FileId, FileSeq, FilesView, LogFileContext, LogKind, LogQueue, PipeLog,
 };
 use crate::{perf_context, Error, Result};
 
@@ -291,10 +291,9 @@ impl<F: FileSystem> SinglePipe<F> {
 
     /// Synchronizes current states to related metrics.
     fn flush_metrics(&self, len: usize) {
-        match self.queue {
-            LogQueue::DEFAULT => LOG_FILE_COUNT.append.set(len as i64),
-            LogQueue::REWRITE => LOG_FILE_COUNT.rewrite.set(len as i64),
-            _ => unreachable!(),
+        match self.queue.kind() {
+            LogKind::Append => LOG_FILE_COUNT.append.set(len as i64),
+            LogKind::Rewrite => LOG_FILE_COUNT.rewrite.set(len as i64),
         }
     }
 }
@@ -530,7 +529,11 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn total_size(&self, queue: LogQueue) -> usize {
+    fn total_size(&self, kind: LogKind) -> usize {
+        let queue = match kind {
+            LogKind::Append => LogQueue::DEFAULT,
+            LogKind::Rewrite => LogQueue::REWRITE,
+        };
         self.pipes[queue.i() as usize].total_size()
     }
 
@@ -570,10 +573,9 @@ mod tests {
             queue,
             0,
             VecDeque::new(),
-            match queue {
-                LogQueue::DEFAULT => cfg.recycle_capacity(),
-                LogQueue::REWRITE => 0,
-                _ => unreachable!(),
+            match queue.kind() {
+                LogKind::Append => cfg.recycle_capacity(),
+                LogKind::Rewrite => 0,
             },
         )
     }

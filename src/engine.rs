@@ -19,7 +19,7 @@ use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilde
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, FileId, LogKind, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{perf_context, Error, GlobalStats, Result};
@@ -374,7 +374,7 @@ where
     }
 
     pub fn get_used_size(&self) -> usize {
-        self.pipe_log.total_size(LogQueue::DEFAULT) + self.pipe_log.total_size(LogQueue::REWRITE)
+        self.pipe_log.total_size(LogKind::Append) + self.pipe_log.total_size(LogKind::Rewrite)
     }
 }
 
@@ -1081,7 +1081,7 @@ mod tests {
             assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
-        assert_eq!(engine.stats.live_entries(LogQueue::DEFAULT), 6); // 5 entries + 1 kv
+        assert_eq!(engine.stats.live_entries(LogKind::Append), 6); // 5 entries + 1 kv
 
         // rewrite:   [20..25]
         // append: [10   ..25]
@@ -1105,9 +1105,9 @@ mod tests {
             assert_eq!(q, LogQueue::DEFAULT);
             assert_eq!(d, &data);
         });
-        assert_eq!(engine.stats.live_entries(LogQueue::DEFAULT), 22); // 20 entries + 2 kv
+        assert_eq!(engine.stats.live_entries(LogKind::Append), 22); // 20 entries + 2 kv
         engine.clean(rid - 1);
-        assert_eq!(engine.stats.live_entries(LogQueue::DEFAULT), 16);
+        assert_eq!(engine.stats.live_entries(LogKind::Append), 16);
         // rewrite: [20..25][10..25]
         // append: [10..25]
         engine
@@ -1186,7 +1186,7 @@ mod tests {
         assert_eq!(count, 100);
         assert!(!engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::DEFAULT));
+            .needs_rewrite_log_files(LogKind::Append));
 
         // Append more logs to make total size greater than `purge_threshold`.
         for index in 100..250 {
@@ -1198,7 +1198,7 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::DEFAULT));
+            .needs_rewrite_log_files(LogKind::Append));
 
         let old_min_file_seq = engine.file_span(LogQueue::DEFAULT).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
@@ -1214,7 +1214,7 @@ mod tests {
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::DEFAULT));
+            .needs_rewrite_log_files(LogKind::Append));
         let will_force_compact = engine.purge_expired_files().unwrap();
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
@@ -1300,11 +1300,11 @@ mod tests {
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::DEFAULT));
+            .needs_rewrite_log_files(LogKind::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.file_span(LogQueue::DEFAULT).0 > 1);
 
-        let rewrite_file_size = engine.pipe_log.total_size(LogQueue::REWRITE);
+        let rewrite_file_size = engine.pipe_log.total_size(LogKind::Rewrite);
         assert!(rewrite_file_size > 59); // The rewrite queue isn't empty.
 
         // All entries should be available.
@@ -1335,7 +1335,7 @@ mod tests {
 
         assert!(engine
             .purge_manager
-            .needs_rewrite_log_files(LogQueue::DEFAULT));
+            .needs_rewrite_log_files(LogKind::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
     }
 

@@ -17,7 +17,7 @@ use crate::log_batch::{
     OpType,
 };
 use crate::metrics::MEMORY_USAGE;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, FilesView, LogQueue};
+use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, FilesView, LogKind, LogQueue};
 use crate::util::{hash_u64, Factory};
 use crate::{Error, GlobalStats, Result};
 
@@ -204,7 +204,7 @@ impl<A: AllocatorTrait> MemTable<A> {
                 true, /* allow_overwrite */
             );
             self.global_stats.add(
-                rhs.entry_indexes[0].entries.unwrap().id.queue,
+                rhs.entry_indexes[0].entries.unwrap().id.queue.kind(),
                 rhs.entry_indexes.len(),
             );
             self.rewrite_count += rhs.rewrite_count;
@@ -217,8 +217,8 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
 
         let deleted = rhs.global_stats.deleted_rewrite_entries();
-        self.global_stats.add(LogQueue::REWRITE, deleted);
-        self.global_stats.delete(LogQueue::REWRITE, deleted);
+        self.global_stats.add(LogKind::Rewrite, deleted);
+        self.global_stats.delete(LogKind::Rewrite, deleted);
     }
 
     /// Merges with a [`MemTable`] that contains only append data. Assumes
@@ -241,7 +241,7 @@ impl<A: AllocatorTrait> MemTable<A> {
                 true, /* allow_overwrite */
             );
             self.global_stats.add(
-                rhs.entry_indexes[0].entries.unwrap().id.queue,
+                rhs.entry_indexes[0].entries.unwrap().id.queue.kind(),
                 rhs.entry_indexes.len(),
             );
             self.entry_indexes.append(&mut rhs.entry_indexes);
@@ -252,8 +252,8 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
 
         let deleted = rhs.global_stats.deleted_rewrite_entries();
-        self.global_stats.add(LogQueue::REWRITE, deleted);
-        self.global_stats.delete(LogQueue::REWRITE, deleted);
+        self.global_stats.add(LogKind::Rewrite, deleted);
+        self.global_stats.delete(LogKind::Rewrite, deleted);
     }
 
     /// Returns value for a given key.
@@ -295,7 +295,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// Deletes a key value pair.
     fn delete(&mut self, key: &[u8]) {
         if let Some(value) = self.kvs.remove(key) {
-            self.global_stats.delete(value.1.queue, 1);
+            self.global_stats.delete(value.1.queue.kind(), 1);
         }
     }
 
@@ -303,9 +303,9 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// old value for this key will be deleted if exists.
     fn put(&mut self, key: Vec<u8>, value: Vec<u8>, file_id: FileId) {
         if let Some(origin) = self.kvs.insert(key, (value, file_id)) {
-            self.global_stats.delete(origin.1.queue, 1);
+            self.global_stats.delete(origin.1.queue.kind(), 1);
         }
-        self.global_stats.add(file_id.queue, 1);
+        self.global_stats.add(file_id.queue.kind(), 1);
     }
 
     /// Rewrites a key by marking its location to the `seq`-th log file in
@@ -314,16 +314,16 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// When `view` is present, only append data contained in it will be
     /// rewritten.
     fn rewrite_key(&mut self, key: Vec<u8>, view: Option<&FilesView>, seq: FileSeq) {
-        self.global_stats.add(LogQueue::REWRITE, 1);
+        self.global_stats.add(LogKind::Rewrite, 1);
         if let Some(origin) = self.kvs.get_mut(&key) {
-            if origin.1.queue == LogQueue::DEFAULT {
+            if origin.1.queue.kind() == LogKind::Append {
                 if let Some(view) = view {
                     if view.contains(&origin.1) {
                         origin.1 = FileId {
                             queue: LogQueue::REWRITE,
                             seq,
                         };
-                        self.global_stats.delete(LogQueue::DEFAULT, 1);
+                        self.global_stats.delete(LogKind::Append, 1);
                         return;
                     }
                 }
@@ -332,7 +332,7 @@ impl<A: AllocatorTrait> MemTable<A> {
                 origin.1.seq = seq;
             }
         }
-        self.global_stats.delete(LogQueue::REWRITE, 1);
+        self.global_stats.delete(LogKind::Rewrite, 1);
     }
 
     /// Returns the log entry location for a given logical log index.
@@ -369,7 +369,7 @@ impl<A: AllocatorTrait> MemTable<A> {
                 false, /* allow_hole */
                 false, /* allow_overwrite */
             );
-            self.global_stats.add(LogQueue::DEFAULT, len);
+            self.global_stats.add(LogKind::Append, len);
             for ei in &entry_indexes {
                 self.entry_indexes.push_back(ei.into());
             }
@@ -390,9 +390,9 @@ impl<A: AllocatorTrait> MemTable<A> {
                 // Refer to case in `merge_newer_neighbor`.
                 true, /* allow_overwrite */
             );
-            self.global_stats.add(LogQueue::DEFAULT, len);
+            self.global_stats.add(LogKind::Append, len);
             for ei in &entry_indexes {
-                debug_assert_eq!(ei.entries.unwrap().id.queue, LogQueue::DEFAULT);
+                debug_assert_eq!(ei.entries.unwrap().id.queue.kind(), LogKind::Append);
                 self.entry_indexes.push_back(ei.into());
             }
         }
@@ -412,12 +412,12 @@ impl<A: AllocatorTrait> MemTable<A> {
             return;
         }
         self.global_stats
-            .add(LogQueue::REWRITE, rewrite_indexes.len());
+            .add(LogKind::Rewrite, rewrite_indexes.len());
 
         let len = self.entry_indexes.len();
         if len == 0 {
             self.global_stats
-                .delete(LogQueue::REWRITE, rewrite_indexes.len());
+                .delete(LogKind::Rewrite, rewrite_indexes.len());
             return;
         }
 
@@ -428,7 +428,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         let mut rewrite_len = (rewrite_last + 1).saturating_sub(rewrite_first) as usize;
         if rewrite_len == 0 {
             self.global_stats
-                .delete(LogQueue::REWRITE, rewrite_indexes.len());
+                .delete(LogKind::Rewrite, rewrite_indexes.len());
             return;
         }
 
@@ -445,13 +445,13 @@ impl<A: AllocatorTrait> MemTable<A> {
         {
             let index = &mut self.entry_indexes[i + pos];
             if let Some(view) = view {
-                debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::DEFAULT);
+                debug_assert_eq!(index.entries.unwrap().id.queue.kind(), LogKind::Append);
                 if !view.contains(&index.entries.unwrap().id) {
                     // Some entries are overwritten by new appends.
                     rewrite_len = i;
                     break;
                 }
-            } else if index.entries.unwrap().id.queue == LogQueue::DEFAULT {
+            } else if index.entries.unwrap().id.queue.kind() == LogKind::Append {
                 // Squeeze operation encounters a new append.
                 rewrite_len = i;
                 break;
@@ -462,11 +462,11 @@ impl<A: AllocatorTrait> MemTable<A> {
 
         if view.is_none() {
             self.global_stats
-                .delete(LogQueue::REWRITE, rewrite_indexes.len());
+                .delete(LogKind::Rewrite, rewrite_indexes.len());
         } else {
-            self.global_stats.delete(LogQueue::DEFAULT, rewrite_len);
+            self.global_stats.delete(LogKind::Append, rewrite_len);
             self.global_stats
-                .delete(LogQueue::REWRITE, rewrite_indexes.len() - rewrite_len);
+                .delete(LogKind::Rewrite, rewrite_indexes.len() - rewrite_len);
         }
 
         self.rewrite_count = pos + rewrite_len;
@@ -489,7 +489,7 @@ impl<A: AllocatorTrait> MemTable<A> {
                 // obsolete rewrite files.
                 true, /* allow_overwrite */
             );
-            self.global_stats.add(LogQueue::REWRITE, len);
+            self.global_stats.add(LogKind::Rewrite, len);
             for ei in &entry_indexes {
                 self.entry_indexes.push_back(ei.into());
             }
@@ -515,9 +515,9 @@ impl<A: AllocatorTrait> MemTable<A> {
         let compacted_rewrite = std::cmp::min(count, self.rewrite_count);
         self.rewrite_count -= compacted_rewrite;
         self.global_stats
-            .delete(LogQueue::REWRITE, compacted_rewrite);
+            .delete(LogKind::Rewrite, compacted_rewrite);
         self.global_stats
-            .delete(LogQueue::DEFAULT, count - compacted_rewrite);
+            .delete(LogKind::Append, count - compacted_rewrite);
         count as u64
     }
 
@@ -538,11 +538,11 @@ impl<A: AllocatorTrait> MemTable<A> {
             let truncated_rewrite = self.rewrite_count - new_len;
             self.rewrite_count = new_len;
             self.global_stats
-                .delete(LogQueue::REWRITE, truncated_rewrite);
+                .delete(LogKind::Rewrite, truncated_rewrite);
             self.global_stats
-                .delete(LogQueue::DEFAULT, truncated - truncated_rewrite);
+                .delete(LogKind::Append, truncated - truncated_rewrite);
         } else {
-            self.global_stats.delete(LogQueue::DEFAULT, truncated);
+            self.global_stats.delete(LogKind::Append, truncated);
         }
         truncated
     }
@@ -680,7 +680,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// buffer.
     pub fn fetch_kvs_before(&self, view: &FilesView, vec: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         for (key, (value, file_id)) in &self.kvs {
-            if file_id.queue == LogQueue::DEFAULT && view.contains(file_id) {
+            if file_id.queue.kind() == LogKind::Append && view.contains(file_id) {
                 vec.push((key.clone(), value.clone()));
             }
         }
@@ -740,10 +740,10 @@ impl<A: AllocatorTrait> MemTable<A> {
     }
 
     #[inline]
-    pub fn exclude_self_from_view(&self, view: &mut FilesView) {
+    pub fn exclude_self_from_view(&self, view: &mut FilesView, upper_bounds: &FilesView) {
         for i in self.rewrite_count..self.entry_indexes.len() {
             let file_id = &self.entry_indexes[i].entries.unwrap().id;
-            if !view.contains(file_id) {
+            if !upper_bounds.contains(file_id) {
                 break;
             }
             view.update_to_exclude(file_id);
@@ -788,15 +788,15 @@ impl<A: AllocatorTrait> MemTable<A> {
         for idx in self.entry_indexes.iter() {
             // rewrites are at the front.
             let queue = idx.entries.unwrap().id.queue;
-            if queue == LogQueue::DEFAULT {
+            if queue.kind() == LogKind::Append {
                 seen_append = true;
             }
             assert_eq!(
-                queue,
+                queue.kind(),
                 if seen_append {
-                    LogQueue::DEFAULT
+                    LogKind::Append
                 } else {
-                    LogQueue::REWRITE
+                    LogKind::Rewrite
                 }
             );
         }
@@ -808,16 +808,16 @@ impl<A: AllocatorTrait> Drop for MemTable<A> {
         let mut append_kvs = 0;
         let mut rewrite_kvs = 0;
         for (_v, id) in self.kvs.values() {
-            match id.queue {
-                LogQueue::REWRITE => rewrite_kvs += 1,
-                _ => append_kvs += 1,
+            match id.queue.kind() {
+                LogKind::Rewrite => rewrite_kvs += 1,
+                LogKind::Append => append_kvs += 1,
             }
         }
 
         self.global_stats
-            .delete(LogQueue::REWRITE, self.rewrite_count + rewrite_kvs);
+            .delete(LogKind::Rewrite, self.rewrite_count + rewrite_kvs);
         self.global_stats.delete(
-            LogQueue::DEFAULT,
+            LogKind::Append,
             self.entry_indexes.len() - self.rewrite_count + append_kvs,
         );
     }
@@ -1350,7 +1350,7 @@ mod tests {
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 2);
         memtable.consistency_check();
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             memtable.entries_size()
         );
 
@@ -1370,7 +1370,7 @@ mod tests {
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 3);
         memtable.consistency_check();
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             memtable.entries_size()
         );
 
@@ -1388,13 +1388,13 @@ mod tests {
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 4);
         memtable.consistency_check();
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             memtable.entries_size()
         );
 
         let global_stats = Arc::clone(&memtable.global_stats);
         drop(memtable);
-        assert_eq!(global_stats.live_entries(LogQueue::DEFAULT), 0);
+        assert_eq!(global_stats.live_entries(LogKind::Append), 0);
     }
 
     #[test]
@@ -1433,7 +1433,7 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::DEFAULT).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 3);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             memtable.entries_size()
         );
         memtable.consistency_check();
@@ -1447,7 +1447,7 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::DEFAULT).unwrap(), 1);
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 3);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             memtable.entries_size()
         );
         // Can't override compacted entries.
@@ -1469,7 +1469,7 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::DEFAULT).unwrap(), 3);
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 3);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             memtable.entries_size()
         );
         memtable.consistency_check();
@@ -1813,7 +1813,7 @@ mod tests {
         expected_deleted_rewrite += 10;
         assert_eq!(memtable.min_file_seq(LogQueue::REWRITE), None);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         assert_eq!(memtable.global_stats.rewrite_entries(), expected_rewrite);
@@ -1869,7 +1869,7 @@ mod tests {
         assert_eq!(memtable.min_file_seq(LogQueue::DEFAULT).unwrap(), 2);
         assert_eq!(memtable.max_file_seq(LogQueue::DEFAULT).unwrap(), 4);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         memtable.consistency_check();
@@ -1891,7 +1891,7 @@ mod tests {
         assert_eq!(memtable.rewrite_count, 0);
         assert_eq!(memtable.get(b"kk0"), None);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         assert_eq!(memtable.global_stats.rewrite_entries(), expected_rewrite);
@@ -1925,7 +1925,7 @@ mod tests {
         assert_eq!(memtable.rewrite_count, 20);
         assert_eq!(memtable.get(b"kk1"), Some(b"vv1".to_vec()));
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         assert_eq!(memtable.global_stats.rewrite_entries(), expected_rewrite);
@@ -1966,7 +1966,7 @@ mod tests {
         assert_eq!(memtable.rewrite_count, 25);
         assert_eq!(memtable.get(b"kk3"), Some(b"vv33".to_vec()));
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         assert_eq!(memtable.global_stats.rewrite_entries(), expected_rewrite);
@@ -1991,7 +1991,7 @@ mod tests {
         assert_eq!(memtable.last_index().unwrap(), 49);
         assert_eq!(memtable.rewrite_count, 5);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         assert_eq!(memtable.global_stats.rewrite_entries(), expected_rewrite);
@@ -2012,7 +2012,7 @@ mod tests {
         assert_eq!(memtable.first_index().unwrap(), 30);
         assert_eq!(memtable.rewrite_count, 5);
         assert_eq!(
-            memtable.global_stats.live_entries(LogQueue::DEFAULT),
+            memtable.global_stats.live_entries(LogKind::Append),
             expected_append
         );
         assert_eq!(memtable.global_stats.rewrite_entries(), expected_rewrite);
@@ -2024,8 +2024,8 @@ mod tests {
 
         let global_stats = Arc::clone(&memtable.global_stats);
         drop(memtable);
-        assert_eq!(global_stats.live_entries(LogQueue::DEFAULT), 0);
-        assert_eq!(global_stats.live_entries(LogQueue::REWRITE), 0);
+        assert_eq!(global_stats.live_entries(LogKind::Append), 0);
+        assert_eq!(global_stats.live_entries(LogKind::Rewrite), 0);
     }
 
     #[test]
@@ -2203,12 +2203,12 @@ mod tests {
             rewrite.merge_append_table(&mut append);
             let expected = case(empty_table(region_id), None);
             assert_eq!(
-                rewrite.global_stats.live_entries(LogQueue::DEFAULT),
-                expected.global_stats.live_entries(LogQueue::DEFAULT)
+                rewrite.global_stats.live_entries(LogKind::Append),
+                expected.global_stats.live_entries(LogKind::Append)
             );
             assert_eq!(
-                rewrite.global_stats.live_entries(LogQueue::REWRITE),
-                expected.global_stats.live_entries(LogQueue::REWRITE)
+                rewrite.global_stats.live_entries(LogKind::Rewrite),
+                expected.global_stats.live_entries(LogKind::Rewrite)
             );
             assert_eq!(rewrite.entry_indexes, expected.entry_indexes);
             assert!(append.entry_indexes.is_empty());
@@ -2316,8 +2316,8 @@ mod tests {
             assert_eq!(merged_vec, sequential_vec);
         }
         assert_eq!(
-            merged_global_stats.live_entries(LogQueue::DEFAULT),
-            sequential_global_stats.live_entries(LogQueue::DEFAULT),
+            merged_global_stats.live_entries(LogKind::Append),
+            sequential_global_stats.live_entries(LogKind::Append),
         );
         assert_eq!(
             merged_global_stats.rewrite_entries(),

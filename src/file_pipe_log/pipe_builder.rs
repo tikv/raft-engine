@@ -16,7 +16,7 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileId, FileSeq, LogKind, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
@@ -133,6 +133,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             min_rewrite_id = std::cmp::min(min_rewrite_id, seq);
                             max_rewrite_id = std::cmp::max(max_rewrite_id, seq);
                         }
+                        // Queue other than default is not supported yet.
+                        Some(_) => unreachable!(),
                         _ => {}
                     }
                 }
@@ -418,10 +420,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             queue,
             first_seq,
             files,
-            match queue {
-                LogQueue::DEFAULT => self.cfg.recycle_capacity(),
-                LogQueue::REWRITE => 0,
-                _ => unreachable!(),
+            match queue.kind() {
+                LogKind::Append => self.cfg.recycle_capacity(),
+                LogKind::Rewrite => 0,
             },
         )
     }

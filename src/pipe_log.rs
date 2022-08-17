@@ -15,6 +15,12 @@ use crate::Result;
 /// Making it possible to use fixed-size array to store channel info.
 pub const MAX_WRITE_CHANNELS: usize = 8;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LogKind {
+    Rewrite = 0,
+    Append = 1,
+}
+
 /// The type of log queue.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LogQueue(u8);
@@ -27,6 +33,15 @@ impl LogQueue {
     pub fn i(&self) -> u8 {
         debug_assert!(self.0 as usize <= MAX_WRITE_CHANNELS);
         self.0
+    }
+
+    #[inline]
+    pub fn kind(&self) -> LogKind {
+        if *self == Self::REWRITE {
+            LogKind::Rewrite
+        } else {
+            LogKind::Append
+        }
     }
 }
 
@@ -56,7 +71,7 @@ impl FileId {
 /// A view of files in Append queue. Files in Rewrite queue are not included.
 /// Internally it contains a list of latest file IDs of all write channels.
 /// `None` means the channel doesn't exist when the view is created.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FilesView([Option<FileSeq>; MAX_WRITE_CHANNELS]);
 
 impl FilesView {
@@ -125,7 +140,7 @@ impl FilesView {
     }
 
     #[inline]
-    pub fn distill(&self) -> Vec<FileId> {
+    pub fn distilled(&self) -> Vec<FileId> {
         self.0
             .iter()
             .enumerate()
@@ -253,8 +268,8 @@ pub trait PipeLog: Sized {
         FilesView::simple_view(self.file_span(LogQueue::DEFAULT).1)
     }
 
-    /// Returns total size of the specified log queue.
-    fn total_size(&self, queue: LogQueue) -> usize;
+    /// Returns total size of the specified kind of log queues.
+    fn total_size(&self, kind: LogKind) -> usize;
 
     /// Rotates a new log file for the specified log queue. Returns the newly
     /// created file ID.
