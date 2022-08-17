@@ -43,12 +43,12 @@ impl StorageInfo {
         Self { storage }
     }
 
-    fn get_free_dir(&self, target_size: usize) -> Option<(String, StorageDirType)> {
+    fn get_free_dir(&self, target_size: usize) -> Option<(&str, StorageDirType)> {
         #[cfg(feature = "failpoints")]
         {
             fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
                 Some((
-                    self.storage[StorageDirType::Secondary as usize].clone(),
+                    self.storage[StorageDirType::Secondary as usize].as_str(),
                     StorageDirType::Secondary,
                 ))
             });
@@ -70,7 +70,7 @@ impl StorageInfo {
                 Ok(stats) => stats,
             };
             if target_size <= disk_stats.available_space() as usize {
-                return Some((self.storage[idx].clone(), t));
+                return Some((&self.storage[idx], t));
             }
         }
         None
@@ -1061,5 +1061,34 @@ mod tests {
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
+    }
+
+    #[test]
+    fn test_storage_info() {
+        let dir = Builder::new()
+            .prefix("test_storage_info_main_dir")
+            .tempdir()
+            .unwrap();
+        let secondary_dir = Builder::new()
+            .prefix("test_storage_info_sec_dir")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let sec_path = secondary_dir.path().to_str().unwrap();
+        {
+            // Test StorageInfo with main dir only.
+            let storage = StorageInfo::new(path.to_owned(), None);
+            assert_eq!(storage.get_dir(StorageDirType::Main).unwrap(), path);
+            assert!(storage.get_dir(StorageDirType::Secondary).is_none());
+        }
+        {
+            // Test StorageInfo both with main dir and secondary dir.
+            let storage = StorageInfo::new(path.to_owned(), Some(sec_path.to_owned()));
+            assert_eq!(storage.get_dir(StorageDirType::Main).unwrap(), path);
+            assert_eq!(
+                storage.get_dir(StorageDirType::Secondary).unwrap(),
+                sec_path
+            );
+        }
     }
 }
