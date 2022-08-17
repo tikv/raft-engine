@@ -285,4 +285,29 @@ mod tests {
             .unwrap()
             .contains("tolerate-corrupted-tail-records"));
     }
+
+    #[test]
+    fn test_secondary_dir() {
+        {
+            // Set the sub-dir with `Some("...")`
+            let dir_list = r#"
+                dir = "./test/"
+                sub-dir = 'Some("./test_secondary")'
+            "#;
+            let mut load: Config = toml::from_str(dir_list).unwrap();
+            load.sanitize().unwrap();
+            assert!(load.sub_dir.is_some());
+            assert!(toml::to_string(&load).unwrap().contains("test_secondary"));
+        }
+        {
+            // Set the sub-dir with `"..."`
+            let wrong_dir_list = r#"
+                dir = "./test/"
+                sub-dir = "./test_secondary"
+            "#;
+            let mut load: Config = toml::from_str(wrong_dir_list).unwrap();
+            load.sanitize().unwrap();
+            assert!(load.sub_dir.is_some());
+        }
+    }
 }
