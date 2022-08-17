@@ -353,10 +353,11 @@ where
     }
 
     pub fn raft_groups(&self) -> Vec<u64> {
-        self.memtables.fold(vec![], |mut v, m| {
+        let mut v = Vec::with_capacity(128);
+        self.memtables.for_each(|m| {
             v.push(m.region_id());
-            v
-        })
+        });
+        v
     }
 
     /// Returns `true` if the engine contains no Raft Group. Empty Raft Group

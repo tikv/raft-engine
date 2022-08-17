@@ -90,7 +90,9 @@ fn test_pipe_log_listeners() {
         }
 
         fn post_purge(&self, id: FileId) {
-            self.0[&id.queue].purged.store(id.seq, Ordering::Release);
+            self.0[&id.queue]
+                .purged
+                .store(id.seq - 1, Ordering::Release);
         }
     }
 
@@ -158,8 +160,8 @@ fn test_pipe_log_listeners() {
     assert_eq!(hook.0[&LogQueue::REWRITE].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
-    let apply_memtable_region_3_fp = "memtable_accessor::apply_append_writes::region_3";
-    fail::cfg(apply_memtable_region_3_fp, "pause").unwrap();
+    let fp = FailGuard::new("memtable_accessor::apply_append_writes::region_3", "pause");
+    let file_not_applied = engine.file_span(LogQueue::DEFAULT).1;
     let engine_clone = engine.clone();
     let data_clone = data.clone();
     let th = std::thread::spawn(move || {
@@ -169,7 +171,6 @@ fn test_pipe_log_listeners() {
     // Sleep a while to wait the log batch `Append(3, [1])` to get written.
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(hook.0[&LogQueue::DEFAULT].appends(), 33);
-    let file_not_applied = engine.file_span(LogQueue::DEFAULT).1;
     assert_eq!(hook.0[&LogQueue::DEFAULT].applys(), 32);
 
     for i in 31..=40 {
@@ -191,7 +192,7 @@ fn test_pipe_log_listeners() {
     assert_eq!(file_not_applied, first);
 
     // Resume write on region 3.
-    fail::remove(apply_memtable_region_3_fp);
+    drop(fp);
     th.join().unwrap();
 
     std::thread::sleep(Duration::from_millis(200));

@@ -732,10 +732,21 @@ impl<A: AllocatorTrait> MemTable<A> {
     /// Returns whether there are at least `n` entries contained in `view`.
     pub fn has_at_least_some_entries_before(&self, view: &FilesView, n: usize) -> bool {
         debug_assert!(n > 0);
-        if let Some(ei) = self.entry_indexes.get(n - 1) {
+        if let Some(ei) = self.entry_indexes.get(self.rewrite_count + n - 1) {
             view.contains(&ei.entries.unwrap().id)
         } else {
             false
+        }
+    }
+
+    #[inline]
+    pub fn exclude_self_from_view(&self, view: &mut FilesView) {
+        for i in self.rewrite_count..self.entry_indexes.len() {
+            let file_id = &self.entry_indexes[i].entries.unwrap().id;
+            if !view.contains(file_id) {
+                break;
+            }
+            view.update_to_exclude(file_id);
         }
     }
 
@@ -917,13 +928,12 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         }
     }
 
-    pub fn fold<B, F: Fn(B, &MemTable<A>) -> B>(&self, mut init: B, fold: F) -> B {
+    pub fn for_each<F: FnMut(&MemTable<A>)>(&self, mut iter: F) {
         for tables in &self.slots {
             for memtable in tables.read().values() {
-                init = fold(init, &*memtable.read());
+                iter(&*memtable.read());
             }
         }
-        init
     }
 
     pub fn collect<F: FnMut(&MemTable<A>) -> bool>(

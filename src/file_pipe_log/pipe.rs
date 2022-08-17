@@ -225,7 +225,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
-    fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<F>>) -> Result<()> {
+    fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<F>>) -> Result<FileId> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
             perf_context!(log_rotate_duration),
@@ -286,7 +286,7 @@ impl<F: FileSystem> SinglePipe<F> {
             files.fds.len()
         };
         self.flush_metrics(len);
-        Ok(())
+        Ok(file_id)
     }
 
     /// Synchronizes current states to related metrics.
@@ -391,7 +391,7 @@ impl<F: FileSystem> SinglePipe<F> {
         files.fds.len() * self.target_file_size
     }
 
-    fn rotate(&self) -> Result<()> {
+    fn rotate(&self) -> Result<FileId> {
         self.rotate_imp(&mut self.active_file.lock())
     }
 
@@ -535,7 +535,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn rotate(&self, queue: LogQueue) -> Result<()> {
+    fn rotate(&self, queue: LogQueue) -> Result<FileId> {
         self.pipes[queue.i() as usize].rotate()
     }
 

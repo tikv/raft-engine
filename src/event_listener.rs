@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileBlockHandle, FileId, FilesView};
 
 /// `EventListener` contains a set of callback functions that will be notified
 /// on specific events inside Raft Engine.
@@ -27,11 +27,11 @@ pub trait EventListener: Sync + Send {
     /// [`MemTable`]: crate::memtable::MemTable
     fn post_apply_memtables(&self, _file_id: FileId) {}
 
-    /// Returns the oldest file sequence number that are not ready to be purged.
-    fn first_file_not_ready_for_purge(&self, _queue: LogQueue) -> Option<FileSeq> {
+    /// Returns a view of Append log files that can be purged.
+    fn latest_files_view_allowed_to_purge(&self) -> Option<FilesView> {
         None
     }
 
-    /// Called *after* a log file is purged.
+    /// Called *after* `PipeLog::purge_to`.
     fn post_purge(&self, _file_id: FileId) {}
 }
