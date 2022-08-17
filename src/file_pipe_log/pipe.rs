@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,108 +28,19 @@ pub enum StorageDirType {
     Secondary = 1,
 }
 
-#[derive(Clone)]
-struct SingleStorageInfo {
-    dir: String,
-    stale_files: HashSet<FileSeq>,
-    in_use_files: HashSet<FileSeq>,
-}
-
-impl SingleStorageInfo {
-    fn new(dir: String) -> Self {
-        Self {
-            dir,
-            stale_files: HashSet::default(),
-            in_use_files: HashSet::default(),
-        }
-    }
-
-    fn has_stale_file(&self) -> bool {
-        !self.stale_files.is_empty()
-    }
-
-    fn find_stale_file(&self, file_seq: FileSeq) -> bool {
-        matches!(self.stale_files.get(&file_seq), Some(_))
-    }
-
-    fn find_in_use_file(&self, file_seq: FileSeq) -> bool {
-        matches!(self.in_use_files.get(&file_seq), Some(_))
-    }
-
-    fn pop_stale_file(&mut self, file_seq: FileSeq) -> bool {
-        self.stale_files.remove(&file_seq)
-    }
-
-    fn push_stale_file(&mut self, file_seq: FileSeq) -> bool {
-        self.stale_files.insert(file_seq)
-    }
-
-    fn pop_in_use_file(&mut self, file_seq: FileSeq) -> bool {
-        self.in_use_files.remove(&file_seq)
-    }
-
-    fn push_in_use_file(&mut self, file_seq: FileSeq) -> bool {
-        self.in_use_files.insert(file_seq)
-    }
-}
-
 /// Represents the info of storage dirs, including `main dir` and
 /// `secondary dir`.
 struct StorageInfo {
-    storage: Vec<SingleStorageInfo>,
+    storage: Vec<String>,
 }
 
 impl StorageInfo {
     fn new(dir: String, sub_dir: Option<String>) -> Self {
-        let mut storage = vec![SingleStorageInfo::new(dir); 1];
+        let mut storage = vec![dir; 1];
         if let Some(sub) = sub_dir {
-            storage.push(SingleStorageInfo::new(sub));
+            storage.push(sub);
         }
         Self { storage }
-    }
-
-    fn pop_file(&mut self, file_seq: FileSeq) -> Option<StorageDirType> {
-        for t in StorageDirType::iter() {
-            let idx = t as usize;
-            if idx >= self.storage.len() {
-                break;
-            }
-            if self.storage[idx].pop_stale_file(file_seq)
-                || self.storage[idx].pop_in_use_file(file_seq)
-            {
-                return Some(t);
-            }
-        }
-        None
-    }
-
-    fn push_in_use_file(&mut self, file_seq: FileSeq, storage_type: StorageDirType) -> bool {
-        let idx = storage_type as usize;
-        if idx >= self.storage.len() {
-            return false;
-        }
-        self.storage[idx].push_in_use_file(file_seq)
-    }
-
-    fn push_stale_file(&mut self, file_seq: FileSeq, storage_type: StorageDirType) -> bool {
-        let idx = storage_type as usize;
-        if idx >= self.storage.len() {
-            return false;
-        }
-        self.storage[idx].push_stale_file(file_seq)
-    }
-
-    fn get_stale_files_dir(&self) -> Option<(String, StorageDirType)> {
-        for t in StorageDirType::iter() {
-            let idx = t as usize;
-            if idx >= self.storage.len() {
-                break;
-            }
-            if self.storage[idx].has_stale_file() {
-                return Some((self.storage[idx].dir.clone(), t));
-            }
-        }
-        None
     }
 
     fn get_free_dir(&self, target_size: usize) -> Option<(String, StorageDirType)> {
@@ -137,7 +48,7 @@ impl StorageInfo {
         {
             fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
                 Some((
-                    self.storage[StorageDirType::Secondary as usize].dir.clone(),
+                    self.storage[StorageDirType::Secondary as usize].clone(),
                     StorageDirType::Secondary,
                 ))
             });
@@ -148,36 +59,30 @@ impl StorageInfo {
             if idx >= self.storage.len() {
                 break;
             }
-            let disk_stats = match fs2::statvfs(&self.storage[idx].dir) {
+            let disk_stats = match fs2::statvfs(&self.storage[idx]) {
                 Err(e) => {
                     error!(
                         "get disk stat for raft engine failed, dir_path: {}, err: {}",
-                        &self.storage[idx].dir, e
+                        &self.storage[idx], e
                     );
                     return None;
                 }
                 Ok(stats) => stats,
             };
             if target_size <= disk_stats.available_space() as usize {
-                return Some((self.storage[idx].dir.clone(), t));
+                return Some((self.storage[idx].clone(), t));
             }
         }
         None
     }
 
-    fn find_dir(&self, file_seq: FileSeq) -> Option<(String, StorageDirType)> {
-        for t in StorageDirType::iter() {
-            let idx = t as usize;
-            if idx >= self.storage.len() {
-                break;
-            }
-            if self.storage[idx].find_stale_file(file_seq)
-                || self.storage[idx].find_in_use_file(file_seq)
-            {
-                return Some((self.storage[idx].dir.clone(), t));
-            }
+    fn get_dir(&self, storage_type: StorageDirType) -> Option<&str> {
+        let idx = storage_type as usize;
+        if idx >= self.storage.len() {
+            None
+        } else {
+            Some(&self.storage[idx])
         }
-        None
     }
 
     fn sync_all_dir(&mut self) -> Result<()> {
@@ -186,7 +91,7 @@ impl StorageInfo {
             if idx >= self.storage.len() {
                 break;
             }
-            let path = PathBuf::from(&self.storage[idx].dir);
+            let path = PathBuf::from(&self.storage[idx]);
             std::fs::File::open(path).and_then(|d| d.sync_all())?;
         }
         Ok(())
@@ -209,6 +114,8 @@ struct FileCollection<F: FileSystem> {
     /// `0` => no capbility for recycling stale files
     /// `_` => finite volume for recycling stale files
     capacity: usize,
+    /// Info of storage dir.
+    storage: StorageInfo,
 }
 
 impl<F: FileSystem> FileCollection<F> {
@@ -216,7 +123,11 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention please, the recycled file would be automatically `renamed` in
     /// this func.
-    fn recycle_one_file(&mut self, file_system: &F, dir_path: &str, dst_fd: FileId) -> bool {
+    fn recycle_one_file(
+        &mut self,
+        file_system: &F,
+        dst_fd: FileId,
+    ) -> (bool, Option<StorageDirType>) {
         debug_assert!(self.first_seq <= self.first_seq_in_use);
         debug_assert!(!self.fds.is_empty());
         if self.first_seq < self.first_seq_in_use {
@@ -224,8 +135,10 @@ impl<F: FileSystem> FileCollection<F> {
                 queue: dst_fd.queue,
                 seq: self.first_seq,
             };
-            let src_path = first_file_id.build_file_path(dir_path); // src filepath
-            let dst_path = dst_fd.build_file_path(dir_path); // dst filepath
+            let storage_type = self.fds[0].storage_type;
+            let dir = self.storage.get_dir(storage_type).unwrap();
+            let src_path = first_file_id.build_file_path(dir); // src filepath
+            let dst_path = dst_fd.build_file_path(dir); // dst filepath
             if let Err(e) = file_system.reuse(&src_path, &dst_path) {
                 error!("error while trying to recycle one expired file: {}", e);
             } else {
@@ -233,10 +146,10 @@ impl<F: FileSystem> FileCollection<F> {
                 // success.
                 self.fds.pop_front().unwrap();
                 self.first_seq += 1;
-                return true;
+                return (true, Some(storage_type));
             }
         }
-        false
+        (false, None)
     }
 }
 
@@ -262,8 +175,6 @@ pub(super) struct SinglePipe<F: FileSystem> {
     /// `active_file` must be locked first to acquire both `files` and
     /// `active_file`
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
-    /// Info of storage dir.
-    storage: CachePadded<RwLock<StorageInfo>>,
 }
 
 impl<F: FileSystem> Drop for SinglePipe<F> {
@@ -275,15 +186,16 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         // Here, we also should release the unnecessary disk space
         // occupied by stale files.
         let files = self.files.write();
-        let storage = self.storage.read();
         for seq in files.first_seq..files.first_seq_in_use {
-            let dir = storage.find_dir(seq);
-            debug_assert!(dir.is_some());
             let file_id = FileId {
                 queue: self.queue,
                 seq,
             };
-            let path = file_id.build_file_path(&dir.as_ref().unwrap().0);
+            let dir = files
+                .storage
+                .get_dir(files.fds[(seq - files.first_seq) as usize].storage_type);
+            debug_assert!(dir.is_some());
+            let path = file_id.build_file_path(dir.unwrap());
             if let Err(e) = self.file_system.delete(&path) {
                 error!(
                     "error while deleting stale file: {}, err_msg: {}",
@@ -321,7 +233,7 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let mut storage = StorageInfo::new(cfg.dir.clone(), cfg.sub_dir.clone());
+        let storage = StorageInfo::new(cfg.dir.clone(), cfg.sub_dir.clone());
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
@@ -338,7 +250,6 @@ impl<F: FileSystem> SinglePipe<F> {
                 queue,
                 seq: first_seq,
             };
-            // let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
             let fd = Arc::new(file_system.create(&file_id.build_file_path(&dir))?);
             fds.push_back(FileWithFormat {
                 handle: fd,
@@ -351,7 +262,6 @@ impl<F: FileSystem> SinglePipe<F> {
         };
 
         for seq in first_seq..=active_seq {
-            storage.push_in_use_file(seq, fds[(seq - first_seq) as usize].storage_type);
             for listener in &listeners {
                 listener.post_new_log_file(FileId { queue, seq });
             }
@@ -384,9 +294,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 first_seq_in_use: first_seq,
                 fds,
                 capacity,
+                storage,
             })),
             active_file: CachePadded::new(Mutex::new(active_file)),
-            storage: CachePadded::new(RwLock::new(storage)),
         };
         pipe.flush_metrics(total_files);
         Ok(pipe)
@@ -395,8 +305,8 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
     fn sync_dir(&self) -> Result<()> {
-        let mut storage = self.storage.write();
-        storage.sync_all_dir()
+        let mut files = self.files.write();
+        files.storage.sync_all_dir()
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -430,32 +340,24 @@ impl<F: FileSystem> SinglePipe<F> {
         // Generate a new fd from a newly chosen file, might be reused from a stale
         // file or generated from a newly created file.
         let (fd, storage_type) = {
-            let mut storage = self.storage.write();
-            let (dir, storage_type) = {
-                if let Some((d, t)) = storage.get_stale_files_dir() {
-                    // Has stale files for reusing.
-                    (d, t)
-                } else if let Some((d, t)) = storage.get_free_dir(self.target_file_size) {
-                    // Has free space for newly writing
-                    (d, t)
-                } else {
-                    // No space for writing.
-                    return Err(Error::Other(box_err!(
-                        "no free space for recording new logs."
-                    )));
-                }
-            };
-            let path = file_id.build_file_path(&dir);
             // Create the fd by recycling stale files or creating a new file.
             let mut files = self.files.write();
-            let first_file_seq = files.first_seq;
-            if files.recycle_one_file(&self.file_system, &dir, file_id) {
-                storage.pop_file(first_file_seq);
+            let (recycle, storage_type) = files.recycle_one_file(&self.file_system, file_id);
+            if recycle {
                 // Open the recycled file(file is already renamed)
+                debug_assert!(storage_type.is_some());
+                let storage_type = storage_type.unwrap();
+                let path = file_id.build_file_path(files.storage.get_dir(storage_type).unwrap());
                 (Arc::new(self.file_system.open(&path)?), storage_type)
+            } else if let Some((d, t)) = files.storage.get_free_dir(self.target_file_size) {
+                // Has free space for newly writing, a new file is introduced.
+                let path = file_id.build_file_path(&d);
+                (Arc::new(self.file_system.create(&path)?), t)
             } else {
-                // A new file is introduced.
-                (Arc::new(self.file_system.create(&path)?), storage_type)
+                // Neither has stale files nor has space for writing.
+                return Err(Error::Other(box_err!(
+                    "no free space for recording new logs."
+                )));
             }
         };
         let mut new_file = ActiveFile {
@@ -486,8 +388,6 @@ impl<F: FileSystem> SinglePipe<F> {
                 format: LogFileFormat::new(version, alignment),
                 storage_type,
             });
-            let mut storage = self.storage.write();
-            storage.push_in_use_file(seq, storage_type);
             for listener in &self.listeners {
                 listener.post_new_log_file(FileId {
                     queue: self.queue,
@@ -569,9 +469,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             };
             let has_free_space = {
-                let storage = self.storage.read();
-                storage.get_stale_files_dir().is_some()
-                    || storage.get_free_dir(self.target_file_size).is_some()
+                let files = self.files.read();
+                files.first_seq < files.first_seq_in_use /* has stale files */
+                    || files.storage.get_free_dir(self.target_file_size).is_some()
             };
             // If there still exists free space for this record, a special Err will
             // be returned to the caller.
@@ -638,9 +538,8 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Return the actual removed count of purged files.
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
         let (
-            first_purge_seq, /* first seq for purging */
-            purged,          /* count of purged files */
-            remained,        /* count of remained files */
+            purged_files, /* list of purged files */
+            remained,     /* count of remained files */
         ) = {
             let mut files = self.files.write();
             if file_seq >= files.first_seq + files.fds.len() as u64 {
@@ -664,25 +563,34 @@ impl<F: FileSystem> SinglePipe<F> {
                     break;
                 }
             }
-            // Update metadata of files
+            // Assemble the info of purged files.
             let old_first_seq = files.first_seq;
+            let mut purged_files = Vec::<(FileSeq, String)>::default();
+            purged_files.reserve(purged);
+            for i in 0..purged {
+                purged_files.push((
+                    i as u64 + old_first_seq,
+                    files
+                        .storage
+                        .get_dir(files.fds[i].storage_type)
+                        .unwrap()
+                        .to_owned(),
+                ));
+            }
+            // Update metadata of files
             files.first_seq += purged as u64;
             files.first_seq_in_use = file_seq;
             files.fds.drain(..purged);
-            (old_first_seq, purged, files.fds.len())
+            (purged_files, files.fds.len())
         };
         self.flush_metrics(remained);
-        // TODO: @lucasliang, following strategy need to be polished
-        // (1) how to build the purged path.
-        // (2) how to put the stale (obsolete) files into storage for later processing.
-        let mut storage = self.storage.write();
-        for seq in first_purge_seq..first_purge_seq + purged as u64 {
+        // for seq in first_purge_seq..first_purge_seq + purged as u64 {
+        for (seq, dir) in purged_files.iter() {
             let file_id = FileId {
                 queue: self.queue,
-                seq,
+                seq: *seq,
             };
-            let (dir, _) = storage.find_dir(seq).unwrap();
-            let path = file_id.build_file_path(&dir);
+            let path = file_id.build_file_path(dir);
             #[cfg(feature = "failpoints")]
             {
                 let remove_skipped = || {
@@ -694,22 +602,8 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             }
             self.file_system.delete(&path)?;
-            debug_assert!(storage.pop_file(seq).is_some());
         }
-        // Move stale files from StorageInfo.in_use_files to StorageInfo.stale_files
-        let (start_seq, end_seq) = {
-            let files = self.files.read();
-            (files.first_seq, files.first_seq_in_use)
-        };
-        for seq in (start_seq..end_seq).rev() {
-            match storage.pop_file(seq) {
-                Some(t) => {
-                    storage.push_stale_file(seq, t);
-                }
-                None => break,
-            }
-        }
-        Ok(purged)
+        Ok(purged_files.len())
     }
 
     fn fetch_active_file(&self) -> LogFileContext {
@@ -997,9 +891,14 @@ mod tests {
                 first_seq_in_use: old_file_id.seq,
                 capacity: 3,
                 fds: vec![new_file_handler(path, old_file_id)].into(),
+                storage: StorageInfo::new(path.to_owned(), None),
             };
             // recycle an old file
-            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(
+                !recycle_collections
+                    .recycle_one_file(&file_system, new_file_id)
+                    .0
+            );
             // update the reycle collection
             {
                 recycle_collections
@@ -1008,7 +907,11 @@ mod tests {
                 recycle_collections.first_seq_in_use = cur_file_id.seq;
             }
             // recycle an old file
-            assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(
+                recycle_collections
+                    .recycle_one_file(&file_system, new_file_id)
+                    .0
+            );
             // validate the content of recycled file
             assert!(
                 validate_content_of_file(file_system.as_ref(), path, new_file_id, &data).unwrap()
@@ -1046,6 +949,7 @@ mod tests {
                 first_seq_in_use: fake_file_id.seq + 1,
                 capacity: 2,
                 fds: vec![new_file_handler(path, fake_file_id)].into(),
+                storage: StorageInfo::new(path.to_owned(), None),
             };
             // mock the failure on `rename`
             file_system
@@ -1057,11 +961,19 @@ mod tests {
             };
             // `rename` is failed, and no stale files in recycle_collections could be
             // recycled.
-            assert!(!recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(
+                !recycle_collections
+                    .recycle_one_file(&file_system, new_file_id)
+                    .0
+            );
             assert_eq!(recycle_collections.fds.len(), 1);
             // rebuild the file for recycle
             prepare_file(file_system.as_ref(), path, fake_file_id, &data).unwrap();
-            assert!(recycle_collections.recycle_one_file(&file_system, path, new_file_id));
+            assert!(
+                recycle_collections
+                    .recycle_one_file(&file_system, new_file_id)
+                    .0
+            );
             assert!(recycle_collections.fds.is_empty());
         }
     }
@@ -1149,76 +1061,5 @@ mod tests {
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
         assert_eq!(file_context.version, Version::V2);
         assert_eq!(file_context.id.seq, 3);
-    }
-
-    #[test]
-    fn test_storage_info() {
-        let dir = Builder::new()
-            .prefix("test_storage_info")
-            .tempdir()
-            .unwrap();
-        let secondary_dir = Builder::new()
-            .prefix("test_storage_info_sec")
-            .tempdir()
-            .unwrap();
-        let path = dir.path().to_str().unwrap().to_owned();
-        let sec_path = secondary_dir.path().to_str().unwrap().to_owned();
-        {
-            // Tests SingleStorageInfo.
-            let mut main_storage = SingleStorageInfo::new(path.clone());
-            assert!(!main_storage.has_stale_file());
-            assert!(!main_storage.find_stale_file(10));
-            assert!(!main_storage.find_in_use_file(1));
-            main_storage.push_in_use_file(10);
-            main_storage.push_stale_file(1);
-            let mut cpy_storage = main_storage.clone();
-            assert!(cpy_storage.has_stale_file());
-            assert!(cpy_storage.find_stale_file(1));
-            assert!(cpy_storage.find_in_use_file(10));
-            assert!(!cpy_storage.pop_in_use_file(1));
-            assert!(cpy_storage.pop_stale_file(1));
-            assert!(cpy_storage.pop_in_use_file(10));
-        }
-        {
-            // Tests StorageInfo with main dir only.
-            let mut storage = StorageInfo::new(path.clone(), None);
-            assert!(storage.push_in_use_file(1, StorageDirType::Main));
-            assert!(!storage.push_in_use_file(2, StorageDirType::Secondary));
-            assert!(!storage.push_stale_file(2, StorageDirType::Secondary));
-            assert_eq!(storage.pop_file(1).unwrap(), StorageDirType::Main);
-            assert!(storage.pop_file(1).is_none());
-            assert!(storage.find_dir(1).is_none());
-            assert!(storage.push_stale_file(1, StorageDirType::Main));
-            assert_eq!(
-                storage.find_dir(1).unwrap(),
-                (path.clone(), StorageDirType::Main)
-            );
-            assert!(storage.get_free_dir(usize::MAX).is_none());
-            assert_eq!(
-                storage.get_free_dir(16).unwrap(),
-                (path.clone(), StorageDirType::Main)
-            );
-        }
-        {
-            // Tests StorageInfo with multi dirs.
-            let mut storage = StorageInfo::new(path.clone(), Some(sec_path.clone()));
-            assert!(storage.push_in_use_file(1, StorageDirType::Main));
-            assert!(storage.push_stale_file(4, StorageDirType::Main));
-            assert!(storage.push_in_use_file(2, StorageDirType::Secondary));
-            assert!(storage.push_stale_file(3, StorageDirType::Secondary));
-            assert_eq!(storage.pop_file(1).unwrap(), StorageDirType::Main);
-            assert_eq!(storage.pop_file(3).unwrap(), StorageDirType::Secondary);
-            assert!(storage.pop_file(1).is_none());
-            assert!(storage.find_dir(1).is_none());
-            assert_eq!(
-                storage.find_dir(2).unwrap(),
-                (sec_path, StorageDirType::Secondary)
-            );
-            assert!(storage.get_free_dir(usize::MAX).is_none());
-            assert_eq!(
-                storage.get_free_dir(16).unwrap(),
-                (path, StorageDirType::Main)
-            );
-        }
     }
 }
