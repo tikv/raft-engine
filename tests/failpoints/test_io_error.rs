@@ -341,14 +341,17 @@ fn test_no_space_write_error() {
         let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*off->1*return->off");
         let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
         let engine = Engine::open(cfg.clone()).unwrap();
-        engine
-            .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-            .unwrap();
+        assert!(catch_unwind_silent(|| {
+            engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .unwrap_err();
+        })
+        .is_err());
         engine
             .write(&mut generate_batch(3, 11, 21, Some(&entry)), true)
             .unwrap();
         assert_eq!(
-            10,
+            0,
             engine
                 .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
                 .unwrap()
@@ -376,7 +379,7 @@ fn test_no_space_write_error() {
             .write(&mut generate_batch(4, 11, 21, Some(&entry)), true)
             .unwrap();
         assert_eq!(
-            10,
+            0,
             engine
                 .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
                 .unwrap()

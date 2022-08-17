@@ -148,9 +148,21 @@ where
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
+                // If we found that there is no spare space for the next LogBatch in the current
+                // active file, we will mark the `force_rotate` with `true` to notify the leader
+                // do `rotate` immediately.
+                let mut force_rotate = false;
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
+                    // To avoid redundant `write` check when `force_rotate` == `true`, we will
+                    // directly assign a special `Error::Other(...)` to the following followers.
+                    if force_rotate {
+                        writer.set_output(Err(Error::Other(box_err!(
+                            "Failed to append logbatch, try to dump it to other dir"
+                        ))));
+                        continue;
+                    }
                     let log_batch = writer.mut_payload();
                     let res = if !log_batch.is_empty() {
                         log_batch.prepare_write(&file_context)?;
@@ -164,12 +176,32 @@ where
                             len: 0,
                         })
                     };
+                    if let Err(Error::Other(e)) = res {
+                        warn!(
+                            "Cannot append, err: {}, try to re-append this log_batch into next log",
+                            e
+                        );
+                        force_rotate = true; // force to flush the current active file
+                        writer.set_output(Err(Error::Other(box_err!(
+                            "Failed to append logbatch, try to dump it to other dir"
+                        ))));
+                        continue;
+                    }
                     writer.set_output(res);
                 }
                 debug_assert!(
                     file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
                 );
                 perf_context!(log_write_duration).observe_since(now);
+                if force_rotate {
+                    if let Err(e) = self.pipe_log.rotate(LogQueue::Append) {
+                        panic!(
+                            "Cannot rotate {:?} queue due to IO error: {}",
+                            LogQueue::Append,
+                            e
+                        );
+                    }
+                }
                 if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                     panic!(
                         "Cannot sync {:?} queue due to IO error: {}",
@@ -194,12 +226,11 @@ where
             // Retry if `writer.finish()` returns a special err, remarking there still
             // exists free space for this `LogBatch`.
             let ret = writer.finish();
-            if let Err(Error::Other(e)) = ret {
-                warn!(
-                    "Cannot append, err: {}, try to re-append this log_batch into other log",
-                    e
-                );
+            if let Err(Error::Other(_)) = ret {
                 log_batch.reset_to_encoded_state();
+                // Here, we will retry this LogBatch `append` by appending this writer
+                // to the next write group, and the current write leader will not hang
+                // on this write and will return timely.
                 return self.write(log_batch, sync);
             }
             ret?
