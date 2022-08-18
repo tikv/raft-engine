@@ -33,7 +33,8 @@ struct FileCollection<F: FileSystem> {
     first_seq_in_use: FileSeq,
     fds: VecDeque<FileWithFormat<F>>,
     /// A hint to control the amount of stale files.
-    /// Unless `active_len() > capacity`, `len() <= capacity`.
+    /// `fds.len()` should be no larger than `capacity` unless it is full of
+    /// active files.
     capacity: usize,
 }
 
