@@ -251,7 +251,6 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
         let files = self.files.read();
-        // TODO(tabokie): test case
         if !(files.first_seq_in_use..files.first_seq_in_use + files.fds.len() as u64)
             .contains(&file_seq)
         {
@@ -288,12 +287,11 @@ impl<F: FileSystem> SinglePipe<F> {
                 };
                 let src_path = src_file_id.build_file_path(&self.dir);
                 let dst_path = file_id.build_file_path(&self.dir);
-                // TODO(tabokie)
                 if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
-                    error!("error while trying to recycle one expired file: {}", e);
-                    self.file_system
-                        .delete(&src_path)
-                        .expect("remove stale file");
+                    error!("error while trying to reuse one expired file: {}", e);
+                    if let Err(e) = self.file_system.delete(&src_path) {
+                        error!("error while trying to delete one expired file: {}", e);
+                    }
                     Arc::new(self.file_system.create(&path)?)
                 } else {
                     Arc::new(self.file_system.open(&path)?)
@@ -563,14 +561,18 @@ mod tests {
     use super::super::format::LogFileFormat;
     use super::super::pipe_builder::lock_dir;
     use super::*;
-    use crate::env::DefaultFileSystem;
+    use crate::env::{DefaultFileSystem, ObfuscatedFileSystem};
     use crate::pipe_log::Version;
     use crate::util::ReadableSize;
 
-    fn new_test_pipe(cfg: &Config, queue: LogQueue) -> Result<SinglePipe<DefaultFileSystem>> {
+    fn new_test_pipe<F: FileSystem>(
+        cfg: &Config,
+        queue: LogQueue,
+        fs: Arc<F>,
+    ) -> Result<SinglePipe<F>> {
         SinglePipe::open(
             cfg,
-            Arc::new(DefaultFileSystem),
+            fs,
             Vec::new(),
             queue,
             0,
@@ -585,8 +587,8 @@ mod tests {
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
         DualPipes::open(
             lock_dir(&cfg.dir)?,
-            new_test_pipe(cfg, LogQueue::Append)?,
-            new_test_pipe(cfg, LogQueue::Rewrite)?,
+            new_test_pipe(cfg, LogQueue::Append, Arc::new(DefaultFileSystem))?,
+            new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem))?,
         )
     }
 
@@ -779,32 +781,41 @@ mod tests {
             ..Default::default()
         };
         let queue = LogQueue::Append;
-
-        let pipe_log = new_test_pipes(&cfg).unwrap();
-        assert_eq!(pipe_log.file_span(queue), (1, 1));
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let pipe_log = new_test_pipe(&cfg, queue, fs.clone()).unwrap();
+        assert_eq!(pipe_log.file_span(), (1, 1));
 
         let content: Vec<u8> = vec![b'a'; 16];
         let mut handles = Vec::new();
         for _ in 0..10 {
-            handles.push(pipe_log.append(queue, &content).unwrap());
-            pipe_log.maybe_sync(queue, true).unwrap();
+            handles.push(pipe_log.append(&content).unwrap());
+            pipe_log.maybe_sync(true).unwrap();
         }
-        let (first, last) = pipe_log.file_span(queue);
-        assert_eq!(
-            pipe_log.purge_to(FileId::new(queue, last)).unwrap() as u64,
-            last - first
-        );
+        let (first, last) = pipe_log.file_span();
+        assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read stale file.
-        let fs = pipe_log.file_system();
         for handle in handles {
             assert!(pipe_log.read_bytes(handle).is_err());
             // Bypass pipe log
             let mut reader = build_file_reader(
-                &fs,
+                fs.as_ref(),
                 Arc::new(fs.open(handle.id.build_file_path(path)).unwrap()),
             )
             .unwrap();
             assert_eq!(reader.read(handle).unwrap(), content);
+            // Delete file so that it cannot be reused.
+            fs.delete(handle.id.build_file_path(path)).unwrap();
+        }
+        // Try to reuse.
+        let new_content: Vec<u8> = vec![b'c'; 16];
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            handles.push(pipe_log.append(&new_content).unwrap());
+            pipe_log.maybe_sync(true).unwrap();
+        }
+        // Verify the data.
+        for handle in handles {
+            assert_eq!(pipe_log.read_bytes(handle).unwrap(), new_content);
         }
     }
 }
