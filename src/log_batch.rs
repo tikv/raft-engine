@@ -834,6 +834,7 @@ impl LogBatch {
     }
 
     /// Resets the `LogBatch` state to `Encoded(_, _)`.
+    #[inline]
     pub(crate) fn reset_to_encoded_state(&mut self) {
         match self.buf_state {
             BufState::Sealed(header_offset, entries_len) => {

@@ -148,9 +148,7 @@ where
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
-                // If we found that there is no spare space for the next LogBatch in the current
-                // active file, we will mark the `force_rotate` with `true` to notify the leader
-                // do `rotate` immediately.
+                // Flag on whether force to flush the current active file or not.
                 let mut force_rotate = false;
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
@@ -176,12 +174,15 @@ where
                             len: 0,
                         })
                     };
+                    // If we found that there is no spare space for the next LogBatch in the current
+                    // active file, we will mark the `force_rotate` with `true` to notify the leader
+                    // do `rotate` immediately.
                     if let Err(Error::Other(e)) = res {
                         warn!(
                             "Cannot append, err: {}, try to re-append this log_batch into next log",
                             e
                         );
-                        force_rotate = true; // force to flush the current active file
+                        force_rotate = true;
                         writer.set_output(Err(Error::Other(box_err!(
                             "Failed to append logbatch, try to dump it to other dir"
                         ))));

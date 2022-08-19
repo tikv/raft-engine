@@ -76,6 +76,7 @@ impl StorageInfo {
         None
     }
 
+    #[inline]
     fn get_dir(&self, storage_type: StorageDirType) -> Option<&str> {
         let idx = storage_type as usize;
         if idx >= self.storage.len() {
