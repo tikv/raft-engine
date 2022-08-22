@@ -31,14 +31,14 @@ pub struct Config {
     /// Default: ""
     pub dir: String,
 
-    /// Assistant directory to store log files. Will create on startup if
+    /// Secondary directory to store log files. Will create on startup if
     /// set and not exists.
     ///
     /// Newly logs will be put into this dir when the main `dir` is full
     /// or not accessible.
     ///
     /// Default: ""
-    pub sub_dir: Option<String>,
+    pub secondary_dir: Option<String>,
 
     /// How to deal with file corruption during recovery.
     ///
@@ -106,7 +106,7 @@ impl Default for Config {
         #[allow(unused_mut)]
         let mut cfg = Config {
             dir: "".to_owned(),
-            sub_dir: None,
+            secondary_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
@@ -292,22 +292,22 @@ mod tests {
             // Set the sub-dir with `Some("...")`
             let dir_list = r#"
                 dir = "./test/"
-                sub-dir = 'Some("./test_secondary")'
+                secondary-dir = 'Some("./test_secondary")'
             "#;
             let mut load: Config = toml::from_str(dir_list).unwrap();
             load.sanitize().unwrap();
-            assert!(load.sub_dir.is_some());
+            assert!(load.secondary_dir.is_some());
             assert!(toml::to_string(&load).unwrap().contains("test_secondary"));
         }
         {
             // Set the sub-dir with `"..."`
             let wrong_dir_list = r#"
                 dir = "./test/"
-                sub-dir = "./test_secondary"
+                secondary-dir = "./test_secondary"
             "#;
             let mut load: Config = toml::from_str(wrong_dir_list).unwrap();
             load.sanitize().unwrap();
-            assert!(load.sub_dir.is_some());
+            assert!(load.secondary_dir.is_some());
         }
     }
 }

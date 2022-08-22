@@ -730,7 +730,7 @@ fn test_build_engine_with_multi_dir() {
         .prefix("test_build_engine_with_multi_dir_1")
         .tempdir()
         .unwrap();
-    let sub_dir = tempfile::Builder::new()
+    let secondary_dir = tempfile::Builder::new()
         .prefix("test_build_engine_with_multi_dir_2")
         .tempdir()
         .unwrap();
@@ -738,7 +738,7 @@ fn test_build_engine_with_multi_dir() {
     let rid = 1;
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        sub_dir: Some(sub_dir.path().to_str().unwrap().to_owned()),
+        secondary_dir: Some(secondary_dir.path().to_str().unwrap().to_owned()),
         target_file_size: ReadableSize::kb(2),
         purge_threshold: ReadableSize::kb(4),
         ..Default::default()
@@ -747,10 +747,10 @@ fn test_build_engine_with_multi_dir() {
     {
         // Set config with abnormal settings => same prefix
         let abnormal_dir = format!("{}/abnormal", dir.path().to_str().unwrap().to_owned());
-        let abnormal_sub_dir = format!("{}/testing", abnormal_dir);
+        let abnormal_sec_dir = format!("{}/testing", abnormal_dir);
         let cfg_err = Config {
             dir: abnormal_dir,
-            sub_dir: Some(abnormal_sub_dir),
+            secondary_dir: Some(abnormal_sec_dir),
             ..cfg
         };
         let engine = Engine::open(cfg_err).unwrap();
@@ -785,7 +785,7 @@ fn test_build_engine_with_multi_dir() {
     {
         // Set config with abnormal settings => same device
         let cfg_err = Config {
-            sub_dir: Some("./abnormal_testing".to_owned()),
+            secondary_dir: Some("./abnormal_testing".to_owned()),
             ..cfg.clone()
         };
         let engine = Engine::open(cfg_err).unwrap();

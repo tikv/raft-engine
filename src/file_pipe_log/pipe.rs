@@ -35,10 +35,10 @@ struct StorageInfo {
 }
 
 impl StorageInfo {
-    fn new(dir: String, sub_dir: Option<String>) -> Self {
+    fn new(dir: String, secondary_dir: Option<String>) -> Self {
         let mut storage = vec![dir; 1];
-        if let Some(sub) = sub_dir {
-            storage.push(sub);
+        if let Some(sec_dir) = secondary_dir {
+            storage.push(sec_dir);
         }
         Self { storage }
     }
@@ -234,7 +234,7 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let storage = StorageInfo::new(cfg.dir.clone(), cfg.sub_dir.clone());
+        let storage = StorageInfo::new(cfg.dir.clone(), cfg.secondary_dir.clone());
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;

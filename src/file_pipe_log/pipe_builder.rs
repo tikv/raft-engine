@@ -101,6 +101,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
+        /// Checks the given `dir` exists or not. If `dir` not exists,
+        /// calls `fs::create_dir` to create it.
         fn validate_dir(dir: &str) -> Result<()> {
             let path = Path::new(dir);
             if !path.exists() {
@@ -113,7 +115,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             Ok(())
         }
-
+        /// Parses the range of file sequences in the given `dir`.
         fn parse_file_range(
             dir: &str,
             dir_type: StorageDirType,
@@ -154,14 +156,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             });
             Ok(valid_file_count)
         }
-
+        /// Cleans up stale metadata left by the previous version.
         fn clean_stale_metadata<F: FileSystem>(
             file_system: &F,
             dir: &str,
             min_id: u64,
             queue: LogQueue,
         ) {
-            // Try to cleanup stale metadata left by the previous version.
             let max_sample = 100;
             // Find the first obsolete metadata.
             let mut delete_start = None;
@@ -197,14 +198,15 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 );
             }
         }
-
-        // Validate main dir.
+        // Steps in the procedure of `scan`: `validate_dir` -> `parse_file_range` ->
+        // `clean_stale_metadata`
+        // Validate the main dir.
         let dir = &self.cfg.dir;
         validate_dir(dir)?;
         self.dir_lock = Some(lock_dir(dir)?);
-        // Validate sub dir (secondary dir).
-        if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
-            validate_dir(sub_dir)?;
+        // Validate the secondary dir.
+        if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref() {
+            validate_dir(secondary_dir)?;
         }
 
         type FileSeqRange = (u64, u64); /* (minimal_id, maximal_id) */
@@ -213,7 +215,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let mut rewrite_id_range = (u64::MAX, 0_u64);
         let mut append_file_dict: HashMap<FileSeq, StorageDirType> = HashMap::default();
         let mut rewrite_file_dict: HashMap<FileSeq, StorageDirType> = HashMap::default();
-        // Parse files in `dir`.
+        // Parse files in `cfg.dir`.
         parse_file_range(
             dir,
             StorageDirType::Main,
@@ -222,26 +224,26 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             &mut append_file_dict,
             &mut rewrite_file_dict,
         )?;
-        // Parse files in `sub-dir`.
+        // Parse files in `cfg.secondary_dir`.
         if_chain::if_chain! {
-            if let Some(sub_dir) = self.cfg.sub_dir.as_ref();
+            if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref();
             if let Ok(0) = parse_file_range(
-                    sub_dir,
+                    secondary_dir,
                     StorageDirType::Secondary,
                     &mut append_id_range,
                     &mut rewrite_id_range,
                     &mut append_file_dict,
                     &mut rewrite_file_dict,
                 );
-            if let Ok(true) = from_same_dev(&self.cfg.dir, sub_dir);
+            if let Ok(true) = from_same_dev(&self.cfg.dir, secondary_dir);
             then {
                 // If the count of valid file in secondary dir was 0, we directly
-                // reset the `cfg.sub_dir` to None.
+                // reset the `cfg.secondary_dir` to None.
                 warn!(
                     "sub-dir ({}) and dir ({}) are on same device, ignore it",
-                    sub_dir, self.cfg.dir
+                    secondary_dir, self.cfg.dir
                 );
-                self.cfg.sub_dir = None; // reset to None
+                self.cfg.secondary_dir = None; // reset to None
             }
         }
 
@@ -265,17 +267,17 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 // Clean stale metadata in main dir.
                 clean_stale_metadata(self.file_system.as_ref(), &self.cfg.dir, min_id, queue);
                 // Clean stale metadata in secondary dir if it was specified.
-                if let Some(sub_dir) = self.cfg.sub_dir.as_ref() {
-                    clean_stale_metadata(self.file_system.as_ref(), sub_dir, min_id, queue);
+                if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref() {
+                    clean_stale_metadata(self.file_system.as_ref(), secondary_dir, min_id, queue);
                 }
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };
                     let (dir, storage_type) = match file_dict.get(&seq) {
                         Some(StorageDirType::Main) => (&self.cfg.dir, StorageDirType::Main),
                         Some(StorageDirType::Secondary) => {
-                            debug_assert!(self.cfg.sub_dir.is_some());
+                            debug_assert!(self.cfg.secondary_dir.is_some());
                             (
-                                self.cfg.sub_dir.as_ref().unwrap(),
+                                self.cfg.secondary_dir.as_ref().unwrap(),
                                 StorageDirType::Secondary,
                             )
                         }
