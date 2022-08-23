@@ -88,8 +88,8 @@ impl<F: FileSystem> FileCollection<F> {
             let capacity_exceeded = self.fds.len().saturating_sub(self.capacity);
             let mut purged = std::cmp::min(capacity_exceeded, obsolete_files);
             // The files with format_version `V1` cannot be chosen as recycle
-            // candidates, which should also be removed.
-            // Find the newest obsolete `V1` file and refresh purge count.
+            // candidates. We will simply make sure there's no V1 stale files in the
+            // collection.
             for i in (purged..obsolete_files).rev() {
                 if !self.fds[i].format.version.has_log_signing() {
                     purged = i + 1;
@@ -280,27 +280,25 @@ impl<F: FileSystem> SinglePipe<F> {
             seq,
         };
         let path = file_id.build_file_path(&self.dir);
-        let fd = {
-            if let Some(seq) = self.files.write().recycle_one_file() {
-                let src_file_id = FileId {
-                    queue: self.queue,
-                    seq,
-                };
-                let src_path = src_file_id.build_file_path(&self.dir);
-                let dst_path = file_id.build_file_path(&self.dir);
-                if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
-                    error!("error while trying to reuse one expired file: {}", e);
-                    if let Err(e) = self.file_system.delete(&src_path) {
-                        error!("error while trying to delete one expired file: {}", e);
-                    }
-                    Arc::new(self.file_system.create(&path)?)
-                } else {
-                    Arc::new(self.file_system.open(&path)?)
+        let fd = Arc::new(if let Some(seq) = self.files.write().recycle_one_file() {
+            let src_file_id = FileId {
+                queue: self.queue,
+                seq,
+            };
+            let src_path = src_file_id.build_file_path(&self.dir);
+            let dst_path = file_id.build_file_path(&self.dir);
+            if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
+                error!("error while trying to reuse one expired file: {}", e);
+                if let Err(e) = self.file_system.delete(&src_path) {
+                    error!("error while trying to delete one expired file: {}", e);
                 }
+                self.file_system.create(&path)?
             } else {
-                Arc::new(self.file_system.create(&path)?)
+                self.file_system.open(&path)?
             }
-        };
+        } else {
+            self.file_system.create(&path)?
+        });
         let mut new_file = ActiveFile {
             seq,
             // The file might generated from a recycled stale-file, always reset the file
