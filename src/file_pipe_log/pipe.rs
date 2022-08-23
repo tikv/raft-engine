@@ -79,9 +79,7 @@ impl<F: FileSystem> FileCollection<F> {
             first_seq_in_use: self.first_seq_in_use,
             total_len: self.fds.len(),
         };
-        if (self.first_seq_in_use..self.first_seq_in_use + self.fds.len() as u64)
-            .contains(&file_seq)
-        {
+        if (self.first_seq_in_use..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
             // Remove some obsolete files if capacity is exceeded.
             let obsolete_files = (file_seq - self.first_seq) as usize;
             // When capacity is zero, always remove logically deleted files.
@@ -257,7 +255,7 @@ impl<F: FileSystem> SinglePipe<F> {
         {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        Ok(files.fds[(file_seq - files.first_seq_in_use) as usize]
+        Ok(files.fds[(file_seq - files.first_seq) as usize]
             .handle
             .clone())
     }
@@ -624,7 +622,7 @@ mod tests {
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
-        let header_size = LogFileFormat::encode_len(Version::default()) as u64;
+        let header_size = LogFileFormat::encode_len(cfg.format_version) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
@@ -684,7 +682,7 @@ mod tests {
 
         // fetch active file
         let file_context = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_context.version, Version::default());
+        assert_eq!(file_context.version, cfg.format_version);
         assert_eq!(file_context.id.seq, 3);
     }
 
@@ -784,16 +782,18 @@ mod tests {
         let pipe_log = new_test_pipe(&cfg, queue, fs.clone()).unwrap();
         assert_eq!(pipe_log.file_span(), (1, 1));
 
-        let content: Vec<u8> = vec![b'a'; 16];
+        fn content(i: usize) -> Vec<u8> {
+            vec![(i % (u8::MAX as usize)) as u8; 16]
+        }
         let mut handles = Vec::new();
-        for _ in 0..10 {
-            handles.push(pipe_log.append(&content).unwrap());
+        for i in 0..10 {
+            handles.push(pipe_log.append(&content(i)).unwrap());
             pipe_log.maybe_sync(true).unwrap();
         }
         let (first, last) = pipe_log.file_span();
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read stale file.
-        for handle in handles {
+        for (i, handle) in handles.into_iter().enumerate() {
             assert!(pipe_log.read_bytes(handle).is_err());
             // Bypass pipe log
             let mut reader = build_file_reader(
@@ -801,20 +801,19 @@ mod tests {
                 Arc::new(fs.open(handle.id.build_file_path(path)).unwrap()),
             )
             .unwrap();
-            assert_eq!(reader.read(handle).unwrap(), content);
+            assert_eq!(reader.read(handle).unwrap(), content(i));
             // Delete file so that it cannot be reused.
             fs.delete(handle.id.build_file_path(path)).unwrap();
         }
         // Try to reuse.
-        let new_content: Vec<u8> = vec![b'c'; 16];
         let mut handles = Vec::new();
-        for _ in 0..10 {
-            handles.push(pipe_log.append(&new_content).unwrap());
+        for i in 0..10 {
+            handles.push(pipe_log.append(&content(i + 1)).unwrap());
             pipe_log.maybe_sync(true).unwrap();
         }
         // Verify the data.
-        for handle in handles {
-            assert_eq!(pipe_log.read_bytes(handle).unwrap(), new_content);
+        for (i, handle) in handles.into_iter().enumerate() {
+            assert_eq!(pipe_log.read_bytes(handle).unwrap(), content(i + 1));
         }
     }
 }
