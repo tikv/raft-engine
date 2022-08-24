@@ -2213,6 +2213,7 @@ mod tests {
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(1024),
             format_version: Version::V1,
+            enable_log_recycle: false,
             ..Default::default()
         };
         let cfg_v2 = Config {
