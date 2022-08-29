@@ -337,7 +337,7 @@ fn test_no_space_write_error() {
         .is_err());
     }
     {
-        // Disk goes from `spare` -> `full` -> `spare`.
+        // Disk goes from `spare(nospace err)` -> `full` -> `spare`.
         let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*off->1*return->off");
         let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
         let engine = Engine::open(cfg.clone()).unwrap();
@@ -369,7 +369,7 @@ fn test_no_space_write_error() {
         let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
         let cfg_err = Config {
             target_file_size: ReadableSize(1),
-            ..cfg
+            ..cfg.clone()
         };
         let engine = Engine::open(cfg_err).unwrap();
         engine
@@ -388,6 +388,50 @@ fn test_no_space_write_error() {
             10,
             engine
                 .fetch_entries_to::<MessageExtTyped>(4, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+    }
+    {
+        // Disk goes from `spare(nospace err)` -> `spare(another dir has enough space)`.
+        let _f = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        engine
+            .write(&mut generate_batch(5, 11, 21, Some(&entry)), true)
+            .unwrap();
+        engine
+            .write(&mut generate_batch(6, 11, 21, Some(&entry)), true)
+            .unwrap();
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(5, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(6, 11, 21, None, &mut vec![])
+                .unwrap()
+        );
+    }
+    {
+        // Disk goes into endless `spare(nospace err)`, engine do panic for multi-
+        // retrying.
+        let _f = FailGuard::new(
+            "log_fd::write::no_space_err",
+            "1*return->1*off->1*return->1*off",
+        );
+        let engine = Engine::open(cfg).unwrap();
+        assert!(catch_unwind_silent(|| {
+            engine
+                .write(&mut generate_batch(7, 11, 21, Some(&entry)), true)
+                .unwrap_err();
+        })
+        .is_err());
+        assert_eq!(
+            0,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(7, 11, 21, None, &mut vec![])
                 .unwrap()
         );
     }

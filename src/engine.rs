@@ -148,7 +148,7 @@ where
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
                 let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
-                // Flag on whether force to flush the current active file or not.
+                // Flag on whether force to rotate the current active file or not.
                 let mut force_rotate = false;
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
@@ -195,6 +195,7 @@ where
                 );
                 perf_context!(log_write_duration).observe_since(now);
                 if force_rotate {
+                    // TODO: encapsulating ops for `force_rotate == true`.
                     if let Err(e) = self.pipe_log.rotate(LogQueue::Append) {
                         panic!(
                             "Cannot rotate {:?} queue due to IO error: {}",
@@ -228,11 +229,7 @@ where
             // exists free space for this `LogBatch`.
             let ret = writer.finish();
             if let Err(Error::Other(_)) = ret {
-                log_batch.reset_to_encoded_state();
-                // Here, we will retry this LogBatch `append` by appending this writer
-                // to the next write group, and the current write leader will not hang
-                // on this write and will return timely.
-                return self.write(log_batch, sync);
+                return self.rewrite(log_batch, sync);
             }
             ret?
         };
@@ -253,6 +250,21 @@ where
         ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
         ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
         Ok(len)
+    }
+
+    /// Rewrites the given log_batch.
+    fn rewrite(&self, log_batch: &mut LogBatch, sync: bool) -> Result<usize> {
+        if let Err(e) = log_batch.prepare_rewrite() {
+            panic!(
+                "Cannot rewrite {:?} queue due to IO error: {}",
+                LogQueue::Append,
+                e
+            );
+        }
+        // Here, we will retry this LogBatch `append` by appending this writer
+        // to the next write group, and the current write leader will not hang
+        // on this write and will return timely.
+        self.write(log_batch, sync)
     }
 
     /// Synchronizes the Raft engine.
