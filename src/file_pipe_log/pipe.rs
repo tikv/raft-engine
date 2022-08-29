@@ -88,7 +88,7 @@ impl StorageInfo {
     }
 
     #[inline]
-    fn sync_all_dir(&mut self) -> Result<()> {
+    fn sync_all_dir(&self) -> Result<()> {
         for t in StorageDirType::iter() {
             let idx = t as usize;
             if idx >= self.storage.len() {
@@ -118,8 +118,6 @@ struct FileCollection<F: FileSystem> {
     /// `fds.len()` should be no larger than `capacity` unless it is full of
     /// active files.
     capacity: usize,
-    /// Info of storage dir.
-    storage: StorageInfo,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -161,8 +159,8 @@ impl<F: FileSystem> FileCollection<F> {
     fn logical_purge(
         &mut self,
         file_seq: FileSeq,
-    ) -> (FileState, FileState, Vec<(FileSeq, String)>) {
-        let mut purged_files = Vec::<(FileSeq, String)>::default();
+    ) -> (FileState, FileState, Vec<(FileSeq, StorageDirType)>) {
+        let mut purged_files = Vec::<(FileSeq, StorageDirType)>::default();
         let prev = FileState {
             first_seq: self.first_seq,
             first_seq_in_use: self.first_seq_in_use,
@@ -185,13 +183,7 @@ impl<F: FileSystem> FileCollection<F> {
             }
             purged_files.reserve(purged);
             for i in 0..purged {
-                purged_files.push((
-                    i as u64 + self.first_seq,
-                    self.storage
-                        .get_dir(self.fds[i].storage_type)
-                        .unwrap()
-                        .to_owned(),
-                ));
+                purged_files.push((i as u64 + self.first_seq, self.fds[i].storage_type));
             }
             self.first_seq += purged as u64;
             self.first_seq_in_use = file_seq;
@@ -227,6 +219,8 @@ pub(super) struct SinglePipe<F: FileSystem> {
     /// `active_file` must be locked first to acquire both `files` and
     /// `active_file`
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
+    /// Info of storage dir.
+    storage: StorageInfo,
 }
 
 impl<F: FileSystem> Drop for SinglePipe<F> {
@@ -243,7 +237,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
                 queue: self.queue,
                 seq,
             };
-            let dir = files
+            let dir = self
                 .storage
                 .get_dir(files.fds[(seq - files.first_seq) as usize].storage_type);
             debug_assert!(dir.is_some());
@@ -344,9 +338,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 first_seq_in_use: first_seq,
                 fds,
                 capacity,
-                storage,
             })),
             active_file: CachePadded::new(Mutex::new(active_file)),
+            storage,
         };
         pipe.flush_metrics(total_files);
         Ok(pipe)
@@ -355,8 +349,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
     fn sync_dir(&self) -> Result<()> {
-        let mut files = self.files.write();
-        files.storage.sync_all_dir()
+        self.storage.sync_all_dir()
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -395,7 +388,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let mut files = self.files.write();
             if let Some((seq, storage_type)) = files.recycle_one_file() {
                 // Has stale files for recycling, the old file will be reused.
-                let dir = files.storage.get_dir(storage_type).unwrap();
+                let dir = self.storage.get_dir(storage_type).unwrap();
                 let src_file_id = FileId {
                     queue: self.queue,
                     seq,
@@ -411,7 +404,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 } else {
                     (Arc::new(self.file_system.open(&dst_path)?), storage_type)
                 }
-            } else if let Some((d, t)) = files.storage.get_free_dir(self.target_file_size) {
+            } else if let Some((d, t)) = self.storage.get_free_dir(self.target_file_size) {
                 // Has free space for newly writing, a new file is introduced.
                 let path = file_id.build_file_path(&d);
                 (Arc::new(self.file_system.create(&path)?), t)
@@ -528,7 +521,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let has_free_space = {
                 let files = self.files.read();
                 files.first_seq < files.first_seq_in_use /* has stale files */
-                    || files.storage.get_free_dir(self.target_file_size).is_some()
+                    || self.storage.get_free_dir(self.target_file_size).is_some()
             };
             // If there still exists free space for this record, a special Err will
             // be returned to the caller.
@@ -602,12 +595,18 @@ impl<F: FileSystem> SinglePipe<F> {
             debug_assert!(purged_files.is_empty());
             return Ok(0);
         }
-        for (seq, dir) in purged_files.iter() {
+        debug_assert_eq!(
+            purged_files.len() as u64,
+            current.first_seq - prev.first_seq
+        );
+        for (seq, dir_type) in purged_files.iter() {
             let file_id = FileId {
                 queue: self.queue,
                 seq: *seq,
             };
-            let path = file_id.build_file_path(dir);
+            let dir = self.storage.get_dir(*dir_type);
+            debug_assert!(dir.is_some());
+            let path = file_id.build_file_path(dir.unwrap());
             #[cfg(feature = "failpoints")]
             {
                 let remove_skipped = || {
@@ -874,7 +873,6 @@ mod tests {
                 Version::V2,
             )]
             .into(),
-            storage: StorageInfo::new(path.to_owned(), None),
         };
         assert_eq!(files.recycle_one_file(), None);
         // | 12 13 14
