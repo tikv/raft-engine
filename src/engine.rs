@@ -195,7 +195,8 @@ where
                 );
                 perf_context!(log_write_duration).observe_since(now);
                 if force_rotate {
-                    // TODO: encapsulating ops for `force_rotate == true`.
+                    // If the leader failed to `rotate` a new log for the un-synced LogBatches,
+                    // it means that it encounters unexpected errors, and should panic.
                     if let Err(e) = self.pipe_log.rotate(LogQueue::Append) {
                         panic!(
                             "Cannot rotate {:?} queue due to IO error: {}",
@@ -203,8 +204,7 @@ where
                             e
                         );
                     }
-                }
-                if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
+                } else if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                     panic!(
                         "Cannot sync {:?} queue due to IO error: {}",
                         LogQueue::Append,
@@ -225,8 +225,8 @@ where
             debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
-            // Retry if `writer.finish()` returns a special err, remarking there still
-            // exists free space for this `LogBatch`.
+            // Retry if `writer.finish()` returns a special 'Error::Other', remarking that
+            // there still exists free space for this `LogBatch`.
             let ret = writer.finish();
             if let Err(Error::Other(_)) = ret {
                 return self.rewrite(log_batch, sync);
@@ -252,7 +252,7 @@ where
         Ok(len)
     }
 
-    /// Rewrites the given log_batch.
+    /// Rewrites the content of `log_batch`.
     fn rewrite(&self, log_batch: &mut LogBatch, sync: bool) -> Result<usize> {
         if let Err(e) = log_batch.prepare_rewrite() {
             panic!(
