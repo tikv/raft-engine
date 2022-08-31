@@ -57,7 +57,7 @@ pub struct Config {
 
     /// Version of the log file.
     ///
-    /// Default: 1
+    /// Default: 2
     pub format_version: Version,
 
     /// Target file size for rotating log files.
@@ -88,7 +88,7 @@ pub struct Config {
     /// If `true`, logically purged log files will be reserved for recycling.
     /// Only available for `format_version` 2 and above.
     ///
-    /// Default: false
+    /// Default: true
     pub enable_log_recycle: bool,
 }
 
@@ -102,13 +102,13 @@ impl Default for Config {
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: ReadableSize::mb(4),
-            format_version: Version::V1,
+            format_version: Version::V2,
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
-            enable_log_recycle: false,
+            enable_log_recycle: true,
         };
         // Test-specific configurations.
         #[cfg(test)]
