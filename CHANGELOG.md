@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Behavior Changes
-* Enable log recycling by default.
-
 ### Bug Fixes
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
@@ -21,6 +18,10 @@
 * Add metadata deletion capability to `FileSystem` trait. Users can implement `exists_metadata` and `delete_metadata` to clean up obsolete metadata from older versions of Raft Engine.
 * Add `Engine::scan_messages` and `Engine::scan_raw_messages` for iterating over written key-values. 
 * Add `Engine::get` for getting raw value.
+
+### Behavior Changes
+
+* Enable log recycling by default.
 
 ## [0.2.0] - 2022-05-25
 
