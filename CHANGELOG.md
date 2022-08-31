@@ -19,6 +19,11 @@
 * Add `Engine::scan_messages` and `Engine::scan_raw_messages` for iterating over written key-values. 
 * Add `Engine::get` for getting raw value.
 
+### Behavior Changes
+
+* Change format version to 2 from 1 by default.
+* Enable log recycling by default.
+
 ## [0.2.0] - 2022-05-25
 
 ### Bug Fixes
