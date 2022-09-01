@@ -1397,6 +1397,34 @@ mod tests {
         );
     }
 
+    #[ignore]
+    #[test]
+    fn test_empty_batch() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_empty_batch")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+                .unwrap();
+        let data = vec![b'x'; 16];
+        let cases = [[false, false], [false, true], [true, true]];
+        for (i, writes) in cases.iter().enumerate() {
+            let rid = i as u64;
+            let mut batch = LogBatch::default();
+            for &has_data in writes {
+                if has_data {
+                    batch.put(rid, b"key".to_vec(), data.clone());
+                }
+                engine.write(&mut batch, true).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn test_dirty_recovery() {
         let dir = tempfile::Builder::new()
