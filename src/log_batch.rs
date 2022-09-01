@@ -568,18 +568,10 @@ enum BufState {
     /// state only briefly exists between encoding and writing, user operation
     /// will panic under this state.
     /// # Content
-    /// (header_offset, entries_len)
+    /// (header_offset, entries_len, signature)
     /// # Invariants
     /// LOG_BATCH_HEADER_LEN <= buf.len()
     Sealed(usize, usize, Option<u32>),
-    /// Buffer is undergoing to be re-written. This state only exists
-    /// triansiently between writing and re-writing, user operation will
-    /// panic under this state.
-    /// # Content
-    /// (header_offset, entries_len)
-    /// # Invariants
-    /// LOG_BATCH_HEADER_LEN <= buf.len()
-    ReSealing(usize, usize),
     /// Buffer is undergoing writes. User operation will panic under this state.
     Incomplete,
 }
@@ -752,7 +744,7 @@ impl LogBatch {
     /// compression type to each entry index.
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         let _t = StopWatch::new(perf_context!(log_populating_duration));
-        if let BufState::ReSealing(header_offset, _) = self.buf_state {
+        if let BufState::Encoded(header_offset, _) = self.buf_state {
             return Ok(self.buf.len() - header_offset);
         }
         debug_assert!(self.buf_state == BufState::Open);
@@ -818,9 +810,6 @@ impl LogBatch {
                     LogItemBatch::prepare_write(&mut self.buf, file_context)?,
                 );
             }
-            BufState::ReSealing(_, _) => {
-                LogItemBatch::prepare_write(&mut self.buf, file_context)?;
-            }
             _ => unreachable!(),
         }
         Ok(())
@@ -830,9 +819,7 @@ impl LogBatch {
     /// Assumes called after a successful call of [`prepare_write`].
     pub(crate) fn encoded_bytes(&self) -> &[u8] {
         match self.buf_state {
-            BufState::Sealed(header_offset, _, _) | BufState::ReSealing(header_offset, _) => {
-                &self.buf[header_offset..]
-            }
+            BufState::Sealed(header_offset, _, _) => &self.buf[header_offset..],
             _ => unreachable!(),
         }
     }
@@ -841,15 +828,12 @@ impl LogBatch {
     ///
     /// Internally sets the file locations of each log entry indexes.
     pub(crate) fn finish_write(&mut self, mut handle: FileBlockHandle) {
-        debug_assert!(matches!(
-            self.buf_state,
-            BufState::Sealed(_, _, _) | BufState::ReSealing(_, _)
-        ));
+        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _, _)));
         if !self.is_empty() {
             // adjust log batch handle to log entries handle.
             handle.offset += LOG_BATCH_HEADER_LEN as u64;
             match self.buf_state {
-                BufState::Sealed(_, entries_len, _) | BufState::ReSealing(_, entries_len) => {
+                BufState::Sealed(_, entries_len, _) => {
                     debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
                     handle.len = entries_len;
                 }
@@ -876,12 +860,9 @@ impl LogBatch {
         match self.buf_state {
             BufState::Sealed(header_offset, entries_len, signature) => {
                 LogItemBatch::prepare_rewrite(&mut self.buf, signature)?;
-                self.buf_state = BufState::ReSealing(header_offset, entries_len);
+                self.buf_state = BufState::Encoded(header_offset, entries_len);
                 Ok(())
             }
-            BufState::ReSealing(_, _) => Err(Error::Corruption(
-                "LogBatch can not be rewritten for twice.".to_owned(),
-            )),
             _ => unreachable!(),
         }
     }

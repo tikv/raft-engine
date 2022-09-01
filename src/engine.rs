@@ -139,99 +139,118 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let block_handle = {
-            let mut writer = Writer::new(log_batch, sync);
-            // Snapshot and clear the current perf context temporarily, so the write group
-            // leader will collect the perf context diff later.
-            let mut perf_context = take_perf_context();
-            let before_enter = Instant::now();
-            if let Some(mut group) = self.write_barrier.enter(&mut writer) {
-                let now = Instant::now();
-                let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
-                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
-                // Flag on whether force to rotate the current active file or not.
-                let mut force_rotate = false;
-                for writer in group.iter_mut() {
-                    writer.entered_time = Some(now);
-                    sync |= writer.sync;
-                    // To avoid redundant `write` check when `force_rotate` == `true`, we will
-                    // directly assign a special `Error::Other(...)` to the following followers.
+            // Max retry count is limited to `2`. If the first `append` retry because of
+            // `NOSPC` error, the next `append` should success, unless there exists
+            // several abnormal cases in the IO device. In that case,
+            // `Engine::write` must return `Err`.
+            let mut retry_count = 2;
+            let mut handle = Ok(FileBlockHandle {
+                id: FileId::new(LogQueue::Append, 0),
+                offset: 0,
+                len: 0,
+            });
+            while retry_count > 0 {
+                let mut writer = Writer::new(log_batch, sync);
+                // Snapshot and clear the current perf context temporarily, so the write group
+                // leader will collect the perf context diff later.
+                let mut perf_context = take_perf_context();
+                let before_enter = Instant::now();
+                if let Some(mut group) = self.write_barrier.enter(&mut writer) {
+                    let now = Instant::now();
+                    let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
+                    let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
+                    // Flag on whether force to rotate the current active file or not.
+                    let mut force_rotate = false;
+                    for writer in group.iter_mut() {
+                        writer.entered_time = Some(now);
+                        sync |= writer.sync;
+                        // To avoid redundant `write` check when `force_rotate` == `true`, we will
+                        // directly assign a special `Error::Other(...)` to the following followers.
+                        if force_rotate {
+                            writer.set_output(Err(Error::Other(box_err!(
+                                "Failed to append logbatch, try to dump it to other dir"
+                            ))));
+                            continue;
+                        }
+                        let log_batch = writer.mut_payload();
+                        let res = if !log_batch.is_empty() {
+                            log_batch.prepare_write(&file_context)?;
+                            self.pipe_log
+                                .append(LogQueue::Append, log_batch.encoded_bytes())
+                        } else {
+                            // TODO(tabokie): use Option<FileBlockHandle> instead.
+                            Ok(FileBlockHandle {
+                                id: FileId::new(LogQueue::Append, 0),
+                                offset: 0,
+                                len: 0,
+                            })
+                        };
+                        // If we found that there is no spare space for the next LogBatch in the
+                        // current active file, we will mark the `force_rotate` with `true` to
+                        // notify the leader do `rotate` immediately.
+                        if let Err(Error::Other(e)) = res {
+                            warn!(
+                                "Cannot append, err: {}, try to re-append this log_batch into next log",
+                                e
+                            );
+                            force_rotate = true;
+                            writer.set_output(Err(Error::Other(box_err!(
+                                "Failed to append logbatch, try to dump it to other dir"
+                            ))));
+                            continue;
+                        }
+                        writer.set_output(res);
+                    }
+                    debug_assert!(
+                        file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
+                    );
+                    perf_context!(log_write_duration).observe_since(now);
                     if force_rotate {
-                        writer.set_output(Err(Error::Other(box_err!(
-                            "Failed to append logbatch, try to dump it to other dir"
-                        ))));
-                        continue;
-                    }
-                    let log_batch = writer.mut_payload();
-                    let res = if !log_batch.is_empty() {
-                        log_batch.prepare_write(&file_context)?;
-                        self.pipe_log
-                            .append(LogQueue::Append, log_batch.encoded_bytes())
-                    } else {
-                        // TODO(tabokie): use Option<FileBlockHandle> instead.
-                        Ok(FileBlockHandle {
-                            id: FileId::new(LogQueue::Append, 0),
-                            offset: 0,
-                            len: 0,
-                        })
-                    };
-                    // If we found that there is no spare space for the next LogBatch in the current
-                    // active file, we will mark the `force_rotate` with `true` to notify the leader
-                    // do `rotate` immediately.
-                    if let Err(Error::Other(e)) = res {
-                        warn!(
-                            "Cannot append, err: {}, try to re-append this log_batch into next log",
-                            e
-                        );
-                        force_rotate = true;
-                        writer.set_output(Err(Error::Other(box_err!(
-                            "Failed to append logbatch, try to dump it to other dir"
-                        ))));
-                        continue;
-                    }
-                    writer.set_output(res);
-                }
-                debug_assert!(
-                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
-                );
-                perf_context!(log_write_duration).observe_since(now);
-                if force_rotate {
-                    // If the leader failed to `rotate` a new log for the un-synced LogBatches,
-                    // it means that it encounters unexpected errors, and should panic.
-                    if let Err(e) = self.pipe_log.rotate(LogQueue::Append) {
+                        // If the leader failed to `rotate` a new log for the un-synced LogBatches,
+                        // it means that it encounters unexpected errors, and should panic.
+                        if let Err(e) = self.pipe_log.rotate(LogQueue::Append) {
+                            panic!(
+                                "Cannot rotate {:?} queue due to IO error: {}",
+                                LogQueue::Append,
+                                e
+                            );
+                        }
+                    } else if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
                         panic!(
-                            "Cannot rotate {:?} queue due to IO error: {}",
+                            "Cannot sync {:?} queue due to IO error: {}",
                             LogQueue::Append,
                             e
                         );
                     }
-                } else if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
-                    panic!(
-                        "Cannot sync {:?} queue due to IO error: {}",
-                        LogQueue::Append,
-                        e
-                    );
+                    // Pass the perf context diff to all the writers.
+                    let diff = get_perf_context();
+                    for writer in group.iter_mut() {
+                        writer.perf_context_diff = diff.clone();
+                    }
                 }
-                // Pass the perf context diff to all the writers.
-                let diff = get_perf_context();
-                for writer in group.iter_mut() {
-                    writer.perf_context_diff = diff.clone();
+                let entered_time = writer.entered_time.unwrap();
+                ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
+                    .observe(entered_time.saturating_duration_since(start).as_secs_f64());
+                perf_context.write_wait_duration +=
+                    entered_time.saturating_duration_since(before_enter);
+                debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
+                perf_context += &writer.perf_context_diff;
+                set_perf_context(perf_context);
+                // Retry if `writer.finish()` returns a special 'Error::Other', remarking that
+                // there still exists free space for this `LogBatch`.
+                handle = writer.finish();
+                if let Err(Error::Other(_)) = handle {
+                    retry_count -= 1;
+                    log_batch.prepare_rewrite()?;
+                    // Here, we will retry this LogBatch `append` by appending this writer
+                    // to the next write group, and the current write leader will not hang
+                    // on this write and will return timely.
+                    continue;
+                } else {
+                    break;
                 }
             }
-            let entered_time = writer.entered_time.unwrap();
-            ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
-                .observe(entered_time.saturating_duration_since(start).as_secs_f64());
-            perf_context.write_wait_duration +=
-                entered_time.saturating_duration_since(before_enter);
-            debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
-            perf_context += &writer.perf_context_diff;
-            set_perf_context(perf_context);
-            // Retry if `writer.finish()` returns a special 'Error::Other', remarking that
-            // there still exists free space for this `LogBatch`.
-            let ret = writer.finish();
-            if let Err(Error::Other(_)) = ret {
-                return self.rewrite(log_batch, sync);
-            }
-            ret?
+            handle?
         };
 
         let mut now = Instant::now();
@@ -250,21 +269,6 @@ where
         ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
         ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
         Ok(len)
-    }
-
-    /// Rewrites the content of `log_batch`.
-    fn rewrite(&self, log_batch: &mut LogBatch, sync: bool) -> Result<usize> {
-        if let Err(e) = log_batch.prepare_rewrite() {
-            panic!(
-                "Cannot rewrite {:?} queue due to IO error: {}",
-                LogQueue::Append,
-                e
-            );
-        }
-        // Here, we will retry this LogBatch `append` by appending this writer
-        // to the next write group, and the current write leader will not hang
-        // on this write and will return timely.
-        self.write(log_batch, sync)
     }
 
     /// Synchronizes the Raft engine.

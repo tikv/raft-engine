@@ -289,151 +289,162 @@ fn test_concurrent_write_error() {
 
 #[test]
 fn test_no_space_write_error() {
-    let dir = tempfile::Builder::new()
-        .prefix("test_no_space_write_error")
-        .tempdir()
-        .unwrap();
-    let cfg = Config {
-        dir: dir.path().to_str().unwrap().to_owned(),
-        target_file_size: ReadableSize(2048),
-        ..Default::default()
-    };
+    let mut cfg_list = [
+        Config {
+            target_file_size: ReadableSize::kb(2),
+            recovery_mode: RecoveryMode::AbsoluteConsistency,
+            format_version: Version::V1,
+            enable_log_recycle: false,
+            ..Default::default()
+        },
+        Config {
+            target_file_size: ReadableSize::kb(2),
+            recovery_mode: RecoveryMode::AbsoluteConsistency,
+            format_version: Version::V2,
+            enable_log_recycle: true,
+            ..Default::default()
+        },
+    ];
     let entry = vec![b'x'; 1024];
-    {
-        // If disk is full, a new Engine cannot be opened.
-        let _f = FailGuard::new("file_pipe_log::force_no_free_space", "return");
-        assert!(Engine::open(cfg.clone()).is_err());
-    }
-    {
-        // If disk is full after writing, the old engine should be available
-        // for `read`.
-        let engine = Engine::open(cfg.clone()).unwrap();
-        engine
-            .write(&mut generate_batch(1, 11, 21, Some(&entry)), true)
+    for cfg in cfg_list.iter_mut() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_no_space_write_error")
+            .tempdir()
             .unwrap();
-        drop(engine);
-        let _f = FailGuard::new("file_pipe_log::force_no_free_space", "return");
-        let engine = Engine::open(cfg.clone()).unwrap();
-        assert_eq!(
-            10,
+        cfg.dir = dir.path().to_str().unwrap().to_owned();
+        {
+            // If disk is full, a new Engine cannot be opened.
+            let _f = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+            assert!(Engine::open(cfg.clone()).is_err());
+        }
+        {
+            // If disk is full after writing, the old engine should be available
+            // for `read`.
+            let engine = Engine::open(cfg.clone()).unwrap();
             engine
-                .fetch_entries_to::<MessageExtTyped>(1, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-    }
-    {
-        // `Write` is abnormal for no space left, Engine should panic at `rotate`.
-        let _f = FailGuard::new("log_fd::write::no_space_err", "return");
-        let cfg_err = Config {
-            target_file_size: ReadableSize(1),
-            ..cfg.clone()
-        };
-        let engine = Engine::open(cfg_err).unwrap();
-        assert!(catch_unwind_silent(|| {
+                .write(&mut generate_batch(1, 11, 21, Some(&entry)), true)
+                .unwrap();
+            drop(engine);
+            let _f = FailGuard::new("file_pipe_log::force_no_free_space", "return");
+            let engine = Engine::open(cfg.clone()).unwrap();
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(1, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
+        {
+            // `Write` is abnormal for no space left, Engine should panic at `rotate`.
+            let _f = FailGuard::new("log_fd::write::no_space_err", "return");
+            let cfg_err = Config {
+                target_file_size: ReadableSize(1),
+                ..cfg.clone()
+            };
+            let engine = Engine::open(cfg_err).unwrap();
+            assert!(catch_unwind_silent(|| {
+                engine
+                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                    .unwrap_err();
+            })
+            .is_err());
+        }
+        {
+            // Disk goes from `spare(nospace err)` -> `full` -> `spare`.
+            let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*off->1*return->off");
+            let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
+            let engine = Engine::open(cfg.clone()).unwrap();
+            assert!(catch_unwind_silent(|| {
+                engine
+                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                    .unwrap_err();
+            })
+            .is_err());
             engine
-                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .write(&mut generate_batch(3, 11, 21, Some(&entry)), true)
+                .unwrap();
+            assert_eq!(
+                0,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(3, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
+        {
+            // Disk is `full` -> `spare`, the first `write` operation should failed.
+            let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*return->off");
+            let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
+            let cfg_err = Config {
+                target_file_size: ReadableSize(1),
+                ..cfg.clone()
+            };
+            let engine = Engine::open(cfg_err).unwrap();
+            engine
+                .write(&mut generate_batch(4, 11, 21, Some(&entry)), true)
                 .unwrap_err();
-        })
-        .is_err());
-    }
-    {
-        // Disk goes from `spare(nospace err)` -> `full` -> `spare`.
-        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*off->1*return->off");
-        let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
-        let engine = Engine::open(cfg.clone()).unwrap();
-        assert!(catch_unwind_silent(|| {
             engine
-                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                .unwrap_err();
-        })
-        .is_err());
-        engine
-            .write(&mut generate_batch(3, 11, 21, Some(&entry)), true)
-            .unwrap();
-        assert_eq!(
-            0,
+                .write(&mut generate_batch(4, 11, 21, Some(&entry)), true)
+                .unwrap();
+            assert_eq!(
+                0,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(4, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
+        {
+            // Disk goes from `spare(nospace err)` -> `spare(another dir has enough space)`.
+            let _f = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
+            let engine = Engine::open(cfg.clone()).unwrap();
             engine
-                .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-        assert_eq!(
-            10,
+                .write(&mut generate_batch(5, 11, 21, Some(&entry)), true)
+                .unwrap();
             engine
-                .fetch_entries_to::<MessageExtTyped>(3, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-    }
-    {
-        // Disk is `full` -> `spare`, the first `write` operation should failed.
-        let _f1 = FailGuard::new("file_pipe_log::force_no_free_space", "1*return->off");
-        let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
-        let cfg_err = Config {
-            target_file_size: ReadableSize(1),
-            ..cfg.clone()
-        };
-        let engine = Engine::open(cfg_err).unwrap();
-        engine
-            .write(&mut generate_batch(4, 11, 21, Some(&entry)), true)
-            .unwrap_err();
-        engine
-            .write(&mut generate_batch(4, 11, 21, Some(&entry)), true)
-            .unwrap();
-        assert_eq!(
-            0,
-            engine
-                .fetch_entries_to::<MessageExtTyped>(2, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-        assert_eq!(
-            10,
-            engine
-                .fetch_entries_to::<MessageExtTyped>(4, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-    }
-    {
-        // Disk goes from `spare(nospace err)` -> `spare(another dir has enough space)`.
-        let _f = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
-        let engine = Engine::open(cfg.clone()).unwrap();
-        engine
-            .write(&mut generate_batch(5, 11, 21, Some(&entry)), true)
-            .unwrap();
-        engine
-            .write(&mut generate_batch(6, 11, 21, Some(&entry)), true)
-            .unwrap();
-        assert_eq!(
-            10,
-            engine
-                .fetch_entries_to::<MessageExtTyped>(5, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-        assert_eq!(
-            10,
-            engine
-                .fetch_entries_to::<MessageExtTyped>(6, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
-    }
-    {
-        // Disk goes into endless `spare(nospace err)`, engine do panic for multi-
-        // retrying.
-        let _f = FailGuard::new(
-            "log_fd::write::no_space_err",
-            "1*return->1*off->1*return->1*off",
-        );
-        let engine = Engine::open(cfg).unwrap();
-        assert!(catch_unwind_silent(|| {
-            engine
+                .write(&mut generate_batch(6, 11, 21, Some(&entry)), true)
+                .unwrap();
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(5, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(6, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
+        {
+            // Disk goes into endless `spare(nospace err)`, engine do panic for multi-
+            // retrying.
+            let _f = FailGuard::new(
+                "log_fd::write::no_space_err",
+                "1*return->1*off->1*return->1*off",
+            );
+            let engine = Engine::open(cfg.clone()).unwrap();
+            assert!(engine
                 .write(&mut generate_batch(7, 11, 21, Some(&entry)), true)
-                .unwrap_err();
-        })
-        .is_err());
-        assert_eq!(
-            0,
-            engine
-                .fetch_entries_to::<MessageExtTyped>(7, 11, 21, None, &mut vec![])
-                .unwrap()
-        );
+                .is_err());
+            assert_eq!(
+                0,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(7, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
     }
 }
 
