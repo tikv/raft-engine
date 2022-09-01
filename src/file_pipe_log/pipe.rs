@@ -119,7 +119,6 @@ pub(super) struct SinglePipe<F: FileSystem> {
     dir: String,
     file_format: LogFileFormat,
     target_file_size: usize,
-    bytes_per_sync: usize,
     file_system: Arc<F>,
     listeners: Vec<Arc<dyn EventListener>>,
 
@@ -223,7 +222,6 @@ impl<F: FileSystem> SinglePipe<F> {
             dir: cfg.dir.clone(),
             file_format: LogFileFormat::new(cfg.format_version, alignment),
             target_file_size: cfg.target_file_size.0 as usize,
-            bytes_per_sync: cfg.bytes_per_sync.0 as usize,
             file_system,
             listeners,
 
@@ -409,7 +407,7 @@ impl<F: FileSystem> SinglePipe<F> {
             if let Err(e) = self.rotate_imp(&mut active_file) {
                 panic!("error when rotate [{:?}:{}]: {}", self.queue, seq, e);
             }
-        } else if writer.since_last_sync() >= self.bytes_per_sync || force {
+        } else if force {
             let _t = StopWatch::new(perf_context!(log_sync_duration));
             if let Err(e) = writer.sync() {
                 panic!("error when sync [{:?}:{}]: {}", self.queue, seq, e,);
@@ -614,7 +612,6 @@ mod tests {
         let cfg = Config {
             dir: path.to_owned(),
             target_file_size: ReadableSize::kb(1),
-            bytes_per_sync: ReadableSize::kb(32),
             ..Default::default()
         };
         let queue = LogQueue::Append;
@@ -770,7 +767,6 @@ mod tests {
         let cfg = Config {
             dir: path.to_owned(),
             target_file_size: ReadableSize(1),
-            bytes_per_sync: ReadableSize::kb(32),
             // super large capacity for recycling
             purge_threshold: ReadableSize::mb(100),
             enable_log_recycle: true,

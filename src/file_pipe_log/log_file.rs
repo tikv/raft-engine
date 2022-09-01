@@ -37,6 +37,7 @@ pub(super) fn build_file_writer<F: FileSystem>(
 
 /// Append-only writer for log file. It also handles the file header write.
 pub struct LogFileWriter<F: FileSystem> {
+    handle: Arc<F::Handle>,
     writer: F::Writer,
     written: usize,
     capacity: usize,
@@ -52,6 +53,7 @@ impl<F: FileSystem> LogFileWriter<F> {
     ) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
+            handle,
             writer,
             written: file_size,
             capacity: file_size,
@@ -123,7 +125,7 @@ impl<F: FileSystem> LogFileWriter<F> {
     pub fn sync(&mut self) -> Result<()> {
         if self.last_sync < self.written {
             let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
-            self.writer.sync()?;
+            self.handle.sync()?;
             self.last_sync = self.written;
         }
         Ok(())

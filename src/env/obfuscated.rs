@@ -57,10 +57,6 @@ impl WriteExt for ObfuscatedWriter {
         self.0.truncate(offset)
     }
 
-    fn sync(&mut self) -> IoResult<()> {
-        self.0.sync()
-    }
-
     fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {
         self.0.allocate(offset, size)
     }

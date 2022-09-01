@@ -49,11 +49,12 @@ pub struct Config {
     ///
     /// Default: "8KB"
     pub batch_compression_threshold: ReadableSize,
+    /// Deprecated.
     /// Incrementally sync log files after specified bytes have been written.
     /// Setting it to zero disables incremental sync.
     ///
     /// Default: "4MB"
-    pub bytes_per_sync: ReadableSize,
+    pub bytes_per_sync: Option<ReadableSize>,
 
     /// Version of the log file.
     ///
@@ -101,7 +102,7 @@ impl Default for Config {
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
-            bytes_per_sync: ReadableSize::mb(4),
+            bytes_per_sync: None,
             format_version: Version::V1,
             target_file_size: ReadableSize::mb(128),
             purge_threshold: ReadableSize::gb(10),
@@ -132,8 +133,8 @@ impl Config {
                 self.target_file_size.0,
             )));
         }
-        if self.bytes_per_sync.0 == 0 {
-            self.bytes_per_sync = ReadableSize(u64::MAX);
+        if self.bytes_per_sync.is_some() {
+            warn!("bytes-per-sync has been deprecated.");
         }
         let min_recovery_read_block_size = ReadableSize(MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         if self.recovery_read_block_size < min_recovery_read_block_size {
@@ -208,7 +209,7 @@ mod tests {
         let load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
         assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
-        assert_eq!(load.bytes_per_sync, ReadableSize::kb(2));
+        assert_eq!(load.bytes_per_sync, Some(ReadableSize::kb(2)));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
         assert_eq!(load.format_version, Version::V1);
@@ -226,7 +227,6 @@ mod tests {
         let soft_error = r#"
             recovery-read-block-size = "1KB"
             recovery-threads = 0
-            bytes-per-sync = "0KB"
             target-file-size = "5000MB"
             format-version = 2
             enable-log-recycle = true
@@ -236,7 +236,6 @@ mod tests {
         soft_sanitized.sanitize().unwrap();
         assert!(soft_sanitized.recovery_read_block_size.0 >= MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         assert!(soft_sanitized.recovery_threads >= MIN_RECOVERY_THREADS);
-        assert_eq!(soft_sanitized.bytes_per_sync.0, u64::MAX);
         assert_eq!(
             soft_sanitized.purge_rewrite_threshold.unwrap(),
             soft_sanitized.target_file_size
