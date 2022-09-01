@@ -6,6 +6,7 @@
 
 * Unconditionally tolerate `fallocate` failures as a fix to its portability issue. Errors other than `EOPNOTSUPP` will still emit a warning.
 * Avoid leaving fractured write after failure by reseeking the file writer. Panic if the reseek fails as well.
+* Fix panic when an empty batch is written to engine and then reused.
 
 ### New Features
 
