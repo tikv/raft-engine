@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::fs;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -789,7 +790,7 @@ fn test_build_engine_with_multi_dir() {
             secondary_dir: Some("./abnormal_testing".to_owned()),
             ..cfg.clone()
         };
-        let engine = Engine::open(cfg_err).unwrap();
+        let engine = Engine::open(cfg_err.clone()).unwrap();
         append(&engine, rid, 1, 2, Some(&data)); // file_seq: 1
         append(&engine, rid, 2, 3, Some(&data));
         append(&engine, rid, 3, 4, Some(&data)); // file_seq: 2
@@ -806,6 +807,7 @@ fn test_build_engine_with_multi_dir() {
         engine.purge_expired_files().unwrap();
         assert!(engine.file_span(LogQueue::Append).0 > start_seq);
         start_seq = engine.file_span(LogQueue::Append).0;
+        assert!(fs::remove_dir_all(&cfg_err.secondary_dir.unwrap()).is_ok());
     }
     // Open engine with multi directories, main dir and secondary dir.
     {
