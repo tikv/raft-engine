@@ -1,13 +1,31 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use log::warn;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
+use crate::env::from_same_dev;
 use crate::pipe_log::Version;
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
+
+/// Check the given `dir` is valid or not. If `dir` not exists,
+/// it would be created automatically.
+fn validate_dir(dir: &str) -> Result<()> {
+    let path = Path::new(dir);
+    if !path.exists() {
+        info!("Create raft log directory: {}", dir);
+        fs::create_dir(dir)?;
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err(box_err!("Not directory: {}", dir));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -170,6 +188,26 @@ impl Config {
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is disabled");
         }
+        // Validate `dir`.
+        if let Err(e) = validate_dir(&self.dir) {
+            return Err(box_err!(
+                "dir ({}) is invalid, err: {}, please check it again",
+                self.dir,
+                e
+            ));
+        }
+        // Validate `secondary-dir`.
+        if_chain::if_chain! {
+            if let Some(secondary_dir) = self.secondary_dir.as_ref();
+            if validate_dir(secondary_dir).is_ok();
+            if let Ok(true) = from_same_dev(&self.dir, secondary_dir);
+            then {
+                warn!(
+                    "secondary-dir ({}) and dir ({}) are on same device, recommend setting it to another device",
+                    secondary_dir, self.dir
+                );
+            }
+        }
         Ok(())
     }
 
@@ -196,6 +234,11 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remove_dir(dir: &str) -> Result<()> {
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
 
     #[test]
     fn test_serde() {
@@ -227,6 +270,7 @@ mod tests {
     #[test]
     fn test_invalid() {
         let hard_error = r#"
+            dir = "./"
             target-file-size = "5MB"
             purge-threshold = "3MB"
         "#;
@@ -234,6 +278,7 @@ mod tests {
         assert!(hard_load.sanitize().is_err());
 
         let soft_error = r#"
+            dir = "./"
             recovery-read-block-size = "1KB"
             recovery-threads = 0
             bytes-per-sync = "0KB"
@@ -255,6 +300,7 @@ mod tests {
         assert!(soft_sanitized.enable_log_recycle);
 
         let recycle_error = r#"
+            dir = "./"
             enable-log-recycle = true
             format-version = 1
         "#;
@@ -266,6 +312,7 @@ mod tests {
     fn test_backward_compactibility() {
         // Upgrade from older version.
         let old = r#"
+            dir = "./"
             recovery-mode = "tolerate-corrupted-tail-records"
         "#;
         let mut load: Config = toml::from_str(old).unwrap();
@@ -277,27 +324,34 @@ mod tests {
     }
 
     #[test]
-    fn test_secondary_dir() {
+    fn test_validate_dir_setting() {
         {
-            // Set the sub-dir with `Some("...")`
+            let dir_list = r#""#;
+            let mut load: Config = toml::from_str(dir_list).unwrap();
+            assert!(load.sanitize().is_err());
+        }
+        {
+            // Set the sub-dir same with main dir
             let dir_list = r#"
-                dir = "./test/"
-                secondary-dir = 'Some("./test_secondary")'
+                dir = "./test_validate_dir_setting/"
+                secondary-dir = "./test_validate_dir_setting/"
             "#;
             let mut load: Config = toml::from_str(dir_list).unwrap();
             load.sanitize().unwrap();
             assert!(load.secondary_dir.is_some());
-            assert!(toml::to_string(&load).unwrap().contains("test_secondary"));
+            assert!(remove_dir(&load.dir).is_ok());
         }
         {
             // Set the sub-dir with `"..."`
-            let wrong_dir_list = r#"
-                dir = "./test/"
-                secondary-dir = "./test_secondary"
+            let dir_list = r#"
+                dir = "./test_validate_dir_setting"
+                secondary-dir = "./test_validate_dir_setting_secondary"
             "#;
-            let mut load: Config = toml::from_str(wrong_dir_list).unwrap();
+            let mut load: Config = toml::from_str(dir_list).unwrap();
             load.sanitize().unwrap();
             assert!(load.secondary_dir.is_some());
+            assert!(remove_dir(&load.dir).is_ok());
+            assert!(remove_dir(&load.secondary_dir.unwrap()).is_ok());
         }
     }
 }
