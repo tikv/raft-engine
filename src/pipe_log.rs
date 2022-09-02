@@ -146,6 +146,20 @@ impl LogFileContext {
     }
 }
 
+/// Some bytes whose value might be dependent on the file it is written to.
+pub trait ReactiveBytes {
+    fn as_bytes(&mut self, ctx: &LogFileContext) -> &[u8];
+}
+
+impl<T> ReactiveBytes for &T
+where
+    T: AsRef<[u8]> + ?Sized,
+{
+    fn as_bytes(&mut self, _ctx: &LogFileContext) -> &[u8] {
+        (*self).as_ref()
+    }
+}
+
 /// A `PipeLog` serves reads and writes over multiple queues of log files.
 pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
@@ -155,7 +169,11 @@ pub trait PipeLog: Sized {
     /// the written bytes.
     ///
     /// The result of `fetch_active_file` will not be affected by this method.
-    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle>;
+    fn append<T: ReactiveBytes + ?Sized>(
+        &self,
+        queue: LogQueue,
+        bytes: &mut T,
+    ) -> Result<FileBlockHandle>;
 
     /// Hints it to synchronize buffered writes. The synchronization is
     /// mandotory when `sync` is true.

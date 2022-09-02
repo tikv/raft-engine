@@ -355,7 +355,7 @@ where
         log_batch.prepare_write(&file_context)?;
         let file_handle = self
             .pipe_log
-            .append(LogQueue::Rewrite, log_batch.encoded_bytes())?;
+            .append(LogQueue::Rewrite, &mut log_batch.encoded_bytes())?;
         self.pipe_log.maybe_sync(LogQueue::Rewrite, sync)?;
         log_batch.finish_write(file_handle);
         self.memtables.apply_rewrite_writes(

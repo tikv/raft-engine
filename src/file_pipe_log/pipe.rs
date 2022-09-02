@@ -14,7 +14,9 @@ use crate::config::Config;
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog};
+use crate::pipe_log::{
+    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
+};
 use crate::{perf_context, Error, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
@@ -347,12 +349,15 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn append(&self, bytes: &[u8]) -> Result<FileBlockHandle> {
+    fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
         let seq = active_file.seq;
-        #[cfg(feature = "failpoints")]
         let format = active_file.format;
+        let ctx = LogFileContext {
+            id: FileId::new(self.queue, seq),
+            version: format.version,
+        };
         let writer = &mut active_file.writer;
 
         #[cfg(feature = "failpoints")]
@@ -376,7 +381,7 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
         let start_offset = writer.offset();
-        if let Err(e) = writer.write(bytes, self.target_file_size) {
+        if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
             if let Err(te) = writer.truncate() {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
@@ -514,7 +519,11 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn append(&self, queue: LogQueue, bytes: &[u8]) -> Result<FileBlockHandle> {
+    fn append<T: ReactiveBytes + ?Sized>(
+        &self,
+        queue: LogQueue,
+        bytes: &mut T,
+    ) -> Result<FileBlockHandle> {
         self.pipes[queue as usize].append(bytes)
     }
 
@@ -623,13 +632,13 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let file_handle = pipe_log.append(queue, &content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
         pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 1);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        let file_handle = pipe_log.append(queue, &content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
         pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
@@ -644,12 +653,12 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let file_handle = pipe_log.append(queue, &s_content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
-        let file_handle = pipe_log.append(queue, &s_content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
@@ -783,7 +792,7 @@ mod tests {
         }
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(pipe_log.append(&content(i)).unwrap());
+            handles.push(pipe_log.append(&mut &content(i)).unwrap());
             pipe_log.maybe_sync(true).unwrap();
         }
         let (first, last) = pipe_log.file_span();
@@ -804,7 +813,7 @@ mod tests {
         // Try to reuse.
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(pipe_log.append(&content(i + 1)).unwrap());
+            handles.push(pipe_log.append(&mut &content(i + 1)).unwrap());
             pipe_log.maybe_sync(true).unwrap();
         }
         // Verify the data.

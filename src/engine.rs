@@ -155,7 +155,7 @@ where
                     let res = if !log_batch.is_empty() {
                         log_batch.prepare_write(&file_context)?;
                         self.pipe_log
-                            .append(LogQueue::Append, log_batch.encoded_bytes())
+                            .append(LogQueue::Append, &mut log_batch.encoded_bytes())
                     } else {
                         // TODO(tabokie): use Option<FileBlockHandle> instead.
                         Ok(FileBlockHandle {
