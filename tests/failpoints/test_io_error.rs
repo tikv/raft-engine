@@ -148,6 +148,9 @@ fn test_file_rotate_error() {
     engine
         .write(&mut generate_batch(1, 3, 4, Some(&entry)), false)
         .unwrap();
+    engine
+        .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
+        .unwrap();
     assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     // The next write will be followed by a rotate.
     {

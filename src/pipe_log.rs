@@ -161,6 +161,13 @@ where
 }
 
 /// A `PipeLog` serves reads and writes over multiple queues of log files.
+///
+/// # Safety
+///
+/// The pipe will panic if it encounters an unrecoverable failure. Otherwise the
+/// operations on it should be atomic, i.e. failed operation will not affect
+/// other ones, and user can still use it afterwards without breaking
+/// consistency.
 pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
@@ -173,12 +180,11 @@ pub trait PipeLog: Sized {
         bytes: &mut T,
     ) -> Result<FileBlockHandle>;
 
-    /// Hints it to synchronize buffered writes. The synchronization is
-    /// mandotory when `sync` is true.
+    /// Synchronize buffered writes.
     ///
     /// This operation might incurs a great latency overhead. It's advised to
     /// call it once every batch of writes.
-    fn maybe_sync(&self, queue: LogQueue, sync: bool) -> Result<()>;
+    fn sync(&self, queue: LogQueue) -> Result<()>;
 
     /// Returns the smallest and largest file sequence number, still in use,
     /// of the specified log queue.

@@ -164,12 +164,8 @@ where
                     writer.set_output(res);
                 }
                 perf_context!(log_write_duration).observe_since(now);
-                if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
-                    panic!(
-                        "Cannot sync {:?} queue due to IO error: {}",
-                        LogQueue::Append,
-                        e
-                    );
+                if sync {
+                    self.pipe_log.sync(LogQueue::Append)?
                 }
                 // Pass the perf context diff to all the writers.
                 let diff = get_perf_context();
@@ -1252,8 +1248,12 @@ mod tests {
             check_purge(vec![1, 2, 3]);
         }
 
-        // 10th, rewrited
-        check_purge(vec![]);
+        // 10th, rewritten, but still needs to be compacted.
+        check_purge(vec![1, 2, 3]);
+        for rid in 1..=3 {
+            let memtable = engine.memtables.get(rid).unwrap();
+            assert_eq!(memtable.read().rewrite_count(), 50);
+        }
 
         // compact and write some new data to trigger compact again.
         for rid in 2..=50 {
@@ -1448,7 +1448,7 @@ mod tests {
         assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
         let old_active_file = engine.file_span(LogQueue::Rewrite).1;
         engine.purge_manager.must_rewrite_rewrite_queue();
-        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+        assert!(engine.file_span(LogQueue::Rewrite).0 > old_active_file);
 
         let engine = engine.reopen();
         for rid in 1..=3 {

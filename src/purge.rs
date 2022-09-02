@@ -76,7 +76,7 @@ where
         let mut should_compact = HashSet::new();
         if self.needs_rewrite_log_files(LogQueue::Rewrite) {
             should_compact.extend(self.rewrite_rewrite_queue()?);
-            self.purge_to(
+            self.rescan_memtables_and_purge_stale_files(
                 LogQueue::Rewrite,
                 self.pipe_log.file_span(LogQueue::Rewrite).1,
             )?;
@@ -110,7 +110,10 @@ where
                 if append_queue_barrier == first_append && first_append < latest_append {
                     warn!("Unable to purge expired files: blocked by barrier");
                 }
-                self.purge_to(LogQueue::Append, append_queue_barrier)?;
+                self.rescan_memtables_and_purge_stale_files(
+                    LogQueue::Append,
+                    append_queue_barrier,
+                )?;
             }
         }
         Ok(should_compact.into_iter().collect())
@@ -139,7 +142,7 @@ where
         if exit_after_step == Some(2) {
             return;
         }
-        self.purge_to(
+        self.rescan_memtables_and_purge_stale_files(
             LogQueue::Append,
             self.pipe_log.file_span(LogQueue::Append).1,
         )
@@ -150,7 +153,7 @@ where
     pub fn must_rewrite_rewrite_queue(&self) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
-        self.purge_to(
+        self.rescan_memtables_and_purge_stale_files(
             LogQueue::Rewrite,
             self.pipe_log.file_span(LogQueue::Rewrite).1,
         )
@@ -208,23 +211,32 @@ where
 
         let mut new_candidates = HashMap::with_capacity(rewrite_candidates.len());
         let memtables = self.memtables.collect(|t| {
-            if let Some(f) = t.min_file_seq(LogQueue::Append) {
-                let sparse = t
-                    .entries_count_before(FileId::new(LogQueue::Append, rewrite_watermark))
-                    < MAX_REWRITE_ENTRIES_PER_REGION;
-                // counter is the times that target region triggers force compact.
-                let compact_counter = rewrite_candidates.get(&t.region_id()).unwrap_or(&0);
-                if f < compact_watermark
-                    && !sparse
-                    && *compact_counter < MAX_COUNT_BEFORE_FORCE_REWRITE
-                {
+            let min_append_seq = t.min_file_seq(LogQueue::Append).unwrap_or(u64::MAX);
+            let old = min_append_seq < compact_watermark || t.rewrite_count() > 0;
+            let has_something_to_rewrite = min_append_seq <= rewrite_watermark;
+            let append_heavy = t.has_at_least_some_entries_before(
+                FileId::new(LogQueue::Append, rewrite_watermark),
+                MAX_REWRITE_ENTRIES_PER_REGION + t.rewrite_count(),
+            );
+            let full_heavy = t.has_at_least_some_entries_before(
+                FileId::new(LogQueue::Append, rewrite_watermark),
+                MAX_REWRITE_ENTRIES_PER_REGION,
+            );
+            // counter is the times that target region triggers force compact.
+            let compact_counter = rewrite_candidates.get(&t.region_id()).unwrap_or(&0);
+            if old && full_heavy {
+                if *compact_counter < MAX_COUNT_BEFORE_FORCE_REWRITE {
+                    // repeatedly ask user to compact these heavy regions.
                     should_compact.push(t.region_id());
                     new_candidates.insert(t.region_id(), *compact_counter + 1);
-                } else if f < rewrite_watermark {
-                    return sparse || *compact_counter >= MAX_COUNT_BEFORE_FORCE_REWRITE;
+                    return false;
+                } else {
+                    // user is not responsive, do the rewrite ourselves.
+                    should_compact.push(t.region_id());
+                    return has_something_to_rewrite;
                 }
             }
-            false
+            !append_heavy && has_something_to_rewrite
         });
 
         self.rewrite_memtables(
@@ -266,7 +278,7 @@ where
     }
 
     // Exclusive.
-    fn purge_to(&self, queue: LogQueue, seq: FileSeq) -> Result<()> {
+    fn rescan_memtables_and_purge_stale_files(&self, queue: LogQueue, seq: FileSeq) -> Result<()> {
         let min_seq = self.memtables.fold(seq, |min, t| {
             t.min_file_seq(queue).map_or(min, |m| std::cmp::min(min, m))
         });
@@ -349,10 +361,15 @@ where
     ) -> Result<()> {
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         if len == 0 {
-            return self.pipe_log.maybe_sync(LogQueue::Rewrite, sync);
+            if sync {
+                self.pipe_log.sync(LogQueue::Rewrite)?
+            }
+            return Ok(());
         }
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
-        self.pipe_log.maybe_sync(LogQueue::Rewrite, sync)?;
+        if sync {
+            self.pipe_log.sync(LogQueue::Rewrite)?
+        }
         log_batch.finish_write(file_handle);
         self.memtables.apply_rewrite_writes(
             log_batch.drain(),

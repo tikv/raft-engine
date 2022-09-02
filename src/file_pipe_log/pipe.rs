@@ -352,6 +352,15 @@ impl<F: FileSystem> SinglePipe<F> {
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
+        if active_file.writer.offset() >= self.target_file_size {
+            if let Err(e) = self.rotate_imp(&mut active_file) {
+                panic!(
+                    "error when rotate [{:?}:{}]: {}",
+                    self.queue, active_file.seq, e
+                );
+            }
+        }
+
         let seq = active_file.seq;
         let format = active_file.format;
         let ctx = LogFileContext {
@@ -404,15 +413,11 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(handle)
     }
 
-    fn maybe_sync(&self, force: bool) -> Result<()> {
+    fn sync(&self) -> Result<()> {
         let mut active_file = self.active_file.lock();
         let seq = active_file.seq;
         let writer = &mut active_file.writer;
-        if writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut active_file) {
-                panic!("error when rotate [{:?}:{}]: {}", self.queue, seq, e);
-            }
-        } else if force {
+        {
             let _t = StopWatch::new(perf_context!(log_sync_duration));
             if let Err(e) = writer.sync() {
                 panic!("error when sync [{:?}:{}]: {}", self.queue, seq, e,);
@@ -520,8 +525,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn maybe_sync(&self, queue: LogQueue, force: bool) -> Result<()> {
-        self.pipes[queue as usize].maybe_sync(force)
+    fn sync(&self, queue: LogQueue) -> Result<()> {
+        self.pipes[queue as usize].sync()
     }
 
     #[inline]
@@ -620,16 +625,16 @@ mod tests {
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
         let file_handle = pipe_log.append(queue, &mut &content).unwrap();
-        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 1);
+        assert_eq!(file_handle.offset, header_size);
+        assert_eq!(pipe_log.file_span(queue).1, 1);
+
+        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
+        assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
-        pipe_log.maybe_sync(queue, false).unwrap();
-        assert_eq!(file_handle.id.seq, 2);
-        assert_eq!(file_handle.offset, header_size);
-        assert_eq!(pipe_log.file_span(queue).1, 3);
+        pipe_log.rotate(queue).unwrap();
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
@@ -641,12 +646,10 @@ mod tests {
         // append position
         let s_content = b"short content".to_vec();
         let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
-        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
         let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
-        pipe_log.maybe_sync(queue, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
             file_handle.offset,
@@ -775,8 +778,9 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             handles.push(pipe_log.append(&mut &content(i)).unwrap());
-            pipe_log.maybe_sync(true).unwrap();
+            pipe_log.sync().unwrap();
         }
+        pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read stale file.
@@ -796,7 +800,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             handles.push(pipe_log.append(&mut &content(i + 1)).unwrap());
-            pipe_log.maybe_sync(true).unwrap();
+            pipe_log.sync().unwrap();
         }
         // Verify the data.
         for (i, handle) in handles.into_iter().enumerate() {
