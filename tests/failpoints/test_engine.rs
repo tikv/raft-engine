@@ -611,6 +611,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
         target_file_size: ReadableSize::kb(2),
         purge_threshold: ReadableSize::kb(4),
         enable_log_recycle: true,
+        format_version: Version::V1,
         ..Default::default()
     };
     // Force open Engine with `enable_log_recycle == true` and
