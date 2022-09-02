@@ -471,14 +471,6 @@ impl<F: FileSystem> SinglePipe<F> {
         self.flush_metrics(current.total_len);
         Ok((current.first_seq_in_use - prev.first_seq_in_use) as usize)
     }
-
-    fn fetch_active_file(&self) -> LogFileContext {
-        let files = self.files.read();
-        LogFileContext {
-            id: FileId::new(self.queue, files.first_seq + files.fds.len() as u64 - 1),
-            version: files.fds.back().unwrap().format.version,
-        }
-    }
 }
 
 /// A [`PipeLog`] implementation that stores data in filesystem.
@@ -550,11 +542,6 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
         self.pipes[file_id.queue as usize].purge_to(file_id.seq)
-    }
-
-    #[inline]
-    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext {
-        self.pipes[queue as usize].fetch_active_file()
     }
 }
 
@@ -685,11 +672,6 @@ mod tests {
         // leave only 1 file to truncate
         pipe_log.purge_to(FileId { queue, seq: 3 }).unwrap();
         assert_eq!(pipe_log.file_span(queue), (3, 3));
-
-        // fetch active file
-        let file_context = pipe_log.fetch_active_file(LogQueue::Append);
-        assert_eq!(file_context.version, cfg.format_version);
-        assert_eq!(file_context.id.seq, 3);
     }
 
     #[test]

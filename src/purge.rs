@@ -351,11 +351,7 @@ where
         if len == 0 {
             return self.pipe_log.maybe_sync(LogQueue::Rewrite, sync);
         }
-        let file_context = self.pipe_log.fetch_active_file(LogQueue::Rewrite);
-        log_batch.prepare_write(&file_context)?;
-        let file_handle = self
-            .pipe_log
-            .append(LogQueue::Rewrite, &mut log_batch.encoded_bytes())?;
+        let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         self.pipe_log.maybe_sync(LogQueue::Rewrite, sync)?;
         log_batch.finish_write(file_handle);
         self.memtables.apply_rewrite_writes(

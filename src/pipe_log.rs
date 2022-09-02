@@ -167,8 +167,6 @@ pub trait PipeLog: Sized {
 
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.
-    ///
-    /// The result of `fetch_active_file` will not be affected by this method.
     fn append<T: ReactiveBytes + ?Sized>(
         &self,
         queue: LogQueue,
@@ -212,8 +210,4 @@ pub trait PipeLog: Sized {
     ///
     /// Returns the number of deleted files.
     fn purge_to(&self, file_id: FileId) -> Result<usize>;
-
-    /// Returns [`LogFileContext`] of the active file in the specific
-    /// log queue.
-    fn fetch_active_file(&self, queue: LogQueue) -> LogFileContext;
 }
