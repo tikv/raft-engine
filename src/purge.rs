@@ -359,13 +359,11 @@ where
         rewrite_watermark: Option<FileSeq>,
         sync: bool,
     ) -> Result<()> {
-        let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
-        if len == 0 {
-            if sync {
-                self.pipe_log.sync(LogQueue::Rewrite)?
-            }
-            return Ok(());
+        if log_batch.is_empty() {
+            debug_assert!(sync);
+            return self.pipe_log.sync(LogQueue::Rewrite);
         }
+        log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         if sync {
             self.pipe_log.sync(LogQueue::Rewrite)?

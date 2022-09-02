@@ -204,14 +204,16 @@ mod tests {
             target-file-size = "1MB"
             purge-threshold = "3MB"
             format-version = 1
+            enable-log-recycle = false
         "#;
-        let load: Config = toml::from_str(custom).unwrap();
+        let mut load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
         assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
         assert_eq!(load.bytes_per_sync, Some(ReadableSize::kb(2)));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
         assert_eq!(load.format_version, Version::V1);
+        load.sanitize().unwrap();
     }
 
     #[test]

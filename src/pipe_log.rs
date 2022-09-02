@@ -180,7 +180,7 @@ pub trait PipeLog: Sized {
         bytes: &mut T,
     ) -> Result<FileBlockHandle>;
 
-    /// Synchronize buffered writes.
+    /// Synchronizes all buffered writes.
     ///
     /// This operation might incurs a great latency overhead. It's advised to
     /// call it once every batch of writes.
