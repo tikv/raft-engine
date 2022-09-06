@@ -210,8 +210,9 @@ where
                             );
                         }
                     } else if sync {
-                        // As per trait protocol, this error should be retriable. But we panic anyway to
-                        // save the trouble of propagating it to other group members.
+                        // As per trait protocol, this error should be retriable. But we panic
+                        // anyway to save the trouble of propagating it to
+                        // other group members.
                         self.pipe_log.sync(LogQueue::Append).expect("pipe::sync()");
                     }
                     // Pass the perf context diff to all the writers.
