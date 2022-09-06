@@ -147,15 +147,12 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
-                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
                     let log_batch = writer.mut_payload();
                     let res = if !log_batch.is_empty() {
-                        log_batch.prepare_write(&file_context)?;
-                        self.pipe_log
-                            .append(LogQueue::Append, log_batch.encoded_bytes())
+                        self.pipe_log.append(LogQueue::Append, log_batch)
                     } else {
                         // TODO(tabokie): use Option<FileBlockHandle> instead.
                         Ok(FileBlockHandle {
@@ -166,16 +163,11 @@ where
                     };
                     writer.set_output(res);
                 }
-                debug_assert!(
-                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
-                );
                 perf_context!(log_write_duration).observe_since(now);
-                if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
-                    panic!(
-                        "Cannot sync {:?} queue due to IO error: {}",
-                        LogQueue::Append,
-                        e
-                    );
+                if sync {
+                    // As per trait protocol, this error should be retriable. But we panic anyway to
+                    // save the trouble of propagating it to other group members.
+                    self.pipe_log.sync(LogQueue::Append).expect("pipe::sync()");
                 }
                 // Pass the perf context diff to all the writers.
                 let diff = get_perf_context();
@@ -1258,8 +1250,12 @@ mod tests {
             check_purge(vec![1, 2, 3]);
         }
 
-        // 10th, rewrited
-        check_purge(vec![]);
+        // 10th, rewritten, but still needs to be compacted.
+        check_purge(vec![1, 2, 3]);
+        for rid in 1..=3 {
+            let memtable = engine.memtables.get(rid).unwrap();
+            assert_eq!(memtable.read().rewrite_count(), 50);
+        }
 
         // compact and write some new data to trigger compact again.
         for rid in 2..=50 {
@@ -1454,7 +1450,7 @@ mod tests {
         assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
         let old_active_file = engine.file_span(LogQueue::Rewrite).1;
         engine.purge_manager.must_rewrite_rewrite_queue();
-        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+        assert!(engine.file_span(LogQueue::Rewrite).0 > old_active_file);
 
         let engine = engine.reopen();
         for rid in 1..=3 {
