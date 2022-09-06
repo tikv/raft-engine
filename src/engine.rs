@@ -141,7 +141,6 @@ where
         }
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
-        debug_assert!(!log_batch.is_empty());
         debug_assert!(len > 0);
         let block_handle = {
             let mut writer = Writer::new(log_batch, sync);
