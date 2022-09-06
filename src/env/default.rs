@@ -74,22 +74,6 @@ impl LogFd {
         close(self.0).map_err(|e| from_nix_error(e, "close"))
     }
 
-    /// Synchronizes all in-memory data of the file except metadata to the
-    /// filesystem.
-    pub fn sync(&self) -> IoResult<()> {
-        fail_point!("log_fd::sync::err", |_| {
-            Err(from_nix_error(nix::Error::EINVAL, "fp"))
-        });
-        #[cfg(target_os = "linux")]
-        {
-            nix::unistd::fdatasync(self.0).map_err(|e| from_nix_error(e, "fdatasync"))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            nix::unistd::fsync(self.0).map_err(|e| from_nix_error(e, "fsync"))
-        }
-    }
-
     /// Reads some bytes starting at `offset` from this file into the specified
     /// buffer. Returns how many bytes were read.
     pub fn read(&self, mut offset: usize, buf: &mut [u8]) -> IoResult<usize> {
@@ -168,6 +152,7 @@ impl LogFd {
 }
 
 impl Handle for LogFd {
+    #[inline]
     fn truncate(&self, offset: usize) -> IoResult<()> {
         fail_point!("log_fd::truncate::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -175,6 +160,7 @@ impl Handle for LogFd {
         ftruncate(self.0, offset as i64).map_err(|e| from_nix_error(e, "ftruncate"))
     }
 
+    #[inline]
     fn file_size(&self) -> IoResult<usize> {
         fail_point!("log_fd::file_size::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
@@ -182,6 +168,21 @@ impl Handle for LogFd {
         lseek(self.0, 0, Whence::SeekEnd)
             .map(|n| n as usize)
             .map_err(|e| from_nix_error(e, "lseek"))
+    }
+
+    #[inline]
+    fn sync(&self) -> IoResult<()> {
+        fail_point!("log_fd::sync::err", |_| {
+            Err(from_nix_error(nix::Error::EINVAL, "fp"))
+        });
+        #[cfg(target_os = "linux")]
+        {
+            nix::unistd::fdatasync(self.0).map_err(|e| from_nix_error(e, "fdatasync"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            nix::unistd::fsync(self.0).map_err(|e| from_nix_error(e, "fsync"))
+        }
     }
 }
 
@@ -249,10 +250,6 @@ impl WriteExt for LogFile {
         self.inner.truncate(offset)?;
         self.offset = offset;
         Ok(())
-    }
-
-    fn sync(&mut self) -> IoResult<()> {
-        self.inner.sync()
     }
 
     fn allocate(&mut self, offset: usize, size: usize) -> IoResult<()> {

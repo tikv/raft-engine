@@ -37,10 +37,10 @@ pub(super) fn build_file_writer<F: FileSystem>(
 
 /// Append-only writer for log file. It also handles the file header write.
 pub struct LogFileWriter<F: FileSystem> {
+    handle: Arc<F::Handle>,
     writer: F::Writer,
     written: usize,
     capacity: usize,
-    last_sync: usize,
 }
 
 impl<F: FileSystem> LogFileWriter<F> {
@@ -52,10 +52,10 @@ impl<F: FileSystem> LogFileWriter<F> {
     ) -> Result<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
+            handle,
             writer,
             written: file_size,
             capacity: file_size,
-            last_sync: file_size,
         };
         // TODO: add tests for file_size in [header_len, max_encode_len].
         if file_size < LogFileFormat::encode_len(format.version) || force_reset {
@@ -68,7 +68,6 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     fn write_header(&mut self, format: LogFileFormat) -> Result<()> {
         self.writer.seek(SeekFrom::Start(0))?;
-        self.last_sync = 0;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileFormat::encode_len(format.version));
         format.encode(&mut buf)?;
@@ -121,17 +120,9 @@ impl<F: FileSystem> LogFileWriter<F> {
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        if self.last_sync < self.written {
-            let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
-            self.writer.sync()?;
-            self.last_sync = self.written;
-        }
+        let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
+        self.handle.sync()?;
         Ok(())
-    }
-
-    #[inline]
-    pub fn since_last_sync(&self) -> usize {
-        self.written - self.last_sync
     }
 
     #[inline]
