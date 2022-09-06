@@ -128,7 +128,7 @@ fn test_pipe_log_listeners() {
         assert_eq!(hook.0[&LogQueue::Append].appends(), i);
         assert_eq!(hook.0[&LogQueue::Append].applys(), i);
     }
-    assert_eq!(hook.0[&LogQueue::Append].files(), 11);
+    assert_eq!(hook.0[&LogQueue::Append].files(), 10);
 
     engine.purge_expired_files().unwrap();
     assert_eq!(hook.0[&LogQueue::Append].purged(), 8);
@@ -155,7 +155,7 @@ fn test_pipe_log_listeners() {
     assert_eq!(hook.0[&LogQueue::Append].applys(), 32);
 
     engine.purge_expired_files().unwrap();
-    assert_eq!(hook.0[&LogQueue::Append].purged(), 13);
+    assert_eq!(hook.0[&LogQueue::Append].purged(), 14);
     assert_eq!(hook.0[&LogQueue::Rewrite].purged(), rewrite_files as u64);
 
     // Write region 3 without applying.
@@ -887,7 +887,7 @@ fn test_build_engine_with_multi_dir() {
             format_version: Version::V2,
             enable_log_recycle: true,
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(4),
+            purge_threshold: ReadableSize(3),
             ..cfg
         };
         let engine = Engine::open(cfg_rec.clone()).unwrap();

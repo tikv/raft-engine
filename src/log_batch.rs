@@ -11,7 +11,7 @@ use protobuf::Message;
 use crate::codec::{self, NumberEncoder};
 use crate::memtable::EntryIndex;
 use crate::metrics::StopWatch;
-use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
+use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext, ReactiveBytes};
 use crate::util::{crc32, lz4};
 use crate::{perf_context, Error, Result};
 
@@ -936,6 +936,13 @@ impl LogBatch {
         } else {
             Ok(Vec::new())
         }
+    }
+}
+
+impl ReactiveBytes for LogBatch {
+    fn as_bytes(&mut self, ctx: &LogFileContext) -> &[u8] {
+        self.prepare_write(ctx).unwrap();
+        self.encoded_bytes()
     }
 }
 

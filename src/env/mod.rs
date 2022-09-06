@@ -58,11 +58,12 @@ pub trait Handle {
 
     /// Returns the current size of this file.
     fn file_size(&self) -> Result<usize>;
+
+    fn sync(&self) -> Result<()>;
 }
 
 /// WriteExt is writer extension api
 pub trait WriteExt {
     fn truncate(&mut self, offset: usize) -> Result<()>;
-    fn sync(&mut self) -> Result<()>;
     fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
 }
