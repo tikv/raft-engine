@@ -25,78 +25,75 @@ use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, EnumIter)]
-pub enum StorageDirType {
+pub enum DirPathId {
     Main = 0,
     Secondary = 1,
 }
 
-/// Represents the info of storage dirs, including `main dir` and
+/// Mananges multi dirs for storing logs, including `main dir` and
 /// `secondary dir`.
-struct StorageInfo {
-    storage: Vec<String>,
+struct DirectoryManager {
+    dirs: Vec<String>,
 }
 
-impl StorageInfo {
+impl DirectoryManager {
     fn new(dir: String, secondary_dir: Option<String>) -> Self {
-        let mut storage = vec![dir; 1];
+        let mut dirs = vec![dir; 1];
         if let Some(sec_dir) = secondary_dir {
-            storage.push(sec_dir);
+            dirs.push(sec_dir);
         }
-        Self { storage }
+        Self { dirs }
     }
 
     #[inline]
-    fn get_free_dir(&self, target_size: usize) -> Option<(&str, StorageDirType)> {
+    fn get_free_dir(&self, target_size: usize) -> Option<(&str, DirPathId)> {
         #[cfg(feature = "failpoints")]
         {
             fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
                 Some((
-                    self.storage[StorageDirType::Secondary as usize].as_str(),
-                    StorageDirType::Secondary,
+                    self.dirs[DirPathId::Secondary as usize].as_str(),
+                    DirPathId::Secondary,
                 ))
             });
             fail::fail_point!("file_pipe_log::force_no_free_space", |_| { None });
         }
-        for t in StorageDirType::iter() {
+        for t in DirPathId::iter() {
             let idx = t as usize;
-            if idx >= self.storage.len() {
+            if idx >= self.dirs.len() {
                 break;
             }
-            let disk_stats = match fs2::statvfs(&self.storage[idx]) {
+            let disk_stats = match fs2::statvfs(&self.dirs[idx]) {
                 Err(e) => {
                     error!(
                         "get disk stat for raft engine failed, dir_path: {}, err: {}",
-                        &self.storage[idx], e
+                        &self.dirs[idx], e
                     );
                     return None;
                 }
                 Ok(stats) => stats,
             };
             if target_size <= disk_stats.available_space() as usize {
-                return Some((&self.storage[idx], t));
+                return Some((&self.dirs[idx], t));
             }
         }
         None
     }
 
     #[inline]
-    fn get_dir(&self, storage_type: StorageDirType) -> Option<&str> {
-        let idx = storage_type as usize;
-        if idx >= self.storage.len() {
+    fn get_dir(&self, path_id: DirPathId) -> Option<&str> {
+        let idx = path_id as usize;
+        if idx >= self.dirs.len() {
             None
         } else {
-            Some(&self.storage[idx])
+            Some(&self.dirs[idx])
         }
     }
 
     #[inline]
-    fn sync_all_dir(&self) -> Result<()> {
-        for t in StorageDirType::iter() {
-            let idx = t as usize;
-            if idx >= self.storage.len() {
-                break;
-            }
-            let path = PathBuf::from(&self.storage[idx]);
+    fn sync_dir(&self, path_id: DirPathId) -> Result<()> {
+        let idx = path_id as usize;
+        if idx < self.dirs.len() {
+            let path = PathBuf::from(&self.dirs[idx]);
             std::fs::File::open(path).and_then(|d| d.sync_all())?;
         }
         Ok(())
@@ -107,7 +104,7 @@ impl StorageInfo {
 pub struct FileWithFormat<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub format: LogFileFormat,
-    pub storage_type: StorageDirType,
+    pub path_id: DirPathId,
 }
 
 struct FileCollection<F: FileSystem> {
@@ -133,15 +130,15 @@ struct FileState {
 impl<F: FileSystem> FileCollection<F> {
     /// Takes a stale file if there is one.
     #[inline]
-    fn recycle_one_file(&mut self) -> Option<(FileSeq, StorageDirType)> {
+    fn recycle_one_file(&mut self) -> Option<(FileSeq, DirPathId)> {
         debug_assert!(self.first_seq <= self.first_seq_in_use);
         debug_assert!(!self.fds.is_empty());
         if self.first_seq < self.first_seq_in_use {
             let seq = self.first_seq;
-            let storage_type = self.fds[0].storage_type;
+            let path_id = self.fds[0].path_id;
             self.fds.pop_front().unwrap();
             self.first_seq += 1;
-            Some((seq, storage_type))
+            Some((seq, path_id))
         } else {
             None
         }
@@ -161,8 +158,8 @@ impl<F: FileSystem> FileCollection<F> {
     fn logical_purge(
         &mut self,
         file_seq: FileSeq,
-    ) -> (FileState, FileState, Vec<(FileSeq, StorageDirType)>) {
-        let mut purged_files = Vec::<(FileSeq, StorageDirType)>::default();
+    ) -> (FileState, FileState, Vec<(FileSeq, DirPathId)>) {
+        let mut purged_files = Vec::<(FileSeq, DirPathId)>::default();
         let prev = FileState {
             first_seq: self.first_seq,
             first_seq_in_use: self.first_seq_in_use,
@@ -185,7 +182,7 @@ impl<F: FileSystem> FileCollection<F> {
             }
             purged_files.reserve(purged);
             for i in 0..purged {
-                purged_files.push((i as u64 + self.first_seq, self.fds[i].storage_type));
+                purged_files.push((i as u64 + self.first_seq, self.fds[i].path_id));
             }
             self.first_seq += purged as u64;
             self.first_seq_in_use = file_seq;
@@ -220,8 +217,8 @@ pub(super) struct SinglePipe<F: FileSystem> {
     /// `active_file` must be locked first to acquire both `files` and
     /// `active_file`
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
-    /// Info of storage dir.
-    storage: StorageInfo,
+    /// Manager of directory.
+    dir_manager: DirectoryManager,
 }
 
 impl<F: FileSystem> Drop for SinglePipe<F> {
@@ -239,8 +236,8 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
                 seq,
             };
             let dir = self
-                .storage
-                .get_dir(files.fds[(seq - files.first_seq) as usize].storage_type);
+                .dir_manager
+                .get_dir(files.fds[(seq - files.first_seq) as usize].path_id);
             debug_assert!(dir.is_some());
             let path = file_id.build_file_path(dir.unwrap());
             if let Err(e) = self.file_system.delete(&path) {
@@ -280,11 +277,11 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let storage = StorageInfo::new(cfg.dir.clone(), cfg.secondary_dir.clone());
+        let dir_manager = DirectoryManager::new(cfg.dir.clone(), cfg.secondary_dir.clone());
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
-            let (dir, dir_type) = match storage.get_free_dir(cfg.target_file_size.0 as usize) {
+            let (dir, path_id) = match dir_manager.get_free_dir(cfg.target_file_size.0 as usize) {
                 Some((d, t)) => (d, t),
                 None => {
                     // No space for writing.
@@ -301,7 +298,7 @@ impl<F: FileSystem> SinglePipe<F> {
             fds.push_back(FileWithFormat {
                 handle: fd,
                 format: LogFileFormat::new(cfg.format_version, alignment),
-                storage_type: dir_type,
+                path_id,
             });
             first_seq
         } else {
@@ -340,7 +337,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 capacity,
             })),
             active_file: CachePadded::new(Mutex::new(active_file)),
-            storage,
+            dir_manager,
         };
         pipe.flush_metrics(total_files);
         Ok(pipe)
@@ -348,8 +345,8 @@ impl<F: FileSystem> SinglePipe<F> {
 
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
-    fn sync_dir(&self) -> Result<()> {
-        self.storage.sync_all_dir()
+    fn sync_dir(&self, path_id: DirPathId) -> Result<()> {
+        self.dir_manager.sync_dir(path_id)
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -384,11 +381,11 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         // Generate a new fd from a newly chosen file, might be reused from a stale
         // file or generated from a newly created file.
-        let (fd, storage_type) = {
+        let (fd, path_id) = {
             let mut files = self.files.write();
-            if let Some((seq, storage_type)) = files.recycle_one_file() {
+            if let Some((seq, path_id)) = files.recycle_one_file() {
                 // Has stale files for recycling, the old file will be reused.
-                let dir = self.storage.get_dir(storage_type).unwrap();
+                let dir = self.dir_manager.get_dir(path_id).unwrap();
                 let src_file_id = FileId {
                     queue: self.queue,
                     seq,
@@ -400,11 +397,11 @@ impl<F: FileSystem> SinglePipe<F> {
                     if let Err(e) = self.file_system.delete(&src_path) {
                         error!("error while trying to delete one expired file: {}", e);
                     }
-                    (Arc::new(self.file_system.create(&dst_path)?), storage_type)
+                    (Arc::new(self.file_system.create(&dst_path)?), path_id)
                 } else {
-                    (Arc::new(self.file_system.open(&dst_path)?), storage_type)
+                    (Arc::new(self.file_system.open(&dst_path)?), path_id)
                 }
-            } else if let Some((d, t)) = self.storage.get_free_dir(self.target_file_size) {
+            } else if let Some((d, t)) = self.dir_manager.get_free_dir(self.target_file_size) {
                 // Has free space for newly writing, a new file is introduced.
                 let path = file_id.build_file_path(&d);
                 (Arc::new(self.file_system.create(&path)?), t)
@@ -430,7 +427,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
-        self.sync_dir()?;
+        self.sync_dir(path_id)?;
         let version = new_file.format.version;
         let alignment = new_file.format.alignment;
         **active_file = new_file;
@@ -438,7 +435,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let state = self.files.write().push(FileWithFormat {
             handle: fd,
             format: LogFileFormat::new(version, alignment),
-            storage_type,
+            path_id,
         });
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
@@ -468,10 +465,14 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
+    fn append<T: ReactiveBytes + ?Sized>(
+        &self,
+        bytes: &mut T,
+        force_rotate: bool,
+    ) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
-        if active_file.writer.offset() >= self.target_file_size {
+        if active_file.writer.offset() >= self.target_file_size || force_rotate {
             if let Err(e) = self.rotate_imp(&mut active_file) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
@@ -533,7 +534,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let has_free_space = {
                 let files = self.files.read();
                 files.first_seq < files.first_seq_in_use /* has stale files */
-                    || self.storage.get_free_dir(self.target_file_size).is_some()
+                    || self.dir_manager.get_free_dir(self.target_file_size).is_some()
             };
             // If there still exists free space for this record, a special Err will
             // be returned to the caller.
@@ -612,7 +613,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 queue: self.queue,
                 seq: *seq,
             };
-            let dir = self.storage.get_dir(*dir_type);
+            let dir = self.dir_manager.get_dir(*dir_type);
             debug_assert!(dir.is_some());
             let path = file_id.build_file_path(dir.unwrap());
             #[cfg(feature = "failpoints")]
@@ -674,8 +675,9 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
         &self,
         queue: LogQueue,
         bytes: &mut T,
+        force_rotate: bool,
     ) -> Result<FileBlockHandle> {
-        self.pipes[queue as usize].append(bytes)
+        self.pipes[queue as usize].append(bytes, force_rotate)
     }
 
     #[inline]
@@ -778,12 +780,12 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &content, false).unwrap();
         assert_eq!(file_handle.id.seq, 1);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 1);
 
-        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &content, false).unwrap();
         assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
@@ -799,11 +801,11 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &s_content, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
-        let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &s_content, false).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
             file_handle.offset,
@@ -845,7 +847,7 @@ mod tests {
                         .unwrap(),
                 ),
                 format: LogFileFormat::new(version, 0 /* alignment */),
-                storage_type: StorageDirType::Main,
+                path_id: DirPathId::Main,
             }
         }
         let dir = Builder::new()
@@ -932,7 +934,7 @@ mod tests {
         }
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(pipe_log.append(&mut &content(i)).unwrap());
+            handles.push(pipe_log.append(&mut &content(i), false).unwrap());
             pipe_log.sync().unwrap();
         }
         pipe_log.rotate().unwrap();
@@ -954,7 +956,7 @@ mod tests {
         // Try to reuse.
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(pipe_log.append(&mut &content(i + 1)).unwrap());
+            handles.push(pipe_log.append(&mut &content(i + 1), false).unwrap());
             pipe_log.sync().unwrap();
         }
         // Verify the data.
@@ -964,31 +966,28 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_info() {
+    fn test_directory_manager() {
         let dir = Builder::new()
-            .prefix("test_storage_info_main_dir")
+            .prefix("test_directory_manager_main_dir")
             .tempdir()
             .unwrap();
         let secondary_dir = Builder::new()
-            .prefix("test_storage_info_sec_dir")
+            .prefix("test_directory_manager_sec_dir")
             .tempdir()
             .unwrap();
         let path = dir.path().to_str().unwrap();
         let sec_path = secondary_dir.path().to_str().unwrap();
         {
-            // Test StorageInfo with main dir only.
-            let storage = StorageInfo::new(path.to_owned(), None);
-            assert_eq!(storage.get_dir(StorageDirType::Main).unwrap(), path);
-            assert!(storage.get_dir(StorageDirType::Secondary).is_none());
+            // Test DirectoryManager with main dir only.
+            let dir_manager = DirectoryManager::new(path.to_owned(), None);
+            assert_eq!(dir_manager.get_dir(DirPathId::Main).unwrap(), path);
+            assert!(dir_manager.get_dir(DirPathId::Secondary).is_none());
         }
         {
-            // Test StorageInfo both with main dir and secondary dir.
-            let storage = StorageInfo::new(path.to_owned(), Some(sec_path.to_owned()));
-            assert_eq!(storage.get_dir(StorageDirType::Main).unwrap(), path);
-            assert_eq!(
-                storage.get_dir(StorageDirType::Secondary).unwrap(),
-                sec_path
-            );
+            // Test DirectoryManager both with main dir and secondary dir.
+            let dir_manager = DirectoryManager::new(path.to_owned(), Some(sec_path.to_owned()));
+            assert_eq!(dir_manager.get_dir(DirPathId::Main).unwrap(), path);
+            assert_eq!(dir_manager.get_dir(DirPathId::Secondary).unwrap(), sec_path);
         }
     }
 }

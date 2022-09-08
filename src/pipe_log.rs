@@ -178,6 +178,7 @@ pub trait PipeLog: Sized {
         &self,
         queue: LogQueue,
         bytes: &mut T,
+        force_rotate: bool,
     ) -> Result<FileBlockHandle>;
 
     /// Synchronizes all buffered writes.

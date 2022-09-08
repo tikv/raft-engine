@@ -23,7 +23,7 @@ use crate::{Error, Result};
 
 use super::format::{lock_file_path, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
-use super::pipe::{DualPipes, FileWithFormat, SinglePipe, StorageDirType};
+use super::pipe::{DirPathId, DualPipes, FileWithFormat, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
 
@@ -68,7 +68,7 @@ struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
     handle: Arc<F::Handle>,
     format: Option<LogFileFormat>,
-    storage_type: StorageDirType,
+    path_id: DirPathId,
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
@@ -86,7 +86,7 @@ pub struct DualPipesBuilder<F: FileSystem> {
 }
 
 type FileSeqRange = (u64, u64); /* (minimal_id, maximal_id) */
-type FileSeqDict = HashMap<FileSeq, StorageDirType>; /* HashMap<seq, dir_type> */
+type FileSeqDict = HashMap<FileSeq, DirPathId>; /* HashMap<seq, path_id> */
 struct FileScanner {
     file_seq_range: FileSeqRange,
     file_dict: FileSeqDict,
@@ -119,7 +119,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // Scan main `dir` and `secondary-dir`, if it was valid.
         let (_, dir_lock) = DualPipesBuilder::<F>::scan_dir(
             &self.cfg.dir,
-            StorageDirType::Main,
+            DirPathId::Main,
             &mut append_scanner,
             &mut rewrite_scanner,
         )?;
@@ -127,7 +127,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref() {
             DualPipesBuilder::<F>::scan_dir(
                 secondary_dir,
-                StorageDirType::Secondary,
+                DirPathId::Secondary,
                 &mut append_scanner,
                 &mut rewrite_scanner,
             )?;
@@ -168,13 +168,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };
-                    let (dir, storage_type) = match file_dict.get(&seq) {
-                        Some(StorageDirType::Main) => (&self.cfg.dir, StorageDirType::Main),
-                        Some(StorageDirType::Secondary) => {
+                    let (dir, path_id) = match file_dict.get(&seq) {
+                        Some(DirPathId::Main) => (&self.cfg.dir, DirPathId::Main),
+                        Some(DirPathId::Secondary) => {
                             debug_assert!(self.cfg.secondary_dir.is_some());
                             (
                                 self.cfg.secondary_dir.as_ref().unwrap(),
-                                StorageDirType::Secondary,
+                                DirPathId::Secondary,
                             )
                         }
                         None => {
@@ -192,7 +192,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         seq,
                         handle,
                         format: None,
-                        storage_type,
+                        path_id,
                     });
                 }
             }
@@ -205,7 +205,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Returns the valid file count and the relative dir_lock.
     fn scan_dir(
         dir: &str,
-        dir_type: StorageDirType,
+        path_id: DirPathId,
         append_scanner: &mut FileScanner,
         rewrite_scanner: &mut FileScanner,
     ) -> Result<(usize, Option<File>)> {
@@ -221,7 +221,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             queue: LogQueue::Append,
                             seq,
                         }) => {
-                            append_scanner.file_dict.insert(seq, dir_type);
+                            append_scanner.file_dict.insert(seq, path_id);
                             append_scanner.file_seq_range.0 =
                                 std::cmp::min(append_scanner.file_seq_range.0, seq);
                             append_scanner.file_seq_range.1 =
@@ -232,7 +232,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             queue: LogQueue::Rewrite,
                             seq,
                         }) => {
-                            rewrite_scanner.file_dict.insert(seq, dir_type);
+                            rewrite_scanner.file_dict.insert(seq, path_id);
                             rewrite_scanner.file_seq_range.0 =
                                 std::cmp::min(rewrite_scanner.file_seq_range.0, seq);
                             rewrite_scanner.file_seq_range.1 =
@@ -486,7 +486,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .map(|f| FileWithFormat {
                 handle: f.handle.clone(),
                 format: f.format.unwrap(),
-                storage_type: f.storage_type,
+                path_id: f.path_id,
             })
             .collect();
         SinglePipe::open(

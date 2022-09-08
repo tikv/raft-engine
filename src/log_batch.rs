@@ -810,6 +810,15 @@ impl LogBatch {
                     LogItemBatch::prepare_write(&mut self.buf, file_context)?,
                 );
             }
+            BufState::Sealed(header_offset, entries_len, signature) => {
+                LogItemBatch::prepare_rewrite(&mut self.buf, signature)?;
+                // Re-seal the LogBatch.
+                self.buf_state = BufState::Sealed(
+                    header_offset,
+                    entries_len,
+                    LogItemBatch::prepare_write(&mut self.buf, file_context)?,
+                );
+            }
             _ => unreachable!(),
         }
         Ok(())
@@ -851,20 +860,6 @@ impl LogBatch {
         self.buf.truncate(LOG_BATCH_HEADER_LEN);
         self.buf_state = BufState::Open;
         self.item_batch.drain()
-    }
-
-    /// Makes preparations for rewriting the `LogBatch`.
-    #[inline]
-    pub(crate) fn prepare_rewrite(&mut self) -> Result<()> {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _, _)));
-        match self.buf_state {
-            BufState::Sealed(header_offset, entries_len, signature) => {
-                LogItemBatch::prepare_rewrite(&mut self.buf, signature)?;
-                self.buf_state = BufState::Encoded(header_offset, entries_len);
-                Ok(())
-            }
-            _ => unreachable!(),
-        }
     }
 
     /// Returns approximate encoded size of this log batch. Might be larger

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-use crate::env::from_same_dev;
 use crate::pipe_log::Version;
+use crate::util::dev_ext::on_same_dev;
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
@@ -200,7 +200,7 @@ impl Config {
         if_chain::if_chain! {
             if let Some(secondary_dir) = self.secondary_dir.as_ref();
             if validate_dir(secondary_dir).is_ok();
-            if let Ok(true) = from_same_dev(&self.dir, secondary_dir);
+            if let Ok(true) = on_same_dev(&self.dir, secondary_dir);
             then {
                 warn!(
                     "secondary-dir ({}) and dir ({}) are on same device, recommend setting it to another device",
