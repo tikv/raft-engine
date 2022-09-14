@@ -57,7 +57,7 @@ strum = { version = "0.24.0", features = ["derive"] }
 thiserror = "1.0"
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.4"
 ctor = "0.1"
 env_logger = "0.9"
 kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
