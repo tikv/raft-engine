@@ -54,7 +54,7 @@ Put this in your Cargo.toml:
 
 ```rust
 [dependencies]
-raft-engine = "0.2.0"
+raft-engine = "0.3.0"
 ```
 
 Available Cargo features:
@@ -74,13 +74,13 @@ Contributions are always welcome! Here are a few tips for making a PR:
 - All commits must be signed off (with `git commit -s`) to pass the [DCO check](https://probot.github.io/apps/dco/).
 - Tests are automatically run against the changes, some of them can be run locally:
 
-```
-# rustup default nightly
+```bash
+# run tests with nightly features
 make
-# rustup default stable
-env WITH_STABLE_TOOLCHAIN=true make
+# run tests on stable toolchain
+make WITH_STABLE_TOOLCHAIN=force
 # filter a specific test case
-env EXTRA_CARGO_ARGS=<testname> make test
+make test EXTRA_CARGO_ARGS=<testname>
 ```
 
 - For changes that might induce performance effects, please quote the targeted benchmark results in the PR description. In addition to micro-benchmarks, there is a standalone [stress test tool](https://github.com/tikv/raft-engine/tree/master/stress) which you can use to demonstrate the system performance.

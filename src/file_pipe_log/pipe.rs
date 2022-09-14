@@ -620,7 +620,7 @@ mod tests {
         let pipe_log = new_test_pipes(&cfg).unwrap();
         assert_eq!(pipe_log.file_span(queue), (1, 1));
 
-        let header_size = LogFileFormat::encode_len(cfg.format_version) as u64;
+        let header_size = LogFileFormat::encoded_len(cfg.format_version) as u64;
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
