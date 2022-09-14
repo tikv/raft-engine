@@ -721,16 +721,12 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
     }
 
-    /// Returns the number of entries smaller than or equal to `gate`.
-    pub fn entries_count_before(&self, mut gate: FileId) -> usize {
-        gate.seq += 1;
-        let idx = self
-            .entry_indexes
-            .binary_search_by_key(&gate, |ei| ei.entries.unwrap().id);
-        match idx {
-            Ok(idx) => idx,
-            Err(idx) => idx,
-        }
+    #[inline]
+    pub fn has_at_least_some_entries_before(&self, gate: FileId, count: usize) -> bool {
+        debug_assert!(count > 0);
+        self.entry_indexes
+            .get(count - 1)
+            .map_or(false, |ei| ei.entries.unwrap().id.seq <= gate.seq)
     }
 
     /// Returns the region ID.

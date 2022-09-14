@@ -84,7 +84,6 @@ fn test_file_write_error() {
         .unwrap();
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        bytes_per_sync: ReadableSize::kb(1024),
         target_file_size: ReadableSize::kb(1024),
         ..Default::default()
     };
@@ -133,7 +132,6 @@ fn test_file_rotate_error() {
         .unwrap();
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        bytes_per_sync: ReadableSize::kb(1024),
         target_file_size: ReadableSize::kb(4),
         ..Default::default()
     };
@@ -149,6 +147,9 @@ fn test_file_rotate_error() {
         .unwrap();
     engine
         .write(&mut generate_batch(1, 3, 4, Some(&entry)), false)
+        .unwrap();
+    engine
+        .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
         .unwrap();
     assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     // The next write will be followed by a rotate.
@@ -209,7 +210,6 @@ fn test_concurrent_write_error() {
         .unwrap();
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        bytes_per_sync: ReadableSize::kb(1024),
         target_file_size: ReadableSize::kb(1024),
         ..Default::default()
     };
@@ -295,7 +295,6 @@ fn test_non_atomic_write_error() {
         .unwrap();
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        bytes_per_sync: ReadableSize::kb(1024),
         target_file_size: ReadableSize::kb(1024),
         ..Default::default()
     };

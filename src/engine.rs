@@ -136,8 +136,12 @@ where
     /// bytes. If `sync` is true, the write will be followed by a call to
     /// `fdatasync` on the log file.
     pub fn write(&self, log_batch: &mut LogBatch, mut sync: bool) -> Result<usize> {
+        if log_batch.is_empty() {
+            return Ok(0);
+        }
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
+        debug_assert!(len > 0);
         let block_handle = {
             let mut writer = Writer::new(log_batch, sync);
             // Snapshot and clear the current perf context temporarily, so the write group
@@ -147,35 +151,18 @@ where
             if let Some(mut group) = self.write_barrier.enter(&mut writer) {
                 let now = Instant::now();
                 let _t = StopWatch::new_with(&*ENGINE_WRITE_LEADER_DURATION_HISTOGRAM, now);
-                let file_context = self.pipe_log.fetch_active_file(LogQueue::Append);
                 for writer in group.iter_mut() {
                     writer.entered_time = Some(now);
                     sync |= writer.sync;
                     let log_batch = writer.mut_payload();
-                    let res = if !log_batch.is_empty() {
-                        log_batch.prepare_write(&file_context)?;
-                        self.pipe_log
-                            .append(LogQueue::Append, log_batch.encoded_bytes())
-                    } else {
-                        // TODO(tabokie): use Option<FileBlockHandle> instead.
-                        Ok(FileBlockHandle {
-                            id: FileId::new(LogQueue::Append, 0),
-                            offset: 0,
-                            len: 0,
-                        })
-                    };
+                    let res = self.pipe_log.append(LogQueue::Append, log_batch);
                     writer.set_output(res);
                 }
-                debug_assert!(
-                    file_context.id == self.pipe_log.fetch_active_file(LogQueue::Append).id
-                );
                 perf_context!(log_write_duration).observe_since(now);
-                if let Err(e) = self.pipe_log.maybe_sync(LogQueue::Append, sync) {
-                    panic!(
-                        "Cannot sync {:?} queue due to IO error: {}",
-                        LogQueue::Append,
-                        e
-                    );
+                if sync {
+                    // As per trait protocol, this error should be retriable. But we panic anyway to
+                    // save the trouble of propagating it to other group members.
+                    self.pipe_log.sync(LogQueue::Append).expect("pipe::sync()");
                 }
                 // Pass the perf context diff to all the writers.
                 let diff = get_perf_context();
@@ -193,20 +180,17 @@ where
             set_perf_context(perf_context);
             writer.finish()?
         };
-
         let mut now = Instant::now();
-        if len > 0 {
-            log_batch.finish_write(block_handle);
-            self.memtables.apply_append_writes(log_batch.drain());
-            for listener in &self.listeners {
-                listener.post_apply_memtables(block_handle.id);
-            }
-            let end = Instant::now();
-            let apply_duration = end.saturating_duration_since(now);
-            ENGINE_WRITE_APPLY_DURATION_HISTOGRAM.observe(apply_duration.as_secs_f64());
-            perf_context!(apply_duration).observe(apply_duration);
-            now = end;
+        log_batch.finish_write(block_handle);
+        self.memtables.apply_append_writes(log_batch.drain());
+        for listener in &self.listeners {
+            listener.post_apply_memtables(block_handle.id);
         }
+        let end = Instant::now();
+        let apply_duration = end.saturating_duration_since(now);
+        ENGINE_WRITE_APPLY_DURATION_HISTOGRAM.observe(apply_duration.as_secs_f64());
+        perf_context!(apply_duration).observe(apply_duration);
+        now = end;
         ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
         ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
         Ok(len)
@@ -1258,8 +1242,12 @@ mod tests {
             check_purge(vec![1, 2, 3]);
         }
 
-        // 10th, rewrited
-        check_purge(vec![]);
+        // 10th, rewritten, but still needs to be compacted.
+        check_purge(vec![1, 2, 3]);
+        for rid in 1..=3 {
+            let memtable = engine.memtables.get(rid).unwrap();
+            assert_eq!(memtable.read().rewrite_count(), 50);
+        }
 
         // compact and write some new data to trigger compact again.
         for rid in 2..=50 {
@@ -1398,6 +1386,34 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_batch() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_empty_batch")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+                .unwrap();
+        let data = vec![b'x'; 16];
+        let cases = [[false, false], [false, true], [true, true]];
+        for (i, writes) in cases.iter().enumerate() {
+            let rid = i as u64;
+            let mut batch = LogBatch::default();
+            for &has_data in writes {
+                if has_data {
+                    batch.put(rid, b"key".to_vec(), data.clone());
+                }
+                engine.write(&mut batch, true).unwrap();
+                assert!(batch.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn test_dirty_recovery() {
         let dir = tempfile::Builder::new()
             .prefix("test_dirty_recovery")
@@ -1454,7 +1470,7 @@ mod tests {
         assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
         let old_active_file = engine.file_span(LogQueue::Rewrite).1;
         engine.purge_manager.must_rewrite_rewrite_queue();
-        assert_eq!(engine.file_span(LogQueue::Rewrite).0, old_active_file + 1);
+        assert!(engine.file_span(LogQueue::Rewrite).0 > old_active_file);
 
         let engine = engine.reopen();
         for rid in 1..=3 {
