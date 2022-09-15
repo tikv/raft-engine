@@ -218,7 +218,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
     /// `active_file`
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
     /// Manager of directory.
-    dir_manager: DirectoryManager,
+    dir_mgr: DirectoryManager,
 }
 
 impl<F: FileSystem> Drop for SinglePipe<F> {
@@ -236,7 +236,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
                 seq,
             };
             let dir = self
-                .dir_manager
+                .dir_mgr
                 .get_dir(files.fds[(seq - files.first_seq) as usize].path_id);
             debug_assert!(dir.is_some());
             let path = file_id.build_file_path(dir.unwrap());
@@ -277,11 +277,11 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let dir_manager = DirectoryManager::new(cfg.dir.clone(), cfg.secondary_dir.clone());
+        let dir_mgr = DirectoryManager::new(cfg.dir.clone(), cfg.secondary_dir.clone());
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
-            let (dir, path_id) = match dir_manager.get_free_dir(cfg.target_file_size.0 as usize) {
+            let (dir, path_id) = match dir_mgr.get_free_dir(cfg.target_file_size.0 as usize) {
                 Some((d, t)) => (d, t),
                 None => {
                     // No space for writing.
@@ -337,7 +337,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 capacity,
             })),
             active_file: CachePadded::new(Mutex::new(active_file)),
-            dir_manager,
+            dir_mgr,
         };
         pipe.flush_metrics(total_files);
         Ok(pipe)
@@ -346,7 +346,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
     fn sync_dir(&self, path_id: DirPathId) -> Result<()> {
-        self.dir_manager.sync_dir(path_id)
+        self.dir_mgr.sync_dir(path_id)
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -385,7 +385,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let mut files = self.files.write();
             if let Some((seq, path_id)) = files.recycle_one_file() {
                 // Has stale files for recycling, the old file will be reused.
-                let dir = self.dir_manager.get_dir(path_id).unwrap();
+                let dir = self.dir_mgr.get_dir(path_id).unwrap();
                 let src_file_id = FileId {
                     queue: self.queue,
                     seq,
@@ -401,7 +401,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 } else {
                     (Arc::new(self.file_system.open(&dst_path)?), path_id)
                 }
-            } else if let Some((d, t)) = self.dir_manager.get_free_dir(self.target_file_size) {
+            } else if let Some((d, t)) = self.dir_mgr.get_free_dir(self.target_file_size) {
                 // Has free space for newly writing, a new file is introduced.
                 let path = file_id.build_file_path(&d);
                 (Arc::new(self.file_system.create(&path)?), t)
@@ -534,7 +534,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let has_free_space = {
                 let files = self.files.read();
                 files.first_seq < files.first_seq_in_use /* has stale files */
-                    || self.dir_manager.get_free_dir(self.target_file_size).is_some()
+                    || self.dir_mgr.get_free_dir(self.target_file_size).is_some()
             };
             // If there still exists free space for this record, a special Err will
             // be returned to the caller.
@@ -613,7 +613,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 queue: self.queue,
                 seq: *seq,
             };
-            let dir = self.dir_manager.get_dir(*dir_type);
+            let dir = self.dir_mgr.get_dir(*dir_type);
             debug_assert!(dir.is_some());
             let path = file_id.build_file_path(dir.unwrap());
             #[cfg(feature = "failpoints")]
@@ -637,14 +637,14 @@ impl<F: FileSystem> SinglePipe<F> {
 pub struct DualPipes<F: FileSystem> {
     pipes: [SinglePipe<F>; 2],
 
-    _dir_lock: File,
+    _dir_locks: Vec<File>,
 }
 
 impl<F: FileSystem> DualPipes<F> {
     /// Open a new [`DualPipes`]. Assumes the two [`SinglePipe`]s share the
     /// same directory, and that directory is locked by `dir_lock`.
     pub(super) fn open(
-        dir_lock: File,
+        dir_locks: Vec<File>,
         appender: SinglePipe<F>,
         rewriter: SinglePipe<F>,
     ) -> Result<Self> {
@@ -654,7 +654,7 @@ impl<F: FileSystem> DualPipes<F> {
 
         Ok(Self {
             pipes: [appender, rewriter],
-            _dir_lock: dir_lock,
+            _dir_locks: dir_locks,
         })
     }
 
@@ -738,7 +738,7 @@ mod tests {
 
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
         DualPipes::open(
-            lock_dir(&cfg.dir)?,
+            vec![lock_dir(&cfg.dir)?],
             new_test_pipe(cfg, LogQueue::Append, Arc::new(DefaultFileSystem))?,
             new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem))?,
         )
@@ -979,15 +979,15 @@ mod tests {
         let sec_path = secondary_dir.path().to_str().unwrap();
         {
             // Test DirectoryManager with main dir only.
-            let dir_manager = DirectoryManager::new(path.to_owned(), None);
-            assert_eq!(dir_manager.get_dir(DirPathId::Main).unwrap(), path);
-            assert!(dir_manager.get_dir(DirPathId::Secondary).is_none());
+            let dir_mgr = DirectoryManager::new(path.to_owned(), None);
+            assert_eq!(dir_mgr.get_dir(DirPathId::Main).unwrap(), path);
+            assert!(dir_mgr.get_dir(DirPathId::Secondary).is_none());
         }
         {
             // Test DirectoryManager both with main dir and secondary dir.
-            let dir_manager = DirectoryManager::new(path.to_owned(), Some(sec_path.to_owned()));
-            assert_eq!(dir_manager.get_dir(DirPathId::Main).unwrap(), path);
-            assert_eq!(dir_manager.get_dir(DirPathId::Secondary).unwrap(), sec_path);
+            let dir_mgr = DirectoryManager::new(path.to_owned(), Some(sec_path.to_owned()));
+            assert_eq!(dir_mgr.get_dir(DirPathId::Main).unwrap(), path);
+            assert_eq!(dir_mgr.get_dir(DirPathId::Secondary).unwrap(), sec_path);
         }
     }
 }

@@ -1,31 +1,14 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use log::{info, warn};
+use log::warn;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::Path;
 
 use crate::pipe_log::Version;
-use crate::util::dev_ext::on_same_dev;
+use crate::util::dev_ext::{on_same_dev, validate_dir};
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
-
-/// Check the given `dir` is valid or not. If `dir` not exists,
-/// it would be created automatically.
-fn validate_dir(dir: &str) -> Result<()> {
-    let path = Path::new(dir);
-    if !path.exists() {
-        info!("Create raft log directory: {}", dir);
-        fs::create_dir(dir)?;
-        return Ok(());
-    }
-    if !path.is_dir() {
-        return Err(box_err!("Not directory: {}", dir));
-    }
-    Ok(())
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -236,7 +219,7 @@ mod tests {
     use super::*;
 
     fn remove_dir(dir: &str) -> Result<()> {
-        fs::remove_dir_all(dir)?;
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 

@@ -331,8 +331,25 @@ pub mod dev_ext {
 
     use fail::fail_point;
 
+    /// Check the given `dir` is valid or not. If `dir` not exists,
+    /// it would be created automatically.
+    pub(crate) fn validate_dir(dir: &str) -> IoResult<()> {
+        let path = Path::new(dir);
+        if !path.exists() {
+            std::fs::create_dir(dir)?;
+            return Ok(());
+        }
+        if !path.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Not directory: {}", dir),
+            ));
+        }
+        Ok(())
+    }
+
     /// Judges whether `dir1` and `dir2` reside on same device.
-    pub fn on_same_dev<P: AsRef<Path>>(dir1: P, dir2: P) -> IoResult<bool> {
+    pub(crate) fn on_same_dev<P: AsRef<Path>>(dir1: P, dir2: P) -> IoResult<bool> {
         fail_point!("env::force_on_different_dev", |_| { Ok(false) });
         if dir1.as_ref().starts_with(dir2.as_ref()) || dir2.as_ref().starts_with(dir1.as_ref()) {
             return Ok(true);

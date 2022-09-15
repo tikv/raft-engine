@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fs2::FileExt;
-use hashbrown::HashMap;
 use log::{error, warn};
 use rayon::prelude::*;
 
@@ -78,18 +77,11 @@ pub struct DualPipesBuilder<F: FileSystem> {
     listeners: Vec<Arc<dyn EventListener>>,
 
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    dir_lock: Option<File>,
+    dir_locks: Option<Vec<File>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
     append_files: Vec<FileToRecover<F>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
     rewrite_files: Vec<FileToRecover<F>>,
-}
-
-type FileSeqRange = (u64, u64); /* (minimal_id, maximal_id) */
-type FileSeqDict = HashMap<FileSeq, DirPathId>; /* HashMap<seq, path_id> */
-struct FileScanner {
-    file_seq_range: FileSeqRange,
-    file_dict: FileSeqDict,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -99,102 +91,106 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             cfg,
             file_system,
             listeners,
-            dir_lock: None,
+            dir_locks: None,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
         }
     }
 
-    /// Scans for all log files under the working directory. The directory will
-    /// be created if not exists.
+    /// Scans for all log files under the working directory.
     pub fn scan(&mut self) -> Result<()> {
-        let mut append_scanner = FileScanner {
-            file_seq_range: (u64::MAX, 0_u64),
-            file_dict: FileSeqDict::default(),
-        };
-        let mut rewrite_scanner = FileScanner {
-            file_seq_range: (u64::MAX, 0_u64),
-            file_dict: FileSeqDict::default(),
-        };
-        // Scan main `dir` and `secondary-dir`, if it was valid.
+        // Scan main `dir` and `secondary-dir`, if `secondary-dir` is valid.
+        let mut dir_locks: Vec<File> = Vec::new();
         let (_, dir_lock) = DualPipesBuilder::<F>::scan_dir(
+            &self.file_system,
             &self.cfg.dir,
             DirPathId::Main,
-            &mut append_scanner,
-            &mut rewrite_scanner,
+            &mut self.append_files,
+            &mut self.rewrite_files,
         )?;
-        self.dir_lock = dir_lock;
+        dir_locks.push(dir_lock);
         if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref() {
-            DualPipesBuilder::<F>::scan_dir(
+            let (_, sec_dir_lock) = DualPipesBuilder::<F>::scan_dir(
+                &self.file_system,
                 secondary_dir,
                 DirPathId::Secondary,
-                &mut append_scanner,
-                &mut rewrite_scanner,
-            )?;
-        }
-
-        for (queue, min_id, max_id, files, file_dict) in [
-            (
-                LogQueue::Append,
-                append_scanner.file_seq_range.0,
-                append_scanner.file_seq_range.1,
                 &mut self.append_files,
-                &append_scanner.file_dict,
-            ),
-            (
-                LogQueue::Rewrite,
-                rewrite_scanner.file_seq_range.0,
-                rewrite_scanner.file_seq_range.1,
                 &mut self.rewrite_files,
-                &rewrite_scanner.file_dict,
-            ),
+            )?;
+            dir_locks.push(sec_dir_lock);
+        }
+        self.dir_locks = Some(dir_locks);
+
+        // Sorts the expected `file_list` according to `file_seq`.
+        self.append_files.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.rewrite_files.sort_by(|a, b| a.seq.cmp(&b.seq));
+
+        for (queue, files) in [
+            (LogQueue::Append, &mut self.append_files),
+            (LogQueue::Rewrite, &mut self.rewrite_files),
         ] {
-            if max_id > 0 {
-                // Clean stale metadata in main dir.
-                DualPipesBuilder::clean_stale_metadata(
-                    self.file_system.as_ref(),
-                    &self.cfg.dir,
-                    min_id,
+            if files.is_empty() {
+                continue;
+            }
+            // Try to cleanup stale metadata left by the previous version.
+            let (min_id, max_id) = (files[0].seq, files[files.len() - 1].seq);
+            debug_assert!(min_id > 0);
+            let mut cleared = 0_u64;
+            for seq in (0..min_id).rev() {
+                let file_id = FileId { queue, seq };
+                let (in_main_dir, main_filepath) = {
+                    let path = file_id.build_file_path(&self.cfg.dir);
+                    (self.file_system.exists_metadata(&path), path)
+                };
+                let (in_sec_dir, sec_filepath) = {
+                    if self.cfg.secondary_dir.is_some() {
+                        let path =
+                            file_id.build_file_path(self.cfg.secondary_dir.as_ref().unwrap());
+                        (self.file_system.exists_metadata(&path), Some(path))
+                    } else {
+                        (false, None)
+                    }
+                };
+                let delete_path = if in_main_dir {
+                    Some(main_filepath)
+                } else if in_sec_dir {
+                    sec_filepath
+                } else {
+                    None
+                };
+                if let Some(path) = delete_path {
+                    if let Err(e) = self.file_system.delete_metadata(&path) {
+                        error!("failed to delete metadata of {}: {}.", path.display(), e);
+                        break;
+                    }
+                    cleared += 1;
+                } else {
+                    // Not found, it means that the following files (file_seq < cur.file_seq)
+                    // are not exists in this Pipe.
+                    break;
+                }
+            }
+            if cleared > 0 {
+                warn!(
+                    "clear {} stale files of {:?} in range [{}, {}).",
+                    cleared,
                     queue,
+                    min_id - cleared,
+                    max_id,
                 );
-                // Clean stale metadata in secondary dir if it was specified.
-                if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref() {
-                    DualPipesBuilder::clean_stale_metadata(
-                        self.file_system.as_ref(),
-                        secondary_dir,
-                        min_id,
-                        queue,
-                    );
-                }
-                for seq in min_id..=max_id {
-                    let file_id = FileId { queue, seq };
-                    let (dir, path_id) = match file_dict.get(&seq) {
-                        Some(DirPathId::Main) => (&self.cfg.dir, DirPathId::Main),
-                        Some(DirPathId::Secondary) => {
-                            debug_assert!(self.cfg.secondary_dir.is_some());
-                            (
-                                self.cfg.secondary_dir.as_ref().unwrap(),
-                                DirPathId::Secondary,
-                            )
-                        }
-                        None => {
-                            warn!(
-                                "Detected a hole when scanning directory, discarding files before {:?}.",
-                                file_id,
-                            );
-                            files.clear();
-                            continue;
-                        }
-                    };
-                    let path = file_id.build_file_path(dir);
-                    let handle = Arc::new(self.file_system.open(&path)?);
-                    files.push(FileToRecover {
+            }
+            // Check the file_list and remove the hole of files.
+            let mut drain_count = files.len();
+            for seq in ((max_id + 1 - drain_count as u64)..=max_id).rev() {
+                if files[drain_count - 1].seq != seq {
+                    warn!(
+                        "Detected a hole when scanning directory, discarding files before file_seq {}.",
                         seq,
-                        handle,
-                        format: None,
-                        path_id,
-                    });
+                    );
+                    files.drain(..drain_count);
+                    break;
                 }
+                drain_count -= 1;
             }
         }
         Ok(())
@@ -204,15 +200,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     ///
     /// Returns the valid file count and the relative dir_lock.
     fn scan_dir(
+        file_system: &F,
         dir: &str,
         path_id: DirPathId,
-        append_scanner: &mut FileScanner,
-        rewrite_scanner: &mut FileScanner,
-    ) -> Result<(usize, Option<File>)> {
-        let dir_lock = Some(lock_dir(dir)?);
+        append_files: &mut Vec<FileToRecover<F>>,
+        rewrite_files: &mut Vec<FileToRecover<F>>,
+    ) -> Result<(usize, File)> {
+        let dir_lock = lock_dir(dir)?;
         // Parse all valid files in `dir`.
         let mut valid_file_count: usize = 0;
-        fs::read_dir(Path::new(dir))?.for_each(|e| {
+        fs::read_dir(Path::new(dir))?.try_for_each(|e| -> Result<()> {
             if let Ok(e) = e {
                 let p = e.path();
                 if p.is_file() {
@@ -221,68 +218,43 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             queue: LogQueue::Append,
                             seq,
                         }) => {
-                            append_scanner.file_dict.insert(seq, path_id);
-                            append_scanner.file_seq_range.0 =
-                                std::cmp::min(append_scanner.file_seq_range.0, seq);
-                            append_scanner.file_seq_range.1 =
-                                std::cmp::max(append_scanner.file_seq_range.1, seq);
+                            let file_id = FileId {
+                                queue: LogQueue::Append,
+                                seq,
+                            };
+                            let path = file_id.build_file_path(dir);
+                            append_files.push(FileToRecover {
+                                seq,
+                                handle: Arc::new(file_system.open(&path)?),
+                                format: None,
+                                path_id,
+                            });
                             valid_file_count += 1;
                         }
                         Some(FileId {
                             queue: LogQueue::Rewrite,
                             seq,
                         }) => {
-                            rewrite_scanner.file_dict.insert(seq, path_id);
-                            rewrite_scanner.file_seq_range.0 =
-                                std::cmp::min(rewrite_scanner.file_seq_range.0, seq);
-                            rewrite_scanner.file_seq_range.1 =
-                                std::cmp::max(rewrite_scanner.file_seq_range.1, seq);
+                            let file_id = FileId {
+                                queue: LogQueue::Rewrite,
+                                seq,
+                            };
+                            let path = file_id.build_file_path(dir);
+                            rewrite_files.push(FileToRecover {
+                                seq,
+                                handle: Arc::new(file_system.open(&path)?),
+                                format: None,
+                                path_id,
+                            });
                             valid_file_count += 1;
                         }
                         _ => {}
                     }
                 }
             }
-        });
+            Ok(())
+        })?;
         Ok((valid_file_count, dir_lock))
-    }
-
-    /// Cleans up stale metadata left by the previous version.
-    fn clean_stale_metadata(file_system: &F, dir: &str, min_id: u64, queue: LogQueue) {
-        let max_sample = 100;
-        // Find the first obsolete metadata.
-        let mut delete_start = None;
-        for i in 0..max_sample {
-            let seq = i * min_id / max_sample;
-            let file_id = FileId { queue, seq };
-            // Main dir
-            let path = file_id.build_file_path(&dir);
-            if file_system.exists_metadata(&path) {
-                delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
-                break;
-            }
-        }
-        // Delete metadata starting from the oldest. Abort on error.
-        if let Some(start) = delete_start {
-            let mut success = 0;
-            for seq in start..min_id {
-                let file_id = FileId { queue, seq };
-                let path = file_id.build_file_path(&dir);
-                if file_system.exists_metadata(&path) {
-                    if let Err(e) = file_system.delete_metadata(&path) {
-                        error!("failed to delete metadata of {}: {}.", path.display(), e);
-                        break;
-                    }
-                } else {
-                    continue;
-                }
-                success += 1;
-            }
-            warn!(
-                "deleted {} stale files of {:?} in range [{}, {}).",
-                success, queue, start, min_id,
-            );
-        }
     }
 
     /// Reads through log items in all available log files, and replays them to
@@ -507,7 +479,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     pub fn finish(self) -> Result<DualPipes<F>> {
         let appender = self.build_pipe(LogQueue::Append)?;
         let rewriter = self.build_pipe(LogQueue::Rewrite)?;
-        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
+        DualPipes::open(self.dir_locks.unwrap(), appender, rewriter)
     }
 }
 
