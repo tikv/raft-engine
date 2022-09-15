@@ -50,7 +50,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         format: LogFileFormat,
         reader: LogFileReader<F>,
     ) -> Result<()> {
-        self.valid_offset = LogFileFormat::encode_len(format.version);
+        self.valid_offset = LogFileFormat::encoded_len(format.version);
         self.file_id = Some(file_id);
         self.format = Some(format);
         self.size = reader.file_size()?;

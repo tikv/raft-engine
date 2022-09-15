@@ -92,10 +92,11 @@ pub(super) fn lock_file_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     path
 }
 
-/// In-memory representation of `Format` in log files.
+/// Log file format. It will be encoded to file header.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct LogFileFormat {
     pub version: Version,
+    /// 0 stands for no alignment.
     pub alignment: u64,
 }
 
@@ -116,12 +117,12 @@ impl LogFileFormat {
         }
     }
 
-    pub const fn max_encode_len() -> usize {
+    pub const fn max_encoded_len() -> usize {
         Self::header_len() + Self::payload_len(Version::V2)
     }
 
     /// Length of whole `LogFileFormat` written on storage.
-    pub fn encode_len(version: Version) -> usize {
+    pub fn encoded_len(version: Version) -> usize {
         Self::header_len() + Self::payload_len(version)
     }
 
