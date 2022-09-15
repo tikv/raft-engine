@@ -166,7 +166,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     cleared += 1;
                 } else {
                     // Not found, it means that the following files (file_seq < cur.file_seq)
-                    // are not exists in this Pipe.
+                    // do not exist in this Pipe.
                     break;
                 }
             }
