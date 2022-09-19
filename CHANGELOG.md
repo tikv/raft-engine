@@ -26,7 +26,7 @@
 ### Behavior Changes
 
 * Change format version to 2 from 1 by default.
-* Enable log recycling by default.
+* Disable log recycling by default.
 
 ## [0.2.0] - 2022-05-25
 
