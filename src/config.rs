@@ -89,7 +89,7 @@ pub struct Config {
     /// If `true`, logically purged log files will be reserved for recycling.
     /// Only available for `format_version` 2 and above.
     ///
-    /// Default: true
+    /// Default: false
     pub enable_log_recycle: bool,
 }
 
@@ -109,7 +109,7 @@ impl Default for Config {
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
-            enable_log_recycle: true,
+            enable_log_recycle: false,
         };
         // Test-specific configurations.
         #[cfg(test)]
