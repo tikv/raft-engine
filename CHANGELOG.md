@@ -1,5 +1,11 @@
 # Raft Engine Change Log
 
+## [Unreleased]
+
+### Behavior Changes
+
+* Disable log recycling by default.
+
 ## [0.3.0] - 2022-09-14
 
 ### Bug Fixes
@@ -26,7 +32,7 @@
 ### Behavior Changes
 
 * Change format version to 2 from 1 by default.
-* Disable log recycling by default.
+* Enable log recycling by default.
 
 ## [0.2.0] - 2022-05-25
 
