@@ -13,11 +13,9 @@ WITH_NIGHTLY_FEATURES = 1
 endif
 
 TOOLCHAIN_ARGS =
-ifeq ($(shell (rustc --version | grep -q nightly); echo $$?), 0)
 ifdef WITH_NIGHTLY_FEATURES
 # Force use nightly toolchain if we are building with nightly features.
 TOOLCHAIN_ARGS = +nightly
-endif
 else
 ifeq ($(WITH_STABLE_TOOLCHAIN), force)
 TOOLCHAIN_ARGS = +stable
