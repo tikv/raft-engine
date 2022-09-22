@@ -13,7 +13,7 @@ WITH_NIGHTLY_FEATURES = 1
 endif
 
 TOOLCHAIN_ARGS =
-ifeq ($(shell (rustc --version | grep -q nightly); echo $$?), 1)
+ifeq ($(shell (rustc --version | grep -q nightly); echo $$?), 0)
 ifdef WITH_NIGHTLY_FEATURES
 # Force use nightly toolchain if we are building with nightly features.
 TOOLCHAIN_ARGS = +nightly
@@ -24,7 +24,7 @@ TOOLCHAIN_ARGS = +stable
 endif
 endif
 
-.PHONY: format clippy test
+.PHONY: all
 
 all: format clippy test
 
