@@ -22,7 +22,7 @@ use crate::{Error, Result};
 
 use super::format::{lock_file_path, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
-use super::pipe::{DirPathId, DualPipes, FileWithFormat, SinglePipe};
+use super::pipe::{DirPathId, DirectoryManager, DualPipes, FileWithFormat, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
 
@@ -77,7 +77,7 @@ pub struct DualPipesBuilder<F: FileSystem> {
     listeners: Vec<Arc<dyn EventListener>>,
 
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    dir_locks: Option<Vec<File>>,
+    dir_mgr: Option<Arc<DirectoryManager>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
     append_files: Vec<FileToRecover<F>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
@@ -91,7 +91,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             cfg,
             file_system,
             listeners,
-            dir_locks: None,
+            dir_mgr: None,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
         }
@@ -100,31 +100,29 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory.
     pub fn scan(&mut self) -> Result<()> {
         // Scan main `dir` and `secondary-dir`, if `secondary-dir` is valid.
-        let mut dir_locks: Vec<File> = Vec::new();
-        let (_, dir_lock) = DualPipesBuilder::<F>::scan_dir(
+        let mut dir_mgr = DirectoryManager::default();
+        dir_mgr.add_dir(self.cfg.dir.clone(), lock_dir(&self.cfg.dir)?);
+        DualPipesBuilder::<F>::scan_dir_imp(
             &self.file_system,
-            &self.cfg.dir,
             DirPathId::Main,
+            &self.cfg.dir,
             &mut self.append_files,
             &mut self.rewrite_files,
         )?;
-        dir_locks.push(dir_lock);
         if let Some(secondary_dir) = self.cfg.secondary_dir.as_ref() {
-            let (_, sec_dir_lock) = DualPipesBuilder::<F>::scan_dir(
+            dir_mgr.add_dir(secondary_dir.clone(), lock_dir(secondary_dir)?);
+            DualPipesBuilder::<F>::scan_dir_imp(
                 &self.file_system,
-                secondary_dir,
                 DirPathId::Secondary,
+                secondary_dir,
                 &mut self.append_files,
                 &mut self.rewrite_files,
             )?;
-            dir_locks.push(sec_dir_lock);
         }
-        self.dir_locks = Some(dir_locks);
-
         // Sorts the expected `file_list` according to `file_seq`.
         self.append_files.sort_by(|a, b| a.seq.cmp(&b.seq));
         self.rewrite_files.sort_by(|a, b| a.seq.cmp(&b.seq));
-
+        // Validate rewrite & append `file_list` individually, and clear stale metadata.
         for (queue, files) in [
             (LogQueue::Append, &mut self.append_files),
             (LogQueue::Rewrite, &mut self.rewrite_files),
@@ -132,82 +130,67 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             if files.is_empty() {
                 continue;
             }
+            // Check the file_list and remove the hole of files.
+            let mut current_seq = files[0].seq;
+            let mut invalid_files = 0_usize;
+            debug_assert!(current_seq > 0);
+            for (i, f) in files.iter().enumerate() {
+                if f.seq > current_seq + (i - invalid_files) as u64 {
+                    warn!(
+                        "Detected a hole when scanning directory, discarding files before file_seq {}.",
+                        f.seq,
+                    );
+                    current_seq = f.seq + 1;
+                    invalid_files = i;
+                } else if f.seq < current_seq {
+                    return Err(Error::InvalidArgument("Duplicate file".to_string()));
+                }
+            }
+            files.drain(..invalid_files);
             // Try to cleanup stale metadata left by the previous version.
-            let (min_id, max_id) = (files[0].seq, files[files.len() - 1].seq);
-            debug_assert!(min_id > 0);
+            if files.is_empty() {
+                continue;
+            }
             let mut cleared = 0_u64;
-            for seq in (0..min_id).rev() {
+            let clear_start: u64 = {
+                // TODO: Need a more efficient way to remove sparse stale metadata,
+                // without iterating one by one.
+                1
+            };
+            for seq in (clear_start..files[0].seq).rev() {
                 let file_id = FileId { queue, seq };
-                let (in_main_dir, main_filepath) = {
-                    let path = file_id.build_file_path(&self.cfg.dir);
-                    (self.file_system.exists_metadata(&path), path)
-                };
-                let (in_sec_dir, sec_filepath) = {
-                    if self.cfg.secondary_dir.is_some() {
-                        let path =
-                            file_id.build_file_path(self.cfg.secondary_dir.as_ref().unwrap());
-                        (self.file_system.exists_metadata(&path), Some(path))
-                    } else {
-                        (false, None)
+                for dir in dir_mgr.get_all_dir().iter() {
+                    let path = file_id.build_file_path(dir);
+                    if self.file_system.exists_metadata(&path) {
+                        if let Err(e) = self.file_system.delete_metadata(&path) {
+                            error!("failed to delete metadata of {}: {}.", path.display(), e);
+                            break;
+                        }
+                        cleared += 1;
                     }
-                };
-                let delete_path = if in_main_dir {
-                    Some(main_filepath)
-                } else if in_sec_dir {
-                    sec_filepath
-                } else {
-                    None
-                };
-                if let Some(path) = delete_path {
-                    if let Err(e) = self.file_system.delete_metadata(&path) {
-                        error!("failed to delete metadata of {}: {}.", path.display(), e);
-                        break;
-                    }
-                    cleared += 1;
-                } else {
-                    // Not found, it means that the following files (file_seq < cur.file_seq)
-                    // do not exist in this Pipe.
-                    break;
                 }
             }
             if cleared > 0 {
                 warn!(
                     "clear {} stale files of {:?} in range [{}, {}).",
-                    cleared,
-                    queue,
-                    min_id - cleared,
-                    max_id,
+                    cleared, queue, 0, files[0].seq,
                 );
             }
-            // Check the file_list and remove the hole of files.
-            let mut drain_count = files.len();
-            for seq in ((max_id + 1 - drain_count as u64)..=max_id).rev() {
-                if files[drain_count - 1].seq != seq {
-                    warn!(
-                        "Detected a hole when scanning directory, discarding files before file_seq {}.",
-                        seq,
-                    );
-                    files.drain(..drain_count);
-                    break;
-                }
-                drain_count -= 1;
-            }
         }
+        self.dir_mgr = Some(Arc::new(dir_mgr));
         Ok(())
     }
 
-    /// Scans for all log files under the given directory.
+    /// Scans and parses all log files under the given directory.
     ///
-    /// Returns the valid file count and the relative dir_lock.
-    fn scan_dir(
+    /// Returns the valid file count
+    fn scan_dir_imp(
         file_system: &F,
-        dir: &str,
         path_id: DirPathId,
+        dir: &str,
         append_files: &mut Vec<FileToRecover<F>>,
         rewrite_files: &mut Vec<FileToRecover<F>>,
-    ) -> Result<(usize, File)> {
-        let dir_lock = lock_dir(dir)?;
-        // Parse all valid files in `dir`.
+    ) -> Result<usize> {
         let mut valid_file_count: usize = 0;
         fs::read_dir(Path::new(dir))?.try_for_each(|e| -> Result<()> {
             if let Ok(e) = e {
@@ -254,7 +237,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             Ok(())
         })?;
-        Ok((valid_file_count, dir_lock))
+        Ok(valid_file_count)
     }
 
     /// Reads through log items in all available log files, and replays them to
@@ -464,6 +447,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
+            self.dir_mgr.clone().unwrap(),
             self.listeners.clone(),
             queue,
             first_seq,
@@ -479,7 +463,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     pub fn finish(self) -> Result<DualPipes<F>> {
         let appender = self.build_pipe(LogQueue::Append)?;
         let rewriter = self.build_pipe(LogQueue::Rewrite)?;
-        DualPipes::open(self.dir_locks.unwrap(), appender, rewriter)
+        DualPipes::open(appender, rewriter)
     }
 }
 

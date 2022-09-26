@@ -364,9 +364,7 @@ where
             return self.pipe_log.sync(LogQueue::Rewrite);
         }
         log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
-        let file_handle =
-            self.pipe_log
-                .append(LogQueue::Rewrite, log_batch, false /* force_rotate */)?;
+        let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         if sync {
             self.pipe_log.sync(LogQueue::Rewrite)?
         }

@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
-use log::{error, info, warn};
+use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
 use crate::config::{Config, RecoveryMode};
@@ -146,8 +146,6 @@ where
         debug_assert!(len > 0);
 
         let mut attempt_count = 0_u64;
-        // Flag on whether force to rotate the current active file or not.
-        let mut force_rotate = false;
         let block_handle = loop {
             // Max retry count is limited to `2`. If the first `append` retry because of
             // `NOSPC` error, the next `append` should success, unless there exists
@@ -167,25 +165,7 @@ where
                     sync |= writer.sync;
 
                     let log_batch = writer.mut_payload();
-                    let res = self
-                        .pipe_log
-                        .append(LogQueue::Append, log_batch, force_rotate);
-                    // If we found that there is no spare space for the next LogBatch in the
-                    // current active file, we will mark the `force_rotate` with `true` to
-                    // notify the leader do `rotate` immediately.
-                    if let Err(Error::Other(e)) = res {
-                        warn!(
-                            "Cannot append, err: {}, try to re-append this log_batch into next log",
-                            e
-                        );
-                        // Notify the next `append` to rotate current file.
-                        force_rotate = true;
-                        writer.set_output(Err(Error::Other(box_err!(
-                            "Failed to append logbatch, try to dump it to other dir"
-                        ))));
-                        continue;
-                    }
-                    force_rotate = false;
+                    let res = self.pipe_log.append(LogQueue::Append, log_batch);
                     writer.set_output(res);
                 }
                 perf_context!(log_write_duration).observe_since(now);

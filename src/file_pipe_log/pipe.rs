@@ -32,17 +32,34 @@ pub enum DirPathId {
 
 /// Mananges multi dirs for storing logs, including `main dir` and
 /// `secondary dir`.
-struct DirectoryManager {
+#[derive(Default)]
+pub struct DirectoryManager {
     dirs: Vec<String>,
+    locks: Vec<File>,
 }
 
 impl DirectoryManager {
+    #[cfg(test)]
     fn new(dir: String, secondary_dir: Option<String>) -> Self {
         let mut dirs = vec![dir; 1];
         if let Some(sec_dir) = secondary_dir {
             dirs.push(sec_dir);
         }
-        Self { dirs }
+        Self {
+            dirs,
+            locks: Vec::default(),
+        }
+    }
+
+    #[inline]
+    pub fn add_dir(&mut self, dir: String, dir_lock: File) {
+        self.dirs.push(dir);
+        self.locks.push(dir_lock);
+    }
+
+    #[inline]
+    pub fn get_all_dir(&self) -> &Vec<String> {
+        &self.dirs
     }
 
     #[inline]
@@ -218,7 +235,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
     /// `active_file`
     active_file: CachePadded<Mutex<ActiveFile<F>>>,
     /// Manager of directory.
-    dir_mgr: DirectoryManager,
+    dir_mgr: Arc<DirectoryManager>,
 }
 
 impl<F: FileSystem> Drop for SinglePipe<F> {
@@ -253,9 +270,11 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
 
 impl<F: FileSystem> SinglePipe<F> {
     /// Opens a new [`SinglePipe`].
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         cfg: &Config,
         file_system: Arc<F>,
+        dir_mgr: Arc<DirectoryManager>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut first_seq: FileSeq,
@@ -277,7 +296,6 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let dir_mgr = DirectoryManager::new(cfg.dir.clone(), cfg.secondary_dir.clone());
         let create_file = first_seq == 0;
         let active_seq = if create_file {
             first_seq = 1;
@@ -465,14 +483,10 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn append<T: ReactiveBytes + ?Sized>(
-        &self,
-        bytes: &mut T,
-        force_rotate: bool,
-    ) -> Result<FileBlockHandle> {
+    fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
-        if active_file.writer.offset() >= self.target_file_size || force_rotate {
+        if active_file.writer.offset() >= self.target_file_size {
             if let Err(e) = self.rotate_imp(&mut active_file) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
@@ -536,9 +550,15 @@ impl<F: FileSystem> SinglePipe<F> {
                 files.first_seq < files.first_seq_in_use /* has stale files */
                     || self.dir_mgr.get_free_dir(self.target_file_size).is_some()
             };
-            // If there still exists free space for this record, a special Err will
-            // be returned to the caller.
+            // If there still exists free space for this record, rotate the file
+            // and return a special Err (for retry) to the caller.
             if no_space_err && has_free_space {
+                if let Err(e) = self.rotate_imp(&mut active_file) {
+                    panic!(
+                        "error when rotate [{:?}:{}]: {}",
+                        self.queue, active_file.seq, e
+                    );
+                }
                 return Err(Error::Other(box_err!(
                     "failed to write {} file, get {} try to flush it to other dir",
                     seq,
@@ -636,25 +656,18 @@ impl<F: FileSystem> SinglePipe<F> {
 /// A [`PipeLog`] implementation that stores data in filesystem.
 pub struct DualPipes<F: FileSystem> {
     pipes: [SinglePipe<F>; 2],
-
-    _dir_locks: Vec<File>,
 }
 
 impl<F: FileSystem> DualPipes<F> {
     /// Open a new [`DualPipes`]. Assumes the two [`SinglePipe`]s share the
     /// same directory, and that directory is locked by `dir_lock`.
-    pub(super) fn open(
-        dir_locks: Vec<File>,
-        appender: SinglePipe<F>,
-        rewriter: SinglePipe<F>,
-    ) -> Result<Self> {
+    pub(super) fn open(appender: SinglePipe<F>, rewriter: SinglePipe<F>) -> Result<Self> {
         // TODO: remove this dependency.
         debug_assert_eq!(LogQueue::Append as usize, 0);
         debug_assert_eq!(LogQueue::Rewrite as usize, 1);
 
         Ok(Self {
             pipes: [appender, rewriter],
-            _dir_locks: dir_locks,
         })
     }
 
@@ -675,9 +688,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
         &self,
         queue: LogQueue,
         bytes: &mut T,
-        force_rotate: bool,
     ) -> Result<FileBlockHandle> {
-        self.pipes[queue as usize].append(bytes, force_rotate)
+        self.pipes[queue as usize].append(bytes)
     }
 
     #[inline]
@@ -721,10 +733,12 @@ mod tests {
         cfg: &Config,
         queue: LogQueue,
         fs: Arc<F>,
+        dir_mgr: Arc<DirectoryManager>,
     ) -> Result<SinglePipe<F>> {
         SinglePipe::open(
             cfg,
             fs,
+            dir_mgr,
             Vec::new(),
             queue,
             0,
@@ -737,10 +751,17 @@ mod tests {
     }
 
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
+        let mut dirs = DirectoryManager::default();
+        dirs.add_dir(cfg.dir.clone(), lock_dir(&cfg.dir)?);
+        let dir_mgr = Arc::new(dirs);
         DualPipes::open(
-            vec![lock_dir(&cfg.dir)?],
-            new_test_pipe(cfg, LogQueue::Append, Arc::new(DefaultFileSystem))?,
-            new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem))?,
+            new_test_pipe(
+                cfg,
+                LogQueue::Append,
+                Arc::new(DefaultFileSystem),
+                dir_mgr.clone(),
+            )?,
+            new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem), dir_mgr)?,
         )
     }
 
@@ -780,12 +801,12 @@ mod tests {
 
         // generate file 1, 2, 3
         let content: Vec<u8> = vec![b'a'; 1024];
-        let file_handle = pipe_log.append(queue, &mut &content, false).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
         assert_eq!(file_handle.id.seq, 1);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 1);
 
-        let file_handle = pipe_log.append(queue, &mut &content, false).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &content).unwrap();
         assert_eq!(file_handle.id.seq, 2);
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
@@ -801,11 +822,11 @@ mod tests {
 
         // append position
         let s_content = b"short content".to_vec();
-        let file_handle = pipe_log.append(queue, &mut &s_content, false).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(file_handle.offset, header_size);
 
-        let file_handle = pipe_log.append(queue, &mut &s_content, false).unwrap();
+        let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         assert_eq!(file_handle.id.seq, 3);
         assert_eq!(
             file_handle.offset,
@@ -926,7 +947,9 @@ mod tests {
         };
         let queue = LogQueue::Append;
         let fs = Arc::new(ObfuscatedFileSystem::default());
-        let pipe_log = new_test_pipe(&cfg, queue, fs.clone()).unwrap();
+        let mut dir_mgr = DirectoryManager::default();
+        dir_mgr.add_dir(cfg.dir.clone(), lock_dir(&cfg.dir).unwrap());
+        let pipe_log = new_test_pipe(&cfg, queue, fs.clone(), Arc::new(dir_mgr)).unwrap();
         assert_eq!(pipe_log.file_span(), (1, 1));
 
         fn content(i: usize) -> Vec<u8> {
@@ -934,7 +957,7 @@ mod tests {
         }
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(pipe_log.append(&mut &content(i), false).unwrap());
+            handles.push(pipe_log.append(&mut &content(i)).unwrap());
             pipe_log.sync().unwrap();
         }
         pipe_log.rotate().unwrap();
@@ -956,7 +979,7 @@ mod tests {
         // Try to reuse.
         let mut handles = Vec::new();
         for i in 0..10 {
-            handles.push(pipe_log.append(&mut &content(i + 1), false).unwrap());
+            handles.push(pipe_log.append(&mut &content(i + 1)).unwrap());
             pipe_log.sync().unwrap();
         }
         // Verify the data.

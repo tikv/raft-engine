@@ -4,7 +4,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::pipe_log::Version;
-use crate::util::dev_ext::{on_same_dev, validate_dir};
+use crate::util::dev_ext::on_same_dev;
 use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
@@ -212,6 +212,22 @@ impl Config {
             0
         }
     }
+}
+
+/// Check the given `dir` is valid or not. If `dir` not exists,
+/// it would be created automatically.
+fn validate_dir(dir: &str) -> Result<()> {
+    use std::path::Path;
+
+    let path = Path::new(dir);
+    if !path.exists() {
+        std::fs::create_dir(dir)?;
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err(box_err!("Not directory: {}", dir));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
