@@ -9,6 +9,6 @@ repository = "https://github.com/tikv/raft-engine"
 license = "Apache-2.0"
 
 [dependencies]
-clap = { version = "3.1", features = ["derive", "cargo"] }
+clap = { version = "4.0", features = ["derive", "cargo"] }
 env_logger = "0.9"
 raft-engine = { path = "..", version = "0.3.0", features = ["scripting", "internals"] }
