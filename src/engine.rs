@@ -367,6 +367,10 @@ where
     pub fn get_used_size(&self) -> usize {
         self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
     }
+
+    pub fn path(&self) -> &str {
+        self.cfg.dir.as_str()
+    }
 }
 
 impl<F, P> Drop for Engine<F, P>
