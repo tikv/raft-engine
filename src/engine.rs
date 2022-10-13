@@ -2094,7 +2094,9 @@ mod tests {
 
         let (start, end) = engine.file_span(LogQueue::Append);
         // Purge all files.
-        engine.purge_manager.must_rewrite_append_queue(Some(end - 1), None);
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(Some(end - 1), None);
         assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
         // no file have been physically deleted.
