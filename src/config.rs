@@ -172,9 +172,11 @@ impl Config {
             return 0;
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
-            // This is required to squeeze file signature into an u32.
+            // (1) At most u32::MAX so that the file number can be capped into an u32
+            // without colliding. (2) Add some more file as an additional buffer to
+            // avoid jitters.
             std::cmp::min(
-                (self.purge_threshold.0 / self.target_file_size.0) as usize,
+                (self.purge_threshold.0 / self.target_file_size.0) as usize + 2,
                 u32::MAX as usize,
             )
         } else {
