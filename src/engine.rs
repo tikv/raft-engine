@@ -367,6 +367,10 @@ where
     pub fn get_used_size(&self) -> usize {
         self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
     }
+
+    pub fn path(&self) -> &str {
+        self.cfg.dir.as_str()
+    }
 }
 
 impl<F, P> Drop for Engine<F, P>
@@ -720,6 +724,7 @@ mod tests {
                 Arc::new(ObfuscatedFileSystem::default()),
             )
             .unwrap();
+            assert_eq!(engine.path(), dir.path().to_str().unwrap());
             let data = vec![b'x'; entry_size];
             for i in 10..20 {
                 let rid = i;
