@@ -2028,6 +2028,7 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(1),
+            enable_log_recycle: false,
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
@@ -2040,9 +2041,12 @@ mod tests {
         }
         let (start, _) = engine.file_span(LogQueue::Append);
         engine.purge_expired_files().unwrap();
+        // some active files have been deleted.
         assert!(start < engine.file_span(LogQueue::Append).0);
+        // corresponding physical files have been deleted too.
         assert_eq!(engine.file_count(None), fs.inner.file_count());
         let start = engine.file_span(LogQueue::Append).0;
+        // metadata have been deleted.
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
@@ -2078,7 +2082,7 @@ mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(2),
+            purge_threshold: ReadableSize(100),
             format_version: Version::V2,
             enable_log_recycle: true,
             ..Default::default()
@@ -2088,62 +2092,34 @@ mod tests {
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
-        for rid in 1..=5 {
+        for rid in 1..=10 {
             engine.clean(rid);
         }
-        let (start, _) = engine.file_span(LogQueue::Append);
-        // the [start - 1] files are recycled
-        engine.purge_expired_files().unwrap();
+
+        let (start, end) = engine.file_span(LogQueue::Append);
+        // Purge all files.
+        engine
+            .purge_manager
+            .must_rewrite_append_queue(Some(end - 1), None);
         assert!(start < engine.file_span(LogQueue::Append).0);
-        let file_count = fs.inner.file_count();
-        assert_eq!(engine.file_count(None) + 1, file_count);
-        let start = engine.file_span(LogQueue::Append).0 - 1;
+        assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
+        // no file have been physically deleted.
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &start
         );
-        // reopen the engine and validate the stale files are removed
-        let engine = engine.reopen();
-        assert_eq!(fs.inner.file_count(), file_count - 1);
-        assert_eq!(engine.file_span(LogQueue::Append).0, start + 1);
-        let start = engine.file_span(LogQueue::Append).0;
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
-        // rewrite the recycled files
-        for rid in 1..=2 {
-            engine.clean(rid);
-        }
-        engine.purge_expired_files().unwrap();
-        for rid in 1..=2 {
+        // reusing these files.
+        for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
-        assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let start = engine.file_span(LogQueue::Append).0;
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
+        let start_1 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
+        assert!(start < start_1);
 
+        // reopen the engine and validate the stale files are removed
         let engine = engine.reopen();
-        assert_eq!(engine.file_count(None), fs.inner.file_count());
-        let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
-
-        // Simulate stale metadata.
-        for i in start / 2..start {
-            fs.append_metadata.lock().unwrap().insert(i);
-        }
-        let engine = engine.reopen();
-        let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
+        assert_eq!(fs.inner.file_count(), engine.file_count(None));
+        let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
+        assert!(start_1 < start_2);
     }
 
     #[test]
@@ -2201,7 +2177,7 @@ mod tests {
             enable_log_recycle: true,
             ..Default::default()
         };
-        assert_eq!(cfg_v2.recycle_capacity(), 15);
+        assert!(cfg_v2.recycle_capacity() > 0);
         // Prepare files with format_version V1
         {
             let engine = RaftLogEngine::open_with_file_system(cfg_v1.clone(), fs.clone()).unwrap();
