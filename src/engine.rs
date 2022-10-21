@@ -724,6 +724,7 @@ mod tests {
                 Arc::new(ObfuscatedFileSystem::default()),
             )
             .unwrap();
+            assert_eq!(engine.path(), dir.path().to_str().unwrap());
             let data = vec![b'x'; entry_size];
             for i in 10..20 {
                 let rid = i;
