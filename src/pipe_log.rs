@@ -208,10 +208,7 @@ pub trait PipeLog: Sized {
 
     /// Returns the sequence number range of all log files in the specific
     /// log queue, including fake and stale logs.
-    fn total_file_count(&self, queue: LogQueue) -> usize {
-        let (first, last) = self.file_span(queue);
-        (last - first + 1) as usize
-    }
+    fn total_file_count(&self, queue: LogQueue) -> usize;
 
     /// Rotates a new log file for the specified log queue.
     ///
