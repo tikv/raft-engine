@@ -439,3 +439,54 @@ fn test_file_allocate_error() {
     assert_eq!(engine.first_index(1).unwrap(), 1);
     assert_eq!(engine.last_index(1).unwrap(), 4);
 }
+
+#[test]
+fn test_start_with_file_allocate_error() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_start_with_file_allocate_error")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize::kb(1),
+        purge_threshold: ReadableSize::kb(10), // capacity is 12
+        enable_log_recycle: true,
+        ..Default::default()
+    };
+    let entry = vec![b'x'; 1024];
+    {
+        // Several Fake logs are filled in err.
+        let _f = FailGuard::new("log_fd::allocate::err", "4*off->5*return->off");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        engine
+            .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
+            .unwrap();
+        let (start, end) = engine.file_span(LogQueue::Append);
+        // Only one file is in use.
+        assert_eq!(start, end);
+        // Append several entries to make Engine reuse the fake logs.
+        for r in 2..6 {
+            engine
+                .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)
+                .unwrap();
+        }
+        assert!(engine.file_span(LogQueue::Append).1 > end);
+    }
+    let engine = Engine::open(cfg).unwrap();
+    assert_eq!(engine.first_index(1).unwrap(), 1);
+    assert_eq!(engine.last_index(1).unwrap(), 4);
+    assert_eq!(engine.last_index(5).unwrap(), 4);
+    let (start, end) = engine.file_span(LogQueue::Append);
+    // Continously append entries to reach the purge_threshold.
+    for r in 6..=15 {
+        engine
+            .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)
+            .unwrap();
+    }
+    assert_eq!(engine.file_span(LogQueue::Append).0, start);
+    assert!(engine.file_span(LogQueue::Append).1 > end);
+    let (start, _) = engine.file_span(LogQueue::Append);
+    // Purge and check.
+    engine.purge_expired_files().unwrap();
+    assert!(engine.file_span(LogQueue::Append).0 > start);
+}

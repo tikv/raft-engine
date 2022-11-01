@@ -79,7 +79,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         // is open, and the following reading strategy should tolerate reading broken
         // blocks until it finds an accessible header of `LogBatch`.
         while self.valid_offset < self.size {
-            let alignment = self.format.unwrap().alignment;
+            let format = self.format.unwrap();
             if self.valid_offset < LOG_BATCH_HEADER_LEN {
                 return Err(Error::Corruption(
                     "attempt to read file with broken header".to_owned(),
@@ -92,8 +92,8 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             )?);
             if_chain::if_chain! {
                 if r.is_err();
-                if alignment > 0;
-                let aligned_next_offset = round_up(self.valid_offset, alignment as usize);
+                if format.alignment > 0;
+                let aligned_next_offset = round_up(self.valid_offset, format.alignment as usize);
                 if self.valid_offset != aligned_next_offset;
                 if is_zero_padded(self.peek(self.valid_offset, aligned_next_offset - self.valid_offset, 0)?);
                 then {
@@ -119,7 +119,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
             };
             let context = LogFileContext {
                 id: self.file_id.unwrap(),
-                version: self.format.unwrap().version,
+                version: format.version,
             };
             let item_batch = LogItemBatch::decode(
                 &mut self.peek(

@@ -17,8 +17,23 @@ const LOG_SEQ_WIDTH: usize = 16;
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
 /// Name suffix for Rewrite queue files.
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
+/// Name suffix for Fake log files.
+const LOG_FAKE_SUFFIX: &str = ".fakelog";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
+/// Max `.fakelog` count.
+const LOG_FAKE_COUNT_MAX: usize = 82;
+
+/// Returns the max limitation of the count of `.fakelog`s.
+///
+/// In most common cases, the default capacity of `.raftlog`s
+/// will be set with `82`, decided by `cfg.purge_threshold` /
+/// `cfg.target_file_size` + 2. So, we can just reuse it as
+/// the max limitation.
+#[inline]
+pub(crate) fn fake_log_count_max() -> usize {
+    LOG_FAKE_COUNT_MAX
+}
 
 /// Checks whether the given `buf` is padded with zeros.
 ///
@@ -61,6 +76,11 @@ impl FileNameExt for FileId {
                         queue: LogQueue::Rewrite,
                         seq,
                     });
+                } else if file_name.ends_with(LOG_FAKE_SUFFIX) {
+                    return Some(FileId {
+                        queue: LogQueue::Fake,
+                        seq,
+                    });
                 }
             }
         }
@@ -79,6 +99,12 @@ impl FileNameExt for FileId {
                 "{:0width$}{}",
                 self.seq,
                 LOG_REWRITE_SUFFIX,
+                width = LOG_SEQ_WIDTH
+            ),
+            LogQueue::Fake => format!(
+                "{:0width$}{}",
+                self.seq,
+                LOG_FAKE_SUFFIX,
                 width = LOG_SEQ_WIDTH
             ),
         }

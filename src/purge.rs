@@ -175,6 +175,7 @@ where
                 total_size > self.cfg.purge_rewrite_threshold.unwrap().0 as usize
                     && compacted_rewrites_ratio > self.cfg.purge_rewrite_garbage_ratio
             }
+            _ => unreachable!(),
         }
     }
 

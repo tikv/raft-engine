@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use fs2::FileExt;
 use log::{error, info, warn};
@@ -16,13 +17,13 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileFormat};
-use super::log_file::build_file_reader;
-use super::pipe::{DualPipes, FileWithFormat, SinglePipe};
+use super::format::{fake_log_count_max, lock_file_path, FileNameExt, LogFileFormat};
+use super::log_file::{build_file_reader, build_file_writer};
+use super::pipe::{DualPipes, FileCollection, FileWithFormat, SinglePipe};
 use super::reader::LogItemBatchFileReader;
 use crate::env::Handle;
 
@@ -396,31 +397,91 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         )
     }
 
+    fn prepare_stale_logs_for_recycle(
+        &self,
+        queue: LogQueue,
+    ) -> (FileSeq, FileSeq, FileSeq, VecDeque<FileWithFormat<F>>) {
+        let start = Instant::now();
+        let (files, capacity) = match queue {
+            LogQueue::Append => (
+                &self.append_files,
+                std::cmp::min(self.cfg.recycle_capacity(), fake_log_count_max()),
+            ),
+            LogQueue::Rewrite => (&self.rewrite_files, 0_usize),
+            _ => unreachable!(),
+        };
+        let mut first_seq = files.first().map(|f| f.seq).unwrap_or(0);
+        let first_seq_in_use = first_seq;
+        let mut last_seq_in_fake = 0;
+        let mut prepare_files: VecDeque<FileWithFormat<F>> = VecDeque::new();
+        if capacity > 0 {
+            let (prepare_first_seq, prepare_stale_files_count) = match first_seq {
+                0 => (1, capacity),
+                seq => {
+                    let supply_count =
+                        std::cmp::min((seq - 1) as usize, capacity.saturating_sub(files.len()));
+                    (seq - supply_count as u64, supply_count)
+                }
+            };
+            first_seq = prepare_first_seq;
+            // Concurrent prepraring will bring more time consumption on racing. So, we just
+            // introduce a serial processing for preparing progress.
+            for seq in prepare_first_seq..prepare_first_seq + prepare_stale_files_count as u64 {
+                let file_id = FileId {
+                    queue: LogQueue::Fake,
+                    seq,
+                };
+                prepare_files.push_back(
+                    gen_fake_file(
+                        self.file_system.as_ref(),
+                        &self.cfg.dir,
+                        file_id,
+                        self.cfg.format_version,
+                        self.cfg.target_file_size.0,
+                    )
+                    .unwrap(),
+                );
+                // Update last seq of fake files.
+                last_seq_in_fake = seq;
+            }
+        }
+        info!("preparing raft logs takes {:?}", start.elapsed());
+        (first_seq, last_seq_in_fake, first_seq_in_use, prepare_files)
+    }
+
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
         let files = match queue {
             LogQueue::Append => &self.append_files,
             LogQueue::Rewrite => &self.rewrite_files,
+            _ => unreachable!(),
         };
-        let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<FileWithFormat<F>> = files
+        let (first_seq, last_seq_in_fake, first_seq_in_use, mut prepared_files) =
+            self.prepare_stale_logs_for_recycle(queue);
+        let mut active_files: VecDeque<FileWithFormat<F>> = files
             .iter()
             .map(|f| FileWithFormat {
                 handle: f.handle.clone(),
                 format: f.format.unwrap(),
             })
             .collect();
+        prepared_files.append(&mut active_files);
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
             self.listeners.clone(),
             queue,
-            first_seq,
-            files,
-            match queue {
-                LogQueue::Append => self.cfg.recycle_capacity(),
-                LogQueue::Rewrite => 0,
-            },
+            FileCollection::new(
+                first_seq,
+                last_seq_in_fake,
+                first_seq_in_use,
+                prepared_files,
+                match queue {
+                    LogQueue::Append => self.cfg.recycle_capacity(),
+                    LogQueue::Rewrite => 0,
+                    _ => unreachable!(),
+                },
+            ),
         )
     }
 
@@ -442,4 +503,31 @@ pub(super) fn lock_dir(dir: &str) -> Result<File> {
         ))
     })?;
     Ok(lock_file)
+}
+
+/// Generates a Fake log used for recycling.
+///
+/// This function is only called when `Config.enable-log-recycle` is true.
+pub(super) fn gen_fake_file<F: FileSystem>(
+    file_system: &F,
+    path: &str,
+    file_id: FileId,
+    version: Version,
+    target_file_size: u64,
+) -> Result<FileWithFormat<F>> {
+    let format = LogFileFormat::new(version, 0 /* alignment */);
+    let file_path = file_id.build_file_path(path);
+    let fd = Arc::new(file_system.create(&file_path)?);
+    let mut file = build_file_writer(file_system, fd.clone(), format, true)?;
+    let mut written = LogFileFormat::encoded_len(version) as u64;
+    let buf = vec![0; 4096];
+    while written <= target_file_size {
+        file.write(&buf, target_file_size as usize)?;
+        written += buf.len() as u64;
+    }
+    file.close()?;
+    // Metadata of fake files are not what we're truely concerned. So,
+    // they can be ignored by clear them here.
+    file_system.delete_metadata(&file_path)?;
+    Ok(FileWithFormat { handle: fd, format })
 }

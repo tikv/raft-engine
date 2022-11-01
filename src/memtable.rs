@@ -700,6 +700,7 @@ impl<A: AllocatorTrait> MemTable<A> {
             LogQueue::Append => self.entry_indexes.get(self.rewrite_count),
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
             LogQueue::Rewrite => self.entry_indexes.front(),
+            _ => unreachable!(),
         };
         let ents_min = entry.map(|e| e.entries.unwrap().id.seq);
         let kvs_min = self
@@ -794,6 +795,7 @@ impl<A: AllocatorTrait> Drop for MemTable<A> {
             match id.queue {
                 LogQueue::Rewrite => rewrite_kvs += 1,
                 LogQueue::Append => append_kvs += 1,
+                _ => unreachable!(),
             }
         }
 
@@ -1204,6 +1206,7 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
         match file_id.queue {
             LogQueue::Append => self.memtables.replay_append_writes(item_batch.drain()),
             LogQueue::Rewrite => self.memtables.replay_rewrite_writes(item_batch.drain()),
+            _ => unreachable!(),
         }
         Ok(())
     }
@@ -1213,6 +1216,7 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
         match queue {
             LogQueue::Append => self.memtables.replay_append_writes(rhs.log_batch.drain()),
             LogQueue::Rewrite => self.memtables.replay_rewrite_writes(rhs.log_batch.drain()),
+            _ => unreachable!(),
         }
         self.memtables.merge_newer_neighbor(rhs.memtables);
         Ok(())
@@ -1249,6 +1253,7 @@ mod tests {
                 LogQueue::Append => self.entry_indexes.back(),
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
                 LogQueue::Rewrite => self.entry_indexes.get(self.rewrite_count - 1),
+                _ => unreachable!(),
             };
             let ents_max = entry.map(|e| e.entries.unwrap().id.seq);
 
@@ -2057,6 +2062,7 @@ mod tests {
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
                     }
+                    Some(_) => unreachable!(),
                 }
                 memtable
             },
@@ -2101,6 +2107,7 @@ mod tests {
                         // By MemTableRecoveryContext.
                         memtable.compact_to(10);
                     }
+                    Some(_) => unreachable!(),
                 }
                 memtable
             },
@@ -2150,6 +2157,7 @@ mod tests {
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
                     }
+                    Some(_) => unreachable!(),
                 }
                 memtable
             },
