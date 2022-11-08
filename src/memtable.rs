@@ -1308,7 +1308,13 @@ mod tests {
         ));
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
+        assert!(
+            catch_unwind_silent(|| { memtable.min_file_seq(LogQueue::Fake).unwrap() }).is_err()
+        );
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 1);
+        assert!(
+            catch_unwind_silent(|| { memtable.max_file_seq(LogQueue::Fake).unwrap() }).is_err()
+        );
         memtable.consistency_check();
 
         // Empty.
@@ -2183,6 +2189,11 @@ mod tests {
                 case(empty_table(region_id), Some(LogQueue::Append)).entry_indexes
             );
             assert!(append.entry_indexes.is_empty());
+
+            assert!(
+                catch_unwind_silent(|| { case(empty_table(region_id), Some(LogQueue::Fake)) })
+                    .is_err()
+            );
         }
 
         for (i, case) in cases.iter().enumerate() {
@@ -2244,6 +2255,20 @@ mod tests {
         for b in batches.iter_mut() {
             b.finish_write(FileBlockHandle::dummy(LogQueue::Append));
         }
+
+        // invalid to replay from .fakelog
+        assert!(catch_unwind_silent(|| {
+            let fake_rid = 777;
+            let fake_file_id = FileId::new(LogQueue::Fake, 77);
+            let mut fake_batch = LogItemBatch::with_capacity(0);
+            // construct fake entries in fake_batch
+            fake_batch.add_entry_indexes(fake_rid, generate_entry_indexes(1, 11, fake_file_id));
+            fake_batch.add_command(fake_rid, Command::Compact { index: 3 });
+            // should panic
+            let mut fake_ctxs = MemTableRecoverContext::default();
+            fake_ctxs.replay(fake_batch, fake_file_id).unwrap()
+        })
+        .is_err());
 
         // reverse merge
         let mut ctxs = VecDeque::default();

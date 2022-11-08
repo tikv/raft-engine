@@ -599,7 +599,7 @@ mod tests {
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
     use crate::pipe_log::Version;
-    use crate::test_util::{generate_entries, PanicGuard};
+    use crate::test_util::{catch_unwind_silent, generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
@@ -1196,6 +1196,11 @@ mod tests {
         assert!(!engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
+
+        assert!(catch_unwind_silent(|| {
+            engine.purge_manager.needs_rewrite_log_files(LogQueue::Fake)
+        })
+        .is_err());
 
         // Append more logs to make total size greater than `purge_threshold`.
         for index in 100..250 {
