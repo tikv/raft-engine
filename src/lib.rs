@@ -102,7 +102,6 @@ impl GlobalStats {
             pipe_log::LogQueue::Rewrite => {
                 self.rewrite_entries.fetch_add(count, Ordering::Relaxed);
             }
-            _ => unreachable!(),
         }
     }
 
@@ -116,7 +115,6 @@ impl GlobalStats {
                 self.deleted_rewrite_entries
                     .fetch_add(count, Ordering::Relaxed);
             }
-            _ => unreachable!(),
         }
     }
 
@@ -148,7 +146,6 @@ impl GlobalStats {
                 debug_assert!(op >= dop);
                 op.saturating_sub(dop)
             }
-            _ => unreachable!(),
         }
     }
 

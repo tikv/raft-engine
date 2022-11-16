@@ -19,7 +19,6 @@ use crate::Result;
 pub enum LogQueue {
     Append = 0,
     Rewrite = 1,
-    Fake = 2,
 }
 
 /// Sequence number for log file. It is unique within a log queue.
@@ -191,6 +190,10 @@ pub trait PipeLog: Sized {
     /// of the specified log queue.
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 
+    /// Returns the sequence number range of all dummy log files in the specific
+    /// log queue.
+    fn dummy_file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
+
     /// Returns the oldest file ID that is newer than `position`% of all files.
     fn file_at(&self, queue: LogQueue, mut position: f64) -> FileSeq {
         if position > 1.0 {
@@ -205,10 +208,6 @@ pub trait PipeLog: Sized {
 
     /// Returns total size of the specified log queue.
     fn total_size(&self, queue: LogQueue) -> usize;
-
-    /// Returns the sequence number range of all log files in the specific
-    /// log queue, including fake and stale logs.
-    fn total_file_count(&self, queue: LogQueue) -> usize;
 
     /// Rotates a new log file for the specified log queue.
     ///

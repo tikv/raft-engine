@@ -19,7 +19,7 @@ use crate::pipe_log::{
 };
 use crate::{perf_context, Error, Result};
 
-use super::format::{FileNameExt, LogFileFormat};
+use super::format::{DummyFileExt, FileNameExt, LogFileFormat};
 use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
 
 #[derive(Debug)]
@@ -31,8 +31,6 @@ pub struct FileWithFormat<F: FileSystem> {
 pub struct FileCollection<F: FileSystem> {
     /// Sequence number of the first file.
     first_seq: FileSeq,
-    /// Sequence number of the last prepared fake file.
-    last_seq_in_fake: FileSeq,
     /// Sequence number of the first file that is in use.
     first_seq_in_use: FileSeq,
     fds: VecDeque<FileWithFormat<F>>,
@@ -45,7 +43,6 @@ pub struct FileCollection<F: FileSystem> {
 #[derive(PartialEq, Eq, Debug)]
 struct FileState {
     first_seq: FileSeq,
-    last_seq_in_fake: FileSeq,
     first_seq_in_use: FileSeq,
     total_len: usize,
 }
@@ -55,14 +52,12 @@ impl<F: FileSystem> FileCollection<F> {
     #[inline]
     pub fn new(
         first_seq: FileSeq,
-        last_seq_in_fake: FileSeq,
         first_seq_in_use: FileSeq,
         fds: VecDeque<FileWithFormat<F>>,
         capacity: usize,
     ) -> Self {
         FileCollection {
             first_seq,
-            last_seq_in_fake,
             first_seq_in_use,
             fds,
             capacity,
@@ -73,7 +68,6 @@ impl<F: FileSystem> FileCollection<F> {
     #[inline]
     fn recycle_one_file(&mut self) -> Option<FileSeq> {
         debug_assert!(self.first_seq <= self.first_seq_in_use);
-        debug_assert!(!self.fds.is_empty());
         if self.first_seq < self.first_seq_in_use {
             let seq = self.first_seq;
             self.fds.pop_front().unwrap();
@@ -89,7 +83,6 @@ impl<F: FileSystem> FileCollection<F> {
         self.fds.push_back(file);
         FileState {
             first_seq: self.first_seq,
-            last_seq_in_fake: self.last_seq_in_fake,
             first_seq_in_use: self.first_seq_in_use,
             total_len: self.fds.len(),
         }
@@ -99,7 +92,6 @@ impl<F: FileSystem> FileCollection<F> {
     fn logical_purge(&mut self, file_seq: FileSeq) -> (FileState, FileState) {
         let prev = FileState {
             first_seq: self.first_seq,
-            last_seq_in_fake: self.last_seq_in_fake,
             first_seq_in_use: self.first_seq_in_use,
             total_len: self.fds.len(),
         };
@@ -124,7 +116,6 @@ impl<F: FileSystem> FileCollection<F> {
         }
         let current = FileState {
             first_seq: self.first_seq,
-            last_seq_in_fake: self.last_seq_in_fake,
             first_seq_in_use: self.first_seq_in_use,
             total_len: self.fds.len(),
         };
@@ -132,8 +123,15 @@ impl<F: FileSystem> FileCollection<F> {
     }
 
     #[inline]
-    fn in_fake_range(&self, seq: FileSeq) -> bool {
-        seq <= self.last_seq_in_fake
+    fn pour_out(&mut self) -> (FileSeq, usize) {
+        if self.fds.is_empty() {
+            return (0, 0);
+        }
+        let (first_seq, len) = (self.first_seq, self.fds.len());
+        self.fds.clear();
+        self.first_seq = 0;
+        self.first_seq_in_use = 0;
+        (first_seq, len)
     }
 }
 
@@ -153,6 +151,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
     listeners: Vec<Arc<dyn EventListener>>,
 
     files: CachePadded<RwLock<FileCollection<F>>>,
+    reserved_files: CachePadded<RwLock<FileCollection<F>>>,
     /// The log file opened for write.
     ///
     /// `active_file` must be locked first to acquire both `files` and
@@ -171,11 +170,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         let files = self.files.read();
         for seq in files.first_seq..files.first_seq_in_use {
             let file_id = FileId {
-                queue: if files.in_fake_range(seq) {
-                    LogQueue::Fake
-                } else {
-                    self.queue
-                },
+                queue: self.queue,
                 seq,
             };
             let path = file_id.build_file_path(&self.dir);
@@ -198,6 +193,7 @@ impl<F: FileSystem> SinglePipe<F> {
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut files: FileCollection<F>,
+        mut reserved_files: FileCollection<F>,
     ) -> Result<Self> {
         #[allow(unused_mut)]
         let mut alignment = 0;
@@ -214,27 +210,37 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let create_file = files.first_seq_in_use == 0;
+        let create_file = files.first_seq == 0;
         let active_seq = if create_file {
-            if files.fds.is_empty() {
-                debug_assert!(files.first_seq == 0);
-                files.first_seq = 1;
-                files.first_seq_in_use = files.first_seq;
-            } else {
-                files.first_seq_in_use = files.first_seq + files.fds.len() as u64;
-            }
+            files.first_seq = 1;
+            files.first_seq_in_use = files.first_seq;
             let file_id = FileId {
                 queue,
-                seq: files.first_seq_in_use,
+                seq: files.first_seq,
             };
-            let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
+            let fd = Arc::new(if let Some(seq) = reserved_files.recycle_one_file() {
+                let dummy_file_id = FileId { queue, seq };
+                let src_path = dummy_file_id.build_dummy_file_path(&cfg.dir);
+                let dst_path = file_id.build_file_path(&cfg.dir);
+                if let Err(e) = file_system.reuse(&src_path, &dst_path) {
+                    error!("error while trying to reuse one dummy file: {}", e);
+                    if let Err(e) = file_system.delete(&src_path) {
+                        error!("error while trying to delete one dummy file: {}", e);
+                    }
+                    file_system.create(&dst_path)?
+                } else {
+                    file_system.open(&dst_path)?
+                }
+            } else {
+                file_system.create(&file_id.build_file_path(&cfg.dir))?
+            });
             files.fds.push_back(FileWithFormat {
                 handle: fd,
                 format: LogFileFormat::new(cfg.format_version, alignment),
             });
-            files.first_seq_in_use
+            files.first_seq
         } else {
-            files.first_seq + files.fds.len() as u64 - 1
+            files.first_seq + files.fds.len() as FileSeq - 1
         };
 
         for seq in files.first_seq_in_use..=active_seq {
@@ -249,7 +255,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 file_system.as_ref(),
                 active_fd.handle.clone(),
                 active_fd.format,
-                false, /* force_reset */
+                create_file, /* force_reset */
             )?,
             format: active_fd.format,
         };
@@ -263,6 +269,7 @@ impl<F: FileSystem> SinglePipe<F> {
             file_system,
             listeners,
             files: CachePadded::new(RwLock::new(files)),
+            reserved_files: CachePadded::new(RwLock::new(reserved_files)),
             active_file: CachePadded::new(Mutex::new(active_file)),
         };
         pipe.flush_metrics(total_files);
@@ -309,17 +316,24 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         let path = file_id.build_file_path(&self.dir);
         let fd = {
-            let mut files = self.files.write();
-            Arc::new(if let Some(seq) = files.recycle_one_file() {
-                let src_file_id = FileId {
-                    queue: if files.in_fake_range(seq) {
-                        LogQueue::Fake
-                    } else {
-                        self.queue
-                    },
-                    seq,
-                };
-                let src_path = src_file_id.build_file_path(&self.dir);
+            let recycled_path = {
+                if let Some(seq) = self.reserved_files.write().recycle_one_file() {
+                    let src_file_id = FileId {
+                        queue: self.queue,
+                        seq,
+                    };
+                    Some(src_file_id.build_dummy_file_path(&self.dir))
+                } else if let Some(seq) = self.files.write().recycle_one_file() {
+                    let src_file_id = FileId {
+                        queue: self.queue,
+                        seq,
+                    };
+                    Some(src_file_id.build_file_path(&self.dir))
+                } else {
+                    None
+                }
+            };
+            Arc::new(if let Some(src_path) = recycled_path {
                 let dst_path = file_id.build_file_path(&self.dir);
                 if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
                     error!("error while trying to reuse one expired file: {}", e);
@@ -373,7 +387,6 @@ impl<F: FileSystem> SinglePipe<F> {
         match self.queue {
             LogQueue::Append => LOG_FILE_COUNT.append.set(len as i64),
             LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(len as i64),
-            _ => unreachable!(),
         }
     }
 }
@@ -473,14 +486,21 @@ impl<F: FileSystem> SinglePipe<F> {
         )
     }
 
+    fn dummy_file_span(&self) -> (FileSeq, FileSeq) {
+        let files = self.reserved_files.read();
+        if files.fds.is_empty() {
+            (0, 0)
+        } else {
+            (
+                files.first_seq,
+                files.first_seq + files.fds.len() as u64 - 1,
+            )
+        }
+    }
+
     fn total_size(&self) -> usize {
         let files = self.files.read();
         files.fds.len() * self.target_file_size
-    }
-
-    fn total_file_count(&self) -> usize {
-        let files = self.files.read();
-        files.fds.len()
     }
 
     fn rotate(&self) -> Result<()> {
@@ -498,14 +518,24 @@ impl<F: FileSystem> SinglePipe<F> {
         } else if prev == current {
             return Ok(0);
         }
-        debug_assert!(prev.last_seq_in_fake == current.last_seq_in_fake);
+
+        // If there exists several stale files for purging, it means that
+        // the file_list is already full of normal log files. So, the dummy
+        // files in `reserved_files` could be removed.
+        {
+            let (first_seq, len) = self.reserved_files.write().pour_out();
+            for seq in first_seq..first_seq + len as FileSeq {
+                let file_id = FileId {
+                    queue: self.queue,
+                    seq,
+                };
+                let path = file_id.build_dummy_file_path(&self.dir);
+                self.file_system.delete(&path)?;
+            }
+        }
         for seq in prev.first_seq..current.first_seq {
             let file_id = FileId {
-                queue: if seq <= prev.last_seq_in_fake {
-                    LogQueue::Fake
-                } else {
-                    self.queue
-                },
+                queue: self.queue,
                 seq,
             };
             let path = file_id.build_file_path(&self.dir);
@@ -583,13 +613,13 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn total_size(&self, queue: LogQueue) -> usize {
-        self.pipes[queue as usize].total_size()
+    fn dummy_file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
+        self.pipes[queue as usize].dummy_file_span()
     }
 
     #[inline]
-    fn total_file_count(&self, queue: LogQueue) -> usize {
-        self.pipes[queue as usize].total_file_count()
+    fn total_size(&self, queue: LogQueue) -> usize {
+        self.pipes[queue as usize].total_size()
     }
 
     #[inline]
@@ -619,22 +649,17 @@ mod tests {
         queue: LogQueue,
         fs: Arc<F>,
     ) -> Result<SinglePipe<F>> {
+        let capacity = match queue {
+            LogQueue::Append => cfg.recycle_capacity(),
+            LogQueue::Rewrite => 0,
+        };
         SinglePipe::open(
             cfg,
             fs,
             Vec::new(),
             queue,
-            FileCollection::new(
-                0,
-                0,
-                0,
-                VecDeque::new(),
-                match queue {
-                    LogQueue::Append => cfg.recycle_capacity(),
-                    LogQueue::Rewrite => 0,
-                    _ => unreachable!(),
-                },
-            ),
+            FileCollection::new(0, 0, VecDeque::new(), capacity),
+            FileCollection::new(0, 0, VecDeque::new(), capacity),
         )
     }
 
@@ -759,7 +784,6 @@ mod tests {
         // | 12
         let mut files = FileCollection {
             first_seq: 12,
-            last_seq_in_fake: 0,
             first_seq_in_use: 12,
             capacity: 5,
             fds: vec![new_file_handler(

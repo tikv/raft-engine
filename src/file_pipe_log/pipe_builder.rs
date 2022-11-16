@@ -21,7 +21,9 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::format::{fake_log_count_max, lock_file_path, FileNameExt, LogFileFormat};
+use super::format::{
+    lock_file_path, max_dummy_log_count, DummyFileExt, FileNameExt, LogFileFormat,
+};
 use super::log_file::{build_file_reader, build_file_writer};
 use super::pipe::{DualPipes, FileCollection, FileWithFormat, SinglePipe};
 use super::reader::LogItemBatchFileReader;
@@ -397,90 +399,56 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         )
     }
 
-    fn prepare_stale_logs_for_recycle(
-        &self,
-        queue: LogQueue,
-    ) -> (FileSeq, FileSeq, FileSeq, VecDeque<FileWithFormat<F>>) {
-        let start = Instant::now();
-        let (files, capacity) = match queue {
-            LogQueue::Append => (
-                &self.append_files,
-                std::cmp::min(self.cfg.recycle_capacity(), fake_log_count_max()),
-            ),
-            LogQueue::Rewrite => (&self.rewrite_files, 0_usize),
-            _ => unreachable!(),
-        };
-        let mut first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let first_seq_in_use = first_seq;
-        let mut last_seq_in_fake = 0;
-        let mut prepare_files: VecDeque<FileWithFormat<F>> = VecDeque::new();
-        if capacity > 0 {
-            let (prepare_first_seq, prepare_stale_files_count) = match first_seq {
-                0 => (1, capacity),
-                seq => {
-                    let supply_count =
-                        std::cmp::min((seq - 1) as usize, capacity.saturating_sub(files.len()));
-                    (seq - supply_count as u64, supply_count)
-                }
-            };
-            first_seq = prepare_first_seq;
-            // Concurrent prepraring will bring more time consumption on racing. So, we just
-            // introduce a serial processing for preparing progress.
-            for seq in prepare_first_seq..prepare_first_seq + prepare_stale_files_count as u64 {
-                let file_id = FileId {
-                    queue: LogQueue::Fake,
-                    seq,
-                };
-                prepare_files.push_back(
-                    gen_fake_file(
-                        self.file_system.as_ref(),
-                        &self.cfg.dir,
-                        file_id,
-                        self.cfg.format_version,
-                        self.cfg.target_file_size.0,
-                    )
-                    .unwrap(),
-                );
-                // Update last seq of fake files.
-                last_seq_in_fake = seq;
-            }
-        }
-        info!("preparing raft logs takes {:?}", start.elapsed());
-        (first_seq, last_seq_in_fake, first_seq_in_use, prepare_files)
-    }
-
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
-        let files = match queue {
-            LogQueue::Append => &self.append_files,
-            LogQueue::Rewrite => &self.rewrite_files,
-            _ => unreachable!(),
+        let (files, capacity, dummy_first_seq, mut dummy_files) = match queue {
+            LogQueue::Append => {
+                // Scan and get all existing dummy files.
+                let (dummy_first_seq, existed_dummy_files) =
+                    scan_dummpy_files(self.file_system.as_ref(), &self.cfg.dir)?;
+                (
+                    &self.append_files,
+                    self.cfg.recycle_capacity(),
+                    dummy_first_seq,
+                    existed_dummy_files,
+                )
+            }
+            LogQueue::Rewrite => (
+                &self.rewrite_files,
+                0,
+                0,
+                VecDeque::<FileWithFormat<F>>::default(),
+            ),
         };
-        let (first_seq, last_seq_in_fake, first_seq_in_use, mut prepared_files) =
-            self.prepare_stale_logs_for_recycle(queue);
-        let mut active_files: VecDeque<FileWithFormat<F>> = files
+        let active_first_seq = files.first().map(|f| f.seq).unwrap_or(0);
+        let active_files: VecDeque<FileWithFormat<F>> = files
             .iter()
             .map(|f| FileWithFormat {
                 handle: f.handle.clone(),
                 format: f.format.unwrap(),
             })
             .collect();
-        prepared_files.append(&mut active_files);
+        // Prepares extra dummpy files for recycling if necessary.
+        let dummy_first_seq = prepare_dummy_logs_for_recycle(
+            self.file_system.as_ref(),
+            &self.cfg.dir,
+            self.cfg.format_version,
+            self.cfg.target_file_size.0,
+            capacity.saturating_sub(active_files.len()),
+            dummy_first_seq,
+            &mut dummy_files,
+        )?;
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
             self.listeners.clone(),
             queue,
+            FileCollection::new(active_first_seq, active_first_seq, active_files, capacity),
             FileCollection::new(
-                first_seq,
-                last_seq_in_fake,
-                first_seq_in_use,
-                prepared_files,
-                match queue {
-                    LogQueue::Append => self.cfg.recycle_capacity(),
-                    LogQueue::Rewrite => 0,
-                    _ => unreachable!(),
-                },
+                dummy_first_seq,
+                dummy_first_seq + dummy_files.len() as FileSeq,
+                dummy_files,
+                capacity,
             ),
         )
     }
@@ -505,10 +473,109 @@ pub(super) fn lock_dir(dir: &str) -> Result<File> {
     Ok(lock_file)
 }
 
+/// Scans all dummy files from the specific directory.
+///
+/// Returns the first `FileSeq` of dummy files and the related file list by
+/// `VecDeque`.
+fn scan_dummpy_files<F: FileSystem>(
+    file_system: &F,
+    path: &str,
+) -> Result<(FileSeq, VecDeque<FileWithFormat<F>>)> {
+    let path = Path::new(path);
+    debug_assert!(path.exists() && path.is_dir());
+    let mut first_seq: FileSeq = 0;
+    let (mut min_dummy_id, mut max_dummy_id) = (u64::MAX, 0);
+    fs::read_dir(path)?.for_each(|e| {
+        if let Ok(e) = e {
+            let p = e.path();
+            if p.is_file() {
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq,
+                }) = FileId::parse_dummy_file_name(p.file_name().unwrap().to_str().unwrap())
+                {
+                    min_dummy_id = std::cmp::min(min_dummy_id, seq);
+                    max_dummy_id = std::cmp::max(max_dummy_id, seq);
+                }
+            }
+        }
+    });
+    let mut files: VecDeque<FileWithFormat<F>> = VecDeque::default();
+    if max_dummy_id > 0 {
+        files.reserve((max_dummy_id - min_dummy_id) as usize + 1);
+        for seq in min_dummy_id..=max_dummy_id {
+            let file_id = FileId {
+                queue: LogQueue::Append,
+                seq,
+            };
+            let path = file_id.build_dummy_file_path(path);
+            if !path.exists() {
+                files.clear();
+            } else {
+                let handle = Arc::new(file_system.open(&path)?);
+                // It's not necessary to record the metadata of dummy files.
+                file_system.delete_metadata(&path)?;
+                files.push_back(FileWithFormat {
+                    handle,
+                    format: LogFileFormat::new(Version::default(), 0),
+                });
+            }
+        }
+        first_seq = max_dummy_id - files.len() as FileSeq + 1;
+    }
+    Ok((first_seq, files))
+}
+
+/// Prepares several dummy files for later log recycling.
+///
+/// Returns the first `FileSeq` of dummy files.
+/// Attention, this function is only called when `Config.enable-log-recycle` is
+/// true.
+fn prepare_dummy_logs_for_recycle<F: FileSystem>(
+    file_system: &F,
+    path: &str,
+    version: Version,
+    target_file_size: u64,
+    capacity: usize,
+    first_seq: FileSeq,
+    files: &mut VecDeque<FileWithFormat<F>>,
+) -> Result<FileSeq> {
+    let now = Instant::now();
+    let capacity = std::cmp::min(capacity, max_dummy_log_count());
+    let mut dummy_first_seq: FileSeq = first_seq;
+    if capacity > 0 {
+        let (prepare_first_seq, prepare_stale_files_count) = match first_seq {
+            0 => {
+                // Update first_seq
+                dummy_first_seq = 1;
+                (1, capacity)
+            }
+            seq => (
+                seq + files.len() as FileSeq,
+                capacity.saturating_sub(files.len()),
+            ),
+        };
+        // Concurrent prepraring will bring more time consumption on racing. So, we just
+        // introduce a serial processing for preparing progress.
+        for seq in prepare_first_seq..prepare_first_seq + prepare_stale_files_count as FileSeq {
+            let file_id = FileId {
+                queue: LogQueue::Append,
+                seq,
+            };
+            files.push_back(
+                gen_fake_file(file_system, path, file_id, version, target_file_size).unwrap(),
+            );
+        }
+    }
+    info!("preparing raft logs takes {:?}", now.elapsed());
+    Ok(dummy_first_seq)
+}
+
 /// Generates a Fake log used for recycling.
 ///
-/// This function is only called when `Config.enable-log-recycle` is true.
-pub(super) fn gen_fake_file<F: FileSystem>(
+/// Attention, this function is only called when `Config.enable-log-recycle` is
+/// true.
+fn gen_fake_file<F: FileSystem>(
     file_system: &F,
     path: &str,
     file_id: FileId,
@@ -516,7 +583,7 @@ pub(super) fn gen_fake_file<F: FileSystem>(
     target_file_size: u64,
 ) -> Result<FileWithFormat<F>> {
     let format = LogFileFormat::new(version, 0 /* alignment */);
-    let file_path = file_id.build_file_path(path);
+    let file_path = file_id.build_dummy_file_path(path);
     let fd = Arc::new(file_system.create(&file_path)?);
     let mut file = build_file_writer(file_system, fd.clone(), format, true)?;
     let mut written = LogFileFormat::encoded_len(version) as u64;
@@ -526,7 +593,7 @@ pub(super) fn gen_fake_file<F: FileSystem>(
         written += buf.len() as u64;
     }
     file.close()?;
-    // Metadata of fake files are not what we're truely concerned. So,
+    // Metadata of dummy files are not what we're truely concerned. So,
     // they can be ignored by clear them here.
     file_system.delete_metadata(&file_path)?;
     Ok(FileWithFormat { handle: fd, format })

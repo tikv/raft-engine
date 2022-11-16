@@ -364,11 +364,11 @@ where
         self.pipe_log.file_span(queue)
     }
 
-    /// Returns the sequence number range of all log files in the specific
-    /// log queue, including fake and stale logs.
+    /// Returns the sequence number range of all dummy log files in the specific
+    /// log queue.
     /// For testing only.
-    pub fn total_file_count(&self, queue: LogQueue) -> usize {
-        self.pipe_log.total_file_count(queue)
+    pub fn dummy_file_span(&self, queue: LogQueue) -> (u64, u64) {
+        self.pipe_log.dummy_file_span(queue)
     }
 
     pub fn get_used_size(&self) -> usize {
@@ -599,7 +599,7 @@ mod tests {
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
     use crate::pipe_log::Version;
-    use crate::test_util::{catch_unwind_silent, generate_entries, PanicGuard};
+    use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
@@ -691,6 +691,18 @@ mod tests {
                 (b - a + 1) as usize
             } else {
                 self.file_count(Some(LogQueue::Append)) + self.file_count(Some(LogQueue::Rewrite))
+            }
+        }
+
+        fn dummy_file_count(&self, queue: Option<LogQueue>) -> usize {
+            if let Some(queue) = queue {
+                match self.dummy_file_span(queue) {
+                    (0, 0) => 0,
+                    (a, b) => (b - a + 1) as usize,
+                }
+            } else {
+                self.dummy_file_count(Some(LogQueue::Append))
+                    + self.dummy_file_count(Some(LogQueue::Rewrite))
             }
         }
     }
@@ -1196,11 +1208,6 @@ mod tests {
         assert!(!engine
             .purge_manager
             .needs_rewrite_log_files(LogQueue::Append));
-
-        assert!(catch_unwind_silent(|| {
-            engine.purge_manager.needs_rewrite_log_files(LogQueue::Fake)
-        })
-        .is_err());
 
         // Append more logs to make total size greater than `purge_threshold`.
         for index in 100..250 {
@@ -1975,15 +1982,18 @@ mod tests {
         }
 
         fn update_metadata(&self, path: &Path, delete: bool) -> bool {
-            let id = FileId::parse_file_name(path.file_name().unwrap().to_str().unwrap()).unwrap();
-            if id.queue == LogQueue::Append {
-                if delete {
-                    self.append_metadata.lock().unwrap().remove(&id.seq)
+            if_chain::if_chain! {
+                if let Some(id) = FileId::parse_file_name(path.file_name().unwrap().to_str().unwrap());
+                if id.queue == LogQueue::Append;
+                then {
+                    if delete {
+                        self.append_metadata.lock().unwrap().remove(&id.seq)
+                    } else {
+                        self.append_metadata.lock().unwrap().insert(id.seq)
+                    }
                 } else {
-                    self.append_metadata.lock().unwrap().insert(id.seq)
+                    false
                 }
-            } else {
-                false
             }
         }
     }
@@ -2155,7 +2165,7 @@ mod tests {
         let engine = engine.reopen();
         assert_eq!(
             fs.inner.file_count(),
-            engine.total_file_count(LogQueue::Append) + engine.total_file_count(LogQueue::Rewrite)
+            engine.file_count(None) + engine.dummy_file_count(None)
         );
         let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
         assert!(start_1 < start_2);
@@ -2287,10 +2297,8 @@ mod tests {
         let (start, _) = engine.file_span(LogQueue::Append);
         // Only one valid file left, the last one => active_file.
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
-        assert_eq!(
-            engine.total_file_count(LogQueue::Append),
-            engine.file_count(Some(LogQueue::Append))
-        );
+        assert_eq!(engine.dummy_file_count(Some(LogQueue::Append)), 0);
+        assert_eq!(engine.dummy_file_count(Some(LogQueue::Rewrite)), 0);
         // Append data.
         let entry_data = vec![b'x'; 512];
         for rid in 1..=5 {
@@ -2298,10 +2306,8 @@ mod tests {
         }
         assert_eq!(engine.file_span(LogQueue::Append).0, start);
         let (start, end) = engine.file_span(LogQueue::Append);
-        assert_eq!(
-            engine.total_file_count(LogQueue::Append),
-            engine.file_count(Some(LogQueue::Append))
-        );
+        assert_eq!(engine.dummy_file_count(Some(LogQueue::Append)), 0);
+        assert_eq!(engine.dummy_file_count(Some(LogQueue::Rewrite)), 0);
         drop(engine);
         // Reopen the engine with a smaller capacity.
         let cfg_v2 = Config {
@@ -2312,13 +2318,11 @@ mod tests {
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        // As the head seq of `file_list` in Append queue equal to `seq 1`, it means
-        // that we have no extra spare seq for preparing Fake logs for
-        // recycling.
-        assert_eq!(
-            engine.total_file_count(LogQueue::Append),
-            engine.file_count(Some(LogQueue::Append))
-        );
+        // As the recycling open, it would generated dummy logs for recycling
+        // LogQueue::Append.
+        let dummy_count = engine.dummy_file_count(Some(LogQueue::Append));
+        assert!(dummy_count > 0);
+        assert_eq!(engine.dummy_file_count(Some(LogQueue::Rewrite)), 0);
         // Stale files haven't filled the LogQueue::Append, purge_expired_files won't
         // make difference.
         engine.purge_expired_files().unwrap();
@@ -2331,11 +2335,7 @@ mod tests {
         let (start, end) = engine.file_span(LogQueue::Append);
         let engine = engine.reopen();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        // As head of `file_list` in Append queue has been filled with prepared `Fake`
-        // logs, the `total_file_count` should > `file_count`.
-        assert!(
-            engine.total_file_count(LogQueue::Append) > engine.file_count(Some(LogQueue::Append))
-        );
+        assert!(dummy_count > engine.dummy_file_count(Some(LogQueue::Append)));
     }
 
     #[test]
@@ -2357,9 +2357,8 @@ mod tests {
         let (start, end) = engine.file_span(LogQueue::Append);
         // Only one valid file left, the last one => active_file.
         assert_eq!(start, end);
-        assert!(
-            engine.total_file_count(LogQueue::Append) > engine.file_count(Some(LogQueue::Append))
-        );
+        assert!(engine.dummy_file_count(Some(LogQueue::Append)) > 0);
+        assert_eq!(engine.dummy_file_count(Some(LogQueue::Rewrite)), 0);
         // Append data.
         let entry_data = vec![b'x'; 512];
         for rid in 1..=5 {
@@ -2367,6 +2366,7 @@ mod tests {
         }
         assert_eq!(engine.file_span(LogQueue::Append).0, start);
         let (start, end) = engine.file_span(LogQueue::Append);
+        let dummy_count = engine.dummy_file_count(Some(LogQueue::Append));
         drop(engine);
         // Reopen the engine with a smaller capacity.
         let cfg_v2 = Config {
@@ -2377,9 +2377,7 @@ mod tests {
         let engine =
             RaftLogEngine::open_with_file_system(cfg_v2.clone(), file_system.clone()).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        assert!(
-            engine.total_file_count(LogQueue::Append) > engine.file_count(Some(LogQueue::Append))
-        );
+        assert_eq!(dummy_count, engine.dummy_file_count(Some(LogQueue::Append)));
         // Stale files have filled the LogQueue::Append, purge_expired_files won't
         // truely remove files from it.
         engine.purge_expired_files().unwrap();
@@ -2389,9 +2387,8 @@ mod tests {
         }
         assert!(engine.file_span(LogQueue::Append).1 > end);
         let engine = engine.reopen();
-        assert!(
-            engine.total_file_count(LogQueue::Append) > engine.file_count(Some(LogQueue::Append))
-        );
+        assert!(dummy_count > engine.dummy_file_count(Some(LogQueue::Append)));
+        let dummy_count = engine.dummy_file_count(Some(LogQueue::Append));
         drop(engine);
         // Reopen the engine withou log recycling.
         let cfg_v3 = Config {
@@ -2401,11 +2398,7 @@ mod tests {
             ..cfg_v2
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system).unwrap();
-        // Restart the engine without log recycling, the stale logs and fake logs both
-        // should be removed.
-        assert_eq!(
-            engine.total_file_count(LogQueue::Append),
-            engine.file_count(Some(LogQueue::Append))
-        );
+        // Restart the engine without log recycling, dummy logs should be reserved.
+        assert_eq!(dummy_count, engine.dummy_file_count(Some(LogQueue::Append)));
     }
 }

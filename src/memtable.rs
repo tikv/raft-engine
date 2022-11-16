@@ -700,7 +700,6 @@ impl<A: AllocatorTrait> MemTable<A> {
             LogQueue::Append => self.entry_indexes.get(self.rewrite_count),
             LogQueue::Rewrite if self.rewrite_count == 0 => None,
             LogQueue::Rewrite => self.entry_indexes.front(),
-            _ => unreachable!(),
         };
         let ents_min = entry.map(|e| e.entries.unwrap().id.seq);
         let kvs_min = self
@@ -795,7 +794,6 @@ impl<A: AllocatorTrait> Drop for MemTable<A> {
             match id.queue {
                 LogQueue::Rewrite => rewrite_kvs += 1,
                 LogQueue::Append => append_kvs += 1,
-                _ => unreachable!(),
             }
         }
 
@@ -1206,7 +1204,6 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
         match file_id.queue {
             LogQueue::Append => self.memtables.replay_append_writes(item_batch.drain()),
             LogQueue::Rewrite => self.memtables.replay_rewrite_writes(item_batch.drain()),
-            _ => unreachable!(),
         }
         Ok(())
     }
@@ -1216,7 +1213,6 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
         match queue {
             LogQueue::Append => self.memtables.replay_append_writes(rhs.log_batch.drain()),
             LogQueue::Rewrite => self.memtables.replay_rewrite_writes(rhs.log_batch.drain()),
-            _ => unreachable!(),
         }
         self.memtables.merge_newer_neighbor(rhs.memtables);
         Ok(())
@@ -1253,7 +1249,6 @@ mod tests {
                 LogQueue::Append => self.entry_indexes.back(),
                 LogQueue::Rewrite if self.rewrite_count == 0 => None,
                 LogQueue::Rewrite => self.entry_indexes.get(self.rewrite_count - 1),
-                _ => unreachable!(),
             };
             let ents_max = entry.map(|e| e.entries.unwrap().id.seq);
 
@@ -1308,13 +1303,7 @@ mod tests {
         ));
         assert_eq!(memtable.entries_size(), 10);
         assert_eq!(memtable.min_file_seq(LogQueue::Append).unwrap(), 1);
-        assert!(
-            catch_unwind_silent(|| { memtable.min_file_seq(LogQueue::Fake).unwrap() }).is_err()
-        );
         assert_eq!(memtable.max_file_seq(LogQueue::Append).unwrap(), 1);
-        assert!(
-            catch_unwind_silent(|| { memtable.max_file_seq(LogQueue::Fake).unwrap() }).is_err()
-        );
         memtable.consistency_check();
 
         // Empty.
@@ -2068,7 +2057,6 @@ mod tests {
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
                     }
-                    Some(_) => unreachable!(),
                 }
                 memtable
             },
@@ -2113,7 +2101,6 @@ mod tests {
                         // By MemTableRecoveryContext.
                         memtable.compact_to(10);
                     }
-                    Some(_) => unreachable!(),
                 }
                 memtable
             },
@@ -2163,7 +2150,6 @@ mod tests {
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
                     }
-                    Some(_) => unreachable!(),
                 }
                 memtable
             },
@@ -2189,11 +2175,6 @@ mod tests {
                 case(empty_table(region_id), Some(LogQueue::Append)).entry_indexes
             );
             assert!(append.entry_indexes.is_empty());
-
-            assert!(
-                catch_unwind_silent(|| { case(empty_table(region_id), Some(LogQueue::Fake)) })
-                    .is_err()
-            );
         }
 
         for (i, case) in cases.iter().enumerate() {
@@ -2255,20 +2236,6 @@ mod tests {
         for b in batches.iter_mut() {
             b.finish_write(FileBlockHandle::dummy(LogQueue::Append));
         }
-
-        // invalid to replay from .fakelog
-        assert!(catch_unwind_silent(|| {
-            let fake_rid = 777;
-            let fake_file_id = FileId::new(LogQueue::Fake, 77);
-            let mut fake_batch = LogItemBatch::with_capacity(0);
-            // construct fake entries in fake_batch
-            fake_batch.add_entry_indexes(fake_rid, generate_entry_indexes(1, 11, fake_file_id));
-            fake_batch.add_command(fake_rid, Command::Compact { index: 3 });
-            // should panic
-            let mut fake_ctxs = MemTableRecoverContext::default();
-            fake_ctxs.replay(fake_batch, fake_file_id).unwrap()
-        })
-        .is_err());
 
         // reverse merge
         let mut ctxs = VecDeque::default();
