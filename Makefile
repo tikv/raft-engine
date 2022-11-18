@@ -60,6 +60,6 @@ endif
 
 ## Build raft-engine-ctl.
 ctl:
-	cargo build --release --package raft-engine-ctl --bin raft-engine-ctl
+	cargo build --release --package raft-engine-ctl
 	@mkdir -p ${BIN_PATH}
 	@cp -f ${CARGO_TARGET_DIR}/release/raft-engine-ctl ${BIN_PATH}/
