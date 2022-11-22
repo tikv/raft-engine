@@ -35,6 +35,7 @@ pub trait FileCollectionMgr<F: FileSystem> {
     fn push(&mut self, file: FileWithFormat<F>) -> FileState;
 }
 
+/// A collection of files for managing active files.
 pub struct ActiveFileCollection<F: FileSystem> {
     /// Sequence number of the first file.
     pub first_seq: FileSeq,
@@ -105,7 +106,12 @@ impl<F: FileSystem> ActiveFileCollection<F> {
     }
 }
 
-//
+/// A collection of files for managing stale files.
+///
+/// Stale files contains two parts:
+/// - `Dummy` part, dummy log files named with `.raftlog.dummy` suffix.
+/// - `Expired` part, obsolete log files manually purged by callers, with
+///   `.raftlog` suffix.
 pub struct StaleFileCollection<F: FileSystem> {
     /// Sequence number of the first file.
     pub first_seq: FileSeq,
