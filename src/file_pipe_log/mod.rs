@@ -4,6 +4,7 @@
 //!
 //! [`PipeLog`]: crate::pipe_log::PipeLog
 
+mod file_mgr;
 mod format;
 mod log_file;
 mod pipe;

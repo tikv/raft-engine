@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::VecDeque;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,123 +16,13 @@ use crate::metrics::*;
 use crate::pipe_log::{
     FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
 };
-use crate::{perf_context, Error, Result};
+use crate::{perf_context, Result};
 
+use super::file_mgr::{
+    ActiveFileCollection, FileCollectionMgr, FileWithFormat, StaleFileCollection,
+};
 use super::format::{DummyFileExt, FileNameExt, LogFileFormat};
 use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
-
-#[derive(Debug)]
-pub struct FileWithFormat<F: FileSystem> {
-    pub handle: Arc<F::Handle>,
-    pub format: LogFileFormat,
-}
-
-pub struct FileCollection<F: FileSystem> {
-    /// Sequence number of the first file.
-    first_seq: FileSeq,
-    /// Sequence number of the first file that is in use.
-    first_seq_in_use: FileSeq,
-    fds: VecDeque<FileWithFormat<F>>,
-    /// A hint to control the amount of stale files.
-    /// `fds.len()` should be no larger than `capacity` unless it is full of
-    /// active files.
-    capacity: usize,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-struct FileState {
-    first_seq: FileSeq,
-    first_seq_in_use: FileSeq,
-    total_len: usize,
-}
-
-/// Note: create a method for any mutable operations.
-impl<F: FileSystem> FileCollection<F> {
-    #[inline]
-    pub fn new(
-        first_seq: FileSeq,
-        first_seq_in_use: FileSeq,
-        fds: VecDeque<FileWithFormat<F>>,
-        capacity: usize,
-    ) -> Self {
-        FileCollection {
-            first_seq,
-            first_seq_in_use,
-            fds,
-            capacity,
-        }
-    }
-
-    /// Takes a stale file if there is one.
-    #[inline]
-    fn recycle_one_file(&mut self) -> Option<FileSeq> {
-        debug_assert!(self.first_seq <= self.first_seq_in_use);
-        if self.first_seq < self.first_seq_in_use {
-            let seq = self.first_seq;
-            self.fds.pop_front().unwrap();
-            self.first_seq += 1;
-            Some(seq)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn push(&mut self, file: FileWithFormat<F>) -> FileState {
-        self.fds.push_back(file);
-        FileState {
-            first_seq: self.first_seq,
-            first_seq_in_use: self.first_seq_in_use,
-            total_len: self.fds.len(),
-        }
-    }
-
-    #[inline]
-    fn logical_purge(&mut self, file_seq: FileSeq) -> (FileState, FileState) {
-        let prev = FileState {
-            first_seq: self.first_seq,
-            first_seq_in_use: self.first_seq_in_use,
-            total_len: self.fds.len(),
-        };
-        if (self.first_seq_in_use..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
-            // Remove some obsolete files if capacity is exceeded.
-            let obsolete_files = (file_seq - self.first_seq) as usize;
-            // When capacity is zero, always remove logically deleted files.
-            let capacity_exceeded = self.fds.len().saturating_sub(self.capacity);
-            let mut purged = std::cmp::min(capacity_exceeded, obsolete_files);
-            // The files with format_version `V1` cannot be chosen as recycle
-            // candidates. We will simply make sure there's no V1 stale files in the
-            // collection.
-            for i in (purged..obsolete_files).rev() {
-                if !self.fds[i].format.version.has_log_signing() {
-                    purged = i + 1;
-                    break;
-                }
-            }
-            self.first_seq += purged as u64;
-            self.first_seq_in_use = file_seq;
-            self.fds.drain(..purged);
-        }
-        let current = FileState {
-            first_seq: self.first_seq,
-            first_seq_in_use: self.first_seq_in_use,
-            total_len: self.fds.len(),
-        };
-        (prev, current)
-    }
-
-    #[inline]
-    fn pour_out(&mut self) -> (FileSeq, usize) {
-        if self.fds.is_empty() {
-            return (0, 0);
-        }
-        let (first_seq, len) = (self.first_seq, self.fds.len());
-        self.fds.clear();
-        self.first_seq = 0;
-        self.first_seq_in_use = 0;
-        (first_seq, len)
-    }
-}
 
 struct ActiveFile<F: FileSystem> {
     seq: FileSeq,
@@ -147,11 +36,12 @@ pub(super) struct SinglePipe<F: FileSystem> {
     dir: String,
     file_format: LogFileFormat,
     target_file_size: usize,
+    capacity: usize,
     file_system: Arc<F>,
     listeners: Vec<Arc<dyn EventListener>>,
 
-    files: CachePadded<RwLock<FileCollection<F>>>,
-    reserved_files: CachePadded<RwLock<FileCollection<F>>>,
+    active_files: CachePadded<RwLock<ActiveFileCollection<F>>>,
+    stale_files: CachePadded<RwLock<StaleFileCollection<F>>>,
     /// The log file opened for write.
     ///
     /// `active_file` must be locked first to acquire both `files` and
@@ -165,23 +55,10 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = active_file.writer.close() {
             error!("error while closing the active writer: {}", e);
         }
-        // Release the unnecessary disk space occupied by stale files. It also reduces
-        // recovery time.
-        let files = self.files.read();
-        for seq in files.first_seq..files.first_seq_in_use {
-            let file_id = FileId {
-                queue: self.queue,
-                seq,
-            };
-            let path = file_id.build_file_path(&self.dir);
-            if let Err(e) = self.file_system.delete(&path) {
-                error!(
-                    "error while deleting stale file: {}, err_msg: {}",
-                    path.display(),
-                    e
-                )
-            }
-        }
+        // Manually release the StaleFileCollection by `destory` before `drop`.
+        self.stale_files
+            .write()
+            .destroy(self.file_system.clone(), &self.dir, self.queue);
     }
 }
 
@@ -192,8 +69,9 @@ impl<F: FileSystem> SinglePipe<F> {
         file_system: Arc<F>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
-        mut files: FileCollection<F>,
-        mut reserved_files: FileCollection<F>,
+        mut active_files: ActiveFileCollection<F>,
+        mut stale_files: StaleFileCollection<F>,
+        capacity: usize,
     ) -> Result<Self> {
         #[allow(unused_mut)]
         let mut alignment = 0;
@@ -210,45 +88,50 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
 
-        let create_file = files.first_seq == 0;
+        let create_file = active_files.first_seq == 0;
         let active_seq = if create_file {
-            files.first_seq = 1;
-            files.first_seq_in_use = files.first_seq;
+            active_files.first_seq = stale_files.file_span().1 + 1;
             let file_id = FileId {
                 queue,
-                seq: files.first_seq,
+                seq: active_files.first_seq,
             };
-            let fd = Arc::new(if let Some(seq) = reserved_files.recycle_one_file() {
-                let dummy_file_id = FileId { queue, seq };
-                let src_path = dummy_file_id.build_dummy_file_path(&cfg.dir);
-                let dst_path = file_id.build_file_path(&cfg.dir);
-                if let Err(e) = file_system.reuse(&src_path, &dst_path) {
-                    error!("error while trying to reuse one dummy file: {}", e);
-                    if let Err(e) = file_system.delete(&src_path) {
-                        error!("error while trying to delete one dummy file: {}", e);
+            let fd = Arc::new(
+                if let Some((seq, is_dummy_file)) = stale_files.recycle_one_file() {
+                    let dummy_file_id = FileId { queue, seq };
+                    let src_path = if is_dummy_file {
+                        dummy_file_id.build_dummy_file_path(&cfg.dir)
+                    } else {
+                        dummy_file_id.build_file_path(&cfg.dir)
+                    };
+                    let dst_path = file_id.build_file_path(&cfg.dir);
+                    if let Err(e) = file_system.reuse(&src_path, &dst_path) {
+                        error!("error while trying to reuse one dummy file: {}", e);
+                        if let Err(e) = file_system.delete(&src_path) {
+                            error!("error while trying to delete one dummy file: {}", e);
+                        }
+                        file_system.create(&dst_path)?
+                    } else {
+                        file_system.open(&dst_path)?
                     }
-                    file_system.create(&dst_path)?
                 } else {
-                    file_system.open(&dst_path)?
-                }
-            } else {
-                file_system.create(&file_id.build_file_path(&cfg.dir))?
-            });
-            files.fds.push_back(FileWithFormat {
+                    file_system.create(&file_id.build_file_path(&cfg.dir))?
+                },
+            );
+            active_files.fds.push_back(FileWithFormat {
                 handle: fd,
                 format: LogFileFormat::new(cfg.format_version, alignment),
             });
-            files.first_seq
+            active_files.first_seq
         } else {
-            files.first_seq + files.fds.len() as FileSeq - 1
+            active_files.first_seq + active_files.fds.len() as FileSeq - 1
         };
 
-        for seq in files.first_seq_in_use..=active_seq {
+        for seq in active_files.first_seq..=active_seq {
             for listener in &listeners {
                 listener.post_new_log_file(FileId { queue, seq });
             }
         }
-        let active_fd = files.fds.back().unwrap();
+        let active_fd = active_files.fds.back().unwrap();
         let active_file = ActiveFile {
             seq: active_seq,
             writer: build_file_writer(
@@ -260,16 +143,17 @@ impl<F: FileSystem> SinglePipe<F> {
             format: active_fd.format,
         };
 
-        let total_files = files.fds.len();
+        let total_files = active_files.fds.len();
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
             file_format: LogFileFormat::new(cfg.format_version, alignment),
             target_file_size: cfg.target_file_size.0 as usize,
+            capacity,
             file_system,
             listeners,
-            files: CachePadded::new(RwLock::new(files)),
-            reserved_files: CachePadded::new(RwLock::new(reserved_files)),
+            active_files: CachePadded::new(RwLock::new(active_files)),
+            stale_files: CachePadded::new(RwLock::new(stale_files)),
             active_file: CachePadded::new(Mutex::new(active_file)),
         };
         pipe.flush_metrics(total_files);
@@ -286,15 +170,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
-        let files = self.files.read();
-        if !(files.first_seq_in_use..files.first_seq_in_use + files.fds.len() as u64)
-            .contains(&file_seq)
-        {
-            return Err(Error::Corruption("file seqno out of range".to_owned()));
-        }
-        Ok(files.fds[(file_seq - files.first_seq) as usize]
-            .handle
-            .clone())
+        self.active_files.read().get_fd(file_seq)
     }
 
     /// Creates a new file for write, and rotates the active log file.
@@ -315,30 +191,22 @@ impl<F: FileSystem> SinglePipe<F> {
             seq,
         };
         let path = file_id.build_file_path(&self.dir);
-        let fd = {
-            let recycled_path = {
-                if let Some(seq) = self.reserved_files.write().recycle_one_file() {
-                    let src_file_id = FileId {
-                        queue: self.queue,
-                        seq,
-                    };
-                    Some(src_file_id.build_dummy_file_path(&self.dir))
-                } else if let Some(seq) = self.files.write().recycle_one_file() {
-                    let src_file_id = FileId {
-                        queue: self.queue,
-                        seq,
-                    };
-                    Some(src_file_id.build_file_path(&self.dir))
+        let fd = Arc::new(
+            if let Some((seq, is_dummy_file)) = self.stale_files.write().recycle_one_file() {
+                let stale_file_id = FileId {
+                    seq,
+                    queue: self.queue,
+                };
+                let src_path = if is_dummy_file {
+                    stale_file_id.build_dummy_file_path(&self.dir)
                 } else {
-                    None
-                }
-            };
-            Arc::new(if let Some(src_path) = recycled_path {
+                    stale_file_id.build_file_path(&self.dir)
+                };
                 let dst_path = file_id.build_file_path(&self.dir);
                 if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
-                    error!("error while trying to reuse one expired file: {}", e);
+                    error!("error while trying to reuse one stale file, err: {}", e);
                     if let Err(e) = self.file_system.delete(&src_path) {
-                        error!("error while trying to delete one expired file: {}", e);
+                        error!("error while trying to delete one stale file, err: {}", e);
                     }
                     self.file_system.create(&path)?
                 } else {
@@ -346,8 +214,8 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             } else {
                 self.file_system.create(&path)?
-            })
-        };
+            },
+        );
         let mut new_file = ActiveFile {
             seq,
             // The file might generated from a recycled stale-file, always reset the file
@@ -368,7 +236,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let alignment = new_file.format.alignment;
         **active_file = new_file;
 
-        let state = self.files.write().push(FileWithFormat {
+        let state = self.active_files.write().push(FileWithFormat {
             handle: fd,
             format: LogFileFormat::new(version, alignment),
         });
@@ -479,28 +347,15 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn file_span(&self) -> (FileSeq, FileSeq) {
-        let files = self.files.read();
-        (
-            files.first_seq_in_use,
-            files.first_seq + files.fds.len() as u64 - 1,
-        )
+        self.active_files.read().file_span()
     }
 
-    fn dummy_file_span(&self) -> (FileSeq, FileSeq) {
-        let files = self.reserved_files.read();
-        if files.fds.is_empty() {
-            (0, 0)
-        } else {
-            (
-                files.first_seq,
-                files.first_seq + files.fds.len() as u64 - 1,
-            )
-        }
+    fn stale_file_span(&self) -> (FileSeq, FileSeq) {
+        self.stale_files.read().file_span()
     }
 
     fn total_size(&self) -> usize {
-        let files = self.files.read();
-        files.fds.len() * self.target_file_size
+        self.active_files.read().len() as usize * self.target_file_size
     }
 
     fn rotate(&self) -> Result<()> {
@@ -511,7 +366,7 @@ impl<F: FileSystem> SinglePipe<F> {
     ///
     /// Return the actual removed count of purged files.
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let (prev, current) = self.files.write().logical_purge(file_seq);
+        let (prev, current, purged_files) = self.active_files.write().logical_purge(file_seq);
         if file_seq > prev.first_seq + prev.total_len as u64 - 1 {
             debug_assert_eq!(prev, current);
             return Err(box_err!("Purge active or newer files"));
@@ -519,40 +374,41 @@ impl<F: FileSystem> SinglePipe<F> {
             return Ok(0);
         }
 
-        // If there exists several stale files for purging, it means that
-        // the file_list is already full of normal log files. So, the dummy
-        // files in `reserved_files` could be removed.
+        // If there exists several stale files for purging in `self.stale_files`,
+        // we should check and remove them to avoid the `size` of whole files
+        // beyond `self.capacity`.
         {
-            let (first_seq, len) = self.reserved_files.write().pour_out();
-            for seq in first_seq..first_seq + len as FileSeq {
+            let mut stale_files = self.stale_files.write();
+            stale_files.concat(prev.first_seq, purged_files);
+            let (before, after, last_dummy_seq) = stale_files
+                .logical_purge(self.capacity.saturating_sub(self.active_files.read().len()));
+            for seq in before.first_seq..after.first_seq {
+                #[cfg(feature = "failpoints")]
+                {
+                    let remove_skipped = || {
+                        fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
+                        false
+                    };
+                    if remove_skipped() {
+                        continue;
+                    }
+                }
                 let file_id = FileId {
                     queue: self.queue,
                     seq,
                 };
-                let path = file_id.build_dummy_file_path(&self.dir);
+                // If the current `seq` is less than `last_dummy_seq`, it means that it
+                // is a dummy raft log.
+                let path = if seq > last_dummy_seq {
+                    file_id.build_file_path(&self.dir)
+                } else {
+                    file_id.build_dummy_file_path(&self.dir)
+                };
                 self.file_system.delete(&path)?;
             }
         }
-        for seq in prev.first_seq..current.first_seq {
-            let file_id = FileId {
-                queue: self.queue,
-                seq,
-            };
-            let path = file_id.build_file_path(&self.dir);
-            #[cfg(feature = "failpoints")]
-            {
-                let remove_skipped = || {
-                    fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
-                    false
-                };
-                if remove_skipped() {
-                    continue;
-                }
-            }
-            self.file_system.delete(&path)?;
-        }
         self.flush_metrics(current.total_len);
-        Ok((current.first_seq_in_use - prev.first_seq_in_use) as usize)
+        Ok((current.first_seq - prev.first_seq) as usize)
     }
 }
 
@@ -613,8 +469,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn dummy_file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
-        self.pipes[queue as usize].dummy_file_span()
+    fn stale_file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
+        self.pipes[queue as usize].stale_file_span()
     }
 
     #[inline]
@@ -635,6 +491,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use tempfile::Builder;
 
     use super::super::format::LogFileFormat;
@@ -658,8 +515,9 @@ mod tests {
             fs,
             Vec::new(),
             queue,
-            FileCollection::new(0, 0, VecDeque::new(), capacity),
-            FileCollection::new(0, 0, VecDeque::new(), capacity),
+            ActiveFileCollection::new(0, VecDeque::new()),
+            StaleFileCollection::new(0, 0, VecDeque::new()),
+            capacity,
         )
     }
 
@@ -758,80 +616,6 @@ mod tests {
         // leave only 1 file to truncate
         pipe_log.purge_to(FileId { queue, seq: 3 }).unwrap();
         assert_eq!(pipe_log.file_span(queue), (3, 3));
-    }
-
-    #[test]
-    fn test_file_collection() {
-        fn new_file_handler(
-            path: &str,
-            file_id: FileId,
-            version: Version,
-        ) -> FileWithFormat<DefaultFileSystem> {
-            FileWithFormat {
-                handle: Arc::new(
-                    DefaultFileSystem
-                        .create(&file_id.build_file_path(path))
-                        .unwrap(),
-                ),
-                format: LogFileFormat::new(version, 0 /* alignment */),
-            }
-        }
-        let dir = Builder::new()
-            .prefix("test_file_collection")
-            .tempdir()
-            .unwrap();
-        let path = dir.path().to_str().unwrap();
-        // | 12
-        let mut files = FileCollection {
-            first_seq: 12,
-            first_seq_in_use: 12,
-            capacity: 5,
-            fds: vec![new_file_handler(
-                path,
-                FileId::new(LogQueue::Append, 12),
-                Version::V2,
-            )]
-            .into(),
-        };
-        assert_eq!(files.recycle_one_file(), None);
-        // | 12 13 14
-        files.push(new_file_handler(
-            path,
-            FileId::new(LogQueue::Append, 13),
-            Version::V2,
-        ));
-        files.push(new_file_handler(
-            path,
-            FileId::new(LogQueue::Append, 14),
-            Version::V1,
-        ));
-        // 12 13 | 14
-        files.logical_purge(14);
-        // 13 | 14
-        assert_eq!(files.recycle_one_file().unwrap(), 12);
-        // 13 | 14 15
-        files.push(new_file_handler(
-            path,
-            FileId::new(LogQueue::Append, 15),
-            Version::V2,
-        ));
-        // V1 file will not be kept around.
-        // | 15
-        files.logical_purge(15);
-        assert_eq!(files.recycle_one_file(), None);
-        // | 15 16 17 18 19 20
-        for i in 16..=20 {
-            files.push(new_file_handler(
-                path,
-                FileId::new(LogQueue::Append, i),
-                Version::V2,
-            ));
-        }
-        assert_eq!(files.recycle_one_file(), None);
-        // 16 17 18 | 19 20
-        files.logical_purge(19);
-        // 17 18 | 19 20
-        assert_eq!(files.recycle_one_file().unwrap(), 16);
     }
 
     #[test]
