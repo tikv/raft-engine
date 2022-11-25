@@ -430,23 +430,22 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             })
             .collect();
         // Prepares extra dummpy files for recycling if necessary.
-        let (dummy_first_seq, dummy_last_seq) =
-            StaleFileCollection::prepare_dummy_logs_for_recycle(
-                &self.cfg,
-                self.file_system.as_ref(),
-                queue,
-                capacity.saturating_sub(active_files.len()),
-                active_first_seq,
-                dummy_first_seq,
-                &mut dummy_files,
-            )?;
+        let dummy_first_seq = StaleFileCollection::prepare_dummy_logs_for_recycle(
+            &self.cfg,
+            self.file_system.as_ref(),
+            queue,
+            capacity.saturating_sub(active_files.len()),
+            active_first_seq,
+            dummy_first_seq,
+            &mut dummy_files,
+        )?;
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
             self.listeners.clone(),
             queue,
             ActiveFileCollection::new(active_first_seq, active_files),
-            StaleFileCollection::new(dummy_first_seq, dummy_last_seq, dummy_files),
+            StaleFileCollection::new(dummy_first_seq, dummy_files),
             capacity,
         )
     }

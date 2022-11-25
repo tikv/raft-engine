@@ -18,9 +18,7 @@ use crate::pipe_log::{
 };
 use crate::{perf_context, Result};
 
-use super::file_mgr::{
-    ActiveFileCollection, FileCollectionMgr, FileWithFormat, StaleFileCollection,
-};
+use super::file_mgr::{ActiveFileCollection, FileWithFormat, StaleFileCollection};
 use super::format::{DummyFileExt, FileNameExt, LogFileFormat};
 use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
 
@@ -55,10 +53,6 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = active_file.writer.close() {
             error!("error while closing the active writer: {}", e);
         }
-        // Manually release the StaleFileCollection by `destory` before `drop`.
-        self.stale_files
-            .write()
-            .destroy(self.file_system.clone(), &self.dir, self.queue);
     }
 }
 
@@ -95,28 +89,22 @@ impl<F: FileSystem> SinglePipe<F> {
                 queue,
                 seq: active_files.first_seq,
             };
-            let fd = Arc::new(
-                if let Some((seq, is_dummy_file)) = stale_files.recycle_one_file() {
-                    let dummy_file_id = FileId { queue, seq };
-                    let src_path = if is_dummy_file {
-                        dummy_file_id.build_dummy_file_path(&cfg.dir)
-                    } else {
-                        dummy_file_id.build_file_path(&cfg.dir)
-                    };
-                    let dst_path = file_id.build_file_path(&cfg.dir);
-                    if let Err(e) = file_system.reuse(&src_path, &dst_path) {
-                        error!("error while trying to reuse one dummy file: {}", e);
-                        if let Err(e) = file_system.delete(&src_path) {
-                            error!("error while trying to delete one dummy file: {}", e);
-                        }
-                        file_system.create(&dst_path)?
-                    } else {
-                        file_system.open(&dst_path)?
+            let fd = Arc::new(if let Some(seq) = stale_files.recycle_one_file() {
+                let dummy_file_id = FileId { queue, seq };
+                let src_path = dummy_file_id.build_dummy_file_path(&cfg.dir);
+                let dst_path = file_id.build_file_path(&cfg.dir);
+                if let Err(e) = file_system.reuse(&src_path, &dst_path) {
+                    error!("error while trying to reuse one dummy file: {}", e);
+                    if let Err(e) = file_system.delete(&src_path) {
+                        error!("error while trying to delete one dummy file: {}", e);
                     }
+                    file_system.create(&dst_path)?
                 } else {
-                    file_system.create(&file_id.build_file_path(&cfg.dir))?
-                },
-            );
+                    file_system.open(&dst_path)?
+                }
+            } else {
+                file_system.create(&file_id.build_file_path(&cfg.dir))?
+            });
             active_files.fds.push_back(FileWithFormat {
                 handle: fd,
                 format: LogFileFormat::new(cfg.format_version, alignment),
@@ -143,7 +131,7 @@ impl<F: FileSystem> SinglePipe<F> {
             format: active_fd.format,
         };
 
-        let total_files = active_files.fds.len();
+        let total_files = active_files.fds.len() + stale_files.fds.len();
         let pipe = Self {
             queue,
             dir: cfg.dir.clone(),
@@ -192,16 +180,12 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         let path = file_id.build_file_path(&self.dir);
         let fd = Arc::new(
-            if let Some((seq, is_dummy_file)) = self.stale_files.write().recycle_one_file() {
+            if let Some(seq) = self.stale_files.write().recycle_one_file() {
                 let stale_file_id = FileId {
                     seq,
                     queue: self.queue,
                 };
-                let src_path = if is_dummy_file {
-                    stale_file_id.build_dummy_file_path(&self.dir)
-                } else {
-                    stale_file_id.build_file_path(&self.dir)
-                };
+                let src_path = stale_file_id.build_dummy_file_path(&self.dir);
                 let dst_path = file_id.build_file_path(&self.dir);
                 if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
                     error!("error while trying to reuse one stale file, err: {}", e);
@@ -246,7 +230,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 seq,
             });
         }
-        self.flush_metrics(state.total_len);
+        self.flush_metrics(state.total_len + self.stale_files.read().len());
         Ok(())
     }
 
@@ -366,49 +350,75 @@ impl<F: FileSystem> SinglePipe<F> {
     ///
     /// Return the actual removed count of purged files.
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let (prev, current, purged_files) = self.active_files.write().logical_purge(file_seq);
-        if file_seq > prev.first_seq + prev.total_len as u64 - 1 {
-            debug_assert_eq!(prev, current);
+        let (active_pre, active_cur, purged_files) =
+            self.active_files.write().logical_purge(file_seq);
+        if file_seq > active_pre.first_seq + active_pre.total_len as u64 - 1 {
+            debug_assert_eq!(active_pre, active_cur);
             return Err(box_err!("Purge active or newer files"));
-        } else if prev == current {
+        } else if active_pre == active_cur {
             return Ok(0);
         }
-
+        debug_assert_eq!(
+            (active_cur.first_seq - active_pre.first_seq) as usize,
+            purged_files.len()
+        );
+        debug_assert_eq!(
+            active_pre.total_len - active_cur.total_len,
+            purged_files.len()
+        );
         // If there exists several stale files for purging in `self.stale_files`,
         // we should check and remove them to avoid the `size` of whole files
         // beyond `self.capacity`.
-        {
+        let (stale_pre, stale_cur) = {
             let mut stale_files = self.stale_files.write();
-            stale_files.concat(prev.first_seq, purged_files);
-            let (before, after, last_dummy_seq) = stale_files
-                .logical_purge(self.capacity.saturating_sub(self.active_files.read().len()));
-            for seq in before.first_seq..after.first_seq {
-                #[cfg(feature = "failpoints")]
-                {
-                    let remove_skipped = || {
-                        fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
-                        false
-                    };
-                    if remove_skipped() {
-                        continue;
-                    }
+            stale_files.concat(active_pre.first_seq, purged_files);
+            stale_files.logical_purge(self.capacity.saturating_sub(active_cur.total_len))
+        };
+        for seq in stale_pre.first_seq..stale_cur.first_seq {
+            #[cfg(feature = "failpoints")]
+            {
+                let remove_skipped = || {
+                    fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
+                    false
+                };
+                if remove_skipped() {
+                    continue;
                 }
+            }
+            let file_id = FileId {
+                queue: self.queue,
+                seq,
+            };
+            // If seq less than the first seq of `purged_files`, it should be a renamed
+            // dummy file, named with `.raftlog.dummy` suffix.
+            let path = if seq < active_pre.first_seq {
+                file_id.build_dummy_file_path(&self.dir)
+            } else {
+                file_id.build_file_path(&self.dir)
+            };
+            self.file_system.delete(&path)?;
+        }
+        // Meanwhile, the new supplemented files from `self.active_files` should
+        // be RENAME to dummy files with `.raftlog.dummy` suffix, to reduce the
+        // unnecessary recovery timecost when RESTART.
+        {
+            let move_first_seq = std::cmp::max(active_pre.first_seq, stale_cur.first_seq);
+            let move_total_len = std::cmp::min(
+                active_pre.total_len - active_cur.total_len,
+                stale_cur.total_len,
+            );
+            for seq in move_first_seq..move_first_seq + move_total_len as FileSeq {
                 let file_id = FileId {
                     queue: self.queue,
                     seq,
                 };
-                // If the current `seq` is less than `last_dummy_seq`, it means that it
-                // is a dummy raft log.
-                let path = if seq > last_dummy_seq {
-                    file_id.build_file_path(&self.dir)
-                } else {
-                    file_id.build_dummy_file_path(&self.dir)
-                };
-                self.file_system.delete(&path)?;
+                let path = file_id.build_file_path(&self.dir);
+                let dummy_path = file_id.build_dummy_file_path(&self.dir);
+                self.file_system.reuse(&path, &dummy_path)?;
             }
         }
-        self.flush_metrics(current.total_len);
-        Ok((current.first_seq - prev.first_seq) as usize)
+        self.flush_metrics(active_cur.total_len + stale_cur.total_len);
+        Ok((active_cur.first_seq - active_pre.first_seq) as usize)
     }
 }
 
@@ -516,7 +526,7 @@ mod tests {
             Vec::new(),
             queue,
             ActiveFileCollection::new(0, VecDeque::new()),
-            StaleFileCollection::new(0, 0, VecDeque::new()),
+            StaleFileCollection::new(0, VecDeque::new()),
             capacity,
         )
     }
@@ -649,19 +659,20 @@ mod tests {
         }
         pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
+        // By `purge`, all stale files will be automatically RENAME to dummy files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read stale file.
-        for (i, handle) in handles.into_iter().enumerate() {
+        for (_, handle) in handles.into_iter().enumerate() {
             assert!(pipe_log.read_bytes(handle).is_err());
             // Bypass pipe log
             let mut reader = build_file_reader(
                 fs.as_ref(),
-                Arc::new(fs.open(handle.id.build_file_path(path)).unwrap()),
+                Arc::new(fs.open(handle.id.build_dummy_file_path(path)).unwrap()),
             )
             .unwrap();
-            assert_eq!(reader.read(handle).unwrap(), content(i));
+            assert!(reader.read(handle).unwrap().is_empty());
             // Delete file so that it cannot be reused.
-            fs.delete(handle.id.build_file_path(path)).unwrap();
+            fs.delete(handle.id.build_dummy_file_path(path)).unwrap();
         }
         // Try to reuse.
         let mut handles = Vec::new();

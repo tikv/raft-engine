@@ -2154,10 +2154,10 @@ mod tests {
             .must_rewrite_append_queue(Some(end - 1), None);
         assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
-        // no file have been physically deleted.
+        // Stale files have been reused.
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
+            &(start + 20)
         );
         // reusing these files.
         for rid in 1..=5 {
@@ -2173,7 +2173,7 @@ mod tests {
             engine.file_count(None) + engine.stale_file_count(None)
         );
         let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
-        assert!(start_1 < start_2);
+        assert_eq!(start_1, start_2);
     }
 
     #[test]

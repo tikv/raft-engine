@@ -6,14 +6,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use log::{error, info};
+use log::info;
 
 use crate::config::Config;
 use crate::env::FileSystem;
 use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::{Error, Result};
 
-use super::format::{max_dummy_log_count, DummyFileExt, FileNameExt, LogFileFormat};
+use super::format::{max_dummy_log_count, DummyFileExt, LogFileFormat};
 use super::log_file::build_file_writer;
 
 #[derive(Debug)]
@@ -28,13 +28,6 @@ pub struct FileState {
     pub total_len: usize,
 }
 
-pub trait FileCollectionMgr<F: FileSystem> {
-    fn len(&self) -> usize;
-    fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>>;
-    fn file_span(&self) -> (FileSeq, FileSeq);
-    fn push(&mut self, file: FileWithFormat<F>) -> FileState;
-}
-
 /// A collection of files for managing active files.
 pub struct ActiveFileCollection<F: FileSystem> {
     /// Sequence number of the first file.
@@ -42,14 +35,19 @@ pub struct ActiveFileCollection<F: FileSystem> {
     pub fds: VecDeque<FileWithFormat<F>>,
 }
 
-impl<F: FileSystem> FileCollectionMgr<F> for ActiveFileCollection<F> {
+impl<F: FileSystem> ActiveFileCollection<F> {
     #[inline]
-    fn len(&self) -> usize {
+    pub fn new(first_seq: FileSeq, fds: VecDeque<FileWithFormat<F>>) -> Self {
+        Self { first_seq, fds }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
         self.fds.len()
     }
 
     #[inline]
-    fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
+    pub fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
         if !(self.first_seq..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
@@ -59,7 +57,7 @@ impl<F: FileSystem> FileCollectionMgr<F> for ActiveFileCollection<F> {
     }
 
     #[inline]
-    fn file_span(&self) -> (FileSeq, FileSeq) {
+    pub fn file_span(&self) -> (FileSeq, FileSeq) {
         if !self.fds.is_empty() {
             (self.first_seq, self.first_seq + self.fds.len() as u64 - 1)
         } else {
@@ -68,19 +66,12 @@ impl<F: FileSystem> FileCollectionMgr<F> for ActiveFileCollection<F> {
     }
 
     #[inline]
-    fn push(&mut self, file: FileWithFormat<F>) -> FileState {
+    pub fn push(&mut self, file: FileWithFormat<F>) -> FileState {
         self.fds.push_back(file);
         FileState {
             first_seq: self.first_seq,
             total_len: self.fds.len(),
         }
-    }
-}
-
-impl<F: FileSystem> ActiveFileCollection<F> {
-    #[inline]
-    pub fn new(first_seq: FileSeq, fds: VecDeque<FileWithFormat<F>>) -> Self {
-        Self { first_seq, fds }
     }
 
     #[inline]
@@ -108,36 +99,39 @@ impl<F: FileSystem> ActiveFileCollection<F> {
 
 /// A collection of files for managing stale files.
 ///
-/// Stale files contains two parts:
-/// - `Dummy` part, dummy log files named with `.raftlog.dummy` suffix.
-/// - `Expired` part, obsolete log files manually purged by callers, with
-///   `.raftlog` suffix.
+/// Stale files are named with `.raftlog.dummy` suffix,
+/// coming from two parts:
+/// - `Dummy` part, prepared when starting.
+/// - `Expired` part, obsolete log files manually purged by callers.
 pub struct StaleFileCollection<F: FileSystem> {
     /// Sequence number of the first file.
     pub first_seq: FileSeq,
-    /// Sequence number of the last dummy file.
-    last_dummy_seq: FileSeq,
     pub fds: VecDeque<FileWithFormat<F>>,
 }
 
-impl<F: FileSystem> FileCollectionMgr<F> for StaleFileCollection<F> {
+impl<F: FileSystem> StaleFileCollection<F> {
     #[inline]
-    fn len(&self) -> usize {
+    pub fn new(first_seq: FileSeq, fds: VecDeque<FileWithFormat<F>>) -> Self {
+        Self { first_seq, fds }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
         self.fds.len()
     }
 
     #[inline]
-    fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
-        if !(self.first_seq..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
-            return Err(Error::Corruption("file seqno out of range".to_owned()));
+    #[cfg(test)]
+    pub fn push(&mut self, file: FileWithFormat<F>) -> FileState {
+        self.fds.push_back(file);
+        FileState {
+            first_seq: self.first_seq,
+            total_len: self.fds.len(),
         }
-        Ok(self.fds[(file_seq - self.first_seq) as usize]
-            .handle
-            .clone())
     }
 
     #[inline]
-    fn file_span(&self) -> (FileSeq, FileSeq) {
+    pub fn file_span(&self) -> (FileSeq, FileSeq) {
         if !self.fds.is_empty() {
             (self.first_seq, self.first_seq + self.fds.len() as u64 - 1)
         } else {
@@ -146,42 +140,18 @@ impl<F: FileSystem> FileCollectionMgr<F> for StaleFileCollection<F> {
     }
 
     #[inline]
-    fn push(&mut self, file: FileWithFormat<F>) -> FileState {
-        self.fds.push_back(file);
-        FileState {
-            first_seq: self.first_seq,
-            total_len: self.fds.len(),
-        }
-    }
-}
-
-impl<F: FileSystem> StaleFileCollection<F> {
-    #[inline]
-    pub fn new(
-        first_seq: FileSeq,
-        last_dummy_seq: FileSeq,
-        fds: VecDeque<FileWithFormat<F>>,
-    ) -> Self {
-        Self {
-            first_seq,
-            last_dummy_seq,
-            fds,
-        }
-    }
-
-    #[inline]
-    pub fn recycle_one_file(&mut self) -> Option<(FileSeq, bool)> {
+    pub fn recycle_one_file(&mut self) -> Option<FileSeq> {
         if !self.fds.is_empty() {
             let seq = self.first_seq;
             self.fds.pop_front().unwrap();
             self.first_seq += 1;
-            return Some((seq, seq <= self.last_dummy_seq));
+            return Some(seq);
         }
         None
     }
 
     #[inline]
-    pub fn logical_purge(&mut self, capacity: usize) -> (FileState, FileState, FileSeq) {
+    pub fn logical_purge(&mut self, capacity: usize) -> (FileState, FileState) {
         let prev = FileState {
             first_seq: self.first_seq,
             total_len: self.fds.len(),
@@ -204,7 +174,7 @@ impl<F: FileSystem> StaleFileCollection<F> {
             first_seq: self.first_seq,
             total_len: self.fds.len(),
         };
-        (prev, current, self.last_dummy_seq)
+        (prev, current)
     }
 
     /// Concatenates the given files into stale files list.
@@ -221,30 +191,6 @@ impl<F: FileSystem> StaleFileCollection<F> {
                 debug_assert_eq!(last + 1, file_seq);
             }
             self.fds.append(&mut files);
-        }
-    }
-
-    /// Renames all stale files into `.raftlog.dummy` format for both reserving
-    /// all dummy logs for next restart and reducing the recovery time when
-    /// `enable-log-recycle` is on.
-    ///
-    /// This function should only be called when `Drop`.
-    #[inline]
-    pub fn destroy(&mut self, file_system: Arc<F>, dir: &str, queue: LogQueue) {
-        let len = self.fds.len();
-        for seq in self.first_seq..self.first_seq + len as FileSeq {
-            if seq > self.last_dummy_seq {
-                let file_id = FileId { queue, seq };
-                let path = file_id.build_file_path(dir);
-                let reserved_path = file_id.build_dummy_file_path(dir);
-                if let Err(e) = file_system.reuse(&path, &reserved_path) {
-                    error!(
-                        "error while deleting stale file: {}, err_msg: {}",
-                        path.display(),
-                        e
-                    )
-                }
-            }
         }
     }
 
@@ -314,7 +260,7 @@ impl<F: FileSystem> StaleFileCollection<F> {
         first_seq: FileSeq,
         dummy_first_seq: FileSeq,
         dummy_files: &mut VecDeque<FileWithFormat<F>>,
-    ) -> Result<(FileSeq, FileSeq)> {
+    ) -> Result<FileSeq> {
         let now = Instant::now();
         let capacity = std::cmp::min(capacity, max_dummy_log_count());
         let mut dummy_first_seq: FileSeq = dummy_first_seq;
@@ -378,10 +324,7 @@ impl<F: FileSystem> StaleFileCollection<F> {
             now.elapsed(),
             dummy_files.len()
         );
-        Ok((
-            dummy_first_seq,
-            dummy_first_seq.saturating_sub(1) + dummy_files.len() as FileSeq,
-        ))
+        Ok(dummy_first_seq)
     }
 
     /// Generates a Fake log used for recycling.
@@ -408,7 +351,6 @@ impl<F: FileSystem> StaleFileCollection<F> {
         file.close()?;
         // Metadata of dummy files are not what we're truely concerned. So,
         // they can be ignored by clear them here.
-        file_system.delete_metadata(&file_path)?;
         Ok(FileWithFormat { handle: fd, format })
     }
 }
@@ -418,7 +360,7 @@ mod tests {
     use std::collections::VecDeque;
     use tempfile::Builder;
 
-    use super::super::format::LogFileFormat;
+    use super::super::format::{FileNameExt, LogFileFormat};
     use super::*;
     use crate::env::DefaultFileSystem;
     use crate::pipe_log::Version;
@@ -454,7 +396,7 @@ mod tests {
             )]
             .into(),
         );
-        let mut stale_files = StaleFileCollection::new(11, 11, VecDeque::default());
+        let mut stale_files = StaleFileCollection::new(11, VecDeque::default());
         assert_eq!(stale_files.len(), 0);
         assert_eq!(stale_files.file_span(), (0, 0));
         assert_eq!(stale_files.recycle_one_file(), None);
@@ -489,7 +431,7 @@ mod tests {
             FileId::new(LogQueue::Append, 14),
             Version::V1,
         ));
-        assert_eq!(stale_files.recycle_one_file().unwrap(), (11, true));
+        assert_eq!(stale_files.recycle_one_file().unwrap(), 11);
         assert_eq!(stale_files.file_span(), (12, 12));
         // 12 | 13 14 15
         active_files.push(new_file_handler(
@@ -503,7 +445,7 @@ mod tests {
         assert_eq!(active_files.len(), 1);
         stale_files.concat(prev.first_seq, files);
         // V1 file will not be kept around.
-        let (prev, curr, _) = stale_files.logical_purge(2);
+        let (prev, curr) = stale_files.logical_purge(2);
         assert_eq!(
             prev,
             FileState {
@@ -529,8 +471,6 @@ mod tests {
         stale_files.concat(prev.first_seq, files);
         assert_eq!(stale_files.file_span(), (15, 18));
         // 16 17 18 | 19 20
-        assert_eq!(stale_files.recycle_one_file().unwrap(), (15, false));
-        let file_system = Arc::new(DefaultFileSystem);
-        stale_files.destroy(file_system, path, LogQueue::Append);
+        assert_eq!(stale_files.recycle_one_file().unwrap(), 15);
     }
 }
