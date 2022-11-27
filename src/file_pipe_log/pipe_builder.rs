@@ -20,7 +20,7 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::file_mgr::{ActiveFileCollection, FileWithFormat, StaleFileCollection};
+use super::file_mgr::{ActiveFileCollection, DirType, FileWithFormat, StaleFileCollection};
 use super::format::{lock_file_path, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
 use super::pipe::{DualPipes, SinglePipe};
@@ -427,6 +427,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             .map(|f| FileWithFormat {
                 handle: f.handle.clone(),
                 format: f.format.unwrap(),
+                dir: DirType::Main,
             })
             .collect();
         // Prepares extra dummpy files for recycling if necessary.

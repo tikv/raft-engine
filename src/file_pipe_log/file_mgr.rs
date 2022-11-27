@@ -16,10 +16,22 @@ use crate::{Error, Result};
 use super::format::{max_dummy_log_count, DummyFileExt, LogFileFormat};
 use super::log_file::build_file_writer;
 
+/// Directory of log file.
+///
+/// Default: `Main`.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DirType {
+    Main = 0,
+}
+
+pub type Dirs = [String; 1];
+
 #[derive(Debug)]
 pub struct FileWithFormat<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub format: LogFileFormat,
+    pub dir: DirType,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -140,18 +152,18 @@ impl<F: FileSystem> StaleFileCollection<F> {
     }
 
     #[inline]
-    pub fn recycle_one_file(&mut self) -> Option<FileSeq> {
+    pub fn recycle_one_file(&mut self) -> Option<(FileSeq, DirType)> {
         if !self.fds.is_empty() {
             let seq = self.first_seq;
-            self.fds.pop_front().unwrap();
+            let handler = self.fds.pop_front().unwrap();
             self.first_seq += 1;
-            return Some(seq);
+            return Some((seq, handler.dir));
         }
         None
     }
 
     #[inline]
-    pub fn logical_purge(&mut self, capacity: usize) -> (FileState, FileState) {
+    pub fn logical_purge(&mut self, capacity: usize) -> (FileState, FileState, Vec<DirType>) {
         let prev = FileState {
             first_seq: self.first_seq,
             total_len: self.fds.len(),
@@ -169,12 +181,16 @@ impl<F: FileSystem> StaleFileCollection<F> {
             }
         }
         self.first_seq += purged as u64;
-        self.fds.drain(..purged);
+        let dir_list: Vec<DirType> = self
+            .fds
+            .drain(..purged)
+            .map(|f: FileWithFormat<F>| f.dir)
+            .collect();
         let current = FileState {
             first_seq: self.first_seq,
             total_len: self.fds.len(),
         };
-        (prev, current)
+        (prev, current, dir_list)
     }
 
     /// Concatenates the given files into stale files list.
@@ -239,6 +255,7 @@ impl<F: FileSystem> StaleFileCollection<F> {
                     files.push_back(FileWithFormat {
                         handle,
                         format: LogFileFormat::new(Version::default(), 0),
+                        dir: DirType::Main,
                     });
                 }
             }
@@ -351,7 +368,11 @@ impl<F: FileSystem> StaleFileCollection<F> {
         file.close()?;
         // Metadata of dummy files are not what we're truely concerned. So,
         // they can be ignored by clear them here.
-        Ok(FileWithFormat { handle: fd, format })
+        Ok(FileWithFormat {
+            handle: fd,
+            format,
+            dir: DirType::Main,
+        })
     }
 }
 
@@ -379,6 +400,7 @@ mod tests {
                         .unwrap(),
                 ),
                 format: LogFileFormat::new(version, 0 /* alignment */),
+                dir: DirType::Main,
             }
         }
         let dir = Builder::new()
@@ -431,7 +453,7 @@ mod tests {
             FileId::new(LogQueue::Append, 14),
             Version::V1,
         ));
-        assert_eq!(stale_files.recycle_one_file().unwrap(), 11);
+        assert_eq!(stale_files.recycle_one_file().unwrap(), (11, DirType::Main));
         assert_eq!(stale_files.file_span(), (12, 12));
         // 12 | 13 14 15
         active_files.push(new_file_handler(
@@ -445,7 +467,7 @@ mod tests {
         assert_eq!(active_files.len(), 1);
         stale_files.concat(prev.first_seq, files);
         // V1 file will not be kept around.
-        let (prev, curr) = stale_files.logical_purge(2);
+        let (prev, curr, dir_list) = stale_files.logical_purge(2);
         assert_eq!(
             prev,
             FileState {
@@ -453,6 +475,7 @@ mod tests {
                 total_len: 3,
             }
         );
+        assert_eq!(dir_list.len(), 3);
         assert_eq!(curr.total_len, 0);
         assert_eq!(stale_files.recycle_one_file(), None);
         // | 15 16 17 18 19 20
@@ -471,6 +494,6 @@ mod tests {
         stale_files.concat(prev.first_seq, files);
         assert_eq!(stale_files.file_span(), (15, 18));
         // 16 17 18 | 19 20
-        assert_eq!(stale_files.recycle_one_file().unwrap(), 15);
+        assert_eq!(stale_files.recycle_one_file().unwrap(), (15, DirType::Main));
     }
 }
