@@ -20,7 +20,7 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::Factory;
 use crate::{Error, Result};
 
-use super::file_mgr::{ActiveFileCollection, DirType, FileWithFormat, StaleFileCollection};
+use super::file_mgr::{FileCollection, FileList, FileWithFormat, PathId};
 use super::format::{lock_file_path, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
 use super::pipe::{DualPipes, SinglePipe};
@@ -68,6 +68,7 @@ struct FileToRecover<F: FileSystem> {
     seq: FileSeq,
     handle: Arc<F::Handle>,
     format: Option<LogFileFormat>,
+    path_id: PathId,
 }
 
 /// [`DualPipes`] factory that can also recover other customized memory states.
@@ -200,6 +201,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             seq,
                             handle,
                             format: None,
+                            path_id: 0, /* default is Main dir. */
                         });
                     }
                 }
@@ -399,55 +401,48 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
-        let (files, capacity, dummy_first_seq, mut dummy_files) = match queue {
+        let (capacity, active_files, stale_files) = match queue {
             LogQueue::Append => {
-                // Scan and get all existing dummy files.
-                let (dummy_first_seq, existed_dummy_files) =
-                    StaleFileCollection::scan_dummpy_files(
-                        self.file_system.as_ref(),
-                        &self.cfg.dir,
-                    )?;
+                // Scan and get all existing stale files.
                 (
-                    &self.append_files,
                     self.cfg.recycle_capacity(),
-                    dummy_first_seq,
-                    existed_dummy_files,
+                    &self.append_files,
+                    FileCollection::scan_stale_files(self.file_system.as_ref(), &self.cfg.dir)?,
                 )
             }
             LogQueue::Rewrite => (
+                0,
                 &self.rewrite_files,
-                0,
-                0,
-                VecDeque::<FileWithFormat<F>>::default(),
+                FileList::new(0, VecDeque::<FileWithFormat<F>>::default()),
             ),
         };
-        let active_first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let active_files: VecDeque<FileWithFormat<F>> = files
-            .iter()
-            .map(|f| FileWithFormat {
-                handle: f.handle.clone(),
-                format: f.format.unwrap(),
-                dir: DirType::Main,
-            })
-            .collect();
-        // Prepares extra dummpy files for recycling if necessary.
-        let dummy_first_seq = StaleFileCollection::prepare_dummy_logs_for_recycle(
-            &self.cfg,
-            self.file_system.as_ref(),
+        let active_files = FileList::new(
+            active_files.first().map(|f| f.seq).unwrap_or(0),
+            active_files
+                .iter()
+                .map(|f| FileWithFormat {
+                    handle: f.handle.clone(),
+                    format: f.format.unwrap(),
+                    path_id: f.path_id,
+                })
+                .collect(),
+        );
+        let mut file_collection = FileCollection::new(
+            self.file_system.clone(),
             queue,
-            capacity.saturating_sub(active_files.len()),
-            active_first_seq,
-            dummy_first_seq,
-            &mut dummy_files,
-        )?;
+            [self.cfg.dir.clone()],
+            capacity,
+            active_files,
+            stale_files,
+        );
+        // Prepares extra stale files for recycling if necessary.
+        file_collection.initialize(self.cfg.target_file_size.0 as usize)?;
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
             self.listeners.clone(),
             queue,
-            ActiveFileCollection::new(active_first_seq, active_files),
-            StaleFileCollection::new(dummy_first_seq, dummy_files),
-            capacity,
+            file_collection,
         )
     }
 

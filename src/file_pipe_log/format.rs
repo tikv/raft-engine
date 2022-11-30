@@ -17,22 +17,22 @@ const LOG_SEQ_WIDTH: usize = 16;
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
 /// Name suffix for Rewrite queue files.
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
-/// Name suffix for dummy log files.
-const LOG_DUMMY_SUFFIX: &str = ".raftlog.dummy";
+/// Name suffix for stale log files.
+const LOG_APPEND_STALE_SUFFIX: &str = ".raftlog.stale";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-/// Max `.raftlog.dummy` count.
-const LOG_DUMMY_COUNT_MAX: usize = 82;
+/// Max `.raftlog.stale` count.
+const LOG_APPEND_STALE_COUNT_MAX: usize = 82;
 
-/// Returns the max limitation of the count of `.fakelog`s.
+/// Returns the max limitation of the count of `.raftlog.stale`s.
 ///
 /// In most common cases, the default capacity of `.raftlog`s
 /// will be set with `82`, decided by `cfg.purge_threshold` /
-/// `cfg.target_file_size` + 2. So, we can just reuse it as
-/// the max limitation.
+/// `cfg.target_file_size` + 2. So, we can just set it as
+/// the max limitation of `.raftlog.stale`.
 #[inline]
-pub(crate) fn max_dummy_log_count() -> usize {
-    LOG_DUMMY_COUNT_MAX
+pub(crate) fn max_stale_log_count() -> usize {
+    LOG_APPEND_STALE_COUNT_MAX
 }
 
 /// Checks whether the given `buf` is padded with zeros.
@@ -100,23 +100,23 @@ impl FileNameExt for FileId {
     }
 }
 
-pub trait DummyFileExt: Sized {
-    fn parse_dummy_file_name(file_name: &str) -> Option<Self>;
+pub trait StaleFileNameExt: Sized {
+    fn parse_stale_file_name(file_name: &str) -> Option<Self>;
 
-    fn build_dummy_file_name(&self) -> String;
+    fn build_stale_file_name(&self) -> String;
 
-    fn build_dummy_file_path<P: AsRef<Path>>(&self, dir: P) -> PathBuf {
+    fn build_stale_file_path<P: AsRef<Path>>(&self, dir: P) -> PathBuf {
         let mut path = PathBuf::from(dir.as_ref());
-        path.push(self.build_dummy_file_name());
+        path.push(self.build_stale_file_name());
         path
     }
 }
 
-impl DummyFileExt for FileId {
-    fn parse_dummy_file_name(file_name: &str) -> Option<FileId> {
+impl StaleFileNameExt for FileId {
+    fn parse_stale_file_name(file_name: &str) -> Option<FileId> {
         if file_name.len() > LOG_SEQ_WIDTH {
             if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
-                if file_name.ends_with(LOG_DUMMY_SUFFIX) {
+                if file_name.ends_with(LOG_APPEND_STALE_SUFFIX) {
                     return Some(FileId {
                         queue: LogQueue::Append,
                         seq,
@@ -127,12 +127,12 @@ impl DummyFileExt for FileId {
         None
     }
 
-    fn build_dummy_file_name(&self) -> String {
+    fn build_stale_file_name(&self) -> String {
         debug_assert!(self.queue == LogQueue::Append);
         format!(
             "{:0width$}{}",
             self.seq,
-            LOG_DUMMY_SUFFIX,
+            LOG_APPEND_STALE_SUFFIX,
             width = LOG_SEQ_WIDTH
         )
     }

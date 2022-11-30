@@ -2323,7 +2323,7 @@ mod tests {
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        // As the recycling open, it would not generated dummy logs for recycling
+        // As the recycling open, it would not generated stale logs for recycling
         // LogQueue::Append as `file_span` is (1, 1).
         let stale_count = engine.stale_file_count(Some(LogQueue::Append));
         assert_eq!(stale_count, 0);
@@ -2371,7 +2371,7 @@ mod tests {
         }
         assert_eq!(engine.file_span(LogQueue::Append).0, start);
         let (start, end) = engine.file_span(LogQueue::Append);
-        let dummy_count = engine.stale_file_count(Some(LogQueue::Append));
+        let stale_count = engine.stale_file_count(Some(LogQueue::Append));
         drop(engine);
         // Reopen the engine with a smaller capacity.
         let cfg_v2 = Config {
@@ -2382,7 +2382,7 @@ mod tests {
         let engine =
             RaftLogEngine::open_with_file_system(cfg_v2.clone(), file_system.clone()).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        assert_eq!(dummy_count, engine.stale_file_count(Some(LogQueue::Append)));
+        assert_eq!(stale_count, engine.stale_file_count(Some(LogQueue::Append)));
         // Stale files have filled the LogQueue::Append, purge_expired_files won't
         // truely remove files from it.
         engine.purge_expired_files().unwrap();
@@ -2392,8 +2392,8 @@ mod tests {
         }
         assert!(engine.file_span(LogQueue::Append).1 > end);
         let engine = engine.reopen();
-        assert!(dummy_count > engine.stale_file_count(Some(LogQueue::Append)));
-        let dummy_count = engine.stale_file_count(Some(LogQueue::Append));
+        assert!(stale_count > engine.stale_file_count(Some(LogQueue::Append)));
+        let stale_count = engine.stale_file_count(Some(LogQueue::Append));
         drop(engine);
         // Reopen the engine withou log recycling.
         let cfg_v3 = Config {
@@ -2403,7 +2403,7 @@ mod tests {
             ..cfg_v2
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system).unwrap();
-        // Restart the engine without log recycling, dummy logs should be reserved.
-        assert_eq!(dummy_count, engine.stale_file_count(Some(LogQueue::Append)));
+        // Restart the engine without log recycling, stale logs should be reserved.
+        assert_eq!(stale_count, engine.stale_file_count(Some(LogQueue::Append)));
     }
 }
