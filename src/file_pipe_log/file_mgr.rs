@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -342,7 +342,7 @@ impl<F: FileSystem> FileCollection<F> {
                     queue: self.queue,
                 };
                 let stale_file_id = FileId {
-                    seq: stale_files.span().1 + 1 as FileSeq,
+                    seq: stale_files.span().1 + 1_u64,
                     queue: self.queue,
                 };
                 let path = file_id.build_file_path(&self.paths[fd.path_id]);
@@ -478,11 +478,18 @@ impl<F: FileSystem> FileCollection<F> {
         let path_id = FileCollection::<F>::get_valid_path(paths, target_file_size);
         let file_path = file_id.build_stale_file_path(&paths[path_id]);
         let fd = Arc::new(file_system.create(&file_path)?);
-        let mut file = file_system.new_writer(fd.clone())?;
+        let mut writer = file_system.new_writer(fd.clone())?;
         let mut written = 0_usize;
-        let buf = vec![0; LOG_STALE_FILE_BUF_SIZE];
+        let buf = vec![0; std::cmp::min(LOG_STALE_FILE_BUF_SIZE, target_file_size)];
         while written <= target_file_size {
-            file.write(&buf)?;
+            writer.write_all(&buf).map_err(|e| {
+                writer
+                    .seek(SeekFrom::Start(written as u64))
+                    .unwrap_or_else(|e| {
+                        panic!("failed to reseek after write failure: {}", e);
+                    });
+                e
+            })?;
             written += buf.len();
         }
         // Metadata of stale files are not what we're truely concerned. So,
