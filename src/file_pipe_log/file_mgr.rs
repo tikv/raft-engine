@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,7 +16,6 @@ use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::{Error, Result};
 
 use super::format::{max_stale_log_count, FileNameExt, LogFileFormat, StaleFileNameExt};
-use super::log_file::build_file_writer;
 
 /// Default buffer size for building stale file, unit: byte.
 const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
@@ -478,14 +478,13 @@ impl<F: FileSystem> FileCollection<F> {
         let path_id = FileCollection::<F>::get_valid_path(paths, target_file_size);
         let file_path = file_id.build_stale_file_path(&paths[path_id]);
         let fd = Arc::new(file_system.create(&file_path)?);
-        let mut file = build_file_writer(file_system, fd.clone(), format, true)?;
-        let mut written = LogFileFormat::encoded_len(format.version);
+        let mut file = file_system.new_writer(fd.clone())?;
+        let mut written = 0_usize;
         let buf = vec![0; LOG_STALE_FILE_BUF_SIZE];
         while written <= target_file_size {
-            file.write(&buf, target_file_size)?;
+            file.write(&buf)?;
             written += buf.len();
         }
-        file.close()?;
         // Metadata of stale files are not what we're truely concerned. So,
         // they can be ignored by clear them here.
         Ok(FileWithFormat {
