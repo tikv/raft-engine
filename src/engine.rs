@@ -717,7 +717,6 @@ mod tests {
         sub_dir.push("raft-engine");
         let cfg = Config {
             dir: sub_dir.to_str().unwrap().to_owned(),
-            enable_log_recycle: false,
             ..Default::default()
         };
         RaftLogEngine::open_with_file_system(
@@ -727,7 +726,7 @@ mod tests {
         .unwrap();
         let cfg_recycle = Config {
             target_file_size: ReadableSize(1),
-            enable_log_recycle: true,
+            enable_recycle_init: true,
             ..cfg
         };
         RaftLogEngine::open_with_file_system(
@@ -1190,7 +1189,6 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
             purge_threshold: ReadableSize::kb(150),
-            enable_log_recycle: false,
             ..Default::default()
         };
 
@@ -1372,7 +1370,6 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            enable_log_recycle: false,
             ..Default::default()
         };
         let engine =
@@ -1433,7 +1430,6 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            enable_log_recycle: false,
             ..Default::default()
         };
         let engine =
@@ -1462,7 +1458,6 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            enable_log_recycle: false,
             ..Default::default()
         };
         let engine =
@@ -1605,7 +1600,7 @@ mod tests {
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
                 format_version: Version::V2,
-                enable_log_recycle: true,
+                enable_recycle_init: true,
                 ..Default::default()
             };
             test_engine_ops(&cfg_v1, &cfg_v2);
@@ -1641,7 +1636,6 @@ mod tests {
 
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            enable_log_recycle: false,
             ..Default::default()
         };
 
@@ -1848,7 +1842,6 @@ mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             // One big file.
             target_file_size: ReadableSize::gb(10),
-            enable_log_recycle: false,
             ..Default::default()
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
@@ -1952,7 +1945,6 @@ mod tests {
         let entry_data = vec![b'x'; 128];
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            enable_log_recycle: false,
             ..Default::default()
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
@@ -2319,14 +2311,14 @@ mod tests {
             target_file_size: ReadableSize::kb(2),
             purge_threshold: ReadableSize::kb(32),
             enable_log_recycle: true,
+            enable_recycle_init: true,
             ..cfg
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        // As the recycling open, it would not generated stale logs for recycling
-        // LogQueue::Append as `file_span` is (1, 1).
+        // As the recycling open, it would generate stale logs for recycling.
         let stale_count = engine.stale_file_count(Some(LogQueue::Append));
-        assert_eq!(stale_count, 0);
+        assert!(stale_count > 0);
         assert_eq!(engine.stale_file_count(Some(LogQueue::Rewrite)), 0);
         // Stale files haven't filled the LogQueue::Append, purge_expired_files won't
         // make difference.
@@ -2340,7 +2332,8 @@ mod tests {
         let (start, end) = engine.file_span(LogQueue::Append);
         let engine = engine.reopen();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        assert!(stale_count < engine.stale_file_count(Some(LogQueue::Append)));
+        // Stale files will be reused for new append files.
+        assert!(stale_count > engine.stale_file_count(Some(LogQueue::Append)));
     }
 
     #[test]
@@ -2354,6 +2347,7 @@ mod tests {
             dir: path.to_owned(),
             target_file_size: ReadableSize::mb(8),
             purge_threshold: ReadableSize::mb(640), // common size of capacity
+            enable_recycle_init: true,
             ..Default::default()
         };
         let file_system = Arc::new(DefaultFileSystem);
@@ -2395,7 +2389,7 @@ mod tests {
         assert!(stale_count > engine.stale_file_count(Some(LogQueue::Append)));
         let stale_count = engine.stale_file_count(Some(LogQueue::Append));
         drop(engine);
-        // Reopen the engine withou log recycling.
+        // Reopen the engine without log recycling.
         let cfg_v3 = Config {
             target_file_size: ReadableSize::kb(2),
             purge_threshold: ReadableSize::kb(100),

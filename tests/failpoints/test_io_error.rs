@@ -450,7 +450,6 @@ fn test_start_with_file_allocate_error() {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(1),
         purge_threshold: ReadableSize::kb(10), // capacity is 12
-        enable_log_recycle: true,
         ..Default::default()
     };
     let entry = vec![b'x'; 1024];

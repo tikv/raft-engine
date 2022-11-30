@@ -81,7 +81,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let create_file = files.back().is_none();
         let (first_seq, active_seq) = {
             if create_file {
-                let (file_seq, path_id, fd) = files.rotate(cfg.target_file_size.0 as usize)?;
+                let (file_seq, path_id, fd) = files.rotate()?;
                 files.push_back(
                     file_seq,
                     FileWithFormat {
@@ -152,7 +152,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
         active_file.writer.close()?;
 
-        let (file_seq, path_id, fd) = self.files.write().rotate(self.target_file_size)?;
+        let (file_seq, path_id, fd) = self.files.write().rotate()?;
         debug_assert_eq!(seq, file_seq);
         let mut new_file = ActiveFile {
             seq,
@@ -423,6 +423,7 @@ mod tests {
                 fs,
                 queue,
                 [cfg.dir.clone()],
+                ReadableSize(1).0 as usize,
                 capacity,
                 FileList::new(0, VecDeque::new()),
                 FileList::new(0, VecDeque::new()),

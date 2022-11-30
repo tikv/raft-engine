@@ -431,12 +431,15 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.file_system.clone(),
             queue,
             [self.cfg.dir.clone()],
+            self.cfg.target_file_size.0 as usize,
             capacity,
             active_files,
             stale_files,
         );
         // Prepares extra stale files for recycling if necessary.
-        file_collection.initialize(self.cfg.target_file_size.0 as usize)?;
+        if capacity > 0 && self.cfg.enable_recycle_init {
+            file_collection.initialize()?;
+        }
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),

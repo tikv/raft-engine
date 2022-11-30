@@ -91,6 +91,14 @@ pub struct Config {
     ///
     /// Default: false
     pub enable_log_recycle: bool,
+
+    /// Whether to prepare stale log files for recycling when start.
+    /// If `true`, batch stale log files will be prepared for recycling when
+    /// starting engine.
+    /// Only available for `enable-log-reycle` is true.
+    ///
+    /// Default: false
+    pub enable_recycle_init: bool,
 }
 
 impl Default for Config {
@@ -110,6 +118,7 @@ impl Default for Config {
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
             enable_log_recycle: false,
+            enable_recycle_init: false,
         };
         // Test-specific configurations.
         #[cfg(test)]
@@ -207,6 +216,7 @@ mod tests {
             purge-threshold = "3MB"
             format-version = 1
             enable-log-recycle = false
+            enable-recycle-init = false
         "#;
         let mut load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -233,6 +243,7 @@ mod tests {
             target-file-size = "5000MB"
             format-version = 2
             enable-log-recycle = true
+            enable-recycle-init = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
         let mut soft_sanitized = soft_load;
