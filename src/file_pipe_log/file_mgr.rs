@@ -13,7 +13,7 @@ use crate::env::FileSystem;
 use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::{Error, Result};
 
-use super::format::{max_stale_log_count, FileNameExt, LogFileFormat, StaleFileNameExt};
+use super::format::{FileNameExt, LogFileFormat, StaleFileNameExt};
 
 /// Default buffer size for building stale file, unit: byte.
 const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
@@ -147,10 +147,12 @@ pub struct FileCollection<F: FileSystem> {
 }
 
 impl<F: FileSystem> FileCollection<F> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         file_system: Arc<F>,
         queue: LogQueue,
         paths: Paths,
+        file_format: LogFileFormat,
         target_file_size: usize,
         capacity: usize,
         active_files: FileList<F>,
@@ -160,7 +162,7 @@ impl<F: FileSystem> FileCollection<F> {
             file_system,
             queue,
             paths,
-            file_format: LogFileFormat::new(Version::V2, 0 /* alignment */),
+            file_format,
             target_file_size,
             capacity,
             active_files: CachePadded::new(RwLock::new(active_files)),
@@ -205,12 +207,6 @@ impl<F: FileSystem> FileCollection<F> {
     #[inline]
     pub fn get_target_file_size(&self) -> usize {
         self.target_file_size
-    }
-
-    /// Update file format in current file collection.
-    #[inline]
-    pub fn upd_file_format(&mut self, format: LogFileFormat) {
-        self.file_format = format;
     }
 
     /// Rotate a new file handle and return it to the caller.
@@ -341,10 +337,7 @@ impl<F: FileSystem> FileCollection<F> {
     /// `Config.enable-log-recycle` is true.
     pub fn initialize(&mut self) -> Result<()> {
         let now = Instant::now();
-        let stale_capacity = std::cmp::min(
-            self.capacity.saturating_sub(self.active_files.read().len()),
-            max_stale_log_count(),
-        );
+        let stale_capacity = self.capacity.saturating_sub(self.active_files.read().len());
         // If `stale_capacity` > 0, we should prepare stale files for later
         // log recycling in advance.
         if stale_capacity > 0 {
@@ -515,6 +508,7 @@ mod tests {
             Arc::new(DefaultFileSystem),
             LogQueue::Append,
             [path.clone()],
+            LogFileFormat::new(Version::V2, 0),
             target_file_size.0 as usize,
             5,
             FileList::new(0, VecDeque::default()),

@@ -60,25 +60,8 @@ impl<F: FileSystem> SinglePipe<F> {
         file_system: Arc<F>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
-        mut files: FileCollection<F>,
+        files: FileCollection<F>,
     ) -> Result<Self> {
-        #[allow(unused_mut)]
-        let mut alignment = 0;
-        #[cfg(feature = "failpoints")]
-        {
-            let force_set_aligned_layout = || {
-                fail_point!("file_pipe_log::open::force_set_aligned_layout", |_| {
-                    true
-                });
-                false
-            };
-            if force_set_aligned_layout() {
-                alignment = 16;
-            }
-        }
-        let file_format = LogFileFormat::new(cfg.format_version, alignment);
-        // Update default file format in the file collection.
-        files.upd_file_format(file_format);
         let create_file = files.back().is_none();
         let (first_seq, active_seq) = {
             if create_file {
@@ -400,6 +383,7 @@ mod tests {
                 fs,
                 queue,
                 [cfg.dir.clone()],
+                LogFileFormat::new(Version::V2, 0),
                 cfg.target_file_size.0 as usize,
                 capacity,
                 FileList::new(0, VecDeque::new()),

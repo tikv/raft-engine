@@ -438,6 +438,24 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
+        #[allow(unused_mut)]
+        let mut alignment = 0;
+        {
+            #[cfg(feature = "failpoints")]
+            {
+                use fail::fail_point;
+
+                let force_set_aligned_layout = || {
+                    fail_point!("file_pipe_log::build_pipe::force_set_alignment", |_| {
+                        true
+                    });
+                    false
+                };
+                if force_set_aligned_layout() {
+                    alignment = 16;
+                }
+            }
+        }
         // Rewrite queue won't be assigned with stale files for recycling.
         let (capacity, active_files, stale_files) = match queue {
             LogQueue::Append => (
@@ -476,6 +494,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.file_system.clone(),
             queue,
             [self.cfg.dir.clone()],
+            LogFileFormat::new(self.cfg.format_version, alignment),
             self.cfg.target_file_size.0 as usize,
             capacity,
             active_files,

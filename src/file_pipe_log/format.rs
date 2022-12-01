@@ -21,19 +21,6 @@ const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 const LOG_APPEND_STALE_SUFFIX: &str = ".raftlog.stale";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
-/// Max `.raftlog.stale` count.
-const LOG_APPEND_STALE_COUNT_MAX: usize = 82;
-
-/// Returns the max limitation of the count of `.raftlog.stale`s.
-///
-/// In most common cases, the default capacity of `.raftlog`s
-/// will be set with `82`, decided by `cfg.purge_threshold` /
-/// `cfg.target_file_size` + 2. So, we can just set it as
-/// the max limitation of `.raftlog.stale`.
-#[inline]
-pub(crate) fn max_stale_log_count() -> usize {
-    LOG_APPEND_STALE_COUNT_MAX
-}
 
 /// Checks whether the given `buf` is padded with zeros.
 ///

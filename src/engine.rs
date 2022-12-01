@@ -705,8 +705,10 @@ mod tests {
             Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
+        // Start engine with prefilled recycling.
         let cfg_recycle = Config {
             target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(100), /* avoid fd overflows */
             prefill_for_recycle: true,
             ..cfg
         };
