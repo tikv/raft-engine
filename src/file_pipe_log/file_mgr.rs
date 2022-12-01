@@ -1,9 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
-use std::fs;
-use std::io::{Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -146,30 +144,6 @@ impl<F: FileSystem> FileList<F> {
             splitted_list,
         )
     }
-
-    /// Purges current file list according to the given `capacity`.
-    ///
-    /// Returns the purged file list. Attention please, this function
-    /// is a specialized one for stale files.
-    pub fn purge(&mut self, capacity: usize) -> FileList<F> {
-        let obsolete_files = self.fds.len();
-        // When capacity is zero, always remove logically deleted files.
-        let mut purged = obsolete_files.saturating_sub(capacity);
-        // The files with format_version `V1` cannot be chosen as recycle
-        // candidates. We will simply make sure there's no V1 stale files in the
-        // collection.
-        for i in (purged..obsolete_files).rev() {
-            if !self.fds[i].format.version.has_log_signing() {
-                purged = i + 1;
-                break;
-            }
-        }
-        self.first_seq += purged as FileSeq;
-        FileList {
-            first_seq: self.first_seq - purged as FileSeq,
-            fds: self.fds.drain(..purged).collect(),
-        }
-    }
 }
 
 /// A collection of files for managing all log files.
@@ -234,6 +208,7 @@ impl<F: FileSystem> FileCollection<F> {
     }
 
     #[inline]
+    #[cfg(test)]
     pub fn stale_file_span(&self) -> (FileSeq, FileSeq) {
         self.stale_files.read().span()
     }
@@ -293,45 +268,48 @@ impl<F: FileSystem> FileCollection<F> {
         let logical_purged_count = purged_files.len();
         {
             let mut stale_files = self.stale_files.write();
-            // If there exists several stale files for purging in `self.stale_files`,
-            // we should check and remove them to avoid the `size` of whole files
-            // beyond `self.capacity`.
-            let remains_capacity = self
-                .capacity
-                .saturating_sub(active_state.total_len + logical_purged_count + stale_files.len());
-            let clear_list = stale_files.purge(remains_capacity);
-            for (i, fd) in clear_list.fds.iter().enumerate() {
-                let file_id = FileId {
-                    seq: clear_list.first_seq + i as FileSeq,
-                    queue: self.queue,
+            // The files with format_version `V1` cannot be chosen as recycle candidates.
+            // We will simply make sure there's no `V1` stale files in the collection.
+            let invalid_count = {
+                let mut invalid_idx = 0_usize;
+                for (i, fd) in purged_files.fds.iter().enumerate() {
+                    if !fd.format.version.has_log_signing() {
+                        invalid_idx = i + 1;
+                        break;
+                    }
+                }
+                invalid_idx
+            };
+            let out_of_space = if invalid_count > 0 && self.capacity > 0 {
+                // If `invalid_count` exists, it means that part of stale files with
+                // seqno earlier than this flag should be cleared.
+                invalid_count + stale_files.len()
+            } else {
+                // If there exists several stale files out of space, contained in
+                // `self.stale_files` and `purged_files`, we should check and remove them
+                // to avoid the `size` of whole files beyond `self.capacity`.
+                (active_state.total_len + logical_purged_count + stale_files.len())
+                    .saturating_sub(self.capacity)
+            };
+            for _ in 0..out_of_space {
+                let path = {
+                    if let Some((seq, fd)) = stale_files.pop_front() {
+                        let file_id = FileId {
+                            seq,
+                            queue: self.queue,
+                        };
+                        file_id.build_stale_file_path(&self.paths[fd.path_id])
+                    } else if let Some((seq, fd)) = purged_files.pop_front() {
+                        let file_id = FileId {
+                            seq,
+                            queue: self.queue,
+                        };
+                        file_id.build_file_path(&self.paths[fd.path_id])
+                    } else {
+                        break;
+                    }
                 };
-                FileCollection::clear_file(
-                    self.file_system.as_ref(),
-                    &self.paths,
-                    file_id,
-                    fd,
-                    true, /* is_stale */
-                )?;
-            }
-            // If `self.capacity` is still not enough for storing files, we should check
-            // and remove redundant file from previous purged_files.
-            // Here, stale file with Version::V1 also should be marked and cleared.
-            let remains_capacity = self
-                .capacity
-                .saturating_sub(active_state.total_len + stale_files.len());
-            let redundant_list = purged_files.purge(remains_capacity);
-            for (i, fd) in redundant_list.fds.iter().enumerate() {
-                let file_id = FileId {
-                    seq: redundant_list.first_seq + i as FileSeq,
-                    queue: self.queue,
-                };
-                FileCollection::clear_file(
-                    self.file_system.as_ref(),
-                    &self.paths,
-                    file_id,
-                    fd,
-                    false, /* is_stale */
-                )?;
+                self.file_system.delete(&path)?;
             }
             // Meanwhile, the new purged files from `self.active_files` should be RENAME
             // to stale files with `.raftlog.stale` suffix, to reduce the unnecessary
@@ -382,9 +360,6 @@ impl<F: FileSystem> FileCollection<F> {
                 stale_files.span().1 + 1,
                 stale_capacity.saturating_sub(stale_files.len()),
             );
-            if stale_files.len() == 0 {
-                stale_files.first_seq = 1;
-            }
             for seq in prepare_first_seq..prepare_first_seq + prepare_stale_files_count as FileSeq {
                 let file_id = FileId {
                     queue: self.queue,
@@ -411,59 +386,6 @@ impl<F: FileSystem> FileCollection<F> {
         Ok(())
     }
 
-    /// Scans all stale files from the specific directory.
-    ///
-    /// Returns a stale `FileList`.
-    pub fn scan_stale_files(file_system: &F, path: &str) -> Result<FileList<F>> {
-        let path = Path::new(path);
-        debug_assert!(path.exists() && path.is_dir());
-        let mut first_seq: FileSeq = 0;
-        let (mut min_stale_id, mut max_stale_id) = (u64::MAX, 0);
-        fs::read_dir(path)?.for_each(|e| {
-            if let Ok(e) = e {
-                let p = e.path();
-                if p.is_file() {
-                    if let Some(FileId {
-                        queue: LogQueue::Append,
-                        seq,
-                    }) = FileId::parse_stale_file_name(p.file_name().unwrap().to_str().unwrap())
-                    {
-                        min_stale_id = std::cmp::min(min_stale_id, seq);
-                        max_stale_id = std::cmp::max(max_stale_id, seq);
-                    }
-                }
-            }
-        });
-        let mut files: VecDeque<FileWithFormat<F>> = VecDeque::default();
-        if max_stale_id > 0 {
-            files.reserve((max_stale_id - min_stale_id) as usize + 1);
-            for seq in min_stale_id..=max_stale_id {
-                let file_id = FileId {
-                    queue: LogQueue::Append,
-                    seq,
-                };
-                let path = file_id.build_stale_file_path(path);
-                if !path.exists() {
-                    files.clear();
-                } else {
-                    let handle = Arc::new(file_system.open(&path)?);
-                    // It's not necessary to record the metadata of stale files.
-                    file_system.delete_metadata(&path)?;
-                    files.push_back(FileWithFormat {
-                        handle,
-                        format: LogFileFormat::new(Version::V2, 0 /* alignment */),
-                        path_id: 0,
-                    });
-                }
-            }
-            first_seq = max_stale_id - files.len() as FileSeq + 1;
-        }
-        Ok(FileList {
-            first_seq,
-            fds: files,
-        })
-    }
-
     /// Generates a Fake log used for recycling.
     ///
     /// Attention, this function is only called when `Config.enable-log-recycle`
@@ -482,14 +404,9 @@ impl<F: FileSystem> FileCollection<F> {
         let mut written = 0_usize;
         let buf = vec![0; std::cmp::min(LOG_STALE_FILE_BUF_SIZE, target_file_size)];
         while written <= target_file_size {
-            writer.write_all(&buf).map_err(|e| {
-                writer
-                    .seek(SeekFrom::Start(written as u64))
-                    .unwrap_or_else(|e| {
-                        panic!("failed to reseek after write failure: {}", e);
-                    });
-                e
-            })?;
+            writer.write_all(&buf).unwrap_or_else(|e| {
+                panic!("failed to prepare stale file: {}", e);
+            });
             written += buf.len();
         }
         // Metadata of stale files are not what we're truely concerned. So,
@@ -499,33 +416,6 @@ impl<F: FileSystem> FileCollection<F> {
             format,
             path_id,
         })
-    }
-
-    /// Clear a log file by the given metadata.
-    fn clear_file(
-        file_system: &F,
-        paths: &Paths,
-        file_id: FileId,
-        file: &FileWithFormat<F>,
-        is_stale: bool,
-    ) -> Result<()> {
-        #[cfg(feature = "failpoints")]
-        {
-            let remove_skipped = || {
-                fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
-                false
-            };
-            if remove_skipped() {
-                return Ok(());
-            }
-        }
-        let path = if is_stale {
-            file_id.build_stale_file_path(&paths[file.path_id])
-        } else {
-            file_id.build_file_path(&paths[file.path_id])
-        };
-        file_system.delete(&path)?;
-        Ok(())
     }
 
     /// Returns a valid path for dumping new files.

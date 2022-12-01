@@ -190,10 +190,6 @@ pub trait PipeLog: Sized {
     /// of the specified log queue.
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
 
-    /// Returns the sequence number range of all stale log files in the specific
-    /// log queue.
-    fn stale_file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);
-
     /// Returns the oldest file ID that is newer than `position`% of all files.
     fn file_at(&self, queue: LogQueue, mut position: f64) -> FileSeq {
         if position > 1.0 {

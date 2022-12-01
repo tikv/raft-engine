@@ -364,13 +364,6 @@ where
         self.pipe_log.file_span(queue)
     }
 
-    /// Returns the sequence number range of all stale log files in the specific
-    /// log queue.
-    /// For testing only.
-    pub fn stale_file_span(&self, queue: LogQueue) -> (u64, u64) {
-        self.pipe_log.stale_file_span(queue)
-    }
-
     pub fn get_used_size(&self) -> usize {
         self.pipe_log.total_size(LogQueue::Append) + self.pipe_log.total_size(LogQueue::Rewrite)
     }
@@ -597,7 +590,7 @@ where
 mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
-    use crate::file_pipe_log::FileNameExt;
+    use crate::file_pipe_log::{FileNameExt, StaleFileNameExt};
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
@@ -691,18 +684,6 @@ mod tests {
                 (b - a + 1) as usize
             } else {
                 self.file_count(Some(LogQueue::Append)) + self.file_count(Some(LogQueue::Rewrite))
-            }
-        }
-
-        fn stale_file_count(&self, queue: Option<LogQueue>) -> usize {
-            if let Some(queue) = queue {
-                match self.stale_file_span(queue) {
-                    (0, 0) => 0,
-                    (a, b) => (b - a + 1) as usize,
-                }
-            } else {
-                self.stale_file_count(Some(LogQueue::Append))
-                    + self.stale_file_count(Some(LogQueue::Rewrite))
             }
         }
     }
@@ -1968,6 +1949,7 @@ mod tests {
     pub struct DeleteMonitoredFileSystem {
         inner: ObfuscatedFileSystem,
         append_metadata: Mutex<BTreeSet<u64>>,
+        stale_metadata: Mutex<BTreeSet<u64>>,
     }
 
     impl DeleteMonitoredFileSystem {
@@ -1975,22 +1957,38 @@ mod tests {
             Self {
                 inner: ObfuscatedFileSystem::default(),
                 append_metadata: Mutex::new(BTreeSet::new()),
+                stale_metadata: Mutex::new(BTreeSet::new()),
             }
         }
 
         fn update_metadata(&self, path: &Path, delete: bool) -> bool {
-            if_chain::if_chain! {
-                if let Some(id) = FileId::parse_file_name(path.file_name().unwrap().to_str().unwrap());
-                if id.queue == LogQueue::Append;
-                then {
-                    if delete {
-                        self.append_metadata.lock().unwrap().remove(&id.seq)
+            let path = path.file_name().unwrap().to_str().unwrap();
+            let parse_append = FileId::parse_file_name(path);
+            let parse_stale = FileId::parse_stale_file_name(path);
+            match (parse_append, parse_stale) {
+                (Some(id), None) => {
+                    if id.queue == LogQueue::Append {
+                        if delete {
+                            self.append_metadata.lock().unwrap().remove(&id.seq)
+                        } else {
+                            self.append_metadata.lock().unwrap().insert(id.seq)
+                        }
                     } else {
-                        self.append_metadata.lock().unwrap().insert(id.seq)
+                        false
                     }
-                } else {
-                    false
                 }
+                (None, Some(id)) => {
+                    if id.queue == LogQueue::Append {
+                        if delete {
+                            self.stale_metadata.lock().unwrap().remove(&id.seq)
+                        } else {
+                            self.stale_metadata.lock().unwrap().insert(id.seq)
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
             }
         }
     }
@@ -2042,12 +2040,25 @@ mod tests {
             if self.inner.exists_metadata(&path) {
                 return true;
             }
-            let id = FileId::parse_file_name(path.as_ref().file_name().unwrap().to_str().unwrap())
-                .unwrap();
-            if id.queue == LogQueue::Append {
-                self.append_metadata.lock().unwrap().contains(&id.seq)
-            } else {
-                false
+            let path = path.as_ref().file_name().unwrap().to_str().unwrap();
+            let parse_append = FileId::parse_file_name(path);
+            let parse_stale = FileId::parse_stale_file_name(path);
+            match (parse_append, parse_stale) {
+                (Some(id), None) => {
+                    if id.queue == LogQueue::Append {
+                        self.append_metadata.lock().unwrap().contains(&id.seq)
+                    } else {
+                        false
+                    }
+                }
+                (None, Some(id)) => {
+                    if id.queue == LogQueue::Append {
+                        self.stale_metadata.lock().unwrap().contains(&id.seq)
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
             }
         }
 
@@ -2158,12 +2169,9 @@ mod tests {
         let start_1 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
         assert!(start <= start_1);
 
-        // reopen the engine and validate the stale files are removed
+        // reopen the engine and validate the stale files are reserved
         let engine = engine.reopen();
-        assert_eq!(
-            fs.inner.file_count(),
-            engine.file_count(None) + engine.stale_file_count(None)
-        );
+        assert!(fs.inner.file_count() > engine.file_count(None));
         let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
         assert_eq!(start_1, start_2);
     }
@@ -2288,14 +2296,13 @@ mod tests {
             enable_log_recycle: false,
             ..Default::default()
         };
-        let file_system = Arc::new(DefaultFileSystem);
+        let file_system = Arc::new(DeleteMonitoredFileSystem::new());
         let engine =
             RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
         let (start, _) = engine.file_span(LogQueue::Append);
         // Only one valid file left, the last one => active_file.
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
-        assert_eq!(engine.stale_file_count(Some(LogQueue::Append)), 0);
-        assert_eq!(engine.stale_file_count(Some(LogQueue::Rewrite)), 0);
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
         // Append data.
         let entry_data = vec![b'x'; 512];
         for rid in 1..=5 {
@@ -2303,8 +2310,7 @@ mod tests {
         }
         assert_eq!(engine.file_span(LogQueue::Append).0, start);
         let (start, end) = engine.file_span(LogQueue::Append);
-        assert_eq!(engine.stale_file_count(Some(LogQueue::Append)), 0);
-        assert_eq!(engine.stale_file_count(Some(LogQueue::Rewrite)), 0);
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
         drop(engine);
         // Reopen the engine with a smaller capacity.
         let cfg_v2 = Config {
@@ -2314,12 +2320,11 @@ mod tests {
             enable_recycle_init: true,
             ..cfg
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system).unwrap();
+        let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system.clone()).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
         // As the recycling open, it would generate stale logs for recycling.
-        let stale_count = engine.stale_file_count(Some(LogQueue::Append));
+        let stale_count = file_system.inner.file_count() - engine.file_count(None);
         assert!(stale_count > 0);
-        assert_eq!(engine.stale_file_count(Some(LogQueue::Rewrite)), 0);
         // Stale files haven't filled the LogQueue::Append, purge_expired_files won't
         // make difference.
         engine.purge_expired_files().unwrap();
@@ -2333,7 +2338,7 @@ mod tests {
         let engine = engine.reopen();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
         // Stale files will be reused for new append files.
-        assert!(stale_count > engine.stale_file_count(Some(LogQueue::Append)));
+        assert!(stale_count > (file_system.inner.file_count() - engine.file_count(None)));
     }
 
     #[test]
@@ -2345,19 +2350,19 @@ mod tests {
         let path = dir.path().to_str().unwrap();
         let cfg = Config {
             dir: path.to_owned(),
-            target_file_size: ReadableSize::mb(8),
-            purge_threshold: ReadableSize::mb(640), // common size of capacity
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(80), // common size of capacity
             enable_recycle_init: true,
             ..Default::default()
         };
-        let file_system = Arc::new(DefaultFileSystem);
+        let file_system = Arc::new(DeleteMonitoredFileSystem::new());
         let engine =
             RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
         let (start, end) = engine.file_span(LogQueue::Append);
         // Only one valid file left, the last one => active_file.
         assert_eq!(start, end);
-        assert!(engine.stale_file_count(Some(LogQueue::Append)) > 0);
-        assert_eq!(engine.stale_file_count(Some(LogQueue::Rewrite)), 0);
+        let stale_count = file_system.inner.file_count() - engine.file_count(None);
+        assert!(stale_count > 0);
         // Append data.
         let entry_data = vec![b'x'; 512];
         for rid in 1..=5 {
@@ -2365,7 +2370,6 @@ mod tests {
         }
         assert_eq!(engine.file_span(LogQueue::Append).0, start);
         let (start, end) = engine.file_span(LogQueue::Append);
-        let stale_count = engine.stale_file_count(Some(LogQueue::Append));
         drop(engine);
         // Reopen the engine with a smaller capacity.
         let cfg_v2 = Config {
@@ -2376,7 +2380,7 @@ mod tests {
         let engine =
             RaftLogEngine::open_with_file_system(cfg_v2.clone(), file_system.clone()).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        assert_eq!(stale_count, engine.stale_file_count(Some(LogQueue::Append)));
+        assert!(stale_count > file_system.inner.file_count() - engine.file_count(None));
         // Stale files have filled the LogQueue::Append, purge_expired_files won't
         // truely remove files from it.
         engine.purge_expired_files().unwrap();
@@ -2386,8 +2390,8 @@ mod tests {
         }
         assert!(engine.file_span(LogQueue::Append).1 > end);
         let engine = engine.reopen();
-        assert!(stale_count > engine.stale_file_count(Some(LogQueue::Append)));
-        let stale_count = engine.stale_file_count(Some(LogQueue::Append));
+        assert!(stale_count > file_system.inner.file_count() - engine.file_count(None));
+        let stale_count = file_system.inner.file_count() - engine.file_count(None);
         drop(engine);
         // Reopen the engine without log recycling.
         let cfg_v3 = Config {
@@ -2396,8 +2400,11 @@ mod tests {
             enable_log_recycle: false,
             ..cfg_v2
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system).unwrap();
+        let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system.clone()).unwrap();
         // Restart the engine without log recycling, stale logs should be reserved.
-        assert_eq!(stale_count, engine.stale_file_count(Some(LogQueue::Append)));
+        assert_eq!(
+            stale_count,
+            file_system.inner.file_count() - engine.file_count(None)
+        );
     }
 }

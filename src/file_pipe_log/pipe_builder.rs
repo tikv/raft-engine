@@ -16,12 +16,12 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
-use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::util::Factory;
 use crate::{Error, Result};
 
 use super::file_mgr::{FileCollection, FileList, FileWithFormat, PathId};
-use super::format::{lock_file_path, FileNameExt, LogFileFormat};
+use super::format::{lock_file_path, FileNameExt, LogFileFormat, StaleFileNameExt};
 use super::log_file::build_file_reader;
 use super::pipe::{DualPipes, SinglePipe};
 use super::reader::LogItemBatchFileReader;
@@ -83,6 +83,8 @@ pub struct DualPipesBuilder<F: FileSystem> {
     append_files: Vec<FileToRecover<F>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
     rewrite_files: Vec<FileToRecover<F>>,
+    /// Only filled after a successful call of `DualPipesBuilder::scan`.
+    stale_files: Vec<FileToRecover<F>>,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -95,6 +97,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             dir_lock: None,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
+            stale_files: Vec::new(),
         }
     }
 
@@ -116,6 +119,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
         let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
+        let (mut min_stale_id, mut max_stale_id) = (u64::MAX, 0);
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
                 let p = e.path();
@@ -135,24 +139,45 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             min_rewrite_id = std::cmp::min(min_rewrite_id, seq);
                             max_rewrite_id = std::cmp::max(max_rewrite_id, seq);
                         }
-                        _ => {}
+                        _ => {
+                            // Scan and check whether current file is a stale file or not.
+                            // Stale files are only vaid for Append queue.
+                            if let Some(FileId {
+                                queue: LogQueue::Append,
+                                seq,
+                            }) = FileId::parse_stale_file_name(
+                                p.file_name().unwrap().to_str().unwrap(),
+                            ) {
+                                min_stale_id = std::cmp::min(min_stale_id, seq);
+                                max_stale_id = std::cmp::max(max_stale_id, seq);
+                            }
+                        }
                     }
                 }
             }
         });
 
-        for (queue, min_id, max_id, files) in [
+        for (queue, min_id, max_id, files, is_stale) in [
             (
                 LogQueue::Append,
                 min_append_id,
                 max_append_id,
                 &mut self.append_files,
+                false, /* active file */
             ),
             (
                 LogQueue::Rewrite,
                 min_rewrite_id,
                 max_rewrite_id,
                 &mut self.rewrite_files,
+                false, /* active file */
+            ),
+            (
+                LogQueue::Append,
+                min_stale_id,
+                max_stale_id,
+                &mut self.stale_files,
+                true, /* stale file */
             ),
         ] {
             if max_id > 0 {
@@ -163,7 +188,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 for i in 0..max_sample {
                     let seq = i * min_id / max_sample;
                     let file_id = FileId { queue, seq };
-                    let path = file_id.build_file_path(dir);
+                    let path = if is_stale {
+                        file_id.build_stale_file_path(dir)
+                    } else {
+                        file_id.build_file_path(dir)
+                    };
                     if self.file_system.exists_metadata(&path) {
                         delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
                         break;
@@ -174,7 +203,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let mut success = 0;
                     for seq in start..min_id {
                         let file_id = FileId { queue, seq };
-                        let path = file_id.build_file_path(dir);
+                        let path = if is_stale {
+                            file_id.build_stale_file_path(dir)
+                        } else {
+                            file_id.build_file_path(dir)
+                        };
                         if let Err(e) = self.file_system.delete_metadata(&path) {
                             error!("failed to delete metadata of {}: {}.", path.display(), e);
                             break;
@@ -188,7 +221,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };
-                    let path = file_id.build_file_path(dir);
+                    let path = if is_stale {
+                        file_id.build_stale_file_path(dir)
+                    } else {
+                        file_id.build_file_path(dir)
+                    };
                     if !path.exists() {
                         warn!(
                             "Detected a hole when scanning directory, discarding files before {:?}.",
@@ -401,15 +438,23 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
+        // Rewrite queue won't be assigned with stale files for recycling.
         let (capacity, active_files, stale_files) = match queue {
-            LogQueue::Append => {
-                // Scan and get all existing stale files.
-                (
-                    self.cfg.recycle_capacity(),
-                    &self.append_files,
-                    FileCollection::scan_stale_files(self.file_system.as_ref(), &self.cfg.dir)?,
-                )
-            }
+            LogQueue::Append => (
+                self.cfg.recycle_capacity(),
+                &self.append_files,
+                FileList::new(
+                    self.stale_files.first().map(|f| f.seq).unwrap_or(0),
+                    self.stale_files
+                        .iter()
+                        .map(|f| FileWithFormat {
+                            handle: f.handle.clone(),
+                            format: LogFileFormat::new(Version::V2, 0),
+                            path_id: f.path_id,
+                        })
+                        .collect(),
+                ),
+            ),
             LogQueue::Rewrite => (
                 0,
                 &self.rewrite_files,

@@ -292,10 +292,6 @@ impl<F: FileSystem> SinglePipe<F> {
         self.files.read().active_file_span()
     }
 
-    fn stale_file_span(&self) -> (FileSeq, FileSeq) {
-        self.files.read().stale_file_span()
-    }
-
     fn total_size(&self) -> usize {
         let (first_seq, last_seq) = self.file_span();
         (last_seq - first_seq + 1) as usize * self.target_file_size
@@ -369,11 +365,6 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
         self.pipes[queue as usize].file_span()
-    }
-
-    #[inline]
-    fn stale_file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq) {
-        self.pipes[queue as usize].stale_file_span()
     }
 
     #[inline]
