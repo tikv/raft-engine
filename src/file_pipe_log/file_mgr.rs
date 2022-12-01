@@ -274,57 +274,47 @@ impl<F: FileSystem> FileCollection<F> {
             // If there exists several stale files out of space, contained in
             // `self.stale_files` and `purged_files`, we should check and remove them
             // to avoid the `size` of whole files beyond `self.capacity`.
-            let out_of_space = (active_state.total_len + logical_purged_count + stale_files.len())
-                .saturating_sub(self.capacity);
-            for _ in 0..out_of_space {
-                let path = {
-                    if let Some((seq, fd)) = stale_files.pop_front() {
-                        let file_id = FileId {
-                            seq,
-                            queue: self.queue,
-                        };
-                        file_id.build_stale_file_path(&self.paths[fd.path_id])
-                    } else if let Some((seq, fd)) = purged_files.pop_front() {
-                        let file_id = FileId {
-                            seq,
-                            queue: self.queue,
-                        };
-                        file_id.build_file_path(&self.paths[fd.path_id])
-                    } else {
-                        break;
-                    }
-                };
-                self.file_system.delete(&path)?;
+            let remains_capacity = self.capacity.saturating_sub(active_state.total_len);
+            while stale_files.len() > remains_capacity {
+                if let Some((seq, fd)) = stale_files.pop_front() {
+                    let file_id = FileId {
+                        seq,
+                        queue: self.queue,
+                    };
+                    let path = file_id.build_stale_file_path(&self.paths[fd.path_id]);
+                    self.file_system.delete(&path)?;
+                }
             }
             // Meanwhile, the new purged files from `self.active_files` should be RENAME
             // to stale files with `.raftlog.stale` suffix, to reduce the unnecessary
             // recovery timecost when RESTART.
-            for (i, fd) in purged_files.fds.iter().enumerate() {
+            while purged_files.len() > 0 {
+                let (seq, file) = purged_files.pop_front().unwrap();
                 let file_id = FileId {
-                    seq: purged_files.first_seq + i as FileSeq,
+                    seq,
                     queue: self.queue,
                 };
-                let path = file_id.build_file_path(&self.paths[fd.path_id]);
-                // The files with format_version `V1` cannot be chosen as recycle candidates.
-                // We will simply make sure there's no `V1` stale files in the collection.
-                if !fd.format.version.has_log_signing() {
+                let path = file_id.build_file_path(&self.paths[file.path_id]);
+                if file.format.version.has_log_signing() && stale_files.len() < remains_capacity {
+                    let stale_file_id = FileId {
+                        seq: stale_files.span().1 + 1_u64,
+                        queue: self.queue,
+                    };
+                    let stale_path = stale_file_id.build_stale_file_path(&self.paths[file.path_id]);
+                    self.file_system.reuse(&path, &stale_path)?;
+                    stale_files.push_back(
+                        stale_file_id.seq,
+                        FileWithFormat {
+                            handle: Arc::new(self.file_system.open(&stale_path)?),
+                            path_id: file.path_id,
+                            format: self.file_format,
+                        },
+                    );
+                } else {
+                    // The files with format_version `V1` cannot be chosen as recycle candidates.
+                    // We will simply make sure there's no `V1` stale files in the collection.
                     self.file_system.delete(&path)?;
-                    continue;
                 }
-                let stale_file_id = FileId {
-                    seq: stale_files.span().1 + 1_u64,
-                    queue: self.queue,
-                };
-                let stale_path = stale_file_id.build_stale_file_path(&self.paths[fd.path_id]);
-                self.file_system.reuse(&path, &stale_path)?;
-                stale_files.push_back(
-                    stale_file_id.seq,
-                    FileWithFormat {
-                        handle: Arc::new(self.file_system.open(&stale_path)?),
-                        path_id: fd.path_id,
-                        format: fd.format,
-                    },
-                );
             }
         }
         Ok(logical_purged_count)
@@ -554,8 +544,8 @@ mod tests {
             15,
             new_file_handler(&path, FileId::new(LogQueue::Append, 15), Version::V2, false),
         );
-        // 1 2 3 | 15
         // V1 file will not be kept around.
+        // 1 2 3 | 15
         assert_eq!(2, file_collection.purge_to(15).unwrap());
         assert_eq!(file_collection.len(), 4);
         assert_eq!(file_collection.stale_file_span(), (1, 3));
@@ -563,7 +553,7 @@ mod tests {
         // 1 2 3 | 15 16
         file_collection.push_back(
             16,
-            new_file_handler(&path, FileId::new(LogQueue::Append, 16), Version::V2, false),
+            new_file_handler(&path, FileId::new(LogQueue::Append, 16), Version::V1, false),
         );
         // Stale file with seqno 15 will be reused to `.raftlog.stale` with seqno 1.
         // 1 2 3 4 | 16
@@ -580,19 +570,22 @@ mod tests {
         }
         assert_eq!(file_collection.stale_file_span(), (1, 4));
         assert_eq!(file_collection.active_file_span(), (16, 20));
-        // 1 2 3 | 19 20
+        // V1 file will not be kept around.
+        // 2 3 4 | 19 20
         assert_eq!(3, file_collection.purge_to(19).unwrap());
         assert_eq!(file_collection.len(), 5);
-        assert_eq!(file_collection.stale_file_span(), (1, 3));
+        assert_eq!(file_collection.stale_file_span(), (2, 4));
         assert_eq!(file_collection.active_file_span(), (19, 20));
-        // 2 3 | 19 20
+        // 3 4 | 19 20
         let (file_seq, fd) = file_collection.rotate().unwrap();
         assert_eq!(file_collection.len(), 4);
+        assert_eq!(file_collection.stale_file_span(), (3, 4));
+        assert_eq!(file_collection.active_file_span(), (19, 20));
         assert_eq!(file_seq, 21);
-        // 2 3 | 19 20 21
+        // 3 4 | 19 20 21
         file_collection.push_back(file_seq, fd);
         assert_eq!(file_collection.len(), 5);
-        assert_eq!(file_collection.stale_file_span(), (2, 3));
+        assert_eq!(file_collection.stale_file_span(), (3, 4));
         assert_eq!(file_collection.active_file_span(), (19, 21));
     }
 }
