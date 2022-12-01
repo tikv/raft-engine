@@ -482,7 +482,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             stale_files,
         );
         // Prepares extra stale files for recycling if necessary.
-        if capacity > 0 && self.cfg.enable_recycle_init {
+        if capacity > 0 && self.cfg.prefill_for_recycle {
             file_collection.initialize()?;
         }
         SinglePipe::open(

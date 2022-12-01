@@ -17,6 +17,8 @@ use super::format::{max_stale_log_count, FileNameExt, LogFileFormat, StaleFileNa
 
 /// Default buffer size for building stale file, unit: byte.
 const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
+/// Default path id for log files. 0 => Main dir
+const LOG_DEFAULT_PATH_ID: PathId = 0;
 
 pub type PathId = usize;
 pub type Paths = [String; 1];
@@ -101,26 +103,6 @@ impl<F: FileSystem> FileList<F> {
         }
     }
 
-    #[inline]
-    #[cfg(test)]
-    pub fn append(&mut self, mut file_list: FileList<F>) -> FileState {
-        if file_list.len() > 0 {
-            if self.fds.is_empty() {
-                self.first_seq = file_list.first_seq;
-            } else {
-                debug_assert_eq!(
-                    self.first_seq + self.fds.len() as FileSeq,
-                    file_list.first_seq
-                );
-            }
-            self.fds.append(&mut file_list.fds);
-        }
-        FileState {
-            first_seq: self.first_seq,
-            total_len: self.fds.len(),
-        }
-    }
-
     /// Splits current file list.
     ///
     /// Returns the first splitted part of current file list.
@@ -155,6 +137,7 @@ pub struct FileCollection<F: FileSystem> {
     file_system: Arc<F>,
     queue: LogQueue,
     paths: Paths,
+    file_format: LogFileFormat,
     target_file_size: usize,
     capacity: usize,
     /// File list to collect all active files
@@ -177,6 +160,7 @@ impl<F: FileSystem> FileCollection<F> {
             file_system,
             queue,
             paths,
+            file_format: LogFileFormat::new(Version::V2, 0 /* alignment */),
             target_file_size,
             capacity,
             active_files: CachePadded::new(RwLock::new(active_files)),
@@ -209,27 +193,38 @@ impl<F: FileSystem> FileCollection<F> {
 
     #[inline]
     #[cfg(test)]
-    pub fn stale_file_span(&self) -> (FileSeq, FileSeq) {
+    fn stale_file_span(&self) -> (FileSeq, FileSeq) {
         self.stale_files.read().span()
     }
 
     #[inline]
-    pub fn push_back(&mut self, seq: FileSeq, handle: FileWithFormat<F>) -> FileState {
+    pub fn push_back(&self, seq: FileSeq, handle: FileWithFormat<F>) -> FileState {
         self.active_files.write().push_back(seq, handle)
+    }
+
+    #[inline]
+    pub fn get_target_file_size(&self) -> usize {
+        self.target_file_size
+    }
+
+    /// Update file format in current file collection.
+    #[inline]
+    pub fn upd_file_format(&mut self, format: LogFileFormat) {
+        self.file_format = format;
     }
 
     /// Rotate a new file handle and return it to the caller.
     ///
-    /// Returns the relevant `FileSeq`, `PathId` and `F::Handle` of the file
+    /// Returns the relevant `FileSeq`, and `FileWithFormat` of the file
     /// handle to the caller.
     /// Attention please, the returned fd should be manually appended to current
     /// `FileCollection`.
-    pub fn rotate(&mut self) -> Result<(FileSeq, PathId, Arc<F::Handle>)> {
+    pub fn rotate(&self) -> Result<(FileSeq, FileWithFormat<F>)> {
         let new_file_id = FileId {
             seq: self.active_files.read().span().1 + 1,
             queue: self.queue,
         };
-        let (path_id, new_fd) = if let Some((seq, fd)) = self.stale_files.write().pop_front() {
+        let new_file_hanle = if let Some((seq, fd)) = self.stale_files.write().pop_front() {
             debug_assert_eq!(fd.path_id, 0);
             let stale_file_id = FileId {
                 seq,
@@ -242,22 +237,34 @@ impl<F: FileSystem> FileCollection<F> {
                 if let Err(e) = self.file_system.delete(&src_path) {
                     error!("error while trying to delete one stale file, err: {}", e);
                 }
-                (fd.path_id, Arc::new(self.file_system.create(&dst_path)?))
+                FileWithFormat {
+                    handle: Arc::new(self.file_system.create(&dst_path)?),
+                    path_id: fd.path_id,
+                    format: self.file_format,
+                }
             } else {
-                (fd.path_id, Arc::new(self.file_system.open(&dst_path)?))
+                FileWithFormat {
+                    handle: Arc::new(self.file_system.open(&dst_path)?),
+                    path_id: fd.path_id,
+                    format: self.file_format,
+                }
             }
         } else {
             let path_id = FileCollection::<F>::get_valid_path(&self.paths, self.target_file_size);
             let path = new_file_id.build_file_path(&self.paths[path_id]);
-            (path_id, Arc::new(self.file_system.create(&path)?))
+            FileWithFormat {
+                handle: Arc::new(self.file_system.create(&path)?),
+                path_id,
+                format: self.file_format,
+            }
         };
-        Ok((new_file_id.seq, path_id, new_fd))
+        Ok((new_file_id.seq, new_file_hanle))
     }
 
     /// Purges files to the specific file_seq.
     ///
     /// Returns the purged count of active files.
-    pub fn purge_to(&mut self, file_seq: FileSeq) -> Result<usize> {
+    pub fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
         let (active_state, mut purged_files) = self.active_files.write().split_by(file_seq);
         if file_seq >= active_state.first_seq + active_state.total_len as FileSeq {
             debug_assert_eq!(purged_files.len(), 0);
@@ -268,29 +275,11 @@ impl<F: FileSystem> FileCollection<F> {
         let logical_purged_count = purged_files.len();
         {
             let mut stale_files = self.stale_files.write();
-            // The files with format_version `V1` cannot be chosen as recycle candidates.
-            // We will simply make sure there's no `V1` stale files in the collection.
-            let invalid_count = {
-                let mut invalid_idx = 0_usize;
-                for (i, fd) in purged_files.fds.iter().enumerate() {
-                    if !fd.format.version.has_log_signing() {
-                        invalid_idx = i + 1;
-                        break;
-                    }
-                }
-                invalid_idx
-            };
-            let out_of_space = if invalid_count > 0 && self.capacity > 0 {
-                // If `invalid_count` exists, it means that part of stale files with
-                // seqno earlier than this flag should be cleared.
-                invalid_count + stale_files.len()
-            } else {
-                // If there exists several stale files out of space, contained in
-                // `self.stale_files` and `purged_files`, we should check and remove them
-                // to avoid the `size` of whole files beyond `self.capacity`.
-                (active_state.total_len + logical_purged_count + stale_files.len())
-                    .saturating_sub(self.capacity)
-            };
+            // If there exists several stale files out of space, contained in
+            // `self.stale_files` and `purged_files`, we should check and remove them
+            // to avoid the `size` of whole files beyond `self.capacity`.
+            let out_of_space = (active_state.total_len + logical_purged_count + stale_files.len())
+                .saturating_sub(self.capacity);
             for _ in 0..out_of_space {
                 let path = {
                     if let Some((seq, fd)) = stale_files.pop_front() {
@@ -319,11 +308,17 @@ impl<F: FileSystem> FileCollection<F> {
                     seq: purged_files.first_seq + i as FileSeq,
                     queue: self.queue,
                 };
+                let path = file_id.build_file_path(&self.paths[fd.path_id]);
+                // The files with format_version `V1` cannot be chosen as recycle candidates.
+                // We will simply make sure there's no `V1` stale files in the collection.
+                if !fd.format.version.has_log_signing() {
+                    self.file_system.delete(&path)?;
+                    continue;
+                }
                 let stale_file_id = FileId {
                     seq: stale_files.span().1 + 1_u64,
                     queue: self.queue,
                 };
-                let path = file_id.build_file_path(&self.paths[fd.path_id]);
                 let stale_path = stale_file_id.build_stale_file_path(&self.paths[fd.path_id]);
                 self.file_system.reuse(&path, &stale_path)?;
                 stale_files.push_back(
@@ -367,12 +362,9 @@ impl<F: FileSystem> FileCollection<F> {
                 };
                 stale_files.push_back(
                     seq,
-                    FileCollection::build_stale_file(
-                        self.file_system.as_ref(),
-                        &self.paths,
+                    self.build_stale_file(
                         file_id,
                         LogFileFormat::new(Version::V2, 0 /* alignment */),
-                        self.target_file_size,
                     )?,
                 );
             }
@@ -391,19 +383,17 @@ impl<F: FileSystem> FileCollection<F> {
     /// Attention, this function is only called when `Config.enable-log-recycle`
     /// is true.
     fn build_stale_file(
-        file_system: &F,
-        paths: &Paths,
+        &self,
         file_id: FileId,
         format: LogFileFormat,
-        target_file_size: usize,
     ) -> Result<FileWithFormat<F>> {
-        let path_id = FileCollection::<F>::get_valid_path(paths, target_file_size);
-        let file_path = file_id.build_stale_file_path(&paths[path_id]);
-        let fd = Arc::new(file_system.create(&file_path)?);
-        let mut writer = file_system.new_writer(fd.clone())?;
+        let path_id = FileCollection::<F>::get_valid_path(&self.paths, self.target_file_size);
+        let file_path = file_id.build_stale_file_path(&self.paths[path_id]);
+        let fd = Arc::new(self.file_system.create(&file_path)?);
+        let mut writer = self.file_system.new_writer(fd.clone())?;
         let mut written = 0_usize;
-        let buf = vec![0; std::cmp::min(LOG_STALE_FILE_BUF_SIZE, target_file_size)];
-        while written <= target_file_size {
+        let buf = vec![0; std::cmp::min(LOG_STALE_FILE_BUF_SIZE, self.target_file_size)];
+        while written <= self.target_file_size {
             writer.write_all(&buf).unwrap_or_else(|e| {
                 panic!("failed to prepare stale file: {}", e);
             });
@@ -419,11 +409,10 @@ impl<F: FileSystem> FileCollection<F> {
     }
 
     /// Returns a valid path for dumping new files.
-    ///
-    /// Default: 0 -> default index of the main directory.
+    #[inline]
     pub fn get_valid_path(paths: &Paths, _target_file_size: usize) -> PathId {
         debug_assert!(paths.len() <= 2);
-        0
+        LOG_DEFAULT_PATH_ID
     }
 }
 
@@ -438,31 +427,28 @@ mod tests {
     use crate::pipe_log::Version;
     use crate::util::ReadableSize;
 
-    #[test]
-    fn test_file_collection() {
-        fn new_file_handler(
-            path: &str,
-            file_id: FileId,
-            version: Version,
-            is_stale: bool,
-        ) -> FileWithFormat<DefaultFileSystem> {
-            let file_path = if !is_stale {
-                file_id.build_file_path(path)
-            } else {
-                file_id.build_stale_file_path(path)
-            };
-            FileWithFormat {
-                handle: Arc::new(DefaultFileSystem.create(&file_path).unwrap()),
-                format: LogFileFormat::new(version, 0 /* alignment */),
-                path_id: 0, /* default with Main dir */
-            }
+    fn new_file_handler(
+        path: &str,
+        file_id: FileId,
+        version: Version,
+        is_stale: bool,
+    ) -> FileWithFormat<DefaultFileSystem> {
+        let file_path = if !is_stale {
+            file_id.build_file_path(path)
+        } else {
+            file_id.build_stale_file_path(path)
+        };
+        FileWithFormat {
+            handle: Arc::new(DefaultFileSystem.create(&file_path).unwrap()),
+            format: LogFileFormat::new(version, 0 /* alignment */),
+            path_id: 0, /* default with Main dir */
         }
-        let dir = Builder::new()
-            .prefix("test_file_collection")
-            .tempdir()
-            .unwrap();
+    }
+
+    #[test]
+    fn test_file_list() {
+        let dir = Builder::new().prefix("test_file_list").tempdir().unwrap();
         let path = String::from(dir.path().to_str().unwrap());
-        let target_file_size = ReadableSize(1);
         // | 12
         let mut active_files = FileList::new(
             12,
@@ -501,23 +487,64 @@ mod tests {
         let (state, files) = active_files.split_by(13);
         assert_eq!(state.first_seq, 13);
         assert_eq!(files.span(), (12, 12));
-        assert_eq!(
-            stale_files.append(files),
-            FileState {
-                first_seq: 11,
-                total_len: 2,
-            }
-        );
-        let mut file_collection = FileCollection::new(
+        for (i, fd) in files.fds.iter().enumerate() {
+            stale_files.push_back(
+                files.first_seq + i as FileSeq,
+                FileWithFormat {
+                    handle: fd.handle.clone(),
+                    ..*fd
+                },
+            );
+        }
+        assert_eq!(stale_files.span(), (11, 12));
+        assert!(stale_files.pop_front().is_some());
+        assert_eq!(stale_files.span(), (12, 12));
+        assert!(stale_files.back().is_some());
+    }
+
+    #[test]
+    fn test_file_collection() {
+        let dir = Builder::new()
+            .prefix("test_file_collection")
+            .tempdir()
+            .unwrap();
+        let path = String::from(dir.path().to_str().unwrap());
+        let target_file_size = ReadableSize(1);
+        // null | null
+        let file_collection = FileCollection::new(
             Arc::new(DefaultFileSystem),
             LogQueue::Append,
             [path.clone()],
             target_file_size.0 as usize,
             5,
-            active_files,
-            stale_files,
+            FileList::new(0, VecDeque::default()),
+            FileList::new(0, VecDeque::default()),
         );
-        // 11 12 | 13 14
+        assert_eq!(file_collection.len(), 0);
+        assert_eq!(file_collection.active_file_span(), (0, 0));
+        assert_eq!(file_collection.stale_file_span(), (0, 0));
+        assert!(file_collection.back().is_none());
+        // null | 11 12 13
+        for seq in 11..=13 {
+            file_collection.push_back(
+                seq,
+                new_file_handler(
+                    &path,
+                    FileId::new(LogQueue::Append, seq),
+                    Version::V2,
+                    false,
+                ),
+            );
+        }
+        assert_eq!(file_collection.len(), 3);
+        assert_eq!(file_collection.active_file_span(), (11, 13));
+        assert_eq!(file_collection.stale_file_span(), (0, 0));
+        // 1 2 | 13
+        assert_eq!(file_collection.purge_to(13).unwrap(), 2);
+        assert_eq!(file_collection.len(), 3);
+        assert_eq!(file_collection.active_file_span(), (13, 13));
+        assert_eq!(file_collection.stale_file_span(), (1, 2));
+        // 1 2 | 13 14
         assert_eq!(
             file_collection.push_back(
                 14,
@@ -528,36 +555,36 @@ mod tests {
                 total_len: 2,
             }
         );
-        // 11 12 | 13 14 15
+        // 1 2 | 13 14 15
         file_collection.push_back(
             15,
             new_file_handler(&path, FileId::new(LogQueue::Append, 15), Version::V2, false),
         );
-        // | 15
+        // 1 2 3 | 15
         // V1 file will not be kept around.
         assert_eq!(2, file_collection.purge_to(15).unwrap());
-        assert_eq!(file_collection.len(), 1);
-        assert_eq!(file_collection.stale_file_span(), (0, 0));
+        assert_eq!(file_collection.len(), 4);
+        assert_eq!(file_collection.stale_file_span(), (1, 3));
         assert_eq!(file_collection.active_file_span(), (15, 15));
-        // | 15 16
+        // 1 2 3 | 15 16
         file_collection.push_back(
             16,
             new_file_handler(&path, FileId::new(LogQueue::Append, 16), Version::V2, false),
         );
         // Stale file with seqno 15 will be reused to `.raftlog.stale` with seqno 1.
-        // 1 | 16
+        // 1 2 3 4 | 16
         assert_eq!(1, file_collection.purge_to(16).unwrap());
-        assert_eq!(file_collection.len(), 2);
-        assert_eq!(file_collection.stale_file_span(), (1, 1));
+        assert_eq!(file_collection.len(), 5);
+        assert_eq!(file_collection.stale_file_span(), (1, 4));
         assert_eq!(file_collection.active_file_span(), (16, 16));
-        // 1 | 16 17 18 19 20
+        // 1 2 3 4 | 16 17 18 19 20
         for i in 17..=20 {
             file_collection.push_back(
                 i as FileSeq,
                 new_file_handler(&path, FileId::new(LogQueue::Append, i), Version::V2, false),
             );
         }
-        assert_eq!(file_collection.stale_file_span(), (1, 1));
+        assert_eq!(file_collection.stale_file_span(), (1, 4));
         assert_eq!(file_collection.active_file_span(), (16, 20));
         // 1 2 3 | 19 20
         assert_eq!(3, file_collection.purge_to(19).unwrap());
@@ -565,18 +592,11 @@ mod tests {
         assert_eq!(file_collection.stale_file_span(), (1, 3));
         assert_eq!(file_collection.active_file_span(), (19, 20));
         // 2 3 | 19 20
-        let (file_seq, path_id, fd) = file_collection.rotate().unwrap();
+        let (file_seq, fd) = file_collection.rotate().unwrap();
         assert_eq!(file_collection.len(), 4);
         assert_eq!(file_seq, 21);
         // 2 3 | 19 20 21
-        file_collection.push_back(
-            file_seq,
-            FileWithFormat {
-                handle: fd,
-                format: LogFileFormat::new(Version::V2, 0),
-                path_id,
-            },
-        );
+        file_collection.push_back(file_seq, fd);
         assert_eq!(file_collection.len(), 5);
         assert_eq!(file_collection.stale_file_span(), (2, 3));
         assert_eq!(file_collection.active_file_span(), (19, 21));

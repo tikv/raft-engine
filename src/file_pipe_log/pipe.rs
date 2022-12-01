@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
 use log::error;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::config::Config;
 use crate::env::FileSystem;
@@ -18,7 +18,7 @@ use crate::pipe_log::{
 };
 use crate::{perf_context, Result};
 
-use super::file_mgr::{FileCollection, FileWithFormat, Paths};
+use super::file_mgr::{FileCollection, Paths};
 use super::format::LogFileFormat;
 use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
 
@@ -32,12 +32,11 @@ struct ActiveFile<F: FileSystem> {
 pub(super) struct SinglePipe<F: FileSystem> {
     queue: LogQueue,
     paths: Paths,
-    file_format: LogFileFormat,
-    target_file_size: usize,
     file_system: Arc<F>,
     listeners: Vec<Arc<dyn EventListener>>,
 
-    files: CachePadded<RwLock<FileCollection<F>>>,
+    /// The collection of all log files.
+    files: FileCollection<F>,
     /// The log file opened for write.
     ///
     /// `active_file` must be locked first to acquire both `files` and
@@ -78,18 +77,13 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
         let file_format = LogFileFormat::new(cfg.format_version, alignment);
+        // Update default file format in the file collection.
+        files.upd_file_format(file_format);
         let create_file = files.back().is_none();
         let (first_seq, active_seq) = {
             if create_file {
-                let (file_seq, path_id, fd) = files.rotate()?;
-                files.push_back(
-                    file_seq,
-                    FileWithFormat {
-                        handle: fd,
-                        format: file_format,
-                        path_id,
-                    },
-                );
+                let (file_seq, fd) = files.rotate()?;
+                files.push_back(file_seq, fd);
             }
             files.active_file_span()
         };
@@ -114,11 +108,9 @@ impl<F: FileSystem> SinglePipe<F> {
         let pipe = Self {
             queue,
             paths: [cfg.dir.clone()],
-            file_format,
-            target_file_size: cfg.target_file_size.0 as usize,
             file_system,
             listeners,
-            files: CachePadded::new(RwLock::new(files)),
+            files,
             active_file: CachePadded::new(Mutex::new(active_file)),
         };
         pipe.flush_metrics((active_seq - first_seq + 1) as usize);
@@ -136,7 +128,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
-        self.files.read().get_fd(file_seq)
+        self.files.get_fd(file_seq)
     }
 
     /// Creates a new file for write, and rotates the active log file.
@@ -152,7 +144,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
         active_file.writer.close()?;
 
-        let (file_seq, path_id, fd) = self.files.write().rotate()?;
+        let (file_seq, fd) = self.files.rotate()?;
         debug_assert_eq!(seq, file_seq);
         let mut new_file = ActiveFile {
             seq,
@@ -160,22 +152,15 @@ impl<F: FileSystem> SinglePipe<F> {
             // header of it.
             writer: build_file_writer(
                 self.file_system.as_ref(),
-                fd.clone(),
-                self.file_format,
+                fd.handle.clone(),
+                fd.format,
                 true, /* force_reset */
             )?,
-            format: self.file_format,
+            format: fd.format,
         };
         // Newly created file by `FileCollection::rotate` should be pushed back to
         // files.
-        self.files.write().push_back(
-            seq,
-            FileWithFormat {
-                path_id,
-                handle: fd,
-                format: self.file_format,
-            },
-        );
+        self.files.push_back(seq, fd);
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
@@ -188,7 +173,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 seq,
             });
         }
-        self.flush_metrics(self.files.read().len());
+        self.flush_metrics(self.files.len());
         Ok(())
     }
 
@@ -213,7 +198,8 @@ impl<F: FileSystem> SinglePipe<F> {
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
-        if active_file.writer.offset() >= self.target_file_size {
+        let target_file_size = self.files.get_target_file_size();
+        if active_file.writer.offset() >= target_file_size {
             if let Err(e) = self.rotate_imp(&mut active_file) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
@@ -246,12 +232,12 @@ impl<F: FileSystem> SinglePipe<F> {
                     if corrupted_padding() {
                         zeros[len - 1] = 8_u8;
                     }
-                    writer.write(&zeros, self.target_file_size)?;
+                    writer.write(&zeros, target_file_size)?;
                 }
             }
         }
         let start_offset = writer.offset();
-        if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
+        if let Err(e) = writer.write(bytes.as_bytes(&ctx), target_file_size) {
             if let Err(te) = writer.truncate() {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
@@ -289,12 +275,12 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn file_span(&self) -> (FileSeq, FileSeq) {
-        self.files.read().active_file_span()
+        self.files.active_file_span()
     }
 
     fn total_size(&self) -> usize {
         let (first_seq, last_seq) = self.file_span();
-        (last_seq - first_seq + 1) as usize * self.target_file_size
+        (last_seq - first_seq + 1) as usize * self.files.get_target_file_size()
     }
 
     fn rotate(&self) -> Result<()> {
@@ -305,8 +291,8 @@ impl<F: FileSystem> SinglePipe<F> {
     ///
     /// Return the actual removed count of purged files.
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let purged_count = self.files.write().purge_to(file_seq)?;
-        self.flush_metrics(self.files.read().len());
+        let purged_count = self.files.purge_to(file_seq)?;
+        self.flush_metrics(self.files.len());
         Ok(purged_count)
     }
 }
@@ -414,7 +400,7 @@ mod tests {
                 fs,
                 queue,
                 [cfg.dir.clone()],
-                ReadableSize(1).0 as usize,
+                cfg.target_file_size.0 as usize,
                 capacity,
                 FileList::new(0, VecDeque::new()),
                 FileList::new(0, VecDeque::new()),

@@ -707,7 +707,7 @@ mod tests {
         .unwrap();
         let cfg_recycle = Config {
             target_file_size: ReadableSize(1),
-            enable_recycle_init: true,
+            prefill_for_recycle: true,
             ..cfg
         };
         RaftLogEngine::open_with_file_system(
@@ -1581,7 +1581,7 @@ mod tests {
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
                 format_version: Version::V2,
-                enable_recycle_init: true,
+                prefill_for_recycle: true,
                 ..Default::default()
             };
             test_engine_ops(&cfg_v1, &cfg_v2);
@@ -2317,7 +2317,7 @@ mod tests {
             target_file_size: ReadableSize::kb(2),
             purge_threshold: ReadableSize::kb(32),
             enable_log_recycle: true,
-            enable_recycle_init: true,
+            prefill_for_recycle: true,
             ..cfg
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system.clone()).unwrap();
@@ -2352,7 +2352,7 @@ mod tests {
             dir: path.to_owned(),
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(80), // common size of capacity
-            enable_recycle_init: true,
+            prefill_for_recycle: true,
             ..Default::default()
         };
         let file_system = Arc::new(DeleteMonitoredFileSystem::new());
