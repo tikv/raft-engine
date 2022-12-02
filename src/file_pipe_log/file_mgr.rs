@@ -64,6 +64,14 @@ impl<F: FileSystem> FileList<F> {
     }
 
     #[inline]
+    pub fn state(&self) -> FileState {
+        FileState {
+            first_seq: self.first_seq,
+            total_len: self.fds.len(),
+        }
+    }
+
+    #[inline]
     pub fn get(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
         if !(self.first_seq..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
@@ -100,6 +108,25 @@ impl<F: FileSystem> FileList<F> {
                 Some((seq, fd))
             }
             None => None,
+        }
+    }
+
+    #[inline]
+    pub fn append(&mut self, mut file_list: FileList<F>) -> FileState {
+        if file_list.len() > 0 {
+            if self.fds.is_empty() {
+                self.first_seq = file_list.first_seq;
+            } else {
+                debug_assert_eq!(
+                    self.first_seq + self.fds.len() as FileSeq,
+                    file_list.first_seq
+                );
+            }
+            self.fds.append(&mut file_list.fds);
+        }
+        FileState {
+            first_seq: self.first_seq,
+            total_len: self.fds.len(),
         }
     }
 
@@ -270,39 +297,34 @@ impl<F: FileSystem> FileCollection<F> {
         }
         let logical_purged_count = purged_files.len();
         {
-            let mut stale_files = self.stale_files.write();
-            // If there exists several stale files out of space, contained in
-            // `self.stale_files` and `purged_files`, we should check and remove them
-            // to avoid the `size` of whole files beyond `self.capacity`.
             let remains_capacity = self.capacity.saturating_sub(active_state.total_len);
-            while stale_files.len() > remains_capacity {
-                if let Some((seq, fd)) = stale_files.pop_front() {
-                    let file_id = FileId {
-                        seq,
-                        queue: self.queue,
-                    };
-                    let path = file_id.build_stale_file_path(&self.paths[fd.path_id]);
-                    self.file_system.delete(&path)?;
-                }
-            }
-            // Meanwhile, the new purged files from `self.active_files` should be RENAME
+            // We get the FileState of `self.stale_files` in advance to reduce the lock
+            // racing for later processing.
+            let mut stale_state = self.stale_files.write().state();
+            let mut files_to_stale = FileList::<F>::new(0, VecDeque::default());
+            // The newly purged files from `self.active_files` should be RENAME
             // to stale files with `.raftlog.stale` suffix, to reduce the unnecessary
             // recovery timecost when RESTART.
-            while purged_files.len() > 0 {
-                let (seq, file) = purged_files.pop_front().unwrap();
+            while let Some((seq, file)) = purged_files.pop_front() {
                 let file_id = FileId {
                     seq,
                     queue: self.queue,
                 };
                 let path = file_id.build_file_path(&self.paths[file.path_id]);
-                if file.format.version.has_log_signing() && stale_files.len() < remains_capacity {
+                if file.format.version.has_log_signing() && stale_state.total_len < remains_capacity
+                {
                     let stale_file_id = FileId {
-                        seq: stale_files.span().1 + 1_u64,
+                        seq: if stale_state.total_len == 0 {
+                            stale_state.first_seq = 1;
+                            stale_state.first_seq
+                        } else {
+                            stale_state.first_seq + stale_state.total_len as FileSeq
+                        },
                         queue: self.queue,
                     };
                     let stale_path = stale_file_id.build_stale_file_path(&self.paths[file.path_id]);
                     self.file_system.reuse(&path, &stale_path)?;
-                    stale_files.push_back(
+                    files_to_stale.push_back(
                         stale_file_id.seq,
                         FileWithFormat {
                             handle: Arc::new(self.file_system.open(&stale_path)?),
@@ -310,12 +332,30 @@ impl<F: FileSystem> FileCollection<F> {
                             format: self.file_format,
                         },
                     );
+                    stale_state.total_len += 1;
                 } else {
                     // The files with format_version `V1` cannot be chosen as recycle candidates.
                     // We will simply make sure there's no `V1` stale files in the collection.
                     self.file_system.delete(&path)?;
                 }
             }
+            // If there exists several stale files out of space, contained in
+            // `self.stale_files` and `purged_files`, we should check and remove them
+            // to avoid the `size` of whole files beyond `self.capacity`.
+            if stale_state.total_len > remains_capacity {
+                let (_, mut clear_list) = self.stale_files.write().split_by(
+                    stale_state.first_seq + (stale_state.total_len - remains_capacity) as FileSeq,
+                );
+                while let Some((seq, file)) = clear_list.pop_front() {
+                    let file_id = FileId {
+                        seq,
+                        queue: self.queue,
+                    };
+                    let path = file_id.build_stale_file_path(&self.paths[file.path_id]);
+                    self.file_system.delete(&path)?;
+                }
+            }
+            self.stale_files.write().append(files_to_stale);
         }
         Ok(logical_purged_count)
     }
@@ -443,6 +483,13 @@ mod tests {
             )]
             .into(),
         );
+        assert_eq!(
+            active_files.state(),
+            FileState {
+                first_seq: 12,
+                total_len: 1,
+            }
+        );
         assert_eq!(active_files.len(), 1);
         assert_eq!(active_files.span(), (12, 12));
         let mut stale_files = FileList::new(0, VecDeque::default());
@@ -483,6 +530,26 @@ mod tests {
         assert!(stale_files.pop_front().is_some());
         assert_eq!(stale_files.span(), (12, 12));
         assert!(stale_files.back().is_some());
+        // 11 12 | 13 14 15
+        let mut append_list = FileList::new(0, VecDeque::default());
+        for seq in 14..=15 {
+            append_list.push_back(
+                seq,
+                new_file_handler(
+                    &path,
+                    FileId::new(LogQueue::Append, seq),
+                    Version::V2,
+                    false,
+                ),
+            );
+        }
+        assert_eq!(
+            active_files.append(append_list),
+            FileState {
+                first_seq: 13,
+                total_len: 3
+            }
+        );
     }
 
     #[test]
