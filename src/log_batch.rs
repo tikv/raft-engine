@@ -347,6 +347,7 @@ pub struct LogItemBatch {
     items: Vec<LogItem>,
     item_size: usize,
     entries_size: u32,
+    save_points: Vec<(usize, usize, u32)>,
 }
 
 impl Default for LogItemBatch {
@@ -361,6 +362,7 @@ impl LogItemBatch {
             items: Vec::with_capacity(cap),
             item_size: 0,
             entries_size: 0,
+            save_points: Vec::new(),
         }
     }
 
@@ -376,6 +378,7 @@ impl LogItemBatch {
     pub fn drain(&mut self) -> LogItemDrain {
         self.item_size = 0;
         self.entries_size = 0;
+        self.save_points.clear();
         self.items.drain(..)
     }
 
@@ -396,7 +399,37 @@ impl LogItemBatch {
         rhs.item_size = 0;
         self.entries_size += rhs.entries_size;
         rhs.entries_size = 0;
+        let (a_delta, b_delta, c_delta) = self.save();
+        for (ref mut a, ref mut b, ref mut c) in &mut rhs.save_points {
+            *a += a_delta;
+            *b += b_delta;
+            *c += c_delta;
+        }
+        self.save_points.append(&mut rhs.save_points);
         self.items.append(&mut rhs.items);
+    }
+
+    #[inline]
+    fn save(&self) -> (usize, usize, u32) {
+        (self.items.len(), self.item_size, self.entries_size)
+    }
+
+    #[inline]
+    pub fn set_save_point(&mut self) {
+        self.save_points.push(self.save());
+    }
+
+    #[inline]
+    pub fn pop_save_point(&mut self) {
+        self.save_points.pop();
+    }
+
+    #[inline]
+    pub fn rollback(&mut self) {
+        let (a, b, c) = self.save_points.last().unwrap();
+        self.items.truncate(*a);
+        self.item_size = *b;
+        self.entries_size = *c;
     }
 
     pub(crate) fn finish_populate(&mut self, compression_type: CompressionType) {
@@ -578,6 +611,7 @@ pub struct LogBatch {
     item_batch: LogItemBatch,
     buf_state: BufState,
     buf: Vec<u8>,
+    save_points: Vec<usize>,
 }
 
 impl Default for LogBatch {
@@ -596,17 +630,19 @@ impl LogBatch {
             item_batch: LogItemBatch::with_capacity(cap),
             buf_state: BufState::Open,
             buf,
+            save_points: Vec::new(),
         }
     }
 
     /// Moves all log items of `rhs` into `Self`, leaving `rhs` empty.
     pub fn merge(&mut self, rhs: &mut Self) -> Result<()> {
-        debug_assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
+        assert!(self.buf_state == BufState::Open && rhs.buf_state == BufState::Open);
         let max_entries_size = (|| {
             fail::fail_point!("log_batch::1kb_entries_size_per_batch", |_| 1024);
             MAX_LOG_ENTRIES_SIZE_PER_BATCH
         })();
-        if !rhs.buf.is_empty() {
+        let old_buf_len = self.buf.len();
+        if rhs.buf.len() > LOG_BATCH_HEADER_LEN {
             if rhs.buf.len() + self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN * 2 {
                 return Err(Error::Full);
             }
@@ -617,9 +653,37 @@ impl LogBatch {
             rhs.buf.truncate(LOG_BATCH_HEADER_LEN);
         }
         self.item_batch.merge(&mut rhs.item_batch);
+        for s in &rhs.save_points {
+            assert!(*s >= LOG_BATCH_HEADER_LEN);
+            self.save_points
+                .push(*s - LOG_BATCH_HEADER_LEN + old_buf_len);
+        }
         self.buf_state = BufState::Open;
         rhs.buf_state = BufState::Open;
         Ok(())
+    }
+
+    /// Creates a save point of current status.
+    #[inline]
+    pub fn set_save_point(&mut self) {
+        assert!(self.buf_state == BufState::Open);
+        self.item_batch.set_save_point();
+        self.save_points.push(self.buf.len());
+    }
+
+    /// No-op if there's no save point to pop.
+    #[inline]
+    pub fn pop_save_point(&mut self) {
+        assert!(self.buf_state == BufState::Open);
+        self.save_points.pop();
+    }
+
+    /// No-op if there's no save point to rollback to.
+    #[inline]
+    pub fn rollback(&mut self) {
+        assert!(self.buf_state == BufState::Open);
+        self.item_batch.rollback();
+        self.buf.truncate(*self.save_points.last().unwrap());
     }
 
     /// Adds some protobuf log entries into the log batch.
@@ -628,7 +692,7 @@ impl LogBatch {
         region_id: u64,
         entries: &[M::Entry],
     ) -> Result<()> {
-        debug_assert!(self.buf_state == BufState::Open);
+        assert!(self.buf_state == BufState::Open);
         if entries.is_empty() {
             return Ok(());
         }
@@ -668,8 +732,8 @@ impl LogBatch {
         mut entry_indexes: Vec<EntryIndex>,
         entries: Vec<Vec<u8>>,
     ) -> Result<()> {
-        debug_assert!(entry_indexes.len() == entries.len());
-        debug_assert!(self.buf_state == BufState::Open);
+        assert!(entry_indexes.len() == entries.len());
+        assert!(self.buf_state == BufState::Open);
         if entry_indexes.is_empty() {
             return Ok(());
         }
@@ -727,7 +791,7 @@ impl LogBatch {
     /// compression type to each entry index.
     pub(crate) fn finish_populate(&mut self, compression_threshold: usize) -> Result<usize> {
         let _t = StopWatch::new(perf_context!(log_populating_duration));
-        debug_assert!(self.buf_state == BufState::Open);
+        assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
             self.buf_state = BufState::Encoded(self.buf.len(), 0);
             return Ok(0);
@@ -805,13 +869,13 @@ impl LogBatch {
     ///
     /// Internally sets the file locations of each log entry indexes.
     pub(crate) fn finish_write(&mut self, mut handle: FileBlockHandle) {
-        debug_assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
+        assert!(matches!(self.buf_state, BufState::Sealed(_, _)));
         if !self.is_empty() {
             // adjust log batch handle to log entries handle.
             handle.offset += LOG_BATCH_HEADER_LEN as u64;
             match self.buf_state {
                 BufState::Sealed(_, entries_len) => {
-                    debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
+                    assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
                     handle.len = entries_len;
                 }
                 _ => unreachable!(),
@@ -822,11 +886,12 @@ impl LogBatch {
 
     /// Consumes log items into an iterator.
     pub(crate) fn drain(&mut self) -> LogItemDrain {
-        debug_assert!(!matches!(self.buf_state, BufState::Incomplete));
+        assert!(!matches!(self.buf_state, BufState::Incomplete));
 
         self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
         self.buf.truncate(LOG_BATCH_HEADER_LEN);
         self.buf_state = BufState::Open;
+        self.save_points.clear();
         self.item_batch.drain()
     }
 
@@ -1369,6 +1434,10 @@ mod tests {
         assert!(batch.is_empty());
         batch.add_raw_entries(0, Vec::new(), Vec::new()).unwrap();
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_save_point() {
     }
 
     #[cfg(feature = "nightly")]
