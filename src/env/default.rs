@@ -273,7 +273,7 @@ impl FileSystem for DefaultFileSystem {
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
-        fail_point!("file_system::remove_file_skipped", |_| { Ok(()) });
+        fail_point!("default_fs::delete_skipped", |_| { Ok(()) });
         std::fs::remove_file(path)
     }
 
