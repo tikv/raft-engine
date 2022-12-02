@@ -24,9 +24,17 @@ TOOLCHAIN_ARGS = +stable
 endif
 endif
 
-.PHONY: format clippy test
+BIN_PATH = $(CURDIR)/bin
+CARGO_TARGET_DIR ?= $(CURDIR)/target/
+
+.PHONY: clean format clippy test
+.PHONY: ctl
 
 all: format clippy test
+
+clean:
+	cargo clean
+	rm -rf ${BIN_PATH}
 
 ## Format code in-place using rustfmt.
 format:
@@ -49,3 +57,9 @@ else
 	cargo ${TOOLCHAIN_ARGS} test --all --features all_stable_except_failpoints ${EXTRA_CARGO_ARGS} -- --nocapture
 	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features all_stable ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
+
+## Build raft-engine-ctl.
+ctl:
+	cargo build --release --package raft-engine-ctl
+	@mkdir -p ${BIN_PATH}
+	@cp -f ${CARGO_TARGET_DIR}/release/raft-engine-ctl ${BIN_PATH}/
