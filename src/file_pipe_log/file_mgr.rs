@@ -45,7 +45,9 @@ pub struct FileList<F: FileSystem> {
 impl<F: FileSystem> FileList<F> {
     #[inline]
     pub fn new(first_seq: FileSeq, fds: VecDeque<FileWithFormat<F>>) -> Self {
-        let first_seq = if fds.is_empty() { 0 } else { first_seq };
+        // If fds was empty, we just set first_seq with `1` to make
+        // `first_seq` + `fds.len()` remake the next file directly.
+        let first_seq = if fds.is_empty() { 1 } else { first_seq };
         Self { first_seq, fds }
     }
 
@@ -55,16 +57,17 @@ impl<F: FileSystem> FileList<F> {
     }
 
     #[inline]
-    pub fn span(&self) -> (FileSeq, FileSeq) {
+    pub fn span(&self) -> Option<(FileSeq, FileSeq)> {
         if !self.fds.is_empty() {
-            (self.first_seq, self.first_seq + self.fds.len() as u64 - 1)
-        } else {
-            (0, 0)
+            return Some((self.first_seq, self.first_seq + self.fds.len() as u64 - 1));
         }
+        None
     }
 
     #[inline]
     pub fn state(&self) -> FileState {
+        // If current file list was empty, the returned state remarks
+        // the next and expected file.
         FileState {
             first_seq: self.first_seq,
             total_len: self.fds.len(),
@@ -216,13 +219,13 @@ impl<F: FileSystem> FileCollection<F> {
     }
 
     #[inline]
-    pub fn active_file_span(&self) -> (FileSeq, FileSeq) {
+    pub fn active_file_span(&self) -> Option<(FileSeq, FileSeq)> {
         self.active_files.read().span()
     }
 
     #[inline]
     #[cfg(test)]
-    fn stale_file_span(&self) -> (FileSeq, FileSeq) {
+    fn stale_file_span(&self) -> Option<(FileSeq, FileSeq)> {
         self.stale_files.read().span()
     }
 
@@ -243,8 +246,9 @@ impl<F: FileSystem> FileCollection<F> {
     /// Attention please, the returned fd should be manually appended to current
     /// `FileCollection`.
     pub fn rotate(&self) -> Result<(FileSeq, FileWithFormat<F>)> {
+        let active_state = self.active_files.read().state();
         let new_file_id = FileId {
-            seq: self.active_files.read().span().1 + 1,
+            seq: active_state.first_seq + active_state.total_len as FileSeq,
             queue: self.queue,
         };
         let new_file_hanle = if let Some((seq, fd)) = self.stale_files.write().pop_front() {
@@ -314,12 +318,7 @@ impl<F: FileSystem> FileCollection<F> {
                 if file.format.version.has_log_signing() && stale_state.total_len < remains_capacity
                 {
                     let stale_file_id = FileId {
-                        seq: if stale_state.total_len == 0 {
-                            stale_state.first_seq = 1;
-                            stale_state.first_seq
-                        } else {
-                            stale_state.first_seq + stale_state.total_len as FileSeq
-                        },
+                        seq: stale_state.first_seq + stale_state.total_len as FileSeq,
                         queue: self.queue,
                     };
                     let stale_path = stale_file_id.build_stale_file_path(&self.paths[file.path_id]);
@@ -375,7 +374,10 @@ impl<F: FileSystem> FileCollection<F> {
             // introduce a serial processing for preparing progress.
             let mut stale_files = self.stale_files.write();
             let (prepare_first_seq, prepare_stale_files_count) = (
-                stale_files.span().1 + 1,
+                {
+                    let state = stale_files.state();
+                    state.first_seq + state.total_len as FileSeq
+                },
                 stale_capacity.saturating_sub(stale_files.len()),
             );
             for seq in prepare_first_seq..prepare_first_seq + prepare_stale_files_count as FileSeq {
@@ -491,10 +493,10 @@ mod tests {
             }
         );
         assert_eq!(active_files.len(), 1);
-        assert_eq!(active_files.span(), (12, 12));
+        assert_eq!(active_files.span().unwrap(), (12, 12));
         let mut stale_files = FileList::new(0, VecDeque::default());
         assert_eq!(stale_files.len(), 0);
-        assert_eq!(stale_files.span(), (0, 0));
+        assert!(stale_files.span().is_none());
         assert!(stale_files.pop_front().is_none());
         // 11 | 12
         assert_eq!(
@@ -512,11 +514,11 @@ mod tests {
             13,
             new_file_handler(&path, FileId::new(LogQueue::Append, 13), Version::V2, false),
         );
-        assert_eq!(active_files.span(), (12, 13));
+        assert_eq!(active_files.span().unwrap(), (12, 13));
         // 11 12 | 13
         let (state, files) = active_files.split_by(13);
         assert_eq!(state.first_seq, 13);
-        assert_eq!(files.span(), (12, 12));
+        assert_eq!(files.span().unwrap(), (12, 12));
         for (i, fd) in files.fds.iter().enumerate() {
             stale_files.push_back(
                 files.first_seq + i as FileSeq,
@@ -526,9 +528,9 @@ mod tests {
                 },
             );
         }
-        assert_eq!(stale_files.span(), (11, 12));
+        assert_eq!(stale_files.span().unwrap(), (11, 12));
         assert!(stale_files.pop_front().is_some());
-        assert_eq!(stale_files.span(), (12, 12));
+        assert_eq!(stale_files.span().unwrap(), (12, 12));
         assert!(stale_files.back().is_some());
         // 11 12 | 13 14 15
         let mut append_list = FileList::new(0, VecDeque::default());
@@ -572,8 +574,8 @@ mod tests {
             FileList::new(0, VecDeque::default()),
         );
         assert_eq!(file_collection.len(), 0);
-        assert_eq!(file_collection.active_file_span(), (0, 0));
-        assert_eq!(file_collection.stale_file_span(), (0, 0));
+        assert!(file_collection.active_file_span().is_none());
+        assert!(file_collection.stale_file_span().is_none());
         assert!(file_collection.back().is_none());
         // null | 11 12 13
         for seq in 11..=13 {
@@ -588,13 +590,13 @@ mod tests {
             );
         }
         assert_eq!(file_collection.len(), 3);
-        assert_eq!(file_collection.active_file_span(), (11, 13));
-        assert_eq!(file_collection.stale_file_span(), (0, 0));
+        assert_eq!(file_collection.active_file_span().unwrap(), (11, 13));
+        assert!(file_collection.stale_file_span().is_none());
         // 1 2 | 13
         assert_eq!(file_collection.purge_to(13).unwrap(), 2);
         assert_eq!(file_collection.len(), 3);
-        assert_eq!(file_collection.active_file_span(), (13, 13));
-        assert_eq!(file_collection.stale_file_span(), (1, 2));
+        assert_eq!(file_collection.active_file_span().unwrap(), (13, 13));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (1, 2));
         // 1 2 | 13 14
         assert_eq!(
             file_collection.push_back(
@@ -615,8 +617,8 @@ mod tests {
         // 1 2 3 | 15
         assert_eq!(2, file_collection.purge_to(15).unwrap());
         assert_eq!(file_collection.len(), 4);
-        assert_eq!(file_collection.stale_file_span(), (1, 3));
-        assert_eq!(file_collection.active_file_span(), (15, 15));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (1, 3));
+        assert_eq!(file_collection.active_file_span().unwrap(), (15, 15));
         // 1 2 3 | 15 16
         file_collection.push_back(
             16,
@@ -626,8 +628,8 @@ mod tests {
         // 1 2 3 4 | 16
         assert_eq!(1, file_collection.purge_to(16).unwrap());
         assert_eq!(file_collection.len(), 5);
-        assert_eq!(file_collection.stale_file_span(), (1, 4));
-        assert_eq!(file_collection.active_file_span(), (16, 16));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (1, 4));
+        assert_eq!(file_collection.active_file_span().unwrap(), (16, 16));
         // 1 2 3 4 | 16 17 18 19 20
         for i in 17..=20 {
             file_collection.push_back(
@@ -635,24 +637,24 @@ mod tests {
                 new_file_handler(&path, FileId::new(LogQueue::Append, i), Version::V2, false),
             );
         }
-        assert_eq!(file_collection.stale_file_span(), (1, 4));
-        assert_eq!(file_collection.active_file_span(), (16, 20));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (1, 4));
+        assert_eq!(file_collection.active_file_span().unwrap(), (16, 20));
         // V1 file will not be kept around.
         // 2 3 4 | 19 20
         assert_eq!(3, file_collection.purge_to(19).unwrap());
         assert_eq!(file_collection.len(), 5);
-        assert_eq!(file_collection.stale_file_span(), (2, 4));
-        assert_eq!(file_collection.active_file_span(), (19, 20));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (2, 4));
+        assert_eq!(file_collection.active_file_span().unwrap(), (19, 20));
         // 3 4 | 19 20
         let (file_seq, fd) = file_collection.rotate().unwrap();
         assert_eq!(file_collection.len(), 4);
-        assert_eq!(file_collection.stale_file_span(), (3, 4));
-        assert_eq!(file_collection.active_file_span(), (19, 20));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (3, 4));
+        assert_eq!(file_collection.active_file_span().unwrap(), (19, 20));
         assert_eq!(file_seq, 21);
         // 3 4 | 19 20 21
         file_collection.push_back(file_seq, fd);
         assert_eq!(file_collection.len(), 5);
-        assert_eq!(file_collection.stale_file_span(), (3, 4));
-        assert_eq!(file_collection.active_file_span(), (19, 21));
+        assert_eq!(file_collection.stale_file_span().unwrap(), (3, 4));
+        assert_eq!(file_collection.active_file_span().unwrap(), (19, 21));
     }
 }

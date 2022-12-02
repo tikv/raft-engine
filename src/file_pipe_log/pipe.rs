@@ -68,7 +68,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 let (file_seq, fd) = files.rotate()?;
                 files.push_back(file_seq, fd);
             }
-            files.active_file_span()
+            files.active_file_span().unwrap()
         };
 
         for seq in first_seq..=active_seq {
@@ -258,7 +258,7 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn file_span(&self) -> (FileSeq, FileSeq) {
-        self.files.active_file_span()
+        self.files.active_file_span().unwrap()
     }
 
     fn total_size(&self) -> usize {
