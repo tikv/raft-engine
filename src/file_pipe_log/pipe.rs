@@ -4,14 +4,16 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
 
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
+use libc::aiocb;
 use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
-use crate::env::FileSystem;
+use crate::env::{AioContext, FileSystem};
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
@@ -349,6 +351,21 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
+    fn read_bytes_aio(&self, mut a: &mut aiocb, handle: FileBlockHandle) -> Result<AioContext>{
+        unsafe {
+            let fd = self.get_fd(handle.id.seq)?;
+            let p: *mut libc::aiocb = a;
+            let buf = vec![0;handle.len];
+            let mut ctx = self.file_system.as_ref().new_async_context(
+                fd.clone(),
+                p,
+                Arc::new(SyncMutex::new(buf))
+            )?;
+            self.file_system.as_ref().read_aio(&mut ctx, handle.offset).unwrap();
+            return Ok(ctx)
+        }
+    }
+
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
@@ -513,6 +530,11 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         self.pipes[handle.id.queue as usize].read_bytes(handle)
+    }
+
+    #[inline]
+    fn read_bytes_aio(&self,mut  a:&mut aiocb,handle: FileBlockHandle) -> Result<AioContext> {
+        self.pipes[handle.id.queue as usize].read_bytes_aio(a,handle)
     }
 
     #[inline]

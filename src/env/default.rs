@@ -1,11 +1,14 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::ffi::c_void;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
-use std::sync::Arc;
+use std::ptr;
+use std::sync::{Arc, Mutex};
 
 use fail::fail_point;
+use libc::{aiocb, off_t};
 use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
@@ -13,8 +16,9 @@ use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
+use nix::sys::signal::{SigEvent, SigevNotify};
 
-use crate::env::{FileSystem, Handle, WriteExt};
+use crate::env::{AsyncContext, FileSystem, Handle, WriteExt};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -95,6 +99,20 @@ impl LogFd {
             offset += bytes;
         }
         Ok(readed)
+    }
+
+    pub fn read_aio(&self,ptr: *mut aiocb,buf: Arc<Mutex<Vec<u8>>>,offset: u64){
+        let mut buf = buf.lock().unwrap();
+        unsafe {
+            (*ptr).aio_fildes = self.0;
+            (*ptr).aio_buf = buf.as_mut_ptr() as *mut c_void;
+            (*ptr).aio_reqprio = 0;
+            (*ptr).aio_sigevent = SigEvent::new(SigevNotify::SigevNone).sigevent();
+            (*ptr).aio_nbytes = buf.len() as usize;
+            (*ptr).aio_lio_opcode = libc::LIO_READ;
+            (*ptr).aio_offset = offset as off_t;
+            libc::aio_read(ptr);
+        }
     }
 
     /// Writes some bytes to this file starting at `offset`. Returns how many
@@ -257,12 +275,51 @@ impl WriteExt for LogFile {
     }
 }
 
+pub struct AioContext {
+    pub(crate) fd: Arc<LogFd>,
+    pub(crate) ptr: *mut aiocb,
+    pub(crate) buf: Arc<Mutex<Vec<u8>>>,
+}
+impl AioContext {
+    pub fn new(fd: Arc<LogFd>,ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> Self{
+        Self{
+            fd,
+            ptr,
+            buf,
+        }
+    }
+}
+
+impl AsyncContext for AioContext{
+    fn wait(&self) -> IoResult<usize> {
+        let p = self.ptr;
+        let aio_list_ptr = vec![p].as_ptr() as *const *const aiocb ; //q
+        let mut len;
+        unsafe {
+            let timep = ptr::null::<libc::timespec>(); //w
+            loop {
+                libc::aio_suspend(aio_list_ptr, 1 as i32, timep); //e
+                len = libc::aio_return(p);
+                if len > 0{
+                    return Ok(len as usize);
+                }
+            }
+        }
+    }
+}
+
 pub struct DefaultFileSystem;
 
 impl FileSystem for DefaultFileSystem {
     type Handle = LogFd;
     type Reader = LogFile;
     type Writer = LogFile;
+
+
+    fn read_aio(&self, ctx: &mut AioContext, offset: u64) -> IoResult<()> {
+        ctx.fd.read_aio(ctx.ptr, ctx.buf.clone(), offset);
+        Ok(())
+    }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         LogFd::create(path.as_ref())
@@ -286,5 +343,9 @@ impl FileSystem for DefaultFileSystem {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
         Ok(LogFile::new(handle))
+    }
+
+    fn new_async_context(&self, handle: Arc<Self::Handle>, ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> IoResult<AioContext> {
+        Ok(AioContext::new(handle,ptr,buf))
     }
 }

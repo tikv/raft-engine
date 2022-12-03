@@ -2,19 +2,23 @@
 
 use std::io::{Read, Result, Seek, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use libc::aiocb;
 
 mod default;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
+pub use default::{AioContext};
 
 /// FileSystem
 pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
+
+    fn read_aio(&self, ctx: &mut AioContext, offset: u64) -> Result<()>;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
@@ -49,6 +53,8 @@ pub trait FileSystem: Send + Sync {
     fn new_reader(&self, handle: Arc<Self::Handle>) -> Result<Self::Reader>;
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
+
+    fn new_async_context(&self,handle: Arc<Self::Handle>,ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> Result<AioContext>;
 }
 
 pub trait Handle {
@@ -64,4 +70,8 @@ pub trait Handle {
 pub trait WriteExt {
     fn truncate(&mut self, offset: usize) -> Result<()>;
     fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
+}
+
+pub trait AsyncContext {
+    fn wait(&self) -> Result<usize>;
 }
