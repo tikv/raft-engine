@@ -592,7 +592,7 @@ mod tests {
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
     use crate::pipe_log::Version;
-    use crate::test_util::{generate_entries, PanicGuard};
+    use crate::test_util::{catch_unwind_silent, generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
@@ -702,6 +702,27 @@ mod tests {
         };
         RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
             .unwrap();
+    }
+
+    #[test]
+    fn test_batch_with_save_point() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_batch_with_save_point")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+                .unwrap();
+        let mut batch = LogBatch::default();
+        batch.add_command(1, Command::Clean);
+        batch.set_save_point();
+        engine.write(&mut batch, false).unwrap();
+        assert!(catch_unwind_silent(|| batch.rollback_to_save_point()).is_err());
+        assert!(catch_unwind_silent(|| batch.pop_save_point()).is_err());
     }
 
     #[test]
