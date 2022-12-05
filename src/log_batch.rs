@@ -671,7 +671,7 @@ impl LogBatch {
         self.save_points.push(self.buf.len());
     }
 
-    /// No-op if there's no save point to pop.
+    /// Panic if there's no save point to pop.
     #[inline]
     pub fn pop_save_point(&mut self) {
         assert!(self.buf_state == BufState::Open);
@@ -679,7 +679,7 @@ impl LogBatch {
         self.save_points.pop();
     }
 
-    /// No-op if there's no save point to rollback to.
+    /// Panic if there's no save point to rollback to.
     #[inline]
     pub fn rollback_to_save_point(&mut self) {
         assert!(self.buf_state == BufState::Open);
