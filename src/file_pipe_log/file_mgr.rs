@@ -140,13 +140,15 @@ impl<F: FileSystem> FileList<F> {
     pub fn split_by(&mut self, file_seq: FileSeq) -> (FileState, FileList<F>) {
         let splitted_list =
             if (self.first_seq..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
-                let purged = file_seq.saturating_sub(self.first_seq) as usize;
-                let purged_file_list =
-                    FileList::new(self.first_seq, self.fds.drain(..purged).collect());
+                let mut reserved_list = self
+                    .fds
+                    .split_off(file_seq.saturating_sub(self.first_seq) as usize);
+                std::mem::swap(&mut self.fds, &mut reserved_list);
+                let purged_file_list = FileList::new(self.first_seq, reserved_list);
                 self.first_seq = file_seq;
                 purged_file_list
             } else {
-                FileList::new(0, VecDeque::default())
+                FileList::new(1, VecDeque::default())
             };
         (
             FileState {
