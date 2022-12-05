@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,11 +10,13 @@ use crossbeam::utils::CachePadded;
 use log::{error, info};
 use parking_lot::RwLock;
 
+use crate::config::Config;
 use crate::env::FileSystem;
-use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
-use crate::{Error, Result};
+use crate::pipe_log::{FileId, FileSeq, LogQueue};
+use crate::Result;
 
 use super::format::{FileNameExt, LogFileFormat, StaleFileNameExt};
+use super::log_file::{build_file_writer, LogFileWriter};
 
 /// Default buffer size for building stale file, unit: byte.
 const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
@@ -21,7 +24,14 @@ const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
 const LOG_DEFAULT_PATH_ID: PathId = 0;
 
 pub type PathId = usize;
-pub type Paths = [String; 1];
+pub type Paths = [PathBuf; 1];
+
+/// File handler to `append` bytes.
+pub struct ActiveFile<F: FileSystem> {
+    pub seq: FileSeq,
+    pub writer: LogFileWriter<F>,
+    pub format: LogFileFormat,
+}
 
 #[derive(Debug)]
 pub struct FileWithFormat<F: FileSystem> {
@@ -75,13 +85,16 @@ impl<F: FileSystem> FileList<F> {
     }
 
     #[inline]
-    pub fn get(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
-        if !(self.first_seq..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
-            return Err(Error::Corruption("file seqno out of range".to_owned()));
+    pub fn get(&self, file_seq: FileSeq) -> Option<Arc<F::Handle>> {
+        if (self.first_seq..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
+            Some(
+                self.fds[(file_seq - self.first_seq) as usize]
+                    .handle
+                    .clone(),
+            )
+        } else {
+            None
         }
-        Ok(self.fds[(file_seq - self.first_seq) as usize]
-            .handle
-            .clone())
     }
 
     #[inline]
@@ -179,23 +192,28 @@ pub struct FileCollection<F: FileSystem> {
 }
 
 impl<F: FileSystem> FileCollection<F> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         file_system: Arc<F>,
         queue: LogQueue,
-        paths: Paths,
-        file_format: LogFileFormat,
-        target_file_size: usize,
+        cfg: &Config,
         capacity: usize,
         active_files: FileList<F>,
         stale_files: FileList<F>,
     ) -> Self {
+        let alignment = || {
+            #[cfg(feature = "failpoints")]
+            {
+                use fail::fail_point;
+                fail_point!("file_mgr::file_collection::force_set_alignment", |_| { 16 });
+            }
+            0
+        };
         Self {
             file_system,
             queue,
-            paths,
-            file_format,
-            target_file_size,
+            paths: [Path::new(&cfg.dir).to_path_buf()],
+            file_format: LogFileFormat::new(cfg.format_version, alignment()),
+            target_file_size: cfg.target_file_size.0 as usize,
             capacity,
             active_files: CachePadded::new(RwLock::new(active_files)),
             stale_files: CachePadded::new(RwLock::new(stale_files)),
@@ -208,7 +226,7 @@ impl<F: FileSystem> FileCollection<F> {
     }
 
     #[inline]
-    pub fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
+    pub fn get_fd(&self, file_seq: FileSeq) -> Option<Arc<F::Handle>> {
         self.active_files.read().get(file_seq)
     }
 
@@ -232,22 +250,62 @@ impl<F: FileSystem> FileCollection<F> {
     }
 
     #[inline]
+    #[cfg(test)]
     pub fn push_back(&self, seq: FileSeq, handle: FileWithFormat<F>) -> FileState {
         self.active_files.write().push_back(seq, handle)
     }
 
     #[inline]
-    pub fn get_target_file_size(&self) -> usize {
+    pub fn target_file_size(&self) -> usize {
         self.target_file_size
+    }
+
+    #[inline]
+    /// Returns the last active file handle to the caller.
+    pub fn fetch_active_file(&self, reset_header: bool) -> Option<ActiveFile<F>> {
+        let active_files = self.active_files.read();
+        active_files.back().map(|file| ActiveFile {
+            seq: active_files.span().unwrap().1,
+            writer: build_file_writer(
+                self.file_system.as_ref(),
+                file.handle.clone(),
+                file.format,
+                reset_header,
+            )
+            .unwrap(),
+            format: file.format,
+        })
     }
 
     /// Rotate a new file handle and return it to the caller.
     ///
-    /// Returns the relevant `FileSeq`, and `FileWithFormat` of the file
-    /// handle to the caller.
-    /// Attention please, the returned fd should be manually appended to current
-    /// `FileCollection`.
-    pub fn rotate(&self) -> Result<(FileSeq, FileWithFormat<F>)> {
+    /// Returns a new file handle by `ActiveFile` to the caller.
+    /// Attention please, it's an atomic operation on `FileCollection` because
+    /// the related fd to this `ActiveFile` has been atomically added
+    /// to `FileCollection`.
+    pub fn rotate(&self) -> Result<ActiveFile<F>> {
+        let (new_file_seq, new_file) = self.rotate_imp()?;
+        // Build new active_file, and only if active_file was successfully built, can we
+        // add it into the active file list.
+        let active_file = ActiveFile {
+            seq: new_file_seq,
+            // The file might generated from a recycled stale-file, always reset the file
+            // header of it.
+            writer: build_file_writer(
+                self.file_system.as_ref(),
+                new_file.handle.clone(),
+                new_file.format,
+                true, /* force_reset */
+            )?,
+            format: new_file.format,
+        };
+        self.active_files.write().push_back(new_file_seq, new_file);
+        Ok(active_file)
+    }
+
+    /// Rotate a new file handle and return related `FileSeq` and
+    /// `FileWithFormat` to the caller.
+    fn rotate_imp(&self) -> Result<(FileSeq, FileWithFormat<F>)> {
         let active_state = self.active_files.read().state();
         let new_file_id = FileId {
             seq: active_state.first_seq + active_state.total_len as FileSeq,
@@ -366,12 +424,16 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention, this function only makes sense when
     /// `Config.enable-log-recycle` is true.
-    pub fn initialize(&mut self) -> Result<()> {
-        let now = Instant::now();
-        let stale_capacity = self.capacity.saturating_sub(self.active_files.read().len());
+    pub fn initialize(&self, prefill_for_recycle: bool) -> Result<()> {
+        let stale_capacity = if prefill_for_recycle {
+            self.capacity.saturating_sub(self.active_files.read().len())
+        } else {
+            0
+        };
         // If `stale_capacity` > 0, we should prepare stale files for later
         // log recycling in advance.
-        if stale_capacity > 0 {
+        {
+            let now = Instant::now();
             // Concurrent prepraring will bring more time consumption on racing. So, we just
             // introduce a serial processing for preparing progress.
             let mut stale_files = self.stale_files.write();
@@ -387,28 +449,47 @@ impl<F: FileSystem> FileCollection<F> {
                     queue: self.queue,
                     seq,
                 };
-                stale_files.push_back(
+                stale_files.push_back(seq, self.build_stale_file(file_id, self.file_format)?);
+            }
+            // If stale_capacity has been changed when restarting by manually modifications,
+            // such as setting `Config::enable-log-recycle` from TRUE to FALSE,
+            // setting `Config::prefill-for-recycle` from TRUE to FALSE or
+            // changing the recycle capacity, we should remove redundant
+            // stale files in advance.
+            let mut redundant_count = 0;
+            while stale_files.len() > stale_capacity {
+                let (seq, file) = stale_files.pop_front().unwrap();
+                let file_id = FileId {
                     seq,
-                    self.build_stale_file(
-                        file_id,
-                        LogFileFormat::new(Version::V2, 0 /* alignment */),
-                    )?,
+                    queue: self.queue,
+                };
+                let path = file_id.build_stale_file_path(&self.paths[file.path_id]);
+                self.file_system.delete(&path)?;
+                redundant_count += 1;
+            }
+            if prepare_stale_files_count > 0 || redundant_count > 0 {
+                info!(
+                    "LogQueue: {:?} preparing stale raft logs takes {:?}, prepared count: {}, removed redundant count: {}",
+                    self.queue,
+                    now.elapsed(),
+                    stale_files.len(),
+                    redundant_count,
                 );
             }
         }
-        info!(
-            "LogQueue: {:?} preparing stale raft logs takes {:?}, prepared count: {}",
-            self.queue,
-            now.elapsed(),
-            self.stale_files.read().len(),
-        );
+        // Prepare an active file in advance if there exists no active files in the
+        // active file list.
+        if self.active_files.write().back().is_none() {
+            let (file_seq, file) = self.rotate_imp()?;
+            self.active_files.write().push_back(file_seq, file);
+        }
         Ok(())
     }
 
     /// Generates a Fake log used for recycling.
     ///
-    /// Attention, this function is only called when `Config.enable-log-recycle`
-    /// is true.
+    /// Attention, this function is only called when
+    /// `Config::prefill-for-recycle` is true.
     fn build_stale_file(
         &self,
         file_id: FileId,
@@ -426,8 +507,6 @@ impl<F: FileSystem> FileCollection<F> {
             });
             written += buf.len();
         }
-        // Metadata of stale files are not what we're truely concerned. So,
-        // they can be ignored by clear them here.
         Ok(FileWithFormat {
             handle: fd,
             format,
@@ -517,6 +596,9 @@ mod tests {
             new_file_handler(&path, FileId::new(LogQueue::Append, 13), Version::V2, false),
         );
         assert_eq!(active_files.span().unwrap(), (12, 13));
+        assert!(active_files.get(10).is_none());
+        assert!(active_files.get(15).is_none());
+        assert!(active_files.get(13).is_some());
         // 11 12 | 13
         let (state, files) = active_files.split_by(13);
         assert_eq!(state.first_seq, 13);
@@ -563,14 +645,17 @@ mod tests {
             .tempdir()
             .unwrap();
         let path = String::from(dir.path().to_str().unwrap());
-        let target_file_size = ReadableSize(1);
+        let config = Config {
+            dir: path.clone(),
+            target_file_size: ReadableSize(1),
+            format_version: Version::V2,
+            ..Config::default()
+        };
         // null | null
         let file_collection = FileCollection::new(
             Arc::new(DefaultFileSystem),
             LogQueue::Append,
-            [path.clone()],
-            LogFileFormat::new(Version::V2, 0),
-            target_file_size.0 as usize,
+            &config,
             5,
             FileList::new(0, VecDeque::default()),
             FileList::new(0, VecDeque::default()),
@@ -647,16 +732,11 @@ mod tests {
         assert_eq!(file_collection.len(), 5);
         assert_eq!(file_collection.stale_file_span().unwrap(), (2, 4));
         assert_eq!(file_collection.active_file_span().unwrap(), (19, 20));
-        // 3 4 | 19 20
-        let (file_seq, fd) = file_collection.rotate().unwrap();
-        assert_eq!(file_collection.len(), 4);
-        assert_eq!(file_collection.stale_file_span().unwrap(), (3, 4));
-        assert_eq!(file_collection.active_file_span().unwrap(), (19, 20));
-        assert_eq!(file_seq, 21);
         // 3 4 | 19 20 21
-        file_collection.push_back(file_seq, fd);
+        let active_file = file_collection.rotate().unwrap();
         assert_eq!(file_collection.len(), 5);
         assert_eq!(file_collection.stale_file_span().unwrap(), (3, 4));
         assert_eq!(file_collection.active_file_span().unwrap(), (19, 21));
+        assert_eq!(active_file.seq, 21);
     }
 }

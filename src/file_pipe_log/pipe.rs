@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crossbeam::utils::CachePadded;
@@ -16,17 +16,10 @@ use crate::metrics::*;
 use crate::pipe_log::{
     FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
 };
-use crate::{perf_context, Result};
+use crate::{perf_context, Error, Result};
 
-use super::file_mgr::{FileCollection, Paths};
-use super::format::LogFileFormat;
-use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
-
-struct ActiveFile<F: FileSystem> {
-    seq: FileSeq,
-    writer: LogFileWriter<F>,
-    format: LogFileFormat,
-}
+use super::file_mgr::{ActiveFile, FileCollection, Paths};
+use super::log_file::build_file_reader;
 
 /// A file-based log storage that arranges files as one single queue.
 pub(super) struct SinglePipe<F: FileSystem> {
@@ -63,34 +56,22 @@ impl<F: FileSystem> SinglePipe<F> {
         files: FileCollection<F>,
     ) -> Result<Self> {
         let create_file = files.back().is_none();
-        let (first_seq, active_seq) = {
-            if create_file {
-                let (file_seq, fd) = files.rotate()?;
-                files.push_back(file_seq, fd);
-            }
-            files.active_file_span().unwrap()
-        };
-
+        // Before initializing `SinglePipe`, we should initialize the given
+        // FileCollection to avoid it has no active files for appending bytes.
+        files.initialize(cfg.prefill_for_recycle)?;
+        let (first_seq, active_seq) = files.active_file_span().unwrap();
         for seq in first_seq..=active_seq {
             for listener in &listeners {
                 listener.post_new_log_file(FileId { queue, seq });
             }
         }
-        let active_fd = files.back().unwrap();
-        let active_file = ActiveFile {
-            seq: active_seq,
-            writer: build_file_writer(
-                file_system.as_ref(),
-                active_fd.handle.clone(),
-                active_fd.format,
-                create_file, /* force_reset */
-            )?,
-            format: active_fd.format,
-        };
+        // If the collection has no valid active files, we should reset
+        // the header of the fetched active file.
+        let active_file = files.fetch_active_file(create_file).unwrap();
 
         let pipe = Self {
             queue,
-            paths: [cfg.dir.clone()],
+            paths: [Path::new(&cfg.dir).to_path_buf()],
             file_system,
             listeners,
             files,
@@ -111,7 +92,11 @@ impl<F: FileSystem> SinglePipe<F> {
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
-        self.files.get_fd(file_seq)
+        if let Some(f) = self.files.get_fd(file_seq) {
+            Ok(f)
+        } else {
+            Err(Error::Corruption("file seqno out of range".to_owned()))
+        }
     }
 
     /// Creates a new file for write, and rotates the active log file.
@@ -127,23 +112,8 @@ impl<F: FileSystem> SinglePipe<F> {
 
         active_file.writer.close()?;
 
-        let (file_seq, fd) = self.files.rotate()?;
-        debug_assert_eq!(seq, file_seq);
-        let mut new_file = ActiveFile {
-            seq,
-            // The file might generated from a recycled stale-file, always reset the file
-            // header of it.
-            writer: build_file_writer(
-                self.file_system.as_ref(),
-                fd.handle.clone(),
-                fd.format,
-                true, /* force_reset */
-            )?,
-            format: fd.format,
-        };
-        // Newly created file by `FileCollection::rotate` should be pushed back to
-        // files.
-        self.files.push_back(seq, fd);
+        let mut new_file = self.files.rotate()?;
+        debug_assert_eq!(seq, new_file.seq);
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
@@ -181,7 +151,7 @@ impl<F: FileSystem> SinglePipe<F> {
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut active_file = self.active_file.lock();
-        let target_file_size = self.files.get_target_file_size();
+        let target_file_size = self.files.target_file_size();
         if active_file.writer.offset() >= target_file_size {
             if let Err(e) = self.rotate_imp(&mut active_file) {
                 panic!(
@@ -263,7 +233,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
     fn total_size(&self) -> usize {
         let (first_seq, last_seq) = self.file_span();
-        (last_seq - first_seq + 1) as usize * self.files.get_target_file_size()
+        (last_seq - first_seq + 1) as usize * self.files.target_file_size()
     }
 
     fn rotate(&self) -> Result<()> {
@@ -382,9 +352,7 @@ mod tests {
             FileCollection::new(
                 fs,
                 queue,
-                [cfg.dir.clone()],
-                LogFileFormat::new(Version::V2, 0),
-                cfg.target_file_size.0 as usize,
+                cfg,
                 capacity,
                 FileList::new(0, VecDeque::new()),
                 FileList::new(0, VecDeque::new()),

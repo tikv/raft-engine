@@ -441,29 +441,31 @@ fn test_file_allocate_error() {
 }
 
 #[test]
-fn test_start_with_file_allocate_error() {
+fn test_start_with_stale_file_allocate_error() {
     let dir = tempfile::Builder::new()
-        .prefix("test_start_with_file_allocate_error")
+        .prefix("test_start_with_stale_file_allocate_error")
         .tempdir()
         .unwrap();
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(1),
         purge_threshold: ReadableSize::kb(10), // capacity is 12
+        enable_log_recycle: true,
+        prefill_for_recycle: true,
         ..Default::default()
     };
     let entry = vec![b'x'; 1024];
     {
-        // Several Fake logs are filled in err.
+        // Several stale logs are filled in err, which also can be reused.
         let _f = FailGuard::new("log_fd::allocate::err", "4*off->5*return->off");
         let engine = Engine::open(cfg.clone()).unwrap();
         engine
             .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
             .unwrap();
         let (start, end) = engine.file_span(LogQueue::Append);
-        // Only one file is in use.
+        // A new file is generated from one reused stale file.
         assert_eq!(start, end);
-        // Append several entries to make Engine reuse the fake logs.
+        // Append several entries to make Engine reuse the stale logs.
         for r in 2..6 {
             engine
                 .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)

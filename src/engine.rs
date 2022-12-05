@@ -1583,6 +1583,7 @@ mod tests {
                 target_file_size: ReadableSize(1),
                 purge_threshold: ReadableSize(1),
                 format_version: Version::V2,
+                enable_log_recycle: true,
                 prefill_for_recycle: true,
                 ..Default::default()
             };
@@ -1899,8 +1900,6 @@ mod tests {
         let entry_data = vec![b'x'; 1024];
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
-            target_file_size: ReadableSize::mb(32),
-            purge_threshold: ReadableSize::gb(2),
             ..Default::default()
         };
         let engine = RaftLogEngine::open(cfg).unwrap();
@@ -2141,10 +2140,12 @@ mod tests {
             purge_threshold: ReadableSize(100),
             format_version: Version::V2,
             enable_log_recycle: true,
+            prefill_for_recycle: true,
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        let stale_start = *fs.stale_metadata.lock().unwrap().iter().next().unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -2164,18 +2165,26 @@ mod tests {
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
             &(start + 20)
         );
-        // reusing these files.
+        let stale_start_1 = *fs.stale_metadata.lock().unwrap().iter().next().unwrap();
+        assert!(stale_start < stale_start_1);
+        // Reuse these files.
         for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         let start_1 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
         assert!(start <= start_1);
+        let stale_start_2 = *fs.stale_metadata.lock().unwrap().iter().next().unwrap();
+        assert!(stale_start_1 < stale_start_2);
 
-        // reopen the engine and validate the stale files are reserved
+        // Reopen the engine and validate the stale files are reserved
+        let file_count = fs.inner.file_count();
         let engine = engine.reopen();
-        assert!(fs.inner.file_count() > engine.file_count(None));
+        assert_eq!(file_count, fs.inner.file_count());
+        assert!(file_count > engine.file_count(None));
         let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
         assert_eq!(start_1, start_2);
+        let stale_start_3 = *fs.stale_metadata.lock().unwrap().iter().next().unwrap();
+        assert_eq!(stale_start_2, stale_start_3);
     }
 
     #[test]
@@ -2314,6 +2323,7 @@ mod tests {
         let (start, end) = engine.file_span(LogQueue::Append);
         assert_eq!(file_system.inner.file_count(), engine.file_count(None));
         drop(engine);
+
         // Reopen the engine with a smaller capacity.
         let cfg_v2 = Config {
             target_file_size: ReadableSize::kb(2),
@@ -2322,25 +2332,40 @@ mod tests {
             prefill_for_recycle: true,
             ..cfg
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg_v2, file_system.clone()).unwrap();
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg_v2.clone(), file_system.clone()).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        // As the recycling open, it would generate stale logs for recycling.
+        // As the recycling open, it would generate stale logs for recycling. And the
+        // first stale file would be reused to initialize the first active log
+        // file.
         let stale_count = file_system.inner.file_count() - engine.file_count(None);
-        assert!(stale_count > 0);
+        assert_eq!(stale_count, cfg_v2.recycle_capacity() - 1);
+        assert_eq!(
+            file_system.inner.file_count() - engine.file_count(Some(LogQueue::Rewrite)),
+            cfg_v2.recycle_capacity()
+        );
         // Stale files haven't filled the LogQueue::Append, purge_expired_files won't
         // make difference.
         engine.purge_expired_files().unwrap();
+        assert_eq!(
+            stale_count,
+            (file_system.inner.file_count() - engine.file_count(None))
+        );
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
         for rid in 1..=20 {
             engine.append(rid, 20, 31, Some(&entry_data));
         }
+        // Stale files will be reused for new append files.
+        assert!(stale_count > (file_system.inner.file_count() - engine.file_count(None)));
         engine.purge_expired_files().unwrap();
         assert!(engine.file_span(LogQueue::Append).0 > start);
         let (start, end) = engine.file_span(LogQueue::Append);
         let engine = engine.reopen();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
-        // Stale files will be reused for new append files.
-        assert!(stale_count > (file_system.inner.file_count() - engine.file_count(None)));
+        assert_eq!(
+            file_system.inner.file_count() - engine.file_count(Some(LogQueue::Rewrite)),
+            cfg_v2.recycle_capacity()
+        );
     }
 
     #[test]
@@ -2365,15 +2390,19 @@ mod tests {
         assert_eq!(start, end);
         let stale_count = file_system.inner.file_count() - engine.file_count(None);
         assert!(stale_count > 0);
-        // Append data.
+        // Append data. Several stale files have been reused.
         let entry_data = vec![b'x'; 512];
         for rid in 1..=5 {
             engine.append(rid, 11, 20, Some(&entry_data));
         }
         assert_eq!(engine.file_span(LogQueue::Append).0, start);
+        assert!(stale_count > file_system.inner.file_count() - engine.file_count(None));
         let (start, end) = engine.file_span(LogQueue::Append);
+        let stale_count = file_system.inner.file_count() - engine.file_count(None);
         drop(engine);
-        // Reopen the engine with a smaller capacity.
+
+        // Reopen the engine with a smaller capacity. Redundant stale files will be
+        // cleared.
         let cfg_v2 = Config {
             target_file_size: ReadableSize::kb(2),
             purge_threshold: ReadableSize::kb(100),
@@ -2393,8 +2422,8 @@ mod tests {
         assert!(engine.file_span(LogQueue::Append).1 > end);
         let engine = engine.reopen();
         assert!(stale_count > file_system.inner.file_count() - engine.file_count(None));
-        let stale_count = file_system.inner.file_count() - engine.file_count(None);
         drop(engine);
+
         // Reopen the engine without log recycling.
         let cfg_v3 = Config {
             target_file_size: ReadableSize::kb(2),
@@ -2403,10 +2432,7 @@ mod tests {
             ..cfg_v2
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system.clone()).unwrap();
-        // Restart the engine without log recycling, stale logs should be reserved.
-        assert_eq!(
-            stale_count,
-            file_system.inner.file_count() - engine.file_count(None)
-        );
+        // Restart the engine without log recycling, stale logs should be cleared.
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
     }
 }
