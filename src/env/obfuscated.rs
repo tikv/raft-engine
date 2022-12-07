@@ -1,13 +1,13 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use libc::aiocb;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use libc::aiocb;
 
-use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
 use crate::env::default::AioContext;
+use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
 
 pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
 
@@ -92,11 +92,6 @@ impl FileSystem for ObfuscatedFileSystem {
     type Reader = ObfuscatedReader;
     type Writer = ObfuscatedWriter;
 
-    fn read_aio(&self, ctx: &mut AioContext, offset: u64) -> IoResult<()> {
-        ctx.fd.read_aio(ctx.ptr, ctx.buf.clone(), offset);
-        Ok(())
-    }
-
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         let r = self.inner.create(path);
         if r.is_ok() {
@@ -133,9 +128,5 @@ impl FileSystem for ObfuscatedFileSystem {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
         Ok(ObfuscatedWriter(self.inner.new_writer(handle)?))
-    }
-
-    fn new_async_context(&self, handle: Arc<Self::Handle>, ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> IoResult<AioContext> {
-        Ok(self.inner.new_async_context(handle,ptr,buf)?)
     }
 }

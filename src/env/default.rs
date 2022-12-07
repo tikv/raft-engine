@@ -4,21 +4,22 @@ use std::ffi::c_void;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
-use std::ptr;
 use std::sync::{Arc, Mutex};
+use std::{mem, ptr};
 
 use fail::fail_point;
-use libc::{aiocb, off_t};
+use libc::{aio_return, aiocb, off_t};
 use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
+use nix::sys::signal::{SigEvent, SigevNotify};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
-use nix::sys::signal::{SigEvent, SigevNotify};
 
 use crate::env::{AsyncContext, FileSystem, Handle, WriteExt};
+use crate::Error;
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -101,17 +102,18 @@ impl LogFd {
         Ok(readed)
     }
 
-    pub fn read_aio(&self,ptr: *mut aiocb,buf: Arc<Mutex<Vec<u8>>>,offset: u64){
-        let mut buf = buf.lock().unwrap();
+    pub fn read_aio(&self, seq: usize, ctx: &mut AioContext, offset: u64) {
+        let mut buf = ctx.buf_vec.last().unwrap().lock().unwrap();
         unsafe {
-            (*ptr).aio_fildes = self.0;
-            (*ptr).aio_buf = buf.as_mut_ptr() as *mut c_void;
-            (*ptr).aio_reqprio = 0;
-            (*ptr).aio_sigevent = SigEvent::new(SigevNotify::SigevNone).sigevent();
-            (*ptr).aio_nbytes = buf.len() as usize;
-            (*ptr).aio_lio_opcode = libc::LIO_READ;
-            (*ptr).aio_offset = offset as off_t;
-            libc::aio_read(ptr);
+            let aior = &mut ctx.aio_vec[seq];
+            aior.aio_fildes = self.0;
+            aior.aio_buf = buf.as_mut_ptr() as *mut c_void;
+            aior.aio_reqprio = 0;
+            aior.aio_sigevent = SigEvent::new(SigevNotify::SigevNone).sigevent();
+            aior.aio_nbytes = buf.len() as usize;
+            aior.aio_lio_opcode = libc::LIO_READ;
+            aior.aio_offset = offset as off_t;
+            libc::aio_read(&mut ctx.aio_vec[seq]);
         }
     }
 
@@ -276,35 +278,54 @@ impl WriteExt for LogFile {
 }
 
 pub struct AioContext {
-    pub(crate) fd: Arc<LogFd>,
-    pub(crate) ptr: *mut aiocb,
-    pub(crate) buf: Arc<Mutex<Vec<u8>>>,
+    pub(crate) aio_vec: Vec<aiocb>,
+    pub(crate) buf_vec: Vec<Arc<Mutex<Vec<u8>>>>,
 }
 impl AioContext {
-    pub fn new(fd: Arc<LogFd>,ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> Self{
-        Self{
-            fd,
-            ptr,
-            buf,
+    pub fn new(block_sum: usize) -> Self {
+        let mut vec = vec![];
+        unsafe {
+            for i in 0..block_sum {
+                vec.push(mem::zeroed::<libc::aiocb>());
+            }
+        }
+        Self {
+            aio_vec: vec,
+            buf_vec: vec![],
         }
     }
 }
 
-impl AsyncContext for AioContext{
-    fn wait(&self) -> IoResult<usize> {
-        let p = self.ptr;
-        let aio_list_ptr = vec![p].as_ptr() as *const *const aiocb ; //q
-        let mut len;
+impl AsyncContext for AioContext {
+    fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
+        let buf_len = self.buf_vec[seq].lock().unwrap().len();
         unsafe {
-            let timep = ptr::null::<libc::timespec>(); //w
             loop {
-                libc::aio_suspend(aio_list_ptr, 1 as i32, timep); //e
-                len = libc::aio_return(p);
-                if len > 0{
-                    return Ok(len as usize);
+                libc::aio_suspend(
+                    vec![&mut self.aio_vec[seq]].as_ptr() as *const *const aiocb,
+                    1 as i32,
+                    ptr::null::<libc::timespec>(),
+                );
+                if buf_len == aio_return(&mut self.aio_vec[seq]) as usize{
+                    return Ok(buf_len);
                 }
             }
         }
+    }
+
+    fn wait(&mut self) -> IoResult<usize> {
+        let mut total = 0;
+        for seq in 0..self.aio_vec.len() {
+            match self.single_wait(seq) {
+                Ok(len) => total += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(total as usize)
+    }
+
+    fn data(&self, seq: usize) -> Arc<Mutex<Vec<u8>>> {
+        self.buf_vec[seq].clone()
     }
 }
 
@@ -315,9 +336,14 @@ impl FileSystem for DefaultFileSystem {
     type Reader = LogFile;
     type Writer = LogFile;
 
-
-    fn read_aio(&self, ctx: &mut AioContext, offset: u64) -> IoResult<()> {
-        ctx.fd.read_aio(ctx.ptr, ctx.buf.clone(), offset);
+    fn read_aio(
+        &self,
+        handle: Arc<Self::Handle>,
+        seq: usize,
+        ctx: &mut AioContext,
+        offset: u64,
+    ) -> IoResult<()> {
+        handle.read_aio(seq, ctx, offset);
         Ok(())
     }
 
@@ -345,7 +371,7 @@ impl FileSystem for DefaultFileSystem {
         Ok(LogFile::new(handle))
     }
 
-    fn new_async_context(&self, handle: Arc<Self::Handle>, ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> IoResult<AioContext> {
-        Ok(AioContext::new(handle,ptr,buf))
+    fn new_async_context(&self, block_sum: usize) -> IoResult<AioContext> {
+        Ok(AioContext::new(block_sum))
     }
 }

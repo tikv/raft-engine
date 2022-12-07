@@ -1,16 +1,16 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use libc::aiocb;
 use std::io::{Read, Result, Seek, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use libc::aiocb;
 
 mod default;
 mod obfuscated;
 
+pub use default::AioContext;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
-pub use default::{AioContext};
 
 /// FileSystem
 pub trait FileSystem: Send + Sync {
@@ -18,7 +18,15 @@ pub trait FileSystem: Send + Sync {
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
 
-    fn read_aio(&self, ctx: &mut AioContext, offset: u64) -> Result<()>;
+    fn read_aio(
+        &self,
+        handle: Arc<Self::Handle>,
+        seq: usize,
+        ctx: &mut AioContext,
+        offset: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
@@ -54,7 +62,9 @@ pub trait FileSystem: Send + Sync {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
 
-    fn new_async_context(&self,handle: Arc<Self::Handle>,ptr: *mut aiocb, buf: Arc<Mutex<Vec<u8>>>) -> Result<AioContext>;
+    fn new_async_context(&self, block_sum: usize) -> Result<AioContext> {
+        Ok(AioContext::new(block_sum))
+    }
 }
 
 pub trait Handle {
@@ -73,5 +83,7 @@ pub trait WriteExt {
 }
 
 pub trait AsyncContext {
-    fn wait(&self) -> Result<usize>;
+    fn wait(&mut self) -> Result<usize>;
+    fn single_wait(&mut self, seq: usize) -> Result<usize>;
+    fn data(&self, seq: usize) -> Arc<Mutex<Vec<u8>>>;
 }

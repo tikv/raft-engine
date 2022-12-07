@@ -5,13 +5,13 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
+use crate::env::AioContext;
 use fail::fail_point;
 use libc::aiocb;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::ToPrimitive;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
-use crate::env::AioContext;
 
 use crate::Result;
 
@@ -174,7 +174,12 @@ pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
 
-    fn read_bytes_aio(&self, a:&mut aiocb, handle: FileBlockHandle) -> Result<AioContext> ;
+    fn read_bytes_aio(
+        &self,
+        seq: usize,
+        ctx: &mut AioContext,
+        handle: FileBlockHandle,
+    ) -> Result<()>;
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.
     fn append<T: ReactiveBytes + ?Sized>(

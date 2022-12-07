@@ -13,7 +13,7 @@ use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
-use crate::env::{AioContext, FileSystem};
+use crate::env::{AioContext, DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
@@ -261,7 +261,6 @@ impl<F: FileSystem> SinglePipe<F> {
             .handle
             .clone())
     }
-
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
@@ -351,18 +350,22 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn read_bytes_aio(&self, mut a: &mut aiocb, handle: FileBlockHandle) -> Result<AioContext>{
+    fn read_bytes_aio(
+        &self,
+        seq: usize,
+        ctx: &mut AioContext,
+        handle: FileBlockHandle,
+    ) -> Result<()> {
         unsafe {
             let fd = self.get_fd(handle.id.seq)?;
-            let p: *mut libc::aiocb = a;
-            let buf = vec![0;handle.len];
-            let mut ctx = self.file_system.as_ref().new_async_context(
-                fd.clone(),
-                p,
-                Arc::new(SyncMutex::new(buf))
-            )?;
-            self.file_system.as_ref().read_aio(&mut ctx, handle.offset).unwrap();
-            return Ok(ctx)
+            let buf = vec![0 as u8; handle.len];
+            let buf = Arc::new(SyncMutex::new(buf));
+            ctx.buf_vec.push(buf);
+            self.file_system
+                .as_ref()
+                .read_aio(fd, seq, ctx, handle.offset)
+                .unwrap();
+            return Ok(());
         }
     }
 
@@ -533,8 +536,16 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn read_bytes_aio(&self,mut  a:&mut aiocb,handle: FileBlockHandle) -> Result<AioContext> {
-        self.pipes[handle.id.queue as usize].read_bytes_aio(a,handle)
+    fn read_bytes_aio(
+        &self,
+        seq: usize,
+        ctx: &mut AioContext,
+        handle: FileBlockHandle,
+    ) -> Result<()> {
+        self.pipes[handle.id.queue as usize]
+            .read_bytes_aio(seq, ctx, handle)
+            .unwrap();
+        Ok(())
     }
 
     #[inline]
