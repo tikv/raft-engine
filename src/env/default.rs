@@ -278,7 +278,7 @@ impl WriteExt for LogFile {
 }
 
 pub struct AioContext {
-    pub(crate) aio_vec: Vec<aiocb>,
+    aio_vec: Vec<aiocb>,
     pub(crate) buf_vec: Vec<Arc<Mutex<Vec<u8>>>>,
 }
 impl AioContext {
@@ -306,7 +306,7 @@ impl AsyncContext for AioContext {
                     1 as i32,
                     ptr::null::<libc::timespec>(),
                 );
-                if buf_len == aio_return(&mut self.aio_vec[seq]) as usize{
+                if buf_len == aio_return(&mut self.aio_vec[seq]) as usize {
                     return Ok(buf_len);
                 }
             }
