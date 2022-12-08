@@ -55,19 +55,14 @@ impl<F: FileSystem> SinglePipe<F> {
         queue: LogQueue,
         files: FileCollection<F>,
     ) -> Result<Self> {
-        let create_file = files.back().is_none();
-        // Before initializing `SinglePipe`, we should initialize the given
-        // FileCollection to avoid it has no active files for appending bytes.
-        files.initialize(cfg.prefill_for_recycle)?;
+        // FileCollection is already initialized.
         let (first_seq, active_seq) = files.active_file_span().unwrap();
         for seq in first_seq..=active_seq {
             for listener in &listeners {
                 listener.post_new_log_file(FileId { queue, seq });
             }
         }
-        // If the collection has no valid active files, we should reset
-        // the header of the fetched active file.
-        let active_file = files.fetch_active_file(create_file).unwrap();
+        let active_file = files.fetch_active_file().unwrap();
 
         let pipe = Self {
             queue,
@@ -488,7 +483,7 @@ mod tests {
         }
         pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
-        // By `purge`, all stale files will be automatically RENAME to stale files.
+        // By `purge`, all stale files will be automatically RENAME to reserved files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read stale file.
         for (_, handle) in handles.into_iter().enumerate() {

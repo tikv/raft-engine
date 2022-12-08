@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam::utils::CachePadded;
-use log::{error, info};
+use fail::fail_point;
+use log::{error, info, warn};
 use parking_lot::RwLock;
 
 use crate::config::Config;
@@ -18,6 +19,8 @@ use crate::Result;
 use super::format::{FileNameExt, LogFileFormat, StaleFileNameExt};
 use super::log_file::{build_file_writer, LogFileWriter};
 
+/// Max limitation for the count of prepared stale file.
+const LOG_STALE_FILE_COUNT_MAX: usize = 1024;
 /// Default buffer size for building stale file, unit: byte.
 const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
 /// Default path id for log files. 0 => Main dir
@@ -189,6 +192,9 @@ pub struct FileCollection<F: FileSystem> {
     active_files: CachePadded<RwLock<FileList<F>>>,
     /// File list to collect all stale files
     stale_files: CachePadded<RwLock<FileList<F>>>,
+    /// Flag remarking whether current collection is initialized
+    /// from an empty active file list.
+    _init_from_empy_active_files: bool,
 }
 
 impl<F: FileSystem> FileCollection<F> {
@@ -201,14 +207,11 @@ impl<F: FileSystem> FileCollection<F> {
         stale_files: FileList<F>,
     ) -> Self {
         let alignment = || {
-            #[cfg(feature = "failpoints")]
-            {
-                use fail::fail_point;
-                fail_point!("file_mgr::file_collection::force_set_alignment", |_| { 16 });
-            }
+            fail_point!("file_mgr::file_collection::force_set_alignment", |_| { 16 });
             0
         };
-        Self {
+        let empty_active_files = active_files.len() == 0;
+        let file_collection = Self {
             file_system,
             queue,
             paths: [Path::new(&cfg.dir).to_path_buf()],
@@ -217,7 +220,10 @@ impl<F: FileSystem> FileCollection<F> {
             capacity,
             active_files: CachePadded::new(RwLock::new(active_files)),
             stale_files: CachePadded::new(RwLock::new(stale_files)),
-        }
+            _init_from_empy_active_files: empty_active_files,
+        };
+        file_collection.initialize(cfg.prefill_for_recycle).unwrap();
+        file_collection
     }
 
     #[inline]
@@ -228,14 +234,6 @@ impl<F: FileSystem> FileCollection<F> {
     #[inline]
     pub fn get_fd(&self, file_seq: FileSeq) -> Option<Arc<F::Handle>> {
         self.active_files.read().get(file_seq)
-    }
-
-    #[inline]
-    pub fn back(&self) -> Option<FileWithFormat<F>> {
-        self.active_files.read().back().map(|fd| FileWithFormat {
-            handle: fd.handle.clone(),
-            ..*fd
-        })
     }
 
     #[inline]
@@ -262,7 +260,10 @@ impl<F: FileSystem> FileCollection<F> {
 
     #[inline]
     /// Returns the last active file handle to the caller.
-    pub fn fetch_active_file(&self, reset_header: bool) -> Option<ActiveFile<F>> {
+    ///
+    /// Attention, this func can only be called when the caller firstly
+    /// tried to access the latest active file.
+    pub fn fetch_active_file(&self) -> Option<ActiveFile<F>> {
         let active_files = self.active_files.read();
         active_files.back().map(|file| ActiveFile {
             seq: active_files.span().unwrap().1,
@@ -270,7 +271,7 @@ impl<F: FileSystem> FileCollection<F> {
                 self.file_system.as_ref(),
                 file.handle.clone(),
                 file.format,
-                reset_header,
+                self._init_from_empy_active_files,
             )
             .unwrap(),
             format: file.format,
@@ -424,9 +425,16 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention, this function only makes sense when
     /// `Config.enable-log-recycle` is true.
-    pub fn initialize(&self, prefill_for_recycle: bool) -> Result<()> {
+    fn initialize(&self, prefill_for_recycle: bool) -> Result<()> {
         let stale_capacity = if prefill_for_recycle {
-            self.capacity.saturating_sub(self.active_files.read().len())
+            let capacity = self.capacity.saturating_sub(self.active_files.read().len());
+            if capacity > LOG_STALE_FILE_COUNT_MAX {
+                warn!(
+                    "prefill too many files for log recycling, given count: {} is limited to {}",
+                    capacity, LOG_STALE_FILE_COUNT_MAX
+                );
+            }
+            std::cmp::min(capacity, LOG_STALE_FILE_COUNT_MAX)
         } else {
             0
         };
@@ -469,7 +477,7 @@ impl<F: FileSystem> FileCollection<F> {
             }
             if prepare_stale_files_count > 0 || redundant_count > 0 {
                 info!(
-                    "LogQueue: {:?} preparing stale raft logs takes {:?}, prepared count: {}, removed redundant count: {}",
+                    "{:?} prefill logs takes {:?}, added {}, removed {}",
                     self.queue,
                     now.elapsed(),
                     stale_files.len(),
@@ -660,12 +668,12 @@ mod tests {
             FileList::new(0, VecDeque::default()),
             FileList::new(0, VecDeque::default()),
         );
-        assert_eq!(file_collection.len(), 0);
-        assert!(file_collection.active_file_span().is_none());
+        assert_eq!(file_collection.len(), 1);
+        assert_eq!(file_collection.active_file_span().unwrap(), (1, 1));
         assert!(file_collection.stale_file_span().is_none());
-        assert!(file_collection.back().is_none());
-        // null | 11 12 13
-        for seq in 11..=13 {
+        assert!(file_collection.fetch_active_file().is_some());
+        // null | 1 2 3
+        for seq in 2..=3 {
             file_collection.push_back(
                 seq,
                 new_file_handler(
@@ -677,66 +685,66 @@ mod tests {
             );
         }
         assert_eq!(file_collection.len(), 3);
-        assert_eq!(file_collection.active_file_span().unwrap(), (11, 13));
+        assert_eq!(file_collection.active_file_span().unwrap(), (1, 3));
         assert!(file_collection.stale_file_span().is_none());
-        // 1 2 | 13
-        assert_eq!(file_collection.purge_to(13).unwrap(), 2);
+        // 1 2 | 3
+        assert_eq!(file_collection.purge_to(3).unwrap(), 2);
         assert_eq!(file_collection.len(), 3);
-        assert_eq!(file_collection.active_file_span().unwrap(), (13, 13));
+        assert_eq!(file_collection.active_file_span().unwrap(), (3, 3));
         assert_eq!(file_collection.stale_file_span().unwrap(), (1, 2));
-        // 1 2 | 13 14
+        // 1 2 | 3 4
         assert_eq!(
             file_collection.push_back(
-                14,
-                new_file_handler(&path, FileId::new(LogQueue::Append, 14), Version::V1, false),
+                4,
+                new_file_handler(&path, FileId::new(LogQueue::Append, 4), Version::V1, false),
             ),
             FileState {
-                first_seq: 13,
+                first_seq: 3,
                 total_len: 2,
             }
         );
-        // 1 2 | 13 14 15
+        // 1 2 | 3 4 5
         file_collection.push_back(
-            15,
-            new_file_handler(&path, FileId::new(LogQueue::Append, 15), Version::V2, false),
+            5,
+            new_file_handler(&path, FileId::new(LogQueue::Append, 5), Version::V2, false),
         );
         // V1 file will not be kept around.
-        // 1 2 3 | 15
-        assert_eq!(2, file_collection.purge_to(15).unwrap());
+        // 1 2 3 | 5
+        assert_eq!(2, file_collection.purge_to(5).unwrap());
         assert_eq!(file_collection.len(), 4);
         assert_eq!(file_collection.stale_file_span().unwrap(), (1, 3));
-        assert_eq!(file_collection.active_file_span().unwrap(), (15, 15));
-        // 1 2 3 | 15 16
+        assert_eq!(file_collection.active_file_span().unwrap(), (5, 5));
+        // 1 2 3 | 5 6
         file_collection.push_back(
-            16,
-            new_file_handler(&path, FileId::new(LogQueue::Append, 16), Version::V1, false),
+            6,
+            new_file_handler(&path, FileId::new(LogQueue::Append, 6), Version::V1, false),
         );
-        // Stale file with seqno 15 will be reused to `.raftlog.stale` with seqno 1.
-        // 1 2 3 4 | 16
-        assert_eq!(1, file_collection.purge_to(16).unwrap());
+        // Stale file with seqno 5 will be reused to `.raftlog.reserved` with seqno 1.
+        // 1 2 3 4 | 6
+        assert_eq!(1, file_collection.purge_to(6).unwrap());
         assert_eq!(file_collection.len(), 5);
         assert_eq!(file_collection.stale_file_span().unwrap(), (1, 4));
-        assert_eq!(file_collection.active_file_span().unwrap(), (16, 16));
-        // 1 2 3 4 | 16 17 18 19 20
-        for i in 17..=20 {
+        assert_eq!(file_collection.active_file_span().unwrap(), (6, 6));
+        // 1 2 3 4 | 6 7 8 9 10
+        for i in 7..=10 {
             file_collection.push_back(
                 i as FileSeq,
                 new_file_handler(&path, FileId::new(LogQueue::Append, i), Version::V2, false),
             );
         }
         assert_eq!(file_collection.stale_file_span().unwrap(), (1, 4));
-        assert_eq!(file_collection.active_file_span().unwrap(), (16, 20));
+        assert_eq!(file_collection.active_file_span().unwrap(), (6, 10));
         // V1 file will not be kept around.
-        // 2 3 4 | 19 20
-        assert_eq!(3, file_collection.purge_to(19).unwrap());
+        // 2 3 4 | 9 10
+        assert_eq!(3, file_collection.purge_to(9).unwrap());
         assert_eq!(file_collection.len(), 5);
         assert_eq!(file_collection.stale_file_span().unwrap(), (2, 4));
-        assert_eq!(file_collection.active_file_span().unwrap(), (19, 20));
-        // 3 4 | 19 20 21
+        assert_eq!(file_collection.active_file_span().unwrap(), (9, 10));
+        // 3 4 | 9 10 11
         let active_file = file_collection.rotate().unwrap();
         assert_eq!(file_collection.len(), 5);
         assert_eq!(file_collection.stale_file_span().unwrap(), (3, 4));
-        assert_eq!(file_collection.active_file_span().unwrap(), (19, 21));
-        assert_eq!(active_file.seq, 21);
+        assert_eq!(file_collection.active_file_span().unwrap(), (9, 11));
+        assert_eq!(active_file.seq, 11);
     }
 }

@@ -165,6 +165,11 @@ impl Config {
                 self.format_version
             ));
         }
+        if !self.enable_log_recycle && self.prefill_for_recycle {
+            return Err(box_err!(
+                "prefill is not allowed when log recycle is disabled"
+            ));
+        }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is disabled");
@@ -262,6 +267,14 @@ mod tests {
             format-version = 1
         "#;
         let mut cfg_load: Config = toml::from_str(recycle_error).unwrap();
+        assert!(cfg_load.sanitize().is_err());
+
+        let prefill_error = r#"
+            enable-log-recycle = false
+            prefill-for-recycle = true
+            format-version = 2
+        "#;
+        let mut cfg_load: Config = toml::from_str(prefill_error).unwrap();
         assert!(cfg_load.sanitize().is_err());
     }
 

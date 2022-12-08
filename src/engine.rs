@@ -705,10 +705,11 @@ mod tests {
             Arc::new(ObfuscatedFileSystem::default()),
         )
         .unwrap();
-        // Start engine with prefilled recycling.
+        // Start engine with prefilled recycling. Testing too many
+        // prefilled files.
         let cfg_recycle = Config {
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(100), /* avoid fd overflows */
+            enable_log_recycle: true,
             prefill_for_recycle: true,
             ..cfg
         };
@@ -1978,15 +1979,11 @@ mod tests {
                         false
                     }
                 }
-                (None, Some(id)) => {
-                    if id.queue == LogQueue::Append {
-                        if delete {
-                            self.stale_metadata.lock().unwrap().remove(&id.seq)
-                        } else {
-                            self.stale_metadata.lock().unwrap().insert(id.seq)
-                        }
+                (None, Some(seq)) => {
+                    if delete {
+                        self.stale_metadata.lock().unwrap().remove(&seq)
                     } else {
-                        false
+                        self.stale_metadata.lock().unwrap().insert(seq)
                     }
                 }
                 _ => false,
@@ -2052,13 +2049,7 @@ mod tests {
                         false
                     }
                 }
-                (None, Some(id)) => {
-                    if id.queue == LogQueue::Append {
-                        self.stale_metadata.lock().unwrap().contains(&id.seq)
-                    } else {
-                        false
-                    }
-                }
+                (None, Some(seq)) => self.stale_metadata.lock().unwrap().contains(&seq),
                 _ => false,
             }
         }
@@ -2429,6 +2420,7 @@ mod tests {
             target_file_size: ReadableSize::kb(2),
             purge_threshold: ReadableSize::kb(100),
             enable_log_recycle: false,
+            prefill_for_recycle: false,
             ..cfg_v2
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system.clone()).unwrap();

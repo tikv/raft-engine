@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 use crate::codec::{self, NumberEncoder};
-use crate::pipe_log::{FileId, LogQueue, Version};
+use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::{Error, Result};
 
 /// Width to format log sequence number.
@@ -18,7 +18,7 @@ const LOG_APPEND_SUFFIX: &str = ".raftlog";
 /// Name suffix for Rewrite queue files.
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
 /// Name suffix for stale log files.
-const LOG_APPEND_STALE_SUFFIX: &str = ".raftlog.stale";
+const LOG_APPEND_RESERVED_SUFFIX: &str = ".raftlog.reserved";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 
@@ -88,7 +88,7 @@ impl FileNameExt for FileId {
 }
 
 pub trait StaleFileNameExt: Sized {
-    fn parse_stale_file_name(file_name: &str) -> Option<Self>;
+    fn parse_stale_file_name(file_name: &str) -> Option<FileSeq>;
 
     fn build_stale_file_name(&self) -> String;
 
@@ -100,14 +100,13 @@ pub trait StaleFileNameExt: Sized {
 }
 
 impl StaleFileNameExt for FileId {
-    fn parse_stale_file_name(file_name: &str) -> Option<FileId> {
+    fn parse_stale_file_name(file_name: &str) -> Option<FileSeq> {
         if file_name.len() > LOG_SEQ_WIDTH {
             if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
-                if file_name.ends_with(LOG_APPEND_STALE_SUFFIX) {
-                    return Some(FileId {
-                        queue: LogQueue::Append,
-                        seq,
-                    });
+                if file_name.ends_with(LOG_APPEND_RESERVED_SUFFIX) {
+                    // As reserved files are only used for LogQueue::Append,
+                    // we just return the related FileSeq of it.
+                    return Some(seq);
                 }
             }
         }
@@ -119,7 +118,7 @@ impl StaleFileNameExt for FileId {
         format!(
             "{:0width$}{}",
             self.seq,
-            LOG_APPEND_STALE_SUFFIX,
+            LOG_APPEND_RESERVED_SUFFIX,
             width = LOG_SEQ_WIDTH
         )
     }

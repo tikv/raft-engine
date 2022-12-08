@@ -84,7 +84,7 @@ pub struct DualPipesBuilder<F: FileSystem> {
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
     rewrite_files: Vec<FileToRecover<F>>,
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    stale_files: Vec<FileToRecover<F>>,
+    reserved_files: Vec<FileToRecover<F>>,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -97,7 +97,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             dir_lock: None,
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
-            stale_files: Vec::new(),
+            reserved_files: Vec::new(),
         }
     }
 
@@ -119,7 +119,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
         let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
-        let (mut min_stale_id, mut max_stale_id) = (u64::MAX, 0);
+        let (mut min_reserved_id, mut max_reserved_id) = (u64::MAX, 0);
         fs::read_dir(path)?.for_each(|e| {
             if let Ok(e) = e {
                 let p = e.path();
@@ -140,16 +140,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             max_rewrite_id = std::cmp::max(max_rewrite_id, seq);
                         }
                         _ => {
-                            // Scan and check whether current file is a stale file or not.
-                            // Stale files are only vaid for Append queue.
-                            if let Some(FileId {
-                                queue: LogQueue::Append,
-                                seq,
-                            }) = FileId::parse_stale_file_name(
+                            // Scan and check whether current file is a reserved file or not.
+                            // Reserved files are only vaid for Append queue.
+                            if let Some(seq) = FileId::parse_stale_file_name(
                                 p.file_name().unwrap().to_str().unwrap(),
                             ) {
-                                min_stale_id = std::cmp::min(min_stale_id, seq);
-                                max_stale_id = std::cmp::max(max_stale_id, seq);
+                                min_reserved_id = std::cmp::min(min_reserved_id, seq);
+                                max_reserved_id = std::cmp::max(max_reserved_id, seq);
                             }
                         }
                     }
@@ -157,7 +154,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
         });
 
-        for (queue, min_id, max_id, files, is_stale) in [
+        for (queue, min_id, max_id, files, is_reserved_file) in [
             (
                 LogQueue::Append,
                 min_append_id,
@@ -174,10 +171,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             ),
             (
                 LogQueue::Append,
-                min_stale_id,
-                max_stale_id,
-                &mut self.stale_files,
-                true, /* stale file */
+                min_reserved_id,
+                max_reserved_id,
+                &mut self.reserved_files,
+                true, /* reserved file */
             ),
         ] {
             if max_id > 0 {
@@ -188,7 +185,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 for i in 0..max_sample {
                     let seq = i * min_id / max_sample;
                     let file_id = FileId { queue, seq };
-                    let path = if is_stale {
+                    let path = if is_reserved_file {
                         file_id.build_stale_file_path(dir)
                     } else {
                         file_id.build_file_path(dir)
@@ -203,7 +200,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let mut success = 0;
                     for seq in start..min_id {
                         let file_id = FileId { queue, seq };
-                        let path = if is_stale {
+                        let path = if is_reserved_file {
                             file_id.build_stale_file_path(dir)
                         } else {
                             file_id.build_file_path(dir)
@@ -221,7 +218,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 }
                 for seq in min_id..=max_id {
                     let file_id = FileId { queue, seq };
-                    let path = if is_stale {
+                    let path = if is_reserved_file {
                         file_id.build_stale_file_path(dir)
                     } else {
                         file_id.build_file_path(dir)
@@ -438,14 +435,14 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     /// Builds a new storage for the specified log queue.
     fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
-        // Rewrite queue won't be assigned with stale files for recycling.
-        let (capacity, active_files, stale_files) = match queue {
+        // Rewrite queue won't be assigned with reserved files for recycling.
+        let (capacity, active_files, reserved_files) = match queue {
             LogQueue::Append => (
                 self.cfg.recycle_capacity(),
                 &self.append_files,
                 FileList::new(
-                    self.stale_files.first().map(|f| f.seq).unwrap_or(0),
-                    self.stale_files
+                    self.reserved_files.first().map(|f| f.seq).unwrap_or(0),
+                    self.reserved_files
                         .iter()
                         .map(|f| FileWithFormat {
                             handle: f.handle.clone(),
@@ -472,7 +469,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 })
                 .collect(),
         );
-        // Build the pipe with the given file collection.
+        // Build the pipe with the given file collection. Attention, it will
+        // automatically initialized.
         SinglePipe::open(
             &self.cfg,
             self.file_system.clone(),
@@ -484,7 +482,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 &self.cfg,
                 capacity,
                 active_files,
-                stale_files,
+                reserved_files,
             ),
         )
     }
