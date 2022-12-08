@@ -455,46 +455,44 @@ fn test_start_with_stale_file_allocate_error() {
         ..Default::default()
     };
     let entry = vec![b'x'; 1024];
-    {
-        // Several stale logs are filled in err, which also can be reused.
-        // Among these stale files, [5, 9] are abnormal stale files.
-        let _f = FailGuard::new("log_fd::allocate::err", "4*off->5*return->off");
-        let engine = Engine::open(cfg.clone()).unwrap();
+    // Mock that the engine is failed because of the stale file
+    // with seqno[5] failed to be generated.
+    assert!(catch_unwind_silent(|| {
+        let _f = FailGuard::new("log_fd::write::zero", "4*off->return");
+        Engine::open(cfg.clone()).unwrap()
+    })
+    .is_err());
+    // Extra stale files have been supplemented.
+    let engine = Engine::open(cfg).unwrap();
+    engine
+        .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
+        .unwrap();
+    let (start, end) = engine.file_span(LogQueue::Append);
+    assert_eq!(start, end);
+    // Append several entries to make Engine reuse the stale logs.
+    for r in 2..6 {
         engine
-            .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
-            .unwrap();
-        let (start, end) = engine.file_span(LogQueue::Append);
-        // A new file is generated from one reused stale file.
-        assert_eq!(start, end);
-        // Append several entries to make Engine reuse the stale logs.
-        for r in 2..6 {
-            engine
-                .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)
-                .unwrap();
-        }
-        // Abnormal stale file - 5 has been reused and records in it can be
-        // normarly fetched.
-        let (reused_start, reused_end) = engine.file_span(LogQueue::Append);
-        assert_eq!((reused_start, reused_end), (1, 5));
-        assert!(reused_end > end);
-        assert_eq!(engine.first_index(1).unwrap(), 1);
-        assert_eq!(engine.last_index(1).unwrap(), 4);
-        assert_eq!(engine.last_index(5).unwrap(), 4);
-        let mut entries = Vec::new();
-        engine
-            .fetch_entries_to::<MessageExtTyped>(5, 1, 5, None, &mut entries)
+            .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)
             .unwrap();
     }
-    let engine = Engine::open(cfg).unwrap();
-    let (start, end) = engine.file_span(LogQueue::Append);
+    let (reused_start, reused_end) = engine.file_span(LogQueue::Append);
+    assert_eq!((reused_start, reused_end), (1, 5));
+    assert!(reused_end > end);
+    assert_eq!(engine.first_index(1).unwrap(), 1);
+    assert_eq!(engine.last_index(1).unwrap(), 4);
+    assert_eq!(engine.last_index(5).unwrap(), 4);
+    let mut entries = Vec::new();
+    engine
+        .fetch_entries_to::<MessageExtTyped>(5, 1, 5, None, &mut entries)
+        .unwrap();
     // Continously append entries to reach the purge_threshold.
     for r in 6..=15 {
         engine
             .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)
             .unwrap();
     }
-    assert_eq!(engine.file_span(LogQueue::Append).0, start);
-    assert!(engine.file_span(LogQueue::Append).1 > end);
+    assert_eq!(engine.file_span(LogQueue::Append).0, reused_start);
+    assert!(engine.file_span(LogQueue::Append).1 > reused_end);
     let (start, _) = engine.file_span(LogQueue::Append);
     // Purge and check.
     engine.purge_expired_files().unwrap();
