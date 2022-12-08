@@ -198,14 +198,14 @@ pub struct FileCollection<F: FileSystem> {
 }
 
 impl<F: FileSystem> FileCollection<F> {
-    pub fn new(
+    pub fn build(
         file_system: Arc<F>,
         queue: LogQueue,
         cfg: &Config,
         capacity: usize,
         active_files: FileList<F>,
         stale_files: FileList<F>,
-    ) -> Self {
+    ) -> Result<Self> {
         let alignment = || {
             fail_point!("file_mgr::file_collection::force_set_alignment", |_| { 16 });
             0
@@ -222,8 +222,8 @@ impl<F: FileSystem> FileCollection<F> {
             stale_files: CachePadded::new(RwLock::new(stale_files)),
             _init_from_empy_active_files: empty_active_files,
         };
-        file_collection.initialize(cfg.prefill_for_recycle).unwrap();
-        file_collection
+        file_collection.initialize(cfg.prefill_for_recycle)?;
+        Ok(file_collection)
     }
 
     #[inline]
@@ -511,7 +511,7 @@ impl<F: FileSystem> FileCollection<F> {
         let buf = vec![0; std::cmp::min(LOG_STALE_FILE_BUF_SIZE, self.target_file_size)];
         while written <= self.target_file_size {
             writer.write_all(&buf).unwrap_or_else(|e| {
-                panic!("failed to prepare stale file: {}", e);
+                warn!("failed to build stale file, err: {}", e);
             });
             written += buf.len();
         }
@@ -660,14 +660,15 @@ mod tests {
             ..Config::default()
         };
         // null | null
-        let file_collection = FileCollection::new(
+        let file_collection = FileCollection::build(
             Arc::new(DefaultFileSystem),
             LogQueue::Append,
             &config,
             5,
             FileList::new(0, VecDeque::default()),
             FileList::new(0, VecDeque::default()),
-        );
+        )
+        .unwrap();
         assert_eq!(file_collection.len(), 1);
         assert_eq!(file_collection.active_file_span().unwrap(), (1, 1));
         assert!(file_collection.stale_file_span().is_none());

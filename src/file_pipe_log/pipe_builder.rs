@@ -476,14 +476,14 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.file_system.clone(),
             self.listeners.clone(),
             queue,
-            FileCollection::new(
+            FileCollection::build(
                 self.file_system.clone(),
                 queue,
                 &self.cfg,
                 capacity,
                 active_files,
                 reserved_files,
-            ),
+            )?,
         )
     }
 

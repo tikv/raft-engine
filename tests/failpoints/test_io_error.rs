@@ -25,7 +25,7 @@ fn test_file_open_error() {
         let _f = FailGuard::new("log_fd::create::err", "return");
         assert!(Engine::open_with_file_system(cfg.clone(), fs.clone()).is_err());
     }
-
+    println!("Try open error");
     {
         let _f = FailGuard::new("log_fd::open::err", "return");
         let _ = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();

@@ -344,14 +344,14 @@ mod tests {
             fs.clone(),
             Vec::new(),
             queue,
-            FileCollection::new(
+            FileCollection::build(
                 fs,
                 queue,
                 cfg,
                 capacity,
                 FileList::new(0, VecDeque::new()),
                 FileList::new(0, VecDeque::new()),
-            ),
+            )?,
         )
     }
 
