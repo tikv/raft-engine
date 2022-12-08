@@ -457,6 +457,7 @@ fn test_start_with_stale_file_allocate_error() {
     let entry = vec![b'x'; 1024];
     {
         // Several stale logs are filled in err, which also can be reused.
+        // Among these stale files, [5, 9] are abnormal stale files.
         let _f = FailGuard::new("log_fd::allocate::err", "4*off->5*return->off");
         let engine = Engine::open(cfg.clone()).unwrap();
         engine
@@ -471,12 +472,20 @@ fn test_start_with_stale_file_allocate_error() {
                 .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)
                 .unwrap();
         }
-        assert!(engine.file_span(LogQueue::Append).1 > end);
+        // Abnormal stale file - 5 has been reused and records in it can be
+        // normarly fetched.
+        let (reused_start, reused_end) = engine.file_span(LogQueue::Append);
+        assert_eq!((reused_start, reused_end), (1, 5));
+        assert!(reused_end > end);
+        assert_eq!(engine.first_index(1).unwrap(), 1);
+        assert_eq!(engine.last_index(1).unwrap(), 4);
+        assert_eq!(engine.last_index(5).unwrap(), 4);
+        let mut entries = Vec::new();
+        engine
+            .fetch_entries_to::<MessageExtTyped>(5, 1, 5, None, &mut entries)
+            .unwrap();
     }
     let engine = Engine::open(cfg).unwrap();
-    assert_eq!(engine.first_index(1).unwrap(), 1);
-    assert_eq!(engine.last_index(1).unwrap(), 4);
-    assert_eq!(engine.last_index(5).unwrap(), 4);
     let (start, end) = engine.file_span(LogQueue::Append);
     // Continously append entries to reach the purge_threshold.
     for r in 6..=15 {
