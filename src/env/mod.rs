@@ -85,5 +85,5 @@ pub trait WriteExt {
 pub trait AsyncContext {
     fn wait(&mut self) -> Result<usize>;
     fn single_wait(&mut self, seq: usize) -> Result<usize>;
-    fn data(&self, seq: usize) -> Arc<Mutex<Vec<u8>>>;
+    fn data(&self, seq: usize) -> Vec<u8>;
 }

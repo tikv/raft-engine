@@ -103,17 +103,16 @@ impl LogFd {
     }
 
     pub fn read_aio(&self, seq: usize, ctx: &mut AioContext, offset: u64) {
-        let mut buf = ctx.buf_vec.last().unwrap().lock().unwrap();
         unsafe {
             let aior = &mut ctx.aio_vec[seq];
             aior.aio_fildes = self.0;
-            aior.aio_buf = buf.as_mut_ptr() as *mut c_void;
             aior.aio_reqprio = 0;
             aior.aio_sigevent = SigEvent::new(SigevNotify::SigevNone).sigevent();
-            aior.aio_nbytes = buf.len() as usize;
+            aior.aio_nbytes = ctx.buf_vec[seq].len() as usize;
+            aior.aio_buf = ctx.buf_vec[seq].as_mut_ptr() as *mut c_void;
             aior.aio_lio_opcode = libc::LIO_READ;
             aior.aio_offset = offset as off_t;
-            libc::aio_read(&mut ctx.aio_vec[seq]);
+            libc::aio_read(aior);
         }
     }
 
@@ -279,7 +278,7 @@ impl WriteExt for LogFile {
 
 pub struct AioContext {
     aio_vec: Vec<aiocb>,
-    pub(crate) buf_vec: Vec<Arc<Mutex<Vec<u8>>>>,
+    pub(crate) buf_vec: Vec<Vec<u8>>,
 }
 impl AioContext {
     pub fn new(block_sum: usize) -> Self {
@@ -298,7 +297,7 @@ impl AioContext {
 
 impl AsyncContext for AioContext {
     fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
-        let buf_len = self.buf_vec[seq].lock().unwrap().len();
+        let buf_len = self.buf_vec[seq].len();
         unsafe {
             loop {
                 libc::aio_suspend(
@@ -324,8 +323,8 @@ impl AsyncContext for AioContext {
         Ok(total as usize)
     }
 
-    fn data(&self, seq: usize) -> Arc<Mutex<Vec<u8>>> {
-        self.buf_vec[seq].clone()
+    fn data(&self, seq: usize) -> Vec<u8> {
+        self.buf_vec[seq].to_vec()
     }
 }
 

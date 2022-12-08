@@ -380,7 +380,7 @@ where
                     0 => {
                         ctx.single_wait(0).unwrap();
                         LogBatch::decode_entries_block(
-                            &ctx.data(0).lock().unwrap(),
+                            &ctx.data(0),
                             ents_idx[0].entries.unwrap(),
                             ents_idx[0].compression_type,
                         )
@@ -391,7 +391,7 @@ where
                             seq += 1;
                             ctx.single_wait(seq).unwrap();
                             LogBatch::decode_entries_block(
-                                &ctx.data(seq).lock().unwrap(),
+                                &ctx.data(seq),
                                 i.entries.unwrap(),
                                 i.compression_type,
                             )

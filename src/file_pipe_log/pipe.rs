@@ -358,8 +358,7 @@ impl<F: FileSystem> SinglePipe<F> {
     ) -> Result<()> {
         unsafe {
             let fd = self.get_fd(handle.id.seq)?;
-            let buf = vec![0 as u8; handle.len];
-            let buf = Arc::new(SyncMutex::new(buf));
+            let mut buf = vec![0 as u8; handle.len];
             ctx.buf_vec.push(buf);
             self.file_system
                 .as_ref()
