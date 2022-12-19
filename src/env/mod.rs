@@ -17,16 +17,13 @@ pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
+    type AsyncIoContext: AsyncContext;
 
-    fn read_aio(
+    fn new_async_reader(
         &self,
         handle: Arc<Self::Handle>,
-        seq: usize,
-        ctx: &mut AioContext,
-        offset: u64,
-    ) -> Result<()> {
-        Ok(())
-    }
+        ctx: &mut Self::AsyncIoContext,
+    ) -> Result<()>;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
@@ -62,9 +59,7 @@ pub trait FileSystem: Send + Sync {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
 
-    fn new_async_context(&self, block_sum: usize) -> Result<AioContext> {
-        Ok(AioContext::new(block_sum))
-    }
+    fn new_async_io_context(&self, block_sum: usize) -> Result<Self::AsyncIoContext>;
 }
 
 pub trait Handle {
@@ -84,6 +79,8 @@ pub trait WriteExt {
 
 pub trait AsyncContext {
     fn wait(&mut self) -> Result<usize>;
-    fn single_wait(&mut self, seq: usize) -> Result<usize>;
     fn data(&self, seq: usize) -> Vec<u8>;
+    fn single_wait(&mut self, seq: usize) -> Result<usize>;
+
+    fn submit_read_req(&mut self, buf: Vec<u8>, offset: u64) -> Result<()>;
 }

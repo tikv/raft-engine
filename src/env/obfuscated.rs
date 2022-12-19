@@ -91,6 +91,15 @@ impl FileSystem for ObfuscatedFileSystem {
     type Handle = <DefaultFileSystem as FileSystem>::Handle;
     type Reader = ObfuscatedReader;
     type Writer = ObfuscatedWriter;
+    type AsyncIoContext = AioContext;
+
+    fn new_async_reader(
+        &self,
+        handle: Arc<Self::Handle>,
+        ctx: &mut Self::AsyncIoContext,
+    ) -> IoResult<()> {
+        ctx.new_reader(handle)
+    }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         let r = self.inner.create(path);
@@ -128,5 +137,9 @@ impl FileSystem for ObfuscatedFileSystem {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
         Ok(ObfuscatedWriter(self.inner.new_writer(handle)?))
+    }
+
+    fn new_async_io_context(&self, block_sum: usize) -> IoResult<Self::AsyncIoContext> {
+        Ok(AioContext::new(block_sum))
     }
 }

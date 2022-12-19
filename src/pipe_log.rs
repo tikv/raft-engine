@@ -6,14 +6,16 @@ use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
 use crate::env::AioContext;
+use crate::memtable::EntryIndex;
 use fail::fail_point;
 use libc::aiocb;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::ToPrimitive;
+use protobuf::Message;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
 
-use crate::Result;
+use crate::{MessageExt, Result};
 
 /// The type of log queue.
 #[repr(u8)]
@@ -174,12 +176,19 @@ pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
 
-    fn read_bytes_aio(
+    /// Read entries from pipe logs using 'Async IO'.
+    fn async_entry_read<M: Message + MessageExt<Entry = M>>(
         &self,
-        seq: usize,
-        ctx: &mut AioContext,
-        handle: FileBlockHandle,
+        ents_idx: &mut Vec<EntryIndex>,
+        vec: &mut Vec<M::Entry>,
     ) -> Result<()>;
+
+    /// Reads bytes from multi blocks using 'Async IO'.
+    fn async_read_bytes(
+        &self,
+        handles: &mut Vec<FileBlockHandle>,
+    ) -> Result<Vec<Vec<u8>>>;
+
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.
     fn append<T: ReactiveBytes + ?Sized>(

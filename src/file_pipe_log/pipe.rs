@@ -11,15 +11,17 @@ use fail::fail_point;
 use libc::aiocb;
 use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
+use protobuf::{parse_from_bytes, Message};
 
 use crate::config::Config;
-use crate::env::{AioContext, DefaultFileSystem, FileSystem};
+use crate::env::{AioContext, AsyncContext, DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
+use crate::memtable::EntryIndex;
 use crate::metrics::*;
 use crate::pipe_log::{
     FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
 };
-use crate::{perf_context, Error, Result};
+use crate::{perf_context, Error, LogBatch, MessageExt, Result};
 
 use super::format::{FileNameExt, LogFileFormat};
 use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
@@ -350,22 +352,15 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn read_bytes_aio(
+    fn submit_read_req(
         &self,
-        seq: usize,
-        ctx: &mut AioContext,
-        handle: FileBlockHandle,
-    ) -> Result<()> {
-        unsafe {
-            let fd = self.get_fd(handle.id.seq)?;
-            let mut buf = vec![0 as u8; handle.len];
-            ctx.buf_vec.push(buf);
-            self.file_system
-                .as_ref()
-                .read_aio(fd, seq, ctx, handle.offset)
-                .unwrap();
-            return Ok(());
-        }
+        handle: &mut FileBlockHandle,
+        ctx: &mut F::AsyncIoContext,
+    ) {
+        let fd = self.get_fd(handle.id.seq).unwrap();
+        let mut buf = vec![0 as u8; handle.len];
+        self.file_system.as_ref().new_async_reader(fd, ctx).unwrap();
+        ctx.submit_read_req(buf, handle.offset).unwrap();
     }
 
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
@@ -533,18 +528,134 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         self.pipes[handle.id.queue as usize].read_bytes(handle)
     }
-
     #[inline]
-    fn read_bytes_aio(
+    fn async_entry_read<M: Message + MessageExt<Entry = M>>(
         &self,
-        seq: usize,
-        ctx: &mut AioContext,
-        handle: FileBlockHandle,
+        ents_idx: &mut Vec<EntryIndex>,
+        vec: &mut Vec<M::Entry>,
     ) -> Result<()> {
-        self.pipes[handle.id.queue as usize]
-            .read_bytes_aio(seq, ctx, handle)
+        let mut handles: Vec<FileBlockHandle> = vec![];
+        for (t, i) in ents_idx.iter().enumerate() {
+            if t == 0 || (i.entries.unwrap() != ents_idx[t - 1].entries.unwrap()) {
+                handles.push(i.entries.unwrap());
+            }
+        }
+
+        let mut ctx_append = self.pipes[LogQueue::Append as usize]
+            .file_system
+            .new_async_io_context(handles.len() as usize)
             .unwrap();
+        let mut ctx_rewrite = self.pipes[LogQueue::Rewrite as usize]
+            .file_system
+            .new_async_io_context(handles.len() as usize)
+            .unwrap();
+
+        for handle in handles.iter_mut() {
+            match handle.id.queue {
+                LogQueue::Append => {
+                    self.pipes[LogQueue::Append as usize].submit_read_req(
+                        handle,
+                        &mut ctx_append,
+                    );
+                }
+                LogQueue::Rewrite => {
+                    self.pipes[LogQueue::Rewrite as usize].submit_read_req(
+                        handle,
+                        &mut ctx_rewrite,
+                    );
+                }
+            }
+        }
+
+        let mut decode_buf = vec![];
+        let mut seq_append: i32 = -1;
+        let mut seq_rewrite: i32 = -1;
+
+        for (t, i) in ents_idx.iter().enumerate() {
+            decode_buf =
+                match t == 0 || ents_idx[t - 1].entries.unwrap() != ents_idx[t].entries.unwrap() {
+                    true => match ents_idx[t].entries.unwrap().id.queue {
+                        LogQueue::Append => {
+                            seq_append += 1;
+                            ctx_append.single_wait(seq_append as usize).unwrap();
+                            LogBatch::decode_entries_block(
+                                &ctx_append.data(seq_append as usize),
+                                i.entries.unwrap(),
+                                i.compression_type,
+                            )
+                            .unwrap()
+                        }
+                        LogQueue::Rewrite => {
+                            seq_rewrite += 1;
+                            ctx_rewrite.single_wait(seq_rewrite as usize).unwrap();
+                            LogBatch::decode_entries_block(
+                                &ctx_rewrite.data(seq_rewrite as usize),
+                                i.entries.unwrap(),
+                                i.compression_type,
+                            )
+                            .unwrap()
+                        }
+                    },
+                    false => decode_buf,
+                };
+
+            vec.push(
+                parse_from_bytes::<M>(
+                    &mut decode_buf
+                        [(i.entry_offset) as usize..(i.entry_offset + i.entry_len) as usize],
+                )
+                .unwrap(),
+            );
+        }
         Ok(())
+    }
+    #[inline]
+    fn async_read_bytes(&self, handles: &mut Vec<FileBlockHandle>) -> Result<Vec<Vec<u8>>> {
+        let mut res: Vec<Vec<u8>> = vec![];
+
+        let mut ctx_append = self.pipes[LogQueue::Append as usize]
+            .file_system
+            .new_async_io_context(handles.len() as usize)
+            .unwrap();
+        let mut ctx_rewrite = self.pipes[LogQueue::Rewrite as usize]
+            .file_system
+            .new_async_io_context(handles.len() as usize)
+            .unwrap();
+
+        for (seq, handle) in handles.iter_mut().enumerate() {
+            match handle.id.queue {
+                LogQueue::Append => {
+                    self.pipes[LogQueue::Append as usize].submit_read_req(
+                        handle,
+                        &mut ctx_append,
+                    );
+                }
+                LogQueue::Rewrite => {
+                    self.pipes[LogQueue::Rewrite as usize].submit_read_req(
+                        handle,
+                        &mut ctx_rewrite,
+                    );
+                }
+            }
+        }
+        let mut seq_append = 0;
+        let mut seq_rewrite = 0;
+        for handle in handles.iter_mut(){
+            match handle.id.queue {
+                LogQueue::Append => {
+                    ctx_append.single_wait(seq_append);
+                    res.push(ctx_append.data(seq_append));
+                    seq_append += 1;
+                }
+                LogQueue::Rewrite => {
+                    ctx_rewrite.single_wait(seq_rewrite);
+                    res.push(ctx_rewrite.data(seq_rewrite));
+                    seq_rewrite += 1;
+                }
+            }
+        }
+
+        Ok(res)
     }
 
     #[inline]

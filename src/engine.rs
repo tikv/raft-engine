@@ -341,73 +341,10 @@ where
                 start.elapsed().as_micros()
             );
 
-            let mut new_block_flags: Vec<bool> = Vec::with_capacity(length);
-            let mut block_sum = 0;
-            for (t, i) in ents_idx.iter().enumerate() {
-                if match t {
-                    0 => true,
-                    _ => ents_idx[t - 1].entries.unwrap() != ents_idx[t].entries.unwrap(),
-                } {
-                    block_sum += 1;
-                    new_block_flags.push(true);
-                } else {
-                    new_block_flags.push(false);
-                }
-            }
+            self.pipe_log
+                .async_entry_read::<M>(&mut ents_idx, vec)
+                .unwrap();
 
-            let mut ctx = AioContext::new(block_sum);
-            for (seq, i) in ents_idx.iter().enumerate() {
-                if new_block_flags[seq] {
-                    submit_read_request_to_file(
-                        self.pipe_log.as_ref(),
-                        seq,
-                        &mut ctx,
-                        i.entries.unwrap(),
-                    )
-                    .unwrap();
-                }
-            }
-            println!(
-                "[fetch_entries_to_aio] (stage2) time cost: {:?} us",
-                start.elapsed().as_micros()
-            );
-
-            let mut seq = 0;
-            let mut decode_buf = vec![];
-
-            for (t, i) in ents_idx.iter().enumerate() {
-                decode_buf = match t {
-                    0 => {
-                        ctx.single_wait(0).unwrap();
-                        LogBatch::decode_entries_block(
-                            &ctx.data(0),
-                            ents_idx[0].entries.unwrap(),
-                            ents_idx[0].compression_type,
-                        )
-                        .unwrap()
-                    }
-                    _ => match new_block_flags[t] {
-                        true => {
-                            seq += 1;
-                            ctx.single_wait(seq).unwrap();
-                            LogBatch::decode_entries_block(
-                                &ctx.data(seq),
-                                i.entries.unwrap(),
-                                i.compression_type,
-                            )
-                            .unwrap()
-                        }
-                        false => decode_buf,
-                    },
-                };
-                vec.push(
-                    parse_from_bytes::<M>(
-                        &mut decode_buf
-                            [(i.entry_offset) as usize..(i.entry_offset + i.entry_len) as usize],
-                    )
-                    .unwrap(),
-                );
-            }
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
             println!(
                 "[fetch_entries_to_aio] (end) time cost: {:?} us",
@@ -692,19 +629,6 @@ where
     })
 }
 
-pub(crate) fn submit_read_request_to_file<P>(
-    pipe_log: &P,
-    seq: usize,
-    ctx: &mut AioContext,
-    handle: FileBlockHandle,
-) -> Result<()>
-where
-    P: PipeLog,
-{
-    pipe_log.read_bytes_aio(seq, ctx, handle).unwrap();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_async_read() {
-        let normal_batch_size = 8192;
+        let normal_batch_size = 4096;
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size] {
             if entry_size == normal_batch_size {
@@ -2162,11 +2086,15 @@ mod tests {
         type Handle = <ObfuscatedFileSystem as FileSystem>::Handle;
         type Reader = <ObfuscatedFileSystem as FileSystem>::Reader;
         type Writer = <ObfuscatedFileSystem as FileSystem>::Writer;
+        type AsyncIoContext = AioContext;
 
-        // fn read_aio(&self, ctx: &mut AioContext, offset: u64) -> std::io::Result<()>
-        // {     // todo!()
-        //     Ok(())
-        // }
+        fn new_async_reader(
+            &self,
+            handle: Arc<Self::Handle>,
+            ctx: &mut Self::AsyncIoContext,
+        ) -> std::io::Result<()> {
+            ctx.new_reader(handle)
+        }
 
         fn create<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {
             let handle = self.inner.create(&path)?;
@@ -2225,6 +2153,10 @@ mod tests {
 
         fn new_writer(&self, h: Arc<Self::Handle>) -> std::io::Result<Self::Writer> {
             self.inner.new_writer(h)
+        }
+
+        fn new_async_io_context(&self, block_sum: usize) -> std::io::Result<Self::AsyncIoContext> {
+            todo!()
         }
     }
 
