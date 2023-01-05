@@ -8,6 +8,8 @@ use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
+/// Max limitation for the count of prepared stale file.
+const LOG_STALE_FILE_COUNT_MAX: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -92,7 +94,7 @@ pub struct Config {
     /// Default: false
     pub enable_log_recycle: bool,
 
-    /// Whether to prepare stale log files for recycling when start.
+    /// Whether to prepare log files for recycling when start.
     /// If `true`, batch stale log files will be prepared for recycling when
     /// starting engine.
     /// Only available for `enable-log-reycle` is true.
@@ -196,6 +198,22 @@ impl Config {
         } else {
             0
         }
+    }
+
+    /// Returns the capacity for prefilling log files.
+    pub(crate) fn prefill_capacity(&self, existed_file_size: usize) -> usize {
+        // Only when `prefill-for-recycle` == true, it makes sense.
+        if !self.prefill_for_recycle {
+            return 0;
+        }
+        let capacity = self.recycle_capacity().saturating_sub(existed_file_size);
+        if capacity > LOG_STALE_FILE_COUNT_MAX {
+            warn!(
+                "prefill too many files for log recycling, given count: {} is limited to {}",
+                capacity, LOG_STALE_FILE_COUNT_MAX
+            );
+        }
+        std::cmp::min(capacity, LOG_STALE_FILE_COUNT_MAX)
     }
 }
 

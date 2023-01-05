@@ -1968,15 +1968,11 @@ mod tests {
             let parse_append = FileId::parse_file_name(path);
             let parse_stale = FileId::parse_stale_file_name(path);
             match (parse_append, parse_stale) {
-                (Some(id), None) => {
-                    if id.queue == LogQueue::Append {
-                        if delete {
-                            self.append_metadata.lock().unwrap().remove(&id.seq)
-                        } else {
-                            self.append_metadata.lock().unwrap().insert(id.seq)
-                        }
+                (Some(id), None) if id.queue == LogQueue::Append => {
+                    if delete {
+                        self.append_metadata.lock().unwrap().remove(&id.seq)
                     } else {
-                        false
+                        self.append_metadata.lock().unwrap().insert(id.seq)
                     }
                 }
                 (None, Some(seq)) => {
@@ -2042,12 +2038,8 @@ mod tests {
             let parse_append = FileId::parse_file_name(path);
             let parse_stale = FileId::parse_stale_file_name(path);
             match (parse_append, parse_stale) {
-                (Some(id), None) => {
-                    if id.queue == LogQueue::Append {
-                        self.append_metadata.lock().unwrap().contains(&id.seq)
-                    } else {
-                        false
-                    }
+                (Some(id), None) if id.queue == LogQueue::Append => {
+                    self.append_metadata.lock().unwrap().contains(&id.seq)
                 }
                 (None, Some(seq)) => self.stale_metadata.lock().unwrap().contains(&seq),
                 _ => false,

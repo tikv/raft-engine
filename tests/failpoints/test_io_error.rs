@@ -25,7 +25,6 @@ fn test_file_open_error() {
         let _f = FailGuard::new("log_fd::create::err", "return");
         assert!(Engine::open_with_file_system(cfg.clone(), fs.clone()).is_err());
     }
-    println!("Try open error");
     {
         let _f = FailGuard::new("log_fd::open::err", "return");
         let _ = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
@@ -455,13 +454,12 @@ fn test_start_with_stale_file_allocate_error() {
         ..Default::default()
     };
     let entry = vec![b'x'; 1024];
-    // Mock that the engine is failed because of the stale file
-    // with seqno[5] failed to be generated.
-    assert!(catch_unwind_silent(|| {
-        let _f = FailGuard::new("log_fd::write::zero", "4*off->return");
-        Engine::open(cfg.clone()).unwrap()
-    })
-    .is_err());
+    // Mock that the engine starts with the circumstance where
+    // the stale file with seqno[5] failed to be generated.
+    {
+        let _f = FailGuard::new("log_fd::write::zero", "4*off->1*return->off");
+        Engine::open(cfg.clone()).unwrap();
+    }
     // Extra stale files have been supplemented.
     let engine = Engine::open(cfg).unwrap();
     engine

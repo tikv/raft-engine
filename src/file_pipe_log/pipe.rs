@@ -62,7 +62,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 listener.post_new_log_file(FileId { queue, seq });
             }
         }
-        let active_file = files.fetch_active_file().unwrap();
+        let active_file = files.fetch_active_file()?;
 
         let pipe = Self {
             queue,

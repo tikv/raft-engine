@@ -19,8 +19,6 @@ use crate::Result;
 use super::format::{FileNameExt, LogFileFormat, StaleFileNameExt};
 use super::log_file::{build_file_writer, LogFileWriter};
 
-/// Max limitation for the count of prepared stale file.
-const LOG_STALE_FILE_COUNT_MAX: usize = 1024;
 /// Default buffer size for building stale file, unit: byte.
 const LOG_STALE_FILE_BUF_SIZE: usize = 16 * 1024 * 1024;
 /// Default path id for log files. 0 => Main dir
@@ -176,6 +174,17 @@ impl<F: FileSystem> FileList<F> {
     }
 }
 
+impl<F: FileSystem> Default for FileList<F> {
+    fn default() -> Self {
+        // By default, we just set first_seq with `1` to make
+        // `first_seq` + `fds.len()` remake the next file directly.
+        Self {
+            first_seq: 1,
+            fds: VecDeque::<FileWithFormat<F>>::default(),
+        }
+    }
+}
+
 /// A collection of files for managing all log files.
 ///
 /// Log files consist of two parts:
@@ -192,9 +201,6 @@ pub struct FileCollection<F: FileSystem> {
     active_files: CachePadded<RwLock<FileList<F>>>,
     /// File list to collect all stale files
     stale_files: CachePadded<RwLock<FileList<F>>>,
-    /// Flag remarking whether current collection is initialized
-    /// from an empty active file list.
-    _init_from_empy_active_files: bool,
 }
 
 impl<F: FileSystem> FileCollection<F> {
@@ -210,8 +216,12 @@ impl<F: FileSystem> FileCollection<F> {
             fail_point!("file_mgr::file_collection::force_set_alignment", |_| { 16 });
             0
         };
-        let empty_active_files = active_files.len() == 0;
-        let file_collection = Self {
+        let prefill_capacity = if capacity > 0 {
+            cfg.prefill_capacity(active_files.len())
+        } else {
+            0
+        };
+        let mut file_collection = Self {
             file_system,
             queue,
             paths: [Path::new(&cfg.dir).to_path_buf()],
@@ -220,9 +230,8 @@ impl<F: FileSystem> FileCollection<F> {
             capacity,
             active_files: CachePadded::new(RwLock::new(active_files)),
             stale_files: CachePadded::new(RwLock::new(stale_files)),
-            _init_from_empy_active_files: empty_active_files,
         };
-        file_collection.initialize(cfg.prefill_for_recycle)?;
+        file_collection.initialize(prefill_capacity)?;
         Ok(file_collection)
     }
 
@@ -263,19 +272,22 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention, this func can only be called when the caller firstly
     /// tried to access the latest active file.
-    pub fn fetch_active_file(&self) -> Option<ActiveFile<F>> {
+    pub fn fetch_active_file(&self) -> Result<ActiveFile<F>> {
         let active_files = self.active_files.read();
-        active_files.back().map(|file| ActiveFile {
-            seq: active_files.span().unwrap().1,
-            writer: build_file_writer(
-                self.file_system.as_ref(),
-                file.handle.clone(),
-                file.format,
-                self._init_from_empy_active_files,
-            )
-            .unwrap(),
-            format: file.format,
-        })
+        if let Some(file) = active_files.back() {
+            Ok(ActiveFile {
+                seq: active_files.span().unwrap().1,
+                writer: build_file_writer(
+                    self.file_system.as_ref(),
+                    file.handle.clone(),
+                    file.format,
+                    false, /* force_reset */
+                )?,
+                format: file.format,
+            })
+        } else {
+            Err(box_err!("Unknown file format"))
+        }
     }
 
     /// Rotate a new file handle and return it to the caller.
@@ -312,7 +324,7 @@ impl<F: FileSystem> FileCollection<F> {
             seq: active_state.first_seq + active_state.total_len as FileSeq,
             queue: self.queue,
         };
-        let new_file_hanle = if let Some((seq, fd)) = self.stale_files.write().pop_front() {
+        if let Some((seq, fd)) = self.stale_files.write().pop_front() {
             debug_assert_eq!(fd.path_id, 0);
             let stale_file_id = FileId {
                 seq,
@@ -325,28 +337,37 @@ impl<F: FileSystem> FileCollection<F> {
                 if let Err(e) = self.file_system.delete(&src_path) {
                     error!("error while trying to delete one stale file, err: {}", e);
                 }
-                FileWithFormat {
-                    handle: Arc::new(self.file_system.create(&dst_path)?),
-                    path_id: fd.path_id,
-                    format: self.file_format,
-                }
+                return Ok((
+                    new_file_id.seq,
+                    FileWithFormat {
+                        handle: Arc::new(self.file_system.create(&dst_path)?),
+                        path_id: fd.path_id,
+                        format: self.file_format,
+                    },
+                ));
             } else {
-                FileWithFormat {
-                    handle: Arc::new(self.file_system.open(&dst_path)?),
-                    path_id: fd.path_id,
-                    format: self.file_format,
-                }
+                return Ok((
+                    new_file_id.seq,
+                    FileWithFormat {
+                        handle: Arc::new(self.file_system.open(&dst_path)?),
+                        path_id: fd.path_id,
+                        format: self.file_format,
+                    },
+                ));
             }
-        } else {
-            let path_id = FileCollection::<F>::get_valid_path(&self.paths, self.target_file_size);
-            let path = new_file_id.build_file_path(&self.paths[path_id]);
+        }
+        // No valid stale file for recycling, we should check all dirs and get one for
+        // generating the new file handler.
+        let path_id = FileCollection::<F>::get_valid_path(&self.paths, self.target_file_size);
+        let path = new_file_id.build_file_path(&self.paths[path_id]);
+        Ok((
+            new_file_id.seq,
             FileWithFormat {
                 handle: Arc::new(self.file_system.create(&path)?),
                 path_id,
                 format: self.file_format,
-            }
-        };
-        Ok((new_file_id.seq, new_file_hanle))
+            },
+        ))
     }
 
     /// Purges files to the specific file_seq.
@@ -365,8 +386,8 @@ impl<F: FileSystem> FileCollection<F> {
             let remains_capacity = self.capacity.saturating_sub(active_state.total_len);
             // We get the FileState of `self.stale_files` in advance to reduce the lock
             // racing for later processing.
-            let mut stale_state = self.stale_files.write().state();
-            let mut files_to_stale = FileList::<F>::new(0, VecDeque::default());
+            let mut stale_state = self.stale_files.read().state();
+            let mut new_stale_files = FileList::<F>::default();
             // The newly purged files from `self.active_files` should be RENAME
             // to stale files with `.raftlog.stale` suffix, to reduce the unnecessary
             // recovery timecost when RESTART.
@@ -384,7 +405,7 @@ impl<F: FileSystem> FileCollection<F> {
                     };
                     let stale_path = stale_file_id.build_stale_file_path(&self.paths[file.path_id]);
                     self.file_system.reuse(&path, &stale_path)?;
-                    files_to_stale.push_back(
+                    new_stale_files.push_back(
                         stale_file_id.seq,
                         FileWithFormat {
                             handle: Arc::new(self.file_system.open(&stale_path)?),
@@ -414,8 +435,10 @@ impl<F: FileSystem> FileCollection<F> {
                     let path = file_id.build_stale_file_path(&self.paths[file.path_id]);
                     self.file_system.delete(&path)?;
                 }
+                assert_eq!(new_stale_files.len(), 0);
+            } else {
+                self.stale_files.write().append(new_stale_files);
             }
-            self.stale_files.write().append(files_to_stale);
         }
         Ok(logical_purged_count)
     }
@@ -425,20 +448,8 @@ impl<F: FileSystem> FileCollection<F> {
     ///
     /// Attention, this function only makes sense when
     /// `Config.enable-log-recycle` is true.
-    fn initialize(&self, prefill_for_recycle: bool) -> Result<()> {
-        let stale_capacity = if prefill_for_recycle {
-            let capacity = self.capacity.saturating_sub(self.active_files.read().len());
-            if capacity > LOG_STALE_FILE_COUNT_MAX {
-                warn!(
-                    "prefill too many files for log recycling, given count: {} is limited to {}",
-                    capacity, LOG_STALE_FILE_COUNT_MAX
-                );
-            }
-            std::cmp::min(capacity, LOG_STALE_FILE_COUNT_MAX)
-        } else {
-            0
-        };
-        // If `stale_capacity` > 0, we should prepare stale files for later
+    fn initialize(&mut self, prefill_capacity: usize) -> Result<()> {
+        // If `prefill_capacity` > 0, we should prepare stale files for later
         // log recycling in advance.
         {
             let now = Instant::now();
@@ -450,7 +461,7 @@ impl<F: FileSystem> FileCollection<F> {
                     let state = stale_files.state();
                     state.first_seq + state.total_len as FileSeq
                 },
-                stale_capacity.saturating_sub(stale_files.len()),
+                prefill_capacity.saturating_sub(stale_files.len()),
             );
             for seq in prepare_first_seq..prepare_first_seq + prepare_stale_files_count as FileSeq {
                 let file_id = FileId {
@@ -465,7 +476,7 @@ impl<F: FileSystem> FileCollection<F> {
             // changing the recycle capacity, we should remove redundant
             // stale files in advance.
             let mut redundant_count = 0;
-            while stale_files.len() > stale_capacity {
+            while stale_files.len() > prefill_capacity {
                 let (seq, file) = stale_files.pop_front().unwrap();
                 let file_id = FileId {
                     seq,
@@ -489,15 +500,19 @@ impl<F: FileSystem> FileCollection<F> {
         // active file list.
         if self.active_files.write().back().is_none() {
             let (file_seq, file) = self.rotate_imp()?;
+            // Reset the header and format of the first active file.
+            build_file_writer(
+                self.file_system.as_ref(),
+                file.handle.clone(),
+                file.format,
+                true, /* force_reset */
+            )?;
             self.active_files.write().push_back(file_seq, file);
         }
         Ok(())
     }
 
     /// Generates a Fake log used for recycling.
-    ///
-    /// Attention, this function is only called when
-    /// `Config::prefill-for-recycle` is true.
     fn build_stale_file(
         &self,
         file_id: FileId,
@@ -672,7 +687,7 @@ mod tests {
         assert_eq!(file_collection.len(), 1);
         assert_eq!(file_collection.active_file_span().unwrap(), (1, 1));
         assert!(file_collection.stale_file_span().is_none());
-        assert!(file_collection.fetch_active_file().is_some());
+        assert!(file_collection.fetch_active_file().is_ok());
         // null | 1 2 3
         for seq in 2..=3 {
             file_collection.push_back(

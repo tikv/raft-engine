@@ -2,7 +2,6 @@
 
 //! Helper types to recover in-memory states from log files.
 
-use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::marker::PhantomData;
 use std::path::Path;
@@ -446,17 +445,15 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         .iter()
                         .map(|f| FileWithFormat {
                             handle: f.handle.clone(),
+                            // No need to parse the format and header of reserved files, just
+                            // give a recycled Version::V2 format.
                             format: LogFileFormat::new(Version::V2, 0),
                             path_id: f.path_id,
                         })
                         .collect(),
                 ),
             ),
-            LogQueue::Rewrite => (
-                0,
-                &self.rewrite_files,
-                FileList::new(0, VecDeque::<FileWithFormat<F>>::default()),
-            ),
+            LogQueue::Rewrite => (0, &self.rewrite_files, FileList::<F>::default()),
         };
         let active_files = FileList::new(
             active_files.first().map(|f| f.seq).unwrap_or(0),
