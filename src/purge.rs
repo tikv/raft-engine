@@ -2,9 +2,12 @@
 
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use fail::fail_point;
 use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
@@ -23,8 +26,15 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
-const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
+fn max_rewrite_batch_bytes() -> usize {
+    fail_point!("max_rewrite_batch_bytes", |s| s
+        .unwrap()
+        .parse::<usize>()
+        .unwrap());
+    128 * 1024
+}
 const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
+const REWRITE_MARKER: &str = "REWRITE_MARKER";
 
 pub struct PurgeManager<P>
 where
@@ -41,6 +51,68 @@ where
     // This table records Raft Groups that should be force compacted before. Those that are not
     // compacted in time (after `MAX_EPOCH_BEFORE_FORCE_REWRITE` epochs) will be force rewritten.
     force_rewrite_candidates: Arc<Mutex<HashMap<u64, u32>>>,
+
+    // The rewrite of the entire rewrite queue of a Raft Group should be atomic.
+    // We use a special marker to indicate such a rewrite is on-going. Before recovery, rewrite
+    // files that are newer than this marker (have bigger seqno) will be removed.
+    rewrite_marker_path: PathBuf,
+}
+
+fn write_marker(p: &Path, seq: u64) -> Result<()> {
+    use std::io::Write;
+    let mut f = fs::File::create(p)?;
+    f.write_all(seq.to_string().as_bytes())?;
+    f.sync_all()?;
+    f.write_all(b"//")?;
+    f.sync_all()?;
+    if let Some(dir) = p.parent() {
+        fs::File::open(dir).and_then(|d| d.sync_all())?;
+    }
+    Ok(())
+}
+
+fn read_marker(p: &Path) -> Result<Option<u64>> {
+    match fs::read_to_string(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        Ok(s) if s.ends_with("//") => Ok(Some(s[..s.len() - 2].parse::<u64>().unwrap())),
+        _ => Ok(None),
+    }
+}
+
+fn remove_marker(p: &Path) -> Result<()> {
+    fs::remove_file(p)?;
+    if let Some(dir) = p.parent() {
+        fs::File::open(dir).and_then(|d| d.sync_all())?;
+    }
+    Ok(())
+}
+
+pub fn before_recover(cfg: &Config, fs: &impl crate::env::FileSystem) -> Result<()> {
+    use crate::file_pipe_log::FileNameExt;
+    let mut rewrite_marker_path = PathBuf::from(&cfg.dir);
+    rewrite_marker_path.push(REWRITE_MARKER);
+    if let Some(seq) = read_marker(&rewrite_marker_path)? {
+        let mut f = FileId::new(LogQueue::Rewrite, seq + 1);
+        let mut paths = Vec::new();
+        loop {
+            let path = f.build_file_path(&cfg.dir);
+            if path.exists() {
+                paths.push(path);
+            } else {
+                break;
+            }
+            f.seq += 1;
+        }
+        // Avoid leaving holes.
+        for f in paths.iter().rev() {
+            info!(
+                "cleaning up partial rewrite-rewrite output: {}",
+                f.display()
+            );
+            fs.delete(f)?;
+        }
+    }
+    Ok(())
 }
 
 impl<P> PurgeManager<P>
@@ -54,6 +126,8 @@ where
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
     ) -> PurgeManager<P> {
+        let mut rewrite_marker_path = PathBuf::from(&cfg.dir);
+        rewrite_marker_path.push(REWRITE_MARKER);
         PurgeManager {
             cfg,
             memtables,
@@ -61,6 +135,7 @@ where
             global_stats,
             listeners,
             force_rewrite_candidates: Arc::new(Mutex::new(HashMap::default())),
+            rewrite_marker_path,
         }
     }
 
@@ -70,6 +145,10 @@ where
         if guard.is_none() {
             warn!("Unable to purge expired files: locked");
             return Ok(vec![]);
+        }
+        if self.rewrite_marker_path.exists() {
+            // Otherwise all writes will be erased next reboot.
+            remove_marker(&self.rewrite_marker_path)?;
         }
         let mut rewrite_candidate_regions = guard.unwrap();
 
@@ -121,7 +200,6 @@ where
 
     /// Rewrite append files with seqno no larger than `watermark`. When it's
     /// None, rewrite the entire queue. Returns the number of purged files.
-    #[cfg(test)]
     pub fn must_rewrite_append_queue(
         &self,
         watermark: Option<FileSeq>,
@@ -149,7 +227,6 @@ where
         .unwrap();
     }
 
-    #[cfg(test)]
     pub fn must_rewrite_rewrite_queue(&self) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
@@ -252,6 +329,10 @@ where
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
+        write_marker(
+            &self.rewrite_marker_path,
+            self.pipe_log.file_span(LogQueue::Rewrite).1,
+        )?;
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let mut force_compact_regions = vec![];
@@ -265,6 +346,7 @@ where
 
         self.rewrite_memtables(memtables, 0 /* expect_rewrites_per_memtable */, None)?;
         self.global_stats.reset_rewrite_counters();
+        remove_marker(&self.rewrite_marker_path)?;
         Ok(force_compact_regions)
     }
 
@@ -330,7 +412,7 @@ where
                     read_entry_bytes_from_file(self.pipe_log.as_ref(), &entry_indexes[cursor])?;
                 total_size += entry.len();
                 entries.push(entry);
-                if total_size > MAX_REWRITE_BATCH_BYTES {
+                if total_size > max_rewrite_batch_bytes() {
                     let mut take_entries = Vec::with_capacity(expect_rewrites_per_memtable);
                     std::mem::swap(&mut take_entries, &mut entries);
                     let mut take_entry_indexes = entry_indexes.split_off(cursor + 1);
@@ -390,6 +472,7 @@ where
     }
 }
 
+#[derive(Default)]
 pub struct PurgeHook {
     // Append queue log files that are not yet fully applied to MemTable must not be
     // purged even when not referenced by any MemTable.
@@ -397,14 +480,6 @@ pub struct PurgeHook {
     // log files in append queue. No need to track rewrite queue because it is only
     // written by purge thread.
     active_log_files: RwLock<VecDeque<(FileSeq, AtomicUsize)>>,
-}
-
-impl PurgeHook {
-    pub fn new() -> Self {
-        PurgeHook {
-            active_log_files: Default::default(),
-        }
-    }
 }
 
 impl EventListener for PurgeHook {

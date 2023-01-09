@@ -335,8 +335,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 if recovery_mode == RecoveryMode::TolerateTailCorruption
                                     && is_last_file =>
                             {
-                                warn!(
-                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
+                                info!(
+                                    "Log file is truncated at tail: {:?}:{}, {}",
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;

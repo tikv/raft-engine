@@ -78,6 +78,7 @@ pub mod internals {
     pub use crate::file_pipe_log::*;
     pub use crate::memtable::*;
     pub use crate::pipe_log::*;
+    pub use crate::purge::*;
     #[cfg(feature = "swap")]
     pub use crate::swappy_allocator::*;
     pub use crate::write_barrier::*;

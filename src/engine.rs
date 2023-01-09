@@ -78,9 +78,10 @@ where
         mut listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<F, FilePipeLog<F>>> {
         cfg.sanitize()?;
-        listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
+        listeners.push(Arc::new(PurgeHook::default()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
+        crate::purge::before_recover(&cfg, file_system.as_ref())?;
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_system, listeners.clone());
         builder.scan()?;
         let factory = MemTableRecoverContextFactory::new(&cfg);
@@ -371,6 +372,11 @@ where
     pub fn path(&self) -> &str {
         self.cfg.dir.as_str()
     }
+
+    #[cfg(feature = "internals")]
+    pub fn purge_manager(&self) -> &PurgeManager<P> {
+        &self.purge_manager
+    }
 }
 
 impl<F, P> Drop for Engine<F, P>
@@ -658,13 +664,13 @@ mod tests {
                 &mut entries,
             )
             .unwrap();
-            assert_eq!(entries.len(), (end - start) as usize);
             assert_eq!(entries.first().unwrap().index, start);
+            assert_eq!(entries.last().unwrap().index + 1, end);
+            assert_eq!(entries.len(), (end - start) as usize);
             assert_eq!(
                 entries.last().unwrap().index,
                 self.decode_last_index(rid).unwrap()
             );
-            assert_eq!(entries.last().unwrap().index + 1, end);
             for e in entries.iter() {
                 let entry_index = self
                     .memtables

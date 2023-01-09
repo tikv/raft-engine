@@ -724,3 +724,46 @@ fn test_build_engine_with_datalayout_abnormal() {
         Engine::open(cfg).unwrap();
     }
 }
+
+// issue-228
+#[test]
+fn test_partial_rewrite_rewrite() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_partial_rewrite_rewrite")
+        .tempdir()
+        .unwrap();
+    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let data = vec![b'x'; 128];
+
+    for rid in 1..=3 {
+        append(&engine, rid, 1, 5, Some(&data));
+        append(&engine, rid, 5, 11, Some(&data));
+    }
+
+    let old_active_file = engine.file_span(LogQueue::Append).1;
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+
+    for rid in 1..=3 {
+        append(&engine, rid, 11, 16, Some(&data));
+    }
+
+    {
+        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        assert!(
+            catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
+        );
+    }
+
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    for rid in 1..=3 {
+        assert_eq!(engine.first_index(rid).unwrap(), 1);
+        assert_eq!(engine.last_index(rid).unwrap(), 15);
+    }
+}
