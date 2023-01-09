@@ -11,13 +11,14 @@ use fail::fail_point;
 use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
+use crate::codec::{self, NumberEncoder};
 use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogBatch;
 use crate::memtable::{MemTableHandle, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog, PipeSnapshot};
 use crate::{GlobalStats, Result};
 
 // Force compact region with oldest 20% logs.
@@ -26,6 +27,9 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
+const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
+const REWRITE_MARKER: &str = "REWRITE_MARKER";
+
 fn max_rewrite_batch_bytes() -> usize {
     fail_point!("max_rewrite_batch_bytes", |s| s
         .unwrap()
@@ -33,8 +37,6 @@ fn max_rewrite_batch_bytes() -> usize {
         .unwrap());
     128 * 1024
 }
-const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
-const REWRITE_MARKER: &str = "REWRITE_MARKER";
 
 pub struct PurgeManager<P>
 where
@@ -58,12 +60,15 @@ where
     rewrite_marker_path: PathBuf,
 }
 
-fn write_marker(p: &Path, seq: u64) -> Result<()> {
+fn write_marker(p: &Path, snapshot: PipeSnapshot) -> Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(p)?;
-    f.write_all(seq.to_string().as_bytes())?;
+    let mut buf = Vec::new();
+    buf.encode_u64(snapshot.file_id.seq)?;
+    buf.encode_u64(snapshot.offset as u64)?;
+    f.write_all(&buf)?;
     f.sync_all()?;
-    f.write_all(b"//")?;
+    f.write_all(&[0u8])?;
     f.sync_all()?;
     if let Some(dir) = p.parent() {
         fs::File::open(dir).and_then(|d| d.sync_all())?;
@@ -71,10 +76,18 @@ fn write_marker(p: &Path, seq: u64) -> Result<()> {
     Ok(())
 }
 
-fn read_marker(p: &Path) -> Result<Option<u64>> {
-    match fs::read_to_string(p) {
+fn read_marker(p: &Path) -> Result<Option<PipeSnapshot>> {
+    match fs::read(p) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-        Ok(s) if s.ends_with("//") => Ok(Some(s[..s.len() - 2].parse::<u64>().unwrap())),
+        Ok(v) if v.last() == Some(&0) => {
+            let buf = &mut &v[..v.len() - 1];
+            let seq = codec::decode_u64(buf).unwrap();
+            let offset = codec::decode_u64(buf).unwrap() as usize;
+            Ok(Some(PipeSnapshot {
+                file_id: FileId::new(LogQueue::Rewrite, seq),
+                offset,
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -87,12 +100,19 @@ fn remove_marker(p: &Path) -> Result<()> {
     Ok(())
 }
 
+/// There're two types of partial rewrite:
+/// 1. Partial rewrite-rewrite: See `test_partial_rewrite_rewrite`. This type
+/// will cause data loss if the partial rewrite entries are merged with some
+/// append entries. We handle this case by cleaning up before engine recovery.
+/// 2. Partial rewrite-append: See `test_partial_rewrite_append`. This type only
+/// causes data loss if there exists partial output from multiple rewrite
+/// operations. We handle this case by checking marker before doing rewrite.
 pub fn before_recover(cfg: &Config, fs: &impl crate::env::FileSystem) -> Result<()> {
     use crate::file_pipe_log::FileNameExt;
     let mut rewrite_marker_path = PathBuf::from(&cfg.dir);
     rewrite_marker_path.push(REWRITE_MARKER);
-    if let Some(seq) = read_marker(&rewrite_marker_path)? {
-        let mut f = FileId::new(LogQueue::Rewrite, seq + 1);
+    if let Some(snap) = read_marker(&rewrite_marker_path)? {
+        let mut f = FileId::new(LogQueue::Rewrite, snap.file_id.seq + 1);
         let mut paths = Vec::new();
         loop {
             let path = f.build_file_path(&cfg.dir);
@@ -148,12 +168,22 @@ where
         }
         if self.rewrite_marker_path.exists() {
             // Otherwise all writes will be erased next reboot.
+            if let Some(snap) = read_marker(&self.rewrite_marker_path)? {
+                self.pipe_log.restore(snap)?;
+            }
             remove_marker(&self.rewrite_marker_path)?;
         }
-        let mut rewrite_candidate_regions = guard.unwrap();
+        let mut marker_written = false;
 
+        let mut rewrite_candidate_regions = guard.unwrap();
         let mut should_compact = HashSet::new();
         if self.needs_rewrite_log_files(LogQueue::Rewrite) {
+            write_marker(
+                &self.rewrite_marker_path,
+                self.pipe_log.snapshot(LogQueue::Rewrite),
+            )?;
+            marker_written = true;
+
             should_compact.extend(self.rewrite_rewrite_queue()?);
             self.rescan_memtables_and_purge_stale_files(
                 LogQueue::Rewrite,
@@ -165,6 +195,13 @@ where
             if let (Some(rewrite_watermark), Some(compact_watermark)) =
                 self.append_queue_watermarks()
             {
+                if !marker_written {
+                    write_marker(
+                        &self.rewrite_marker_path,
+                        self.pipe_log.snapshot(LogQueue::Rewrite),
+                    )?;
+                    marker_written = true;
+                }
                 let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
                 let append_queue_barrier =
                     self.listeners.iter().fold(latest_append, |barrier, l| {
@@ -195,6 +232,11 @@ where
                 )?;
             }
         }
+
+        if marker_written {
+            remove_marker(&self.rewrite_marker_path)?;
+        }
+
         Ok(should_compact.into_iter().collect())
     }
 
@@ -206,6 +248,11 @@ where
         exit_after_step: Option<u64>,
     ) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
+        write_marker(
+            &self.rewrite_marker_path,
+            self.pipe_log.snapshot(LogQueue::Rewrite),
+        )
+        .unwrap();
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
@@ -225,16 +272,23 @@ where
             self.pipe_log.file_span(LogQueue::Append).1,
         )
         .unwrap();
+        remove_marker(&self.rewrite_marker_path).unwrap();
     }
 
     pub fn must_rewrite_rewrite_queue(&self) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
+        write_marker(
+            &self.rewrite_marker_path,
+            self.pipe_log.snapshot(LogQueue::Rewrite),
+        )
+        .unwrap();
         self.rewrite_rewrite_queue().unwrap();
         self.rescan_memtables_and_purge_stale_files(
             LogQueue::Rewrite,
             self.pipe_log.file_span(LogQueue::Rewrite).1,
         )
         .unwrap();
+        remove_marker(&self.rewrite_marker_path).unwrap();
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
@@ -329,10 +383,6 @@ where
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
-        write_marker(
-            &self.rewrite_marker_path,
-            self.pipe_log.file_span(LogQueue::Rewrite).1,
-        )?;
         self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let mut force_compact_regions = vec![];
@@ -346,7 +396,6 @@ where
 
         self.rewrite_memtables(memtables, 0 /* expect_rewrites_per_memtable */, None)?;
         self.global_stats.reset_rewrite_counters();
-        remove_marker(&self.rewrite_marker_path)?;
         Ok(force_compact_regions)
     }
 

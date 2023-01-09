@@ -15,7 +15,8 @@ use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
-    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
+    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, PipeSnapshot,
+    ReactiveBytes,
 };
 use crate::{perf_context, Error, Result};
 
@@ -391,7 +392,7 @@ impl<F: FileSystem> SinglePipe<F> {
         }
         let start_offset = writer.offset();
         if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
-            if let Err(te) = writer.truncate() {
+            if let Err(te) = writer.truncate(None) {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
                     seq, e, te
@@ -476,6 +477,46 @@ impl<F: FileSystem> SinglePipe<F> {
         self.flush_metrics(current.total_len);
         Ok((current.first_seq_in_use - prev.first_seq_in_use) as usize)
     }
+
+    fn snapshot(&self) -> (FileSeq, usize) {
+        let active_file = self.active_file.lock();
+        (active_file.seq, active_file.writer.offset())
+    }
+
+    fn restore(&self, file_seq: FileSeq, offset: usize) -> Result<()> {
+        let mut active_file = self.active_file.lock();
+        let mut files = self.files.write();
+        if file_seq < files.first_seq_in_use {
+            return Err(box_err!("Cannot truncate all files"));
+        }
+        while active_file.seq > file_seq {
+            assert!(files.fds.len() > 1);
+            let new_active_fd = &files.fds[files.fds.len() - 2];
+            let new_active_file = ActiveFile {
+                seq: active_file.seq - 1,
+                writer: build_file_writer(
+                    self.file_system.as_ref(),
+                    new_active_fd.handle.clone(),
+                    new_active_fd.format,
+                    false, /* force_reset */
+                )?,
+                format: new_active_fd.format,
+            };
+            let file_id = FileId {
+                queue: self.queue,
+                seq: active_file.seq,
+            };
+            self.file_system
+                .delete(file_id.build_file_path(&self.dir))?;
+            self.sync_dir()?;
+            files.fds.pop_back();
+            *active_file = new_active_file;
+
+            self.flush_metrics(files.fds.len());
+        }
+        active_file.writer.truncate(Some(offset))?;
+        Ok(())
+    }
 }
 
 /// A [`PipeLog`] implementation that stores data in filesystem.
@@ -547,6 +588,20 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
         self.pipes[file_id.queue as usize].purge_to(file_id.seq)
+    }
+
+    #[inline]
+    fn snapshot(&self, queue: LogQueue) -> PipeSnapshot {
+        let (seq, offset) = self.pipes[queue as usize].snapshot();
+        PipeSnapshot {
+            file_id: FileId::new(queue, seq),
+            offset,
+        }
+    }
+
+    #[inline]
+    fn restore(&self, snapshot: PipeSnapshot) -> Result<()> {
+        self.pipes[snapshot.file_id.queue as usize].restore(snapshot.file_id.seq, snapshot.offset)
     }
 }
 
