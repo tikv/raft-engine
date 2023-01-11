@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use fail::fail_point;
 use log::{info, warn};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 use crate::codec::{self, NumberEncoder};
 use crate::config::Config;
@@ -18,7 +18,7 @@ use crate::event_listener::EventListener;
 use crate::log_batch::LogBatch;
 use crate::memtable::{MemTableHandle, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog, PipeSnapshot};
+use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
 use crate::{GlobalStats, Result};
 
 // Force compact region with oldest 20% logs.
@@ -28,7 +28,6 @@ const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
-const REWRITE_MARKER: &str = "REWRITE_MARKER";
 
 fn max_rewrite_batch_bytes() -> usize {
     fail_point!("max_rewrite_batch_bytes", |s| s
@@ -48,74 +47,108 @@ where
     global_stats: Arc<GlobalStats>,
     listeners: Vec<Arc<dyn EventListener>>,
 
-    // Only one thread can run `purge_expired_files` at a time.
-    //
     // This table records Raft Groups that should be force compacted before. Those that are not
     // compacted in time (after `MAX_EPOCH_BEFORE_FORCE_REWRITE` epochs) will be force rewritten.
-    force_rewrite_candidates: Arc<Mutex<HashMap<u64, u32>>>,
+    force_rewrite_candidates: HashMap<u64, u32>,
 
     // The rewrite of the entire rewrite queue of a Raft Group should be atomic.
     // We use a special marker to indicate such a rewrite is on-going. Before recovery, rewrite
     // files that are newer than this marker (have bigger seqno) will be removed.
-    rewrite_marker_path: PathBuf,
+    progress_marker: Option<ProgressMarker>,
 }
 
-fn write_marker(p: &Path, snapshot: PipeSnapshot) -> Result<()> {
-    use std::io::Write;
-    let mut f = fs::File::create(p)?;
-    let mut buf = Vec::new();
-    buf.encode_u64(snapshot.file_id.seq)?;
-    buf.encode_u64(snapshot.offset as u64)?;
-    f.write_all(&buf)?;
-    f.sync_all()?;
-    f.write_all(&[0u8])?;
-    f.sync_all()?;
-    if let Some(dir) = p.parent() {
-        fs::File::open(dir).and_then(|d| d.sync_all())?;
+/// A persistent marker used to guarantee the atomicity of rewrite-rewrite
+/// operation.
+///
+/// Partial rewrite-rewrite will cause data loss if the partial rewrite entries
+/// are merged with some append entries. See `test_partial_rewrite_rewrite`.
+pub struct ProgressMarker {
+    data_dir: PathBuf,
+    // There're two possibilities when the oldest file seq increases after restart:
+    //
+    // 1. In the last rewrite operation, we successfully finished rewrite and purged some files
+    // (could be partially). This is based on the assumption that purge-append happens after
+    // rewrite.
+    // 2. User downgraded the engine and some files are purged by an old version without marker
+    // checks.
+    //
+    // Either way, the marker can be discarded.
+    //
+    // On the other hand, if the oldest file still exists after restart, it means there's enough
+    // append data and we can restore to the marker without data loss.
+    append_oldest_seq: u64,
+    rewrite_newest_seq: u64,
+}
+
+impl ProgressMarker {
+    const PROGRESS_MARKER: &'static str = "REWRITE_MARKER";
+
+    fn len() -> usize {
+        std::mem::size_of::<u64>() + 1
     }
-    Ok(())
-}
 
-fn read_marker(p: &Path) -> Result<Option<PipeSnapshot>> {
-    match fs::read(p) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-        Ok(v) if v.last() == Some(&0) => {
-            let buf = &mut &v[..v.len() - 1];
-            let seq = codec::decode_u64(buf).unwrap();
-            let offset = codec::decode_u64(buf).unwrap() as usize;
-            Ok(Some(PipeSnapshot {
-                file_id: FileId::new(LogQueue::Rewrite, seq),
-                offset,
-            }))
+    fn write(data_dir: &Path, pipe: &impl PipeLog) -> Result<Self> {
+        use std::io::Write;
+        let mut f = fs::File::create(&data_dir.join(Self::PROGRESS_MARKER))?;
+        let mut buf = Vec::new();
+        let append_oldest_seq = pipe.file_span(LogQueue::Append).0;
+        let rewrite_newest_seq = pipe.file_span(LogQueue::Rewrite).1;
+        buf.encode_u64(append_oldest_seq)?;
+        buf.encode_u64(rewrite_newest_seq)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+        f.write_all(&[0u8])?;
+        f.sync_all()?;
+        fs::File::open(data_dir).and_then(|d| d.sync_all())?;
+        Ok(Self {
+            data_dir: data_dir.into(),
+            append_oldest_seq,
+            rewrite_newest_seq,
+        })
+    }
+
+    pub fn read(data_dir: &Path) -> Result<Option<Self>> {
+        use crate::file_pipe_log::FileNameExt;
+        match fs::read(&data_dir.join(Self::PROGRESS_MARKER)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            // In case we add other fields into this marker, we allow the length to be longer than
+            // expected.
+            Ok(v) if v.last() == Some(&0) && v.len() >= Self::len() => {
+                let buf = &mut &v[..v.len() - 1];
+                let append_oldest_seq = codec::decode_u64(buf).unwrap();
+                let rewrite_newest_seq = codec::decode_u64(buf).unwrap();
+                let marker = ProgressMarker {
+                    data_dir: data_dir.into(),
+                    append_oldest_seq,
+                    rewrite_newest_seq,
+                };
+                let expected_append = FileId::new(LogQueue::Append, marker.append_oldest_seq);
+                if expected_append.build_file_path(data_dir).exists() {
+                    return Ok(Some(marker));
+                }
+            }
+            _ => {}
         }
-        _ => Ok(None),
+        let _ = fs::remove_file(&data_dir.join(Self::PROGRESS_MARKER));
+        Ok(None)
     }
-}
 
-fn remove_marker(p: &Path) -> Result<()> {
-    fs::remove_file(p)?;
-    if let Some(dir) = p.parent() {
-        fs::File::open(dir).and_then(|d| d.sync_all())?;
+    fn defuse(&self) -> Result<()> {
+        if let Err(e) = fs::remove_file(&self.data_dir.join(Self::PROGRESS_MARKER)) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
+        }
+        fs::File::open(&self.data_dir).and_then(|d| d.sync_all())?;
+        Ok(())
     }
-    Ok(())
-}
 
-/// There're two types of partial rewrite:
-/// 1. Partial rewrite-rewrite: See `test_partial_rewrite_rewrite`. This type
-/// will cause data loss if the partial rewrite entries are merged with some
-/// append entries. We handle this case by cleaning up before engine recovery.
-/// 2. Partial rewrite-append: See `test_partial_rewrite_append`. This type only
-/// causes data loss if there exists partial output from multiple rewrite
-/// operations. We handle this case by checking marker before doing rewrite.
-pub fn before_recover(cfg: &Config, fs: &impl crate::env::FileSystem) -> Result<()> {
-    use crate::file_pipe_log::FileNameExt;
-    let mut rewrite_marker_path = PathBuf::from(&cfg.dir);
-    rewrite_marker_path.push(REWRITE_MARKER);
-    if let Some(snap) = read_marker(&rewrite_marker_path)? {
-        let mut f = FileId::new(LogQueue::Rewrite, snap.file_id.seq + 1);
+    pub fn restore_offline(&self, fs: &impl crate::env::FileSystem) -> Result<()> {
+        use crate::file_pipe_log::FileNameExt;
+        let mut f = FileId::new(LogQueue::Rewrite, self.rewrite_newest_seq + 1);
         let mut paths = Vec::new();
         loop {
-            let path = f.build_file_path(&cfg.dir);
+            let path = f.build_file_path(&self.data_dir);
             if path.exists() {
                 paths.push(path);
             } else {
@@ -125,14 +158,16 @@ pub fn before_recover(cfg: &Config, fs: &impl crate::env::FileSystem) -> Result<
         }
         // Avoid leaving holes.
         for f in paths.iter().rev() {
-            info!(
-                "cleaning up partial rewrite-rewrite output: {}",
-                f.display()
-            );
+            info!("cleaning up partial rewrite output: {}", f.display());
             fs.delete(f)?;
+            fs::File::open(&self.data_dir).and_then(|d| d.sync_all())?;
         }
+        Ok(())
     }
-    Ok(())
+
+    fn restore_online(&self, pipe: &impl PipeLog) -> Result<()> {
+        pipe.truncate(FileId::new(LogQueue::Rewrite, self.rewrite_newest_seq))
+    }
 }
 
 impl<P> PurgeManager<P>
@@ -145,63 +180,65 @@ where
         pipe_log: Arc<P>,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
+        progress_marker: Option<ProgressMarker>,
     ) -> PurgeManager<P> {
-        let mut rewrite_marker_path = PathBuf::from(&cfg.dir);
-        rewrite_marker_path.push(REWRITE_MARKER);
         PurgeManager {
             cfg,
             memtables,
             pipe_log,
             global_stats,
             listeners,
-            force_rewrite_candidates: Arc::new(Mutex::new(HashMap::default())),
-            rewrite_marker_path,
+            force_rewrite_candidates: HashMap::default(),
+            progress_marker,
         }
     }
 
-    pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        let _t = StopWatch::new(&*ENGINE_PURGE_DURATION_HISTOGRAM);
-        let guard = self.force_rewrite_candidates.try_lock();
-        if guard.is_none() {
-            warn!("Unable to purge expired files: locked");
-            return Ok(vec![]);
+    #[inline]
+    fn install_progress_marker(&mut self) -> Result<()> {
+        if self.progress_marker.is_none() {
+            self.progress_marker = Some(ProgressMarker::write(
+                Path::new(&self.cfg.dir),
+                self.pipe_log.as_ref(),
+            )?);
         }
-        if self.rewrite_marker_path.exists() {
-            // Otherwise all writes will be erased next reboot.
-            if let Some(snap) = read_marker(&self.rewrite_marker_path)? {
-                self.pipe_log.restore(snap)?;
-            }
-            remove_marker(&self.rewrite_marker_path)?;
-        }
-        let mut marker_written = false;
+        Ok(())
+    }
 
-        let mut rewrite_candidate_regions = guard.unwrap();
+    #[inline]
+    fn defuse_progress_marker(&mut self) -> Result<()> {
+        if let Some(marker) = &self.progress_marker {
+            marker.defuse()?;
+            self.progress_marker.take();
+        }
+        Ok(())
+    }
+
+    pub fn purge_expired_files(&mut self) -> Result<Vec<u64>> {
+        let _t = StopWatch::new(&*ENGINE_PURGE_DURATION_HISTOGRAM);
+
+        // Otherwise all writes will be erased next reboot.
+        if let Some(marker) = &self.progress_marker {
+            marker.restore_online(self.pipe_log.as_ref())?;
+            self.defuse_progress_marker()?;
+        }
+
         let mut should_compact = HashSet::new();
         if self.needs_rewrite_log_files(LogQueue::Rewrite) {
-            write_marker(
-                &self.rewrite_marker_path,
-                self.pipe_log.snapshot(LogQueue::Rewrite),
-            )?;
-            marker_written = true;
+            self.install_progress_marker()?;
 
             should_compact.extend(self.rewrite_rewrite_queue()?);
             self.rescan_memtables_and_purge_stale_files(
                 LogQueue::Rewrite,
                 self.pipe_log.file_span(LogQueue::Rewrite).1,
             )?;
+
+            self.defuse_progress_marker()?;
         }
 
         if self.needs_rewrite_log_files(LogQueue::Append) {
             if let (Some(rewrite_watermark), Some(compact_watermark)) =
                 self.append_queue_watermarks()
             {
-                if !marker_written {
-                    write_marker(
-                        &self.rewrite_marker_path,
-                        self.pipe_log.snapshot(LogQueue::Rewrite),
-                    )?;
-                    marker_written = true;
-                }
                 let (first_append, latest_append) = self.pipe_log.file_span(LogQueue::Append);
                 let append_queue_barrier =
                     self.listeners.iter().fold(latest_append, |barrier, l| {
@@ -217,11 +254,9 @@ where
                 //    entries from recreated region might be lost after
                 //    restart.
                 self.rewrite_append_queue_tombstones()?;
-                should_compact.extend(self.rewrite_or_compact_append_queue(
-                    rewrite_watermark,
-                    compact_watermark,
-                    &mut rewrite_candidate_regions,
-                )?);
+                should_compact.extend(
+                    self.rewrite_or_compact_append_queue(rewrite_watermark, compact_watermark)?,
+                );
 
                 if append_queue_barrier == first_append && first_append < latest_append {
                     warn!("Unable to purge expired files: blocked by barrier");
@@ -233,26 +268,16 @@ where
             }
         }
 
-        if marker_written {
-            remove_marker(&self.rewrite_marker_path)?;
-        }
-
         Ok(should_compact.into_iter().collect())
     }
 
     /// Rewrite append files with seqno no larger than `watermark`. When it's
     /// None, rewrite the entire queue. Returns the number of purged files.
     pub fn must_rewrite_append_queue(
-        &self,
+        &mut self,
         watermark: Option<FileSeq>,
         exit_after_step: Option<u64>,
     ) {
-        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
-        write_marker(
-            &self.rewrite_marker_path,
-            self.pipe_log.snapshot(LogQueue::Rewrite),
-        )
-        .unwrap();
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
@@ -272,23 +297,21 @@ where
             self.pipe_log.file_span(LogQueue::Append).1,
         )
         .unwrap();
-        remove_marker(&self.rewrite_marker_path).unwrap();
     }
 
-    pub fn must_rewrite_rewrite_queue(&self) {
-        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
-        write_marker(
-            &self.rewrite_marker_path,
-            self.pipe_log.snapshot(LogQueue::Rewrite),
-        )
-        .unwrap();
+    pub fn must_rewrite_rewrite_queue(&mut self) {
+        if let Some(marker) = &self.progress_marker {
+            marker.restore_online(self.pipe_log.as_ref()).unwrap();
+            self.defuse_progress_marker().unwrap();
+        }
+        self.install_progress_marker().unwrap();
         self.rewrite_rewrite_queue().unwrap();
         self.rescan_memtables_and_purge_stale_files(
             LogQueue::Rewrite,
             self.pipe_log.file_span(LogQueue::Rewrite).1,
         )
         .unwrap();
-        remove_marker(&self.rewrite_marker_path).unwrap();
+        self.defuse_progress_marker().unwrap();
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
@@ -331,16 +354,15 @@ where
     }
 
     fn rewrite_or_compact_append_queue(
-        &self,
+        &mut self,
         rewrite_watermark: FileSeq,
         compact_watermark: FileSeq,
-        rewrite_candidates: &mut HashMap<u64, u32>,
     ) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_APPEND_DURATION_HISTOGRAM);
         debug_assert!(compact_watermark <= rewrite_watermark);
         let mut should_compact = Vec::with_capacity(16);
 
-        let mut new_candidates = HashMap::with_capacity(rewrite_candidates.len());
+        let mut new_candidates = HashMap::with_capacity(self.force_rewrite_candidates.len());
         let memtables = self.memtables.collect(|t| {
             let min_append_seq = t.min_file_seq(LogQueue::Append).unwrap_or(u64::MAX);
             let old = min_append_seq < compact_watermark || t.rewrite_count() > 0;
@@ -354,7 +376,10 @@ where
                 MAX_REWRITE_ENTRIES_PER_REGION,
             );
             // counter is the times that target region triggers force compact.
-            let compact_counter = rewrite_candidates.get(&t.region_id()).unwrap_or(&0);
+            let compact_counter = self
+                .force_rewrite_candidates
+                .get(&t.region_id())
+                .unwrap_or(&0);
             if old && full_heavy {
                 if *compact_counter < MAX_COUNT_BEFORE_FORCE_REWRITE {
                     // repeatedly ask user to compact these heavy regions.
@@ -375,7 +400,7 @@ where
             MAX_REWRITE_ENTRIES_PER_REGION,
             Some(rewrite_watermark),
         )?;
-        *rewrite_candidates = new_candidates;
+        self.force_rewrite_candidates = new_candidates;
 
         Ok(should_compact)
     }

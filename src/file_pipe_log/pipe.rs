@@ -15,8 +15,7 @@ use crate::env::FileSystem;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
-    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, PipeSnapshot,
-    ReactiveBytes,
+    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
 };
 use crate::{perf_context, Error, Result};
 
@@ -478,12 +477,7 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok((current.first_seq_in_use - prev.first_seq_in_use) as usize)
     }
 
-    fn snapshot(&self) -> (FileSeq, usize) {
-        let active_file = self.active_file.lock();
-        (active_file.seq, active_file.writer.offset())
-    }
-
-    fn restore(&self, file_seq: FileSeq, offset: usize) -> Result<()> {
+    fn truncate(&self, file_seq: FileSeq) -> Result<()> {
         let mut active_file = self.active_file.lock();
         let mut files = self.files.write();
         if file_seq < files.first_seq_in_use {
@@ -510,11 +504,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 .delete(file_id.build_file_path(&self.dir))?;
             self.sync_dir()?;
             files.fds.pop_back();
-            *active_file = new_active_file;
-
             self.flush_metrics(files.fds.len());
+            *active_file = new_active_file;
         }
-        active_file.writer.truncate(Some(offset))?;
         Ok(())
     }
 }
@@ -591,17 +583,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn snapshot(&self, queue: LogQueue) -> PipeSnapshot {
-        let (seq, offset) = self.pipes[queue as usize].snapshot();
-        PipeSnapshot {
-            file_id: FileId::new(queue, seq),
-            offset,
-        }
-    }
-
-    #[inline]
-    fn restore(&self, snapshot: PipeSnapshot) -> Result<()> {
-        self.pipes[snapshot.file_id.queue as usize].restore(snapshot.file_id.seq, snapshot.offset)
+    fn truncate(&self, file_id: FileId) -> Result<()> {
+        self.pipes[file_id.queue as usize].truncate(file_id.seq)
     }
 }
 

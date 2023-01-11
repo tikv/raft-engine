@@ -160,11 +160,6 @@ where
     }
 }
 
-pub struct PipeSnapshot {
-    pub file_id: FileId,
-    pub offset: usize,
-}
-
 /// A `PipeLog` serves reads and writes over multiple queues of log files.
 ///
 /// # Safety
@@ -222,8 +217,7 @@ pub trait PipeLog: Sized {
     /// Returns the number of deleted files.
     fn purge_to(&self, file_id: FileId) -> Result<usize>;
 
-    fn snapshot(&self, queue: LogQueue) -> PipeSnapshot;
-    /// Deletes all log files not visible in `snapshot`. This call should be
+    /// Deletes all log files larger than `file_id`. This call should be
     /// retriable on I/O error.
-    fn restore(&self, snapshot: PipeSnapshot) -> Result<()>;
+    fn truncate(&self, file_id: FileId) -> Result<()>;
 }

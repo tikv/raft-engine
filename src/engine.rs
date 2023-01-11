@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,7 @@ where
     stats: Arc<GlobalStats>,
     memtables: MemTables,
     pipe_log: Arc<P>,
-    purge_manager: PurgeManager<P>,
+    purge_manager: Mutex<PurgeManager<P>>,
 
     write_barrier: WriteBarrier<LogBatch, Result<FileBlockHandle>>,
 
@@ -81,7 +81,10 @@ where
         listeners.push(Arc::new(PurgeHook::default()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
-        crate::purge::before_recover(&cfg, file_system.as_ref())?;
+        let purge_marker = crate::purge::ProgressMarker::read(Path::new(&cfg.dir))?;
+        if let Some(marker) = &purge_marker {
+            marker.restore_offline(file_system.as_ref())?;
+        }
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_system, listeners.clone());
         builder.scan()?;
         let factory = MemTableRecoverContextFactory::new(&cfg);
@@ -98,6 +101,7 @@ where
             pipe_log.clone(),
             stats.clone(),
             listeners.clone(),
+            purge_marker,
         );
 
         let (tx, rx) = mpsc::channel();
@@ -119,7 +123,7 @@ where
             stats,
             memtables,
             pipe_log,
-            purge_manager,
+            purge_manager: Mutex::new(purge_manager),
             write_barrier: Default::default(),
             tx: Mutex::new(tx),
             metrics_flusher: Some(metrics_flusher),
@@ -287,7 +291,11 @@ where
     /// Purges expired logs files and returns a set of Raft group ids that need
     /// to be compacted.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        self.purge_manager.purge_expired_files()
+        if let Ok(mut p) = self.purge_manager.try_lock() {
+            p.purge_expired_files()
+        } else {
+            Err(box_err!("Another purge is on-going"))
+        }
     }
 
     /// Returns count of fetched entries.
@@ -373,9 +381,9 @@ where
         self.cfg.dir.as_str()
     }
 
-    #[cfg(feature = "internals")]
-    pub fn purge_manager(&self) -> &PurgeManager<P> {
-        &self.purge_manager
+    #[cfg(any(feature = "internals", test))]
+    pub fn purge_manager(&self) -> MutexGuard<PurgeManager<P>> {
+        self.purge_manager.try_lock().unwrap()
     }
 }
 
@@ -794,7 +802,7 @@ mod tests {
                         }
                         if i + 1 == rewrite_step {
                             engine
-                                .purge_manager
+                                .purge_manager()
                                 .must_rewrite_append_queue(None, exit_purge);
                         }
                     }
@@ -808,7 +816,7 @@ mod tests {
                         assert!(engine.raft_groups().is_empty());
                     }
 
-                    engine.purge_manager.must_rewrite_append_queue(None, None);
+                    engine.purge_manager().must_rewrite_append_queue(None, None);
                     let engine = engine.reopen();
                     if let Some((start, end)) = *steps.last().unwrap() {
                         engine.scan_entries(rid, start, end, |_, _, d| {
@@ -955,7 +963,7 @@ mod tests {
         //     ^ rewrite
         engine.write(&mut batch_1.clone(), true).unwrap();
         assert!(engine.get_message::<RaftLocalState>(rid, &key).is_err());
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         engine.write(&mut delete_batch.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key), None);
@@ -967,7 +975,7 @@ mod tests {
         // Incomplete purge.
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         engine.write(&mut delete_batch.clone(), true).unwrap();
         let engine = engine.reopen();
@@ -979,7 +987,7 @@ mod tests {
         // let engine = engine.reopen();
         // engine.write(&mut batch_1.clone(), true).unwrap();
         // engine.write(&mut delete_batch.clone(), true).unwrap();
-        // engine.purge_manager.must_rewrite_append_queue(None, None);
+        // engine.purge_manager().must_rewrite_append_queue(None, None);
         // let engine = engine.reopen();
         // assert_eq!(engine.get(rid, &key), None);
 
@@ -987,7 +995,7 @@ mod tests {
         //     ^ rewrite
         let engine = engine.reopen();
         engine.write(&mut batch_1.clone(), true).unwrap();
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         engine.write(&mut delete_batch.clone(), true).unwrap();
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
@@ -995,7 +1003,7 @@ mod tests {
         // Incomplete purge.
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         engine.write(&mut delete_batch.clone(), true).unwrap();
         engine.write(&mut batch_2.clone(), true).unwrap();
@@ -1007,7 +1015,7 @@ mod tests {
         let engine = engine.reopen();
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.write(&mut delete_batch.clone(), true).unwrap();
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
@@ -1015,7 +1023,7 @@ mod tests {
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.write(&mut delete_batch.clone(), true).unwrap();
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         engine.write(&mut batch_2.clone(), true).unwrap();
         let engine = engine.reopen();
@@ -1027,7 +1035,7 @@ mod tests {
         engine.write(&mut batch_1.clone(), true).unwrap();
         engine.write(&mut delete_batch.clone(), true).unwrap();
         engine.write(&mut batch_2.clone(), true).unwrap();
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
         // Incomplete purge.
@@ -1036,7 +1044,7 @@ mod tests {
         engine.write(&mut delete_batch.clone(), true).unwrap();
         engine.write(&mut batch_2.clone(), true).unwrap();
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
         assert_eq!(engine.get(rid, &key).unwrap(), v2);
@@ -1064,7 +1072,7 @@ mod tests {
         engine.append(rid, 1, 10, Some(&data));
         // Files are not purged.
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         let mut compact_log = LogBatch::default();
         compact_log.add_command(rid, Command::Compact { index: 5 });
@@ -1086,13 +1094,13 @@ mod tests {
         engine.append(rid, 15, 25, Some(&data));
         // Files are not purged.
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         // Simulate loss of buffered write.
         let mut compact_log = LogBatch::default();
         compact_log.add_command(rid, Command::Compact { index: 20 });
         engine.memtables.apply_append_writes(compact_log.drain());
-        engine.purge_manager.must_rewrite_rewrite_queue();
+        engine.purge_manager().must_rewrite_rewrite_queue();
         let engine = engine.reopen();
         engine.scan_entries(rid, 10, 25, |_, q, d| {
             assert_eq!(q, LogQueue::Append);
@@ -1104,7 +1112,7 @@ mod tests {
         // rewrite: [20..25][10..25]
         // append: [10..25]
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
         engine.scan_entries(rid, 10, 25, |_, q, d| {
@@ -1119,10 +1127,10 @@ mod tests {
         let mut compact_log = LogBatch::default();
         compact_log.add_command(rid, Command::Compact { index: 10 });
         engine.write(&mut compact_log, true).unwrap();
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         engine.append(rid, 15, 25, Some(&data));
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         let mut compact_log = LogBatch::default();
         compact_log.add_command(rid, Command::Compact { index: 20 });
@@ -1137,14 +1145,14 @@ mod tests {
         // append:        [10..15]
         rid += 1;
         engine.append(rid, 1, 5, Some(&data));
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         engine.append(rid, 5, 15, Some(&data));
         let mut compact_log = LogBatch::default();
         compact_log.add_command(rid, Command::Compact { index: 10 });
         engine.write(&mut compact_log, true).unwrap();
         // Files are not purged.
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(None, Some(2));
         let engine = engine.reopen();
         engine.scan_entries(rid, 10, 15, |_, q, d| {
@@ -1178,7 +1186,7 @@ mod tests {
         let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
         assert!(!engine
-            .purge_manager
+            .purge_manager()
             .needs_rewrite_log_files(LogQueue::Append));
 
         // Append more logs to make total size greater than `purge_threshold`.
@@ -1190,7 +1198,7 @@ mod tests {
         assert_eq!(engine.compact_to(1, 101), 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
-            .purge_manager
+            .purge_manager()
             .needs_rewrite_log_files(LogQueue::Append));
 
         let old_min_file_seq = engine.file_span(LogQueue::Append).0;
@@ -1206,7 +1214,7 @@ mod tests {
         assert_eq!(engine.compact_to(1, 102), 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
         assert!(engine
-            .purge_manager
+            .purge_manager()
             .needs_rewrite_log_files(LogQueue::Append));
         let will_force_compact = engine.purge_expired_files().unwrap();
         // The region needs to be force compacted because the threshold is reached.
@@ -1296,7 +1304,7 @@ mod tests {
 
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine
-            .purge_manager
+            .purge_manager()
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.file_span(LogQueue::Append).0 > 1);
@@ -1331,7 +1339,7 @@ mod tests {
         }
 
         assert!(engine
-            .purge_manager
+            .purge_manager()
             .needs_rewrite_log_files(LogQueue::Append));
         assert!(engine.purge_expired_files().unwrap().is_empty());
     }
@@ -1477,10 +1485,10 @@ mod tests {
         }
 
         let old_active_file = engine.file_span(LogQueue::Append).1;
-        engine.purge_manager.must_rewrite_append_queue(None, None);
+        engine.purge_manager().must_rewrite_append_queue(None, None);
         assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
         let old_active_file = engine.file_span(LogQueue::Rewrite).1;
-        engine.purge_manager.must_rewrite_rewrite_queue();
+        engine.purge_manager().must_rewrite_rewrite_queue();
         assert!(engine.file_span(LogQueue::Rewrite).0 > old_active_file);
 
         let engine = engine.reopen();
@@ -2106,7 +2114,7 @@ mod tests {
         let (start, end) = engine.file_span(LogQueue::Append);
         // Purge all files.
         engine
-            .purge_manager
+            .purge_manager()
             .must_rewrite_append_queue(Some(end - 1), None);
         assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
