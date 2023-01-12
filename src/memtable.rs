@@ -444,12 +444,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         {
             let index = &mut self.entry_indexes[i + pos];
             if let Some(gate) = gate {
-                debug_assert_eq!(
-                    index.entries.unwrap().id.queue,
-                    LogQueue::Append,
-                    "{}",
-                    rindex.index
-                );
+                debug_assert_eq!(index.entries.unwrap().id.queue, LogQueue::Append);
                 if index.entries.unwrap().id.seq > gate {
                     // Some entries are overwritten by new appends.
                     rewrite_len = i;
@@ -469,7 +464,7 @@ impl<A: AllocatorTrait> MemTable<A> {
             // discarded.
             self.global_stats
                 .delete(LogQueue::Rewrite, rewrite_indexes.len());
-            // rewrite-rewrite could only partially renew rewrite entries.
+            // rewrite-rewrite could partially renew rewrite entries due to batch splitting.
             self.rewrite_count = std::cmp::max(self.rewrite_count, pos + rewrite_len);
         } else {
             self.global_stats.delete(LogQueue::Append, rewrite_len);
@@ -1153,7 +1148,6 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     }
 }
 
-#[derive(Debug)]
 struct PendingAtomicGroup {
     status: AtomicGroupStatus,
     items: Vec<LogItem>,
@@ -1202,6 +1196,16 @@ impl<A: AllocatorTrait> MemTableRecoverContext<A> {
         self.memtables
             .apply_append_writes(append.tombstone_items.into_iter());
         self.memtables.merge_append_table(append.memtables);
+    }
+
+    #[inline]
+    fn is_tombstone(item: &LogItem) -> bool {
+        match &item.content {
+            LogItemContent::Command(Command::Clean)
+            | LogItemContent::Command(Command::Compact { .. }) => true,
+            LogItemContent::Kv(KeyValue { op_type, .. }) if *op_type == OpType::Del => true,
+            _ => false,
+        }
     }
 
     fn accept_new_group(&mut self, queue: LogQueue, id: u64, mut new_group: PendingAtomicGroup) {
@@ -1258,48 +1262,50 @@ impl Default for MemTableRecoverContext<VacantAllocator> {
 
 impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
     fn replay(&mut self, mut item_batch: LogItemBatch, file_id: FileId) -> Result<()> {
-        let mut new_tombstones = Vec::new();
-        let mut is_group = None;
-        let items = item_batch
-            .drain()
-            .filter(|item| {
-                if let Some(g) = AtomicGroupStatus::parse(item) {
-                    if file_id.queue == LogQueue::Rewrite && is_group.is_none() {
-                        // Ignore append queue because it's unsafe.
-                        is_group = Some(g);
-                    } else {
-                        debug_assert!(false, "skipped an atomic group: {:?}", g);
-                    }
-                    return false;
-                }
-                match &item.content {
-                    LogItemContent::Command(Command::Clean)
-                    | LogItemContent::Command(Command::Compact { .. }) => {
+        if file_id.queue == LogQueue::Append {
+            let mut new_tombstones = Vec::new();
+            self.memtables
+                .replay_append_writes(item_batch.drain().filter(|item| {
+                    if Self::is_tombstone(item) {
                         new_tombstones.push(item.clone());
                     }
-                    LogItemContent::Kv(KeyValue { op_type, .. }) if *op_type == OpType::Del => {
-                        new_tombstones.push(item.clone());
-                    }
-                    _ => {}
-                }
-                true
-            })
-            .collect();
-        if let Some((id, status)) = is_group {
-            self.accept_new_group(
-                file_id.queue,
-                id,
-                PendingAtomicGroup {
-                    status,
-                    items,
-                    tombstone_items: new_tombstones,
-                },
-            );
-        } else {
+                    true
+                }));
             self.tombstone_items.append(&mut new_tombstones);
-            match file_id.queue {
-                LogQueue::Append => self.memtables.replay_append_writes(items.into_iter()),
-                LogQueue::Rewrite => self.memtables.replay_rewrite_writes(items.into_iter()),
+        } else {
+            let mut new_tombstones = Vec::new();
+            let mut is_group = None;
+            let items = item_batch
+                .drain()
+                .filter(|item| {
+                    if let Some(g) = AtomicGroupStatus::parse(item) {
+                        if file_id.queue == LogQueue::Rewrite && is_group.is_none() {
+                            // Ignore append queue because it's unsafe.
+                            is_group = Some(g);
+                        } else {
+                            debug_assert!(false, "skipped an atomic group: {:?}", g);
+                        }
+                        return false;
+                    }
+                    if Self::is_tombstone(item) {
+                        new_tombstones.push(item.clone());
+                    }
+                    true
+                })
+                .collect();
+            if let Some((id, status)) = is_group {
+                self.accept_new_group(
+                    file_id.queue,
+                    id,
+                    PendingAtomicGroup {
+                        status,
+                        items,
+                        tombstone_items: new_tombstones,
+                    },
+                );
+            } else {
+                self.tombstone_items.append(&mut new_tombstones);
+                self.memtables.replay_rewrite_writes(items.into_iter());
             }
         }
         Ok(())

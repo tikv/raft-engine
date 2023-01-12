@@ -31,10 +31,7 @@ fn max_rewrite_batch_bytes() -> usize {
         .unwrap()
         .parse::<usize>()
         .unwrap());
-    #[cfg(test)]
-    return 1;
-    #[cfg(not(test))]
-    return 128 * 1024;
+    128 * 1024
 }
 
 pub struct PurgeManager<P>
@@ -170,9 +167,11 @@ where
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
-        let (first_file, active_file) = self.pipe_log.file_span(queue);
-        if active_file == first_file {
-            return false;
+        if queue == LogQueue::Append {
+            let (first_file, active_file) = self.pipe_log.file_span(queue);
+            if active_file == first_file {
+                return false;
+            }
         }
 
         let total_size = self.pipe_log.total_size(queue);
@@ -320,7 +319,7 @@ where
             rewrite.is_none()
         };
         let mut log_batch = LogBatch::default();
-        // Size of entries from other regions.
+        // Size of entries from other regions in `log_batch`.
         let mut prev_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
@@ -336,59 +335,64 @@ where
                 }
                 m.region_id()
             };
+
+            // Split the entries into smaller chunks, so that we don't OOM, and the
+            // compression overhead is not too high.
+            let mut split_entry_indexes = vec![Vec::new()];
+            let mut current_size = 0;
+            for ei in entry_indexes {
+                if current_size + prev_size > max_rewrite_batch_bytes() && ei.entry_len > 0 {
+                    if use_atomic_group() && prev_size > 0 {
+                        self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                        prev_size = 0;
+                    } else {
+                        debug_assert!(!split_entry_indexes.last().unwrap().is_empty());
+                        split_entry_indexes.push(Vec::new());
+                        current_size = 0;
+                    }
+                }
+                current_size += ei.entry_len as usize;
+                split_entry_indexes.last_mut().unwrap().push(ei);
+            }
+
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }
 
-            let mut pending_entries_size = 0;
-            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut atomic_group = None;
-            while entries.len() < entry_indexes.len() {
-                let entry = read_entry_bytes_from_file(
-                    self.pipe_log.as_ref(),
-                    &entry_indexes[entries.len()],
-                )?;
-                pending_entries_size += entry.len();
-                entries.push(entry);
+            let mut atomic_group = if split_entry_indexes.len() > 1 && use_atomic_group() {
+                Some(AtomicGroupBuilder::default())
+            } else {
+                None
+            };
+            let total_tasks = split_entry_indexes.len();
+            for (i, entry_indexes) in split_entry_indexes.into_iter().enumerate() {
+                let entries = entry_indexes
+                    .iter()
+                    .map(|ei| read_entry_bytes_from_file(self.pipe_log.as_ref(), ei))
+                    .collect::<Result<Vec<_>>>()?;
+                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
 
-                if pending_entries_size + prev_size > max_rewrite_batch_bytes()
-                    && entries.len() < entry_indexes.len()
-                {
-                    if use_atomic_group() {
-                        if prev_size > 0 {
-                            self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                            prev_size = 0;
-                            continue;
-                        } else if atomic_group.is_none() {
-                            let mut g = AtomicGroupBuilder::default();
-                            g.begin(&mut log_batch);
-                            atomic_group = Some(g);
-                        } else if entries.len() < entry_indexes.len() {
-                            atomic_group.as_mut().unwrap().add(&mut log_batch);
-                        }
+                if let Some(g) = atomic_group.as_mut() {
+                    if i == 0 {
+                        g.begin(&mut log_batch);
+                    } else if i < total_tasks - 1 {
+                        g.add(&mut log_batch);
+                    } else {
+                        g.end(&mut log_batch);
                     }
-                    let mut take_entry_indexes = entry_indexes.split_off(entries.len());
-                    std::mem::swap(&mut take_entry_indexes, &mut entry_indexes);
-                    log_batch.add_raw_entries(
-                        region_id,
-                        take_entry_indexes,
-                        std::mem::take(&mut entries),
-                    )?;
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                    pending_entries_size = 0;
-                    prev_size = 0;
+                } else if i < total_tasks - 1
+                    || log_batch.approximate_size() > max_rewrite_batch_bytes()
+                {
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 }
             }
-            assert!(!(atomic_group.is_some() && entries.is_empty()));
-            if !entries.is_empty() {
-                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
-                if let Some(g) = atomic_group {
-                    g.end(&mut log_batch);
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                    assert_eq!(prev_size, 0);
-                } else {
-                    prev_size += pending_entries_size;
-                }
+            if atomic_group.is_some() {
+                assert!(log_batch.is_empty());
+                prev_size = 0;
+            } else {
+                prev_size = log_batch.approximate_size();
+                debug_assert!(prev_size <= max_rewrite_batch_bytes());
             }
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
