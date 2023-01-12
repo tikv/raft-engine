@@ -78,6 +78,7 @@ pub mod internals {
     pub use crate::file_pipe_log::*;
     pub use crate::memtable::*;
     pub use crate::pipe_log::*;
+    pub use crate::purge::*;
     #[cfg(feature = "swap")]
     pub use crate::swappy_allocator::*;
     pub use crate::write_barrier::*;
@@ -158,6 +159,19 @@ impl GlobalStats {
             .append
             .set(self.live_entries(pipe_log::LogQueue::Append) as i64);
     }
+}
+
+const INTERNAL_KEY_PREFIX: &[u8] = b"__";
+
+pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
+    assert!(!k.is_empty());
+    let mut v = INTERNAL_KEY_PREFIX.to_vec();
+    v.extend_from_slice(k);
+    v
+}
+
+pub fn is_internal_key(s: &[u8]) -> bool {
+    s.len() > INTERNAL_KEY_PREFIX.len() && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
 }
 
 #[cfg(test)]

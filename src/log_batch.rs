@@ -2,10 +2,14 @@
 
 use std::fmt::Debug;
 use std::io::BufRead;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
+use num_derive::FromPrimitive;
+use num_traits::FromPrimitive;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
@@ -557,6 +561,103 @@ enum BufState {
     Sealed(usize, usize),
     /// Buffer is undergoing writes. User operation will panic under this state.
     Incomplete,
+}
+
+lazy_static! {
+    static ref ATOMIC_GROUP_ID: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+}
+const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
+
+#[repr(u8)]
+#[derive(Clone, Copy, FromPrimitive, Debug, PartialEq)]
+pub(crate) enum AtomicGroupStatus {
+    Begin = 0,
+    Middle = 1,
+    End = 2,
+}
+
+impl AtomicGroupStatus {
+    /// Whether the log batch with `item` belongs to an atomic group.
+    pub fn parse(item: &LogItem) -> Option<(u64, AtomicGroupStatus)> {
+        if let LogItemContent::Kv(KeyValue {
+            op_type,
+            key,
+            value,
+            ..
+        }) = &item.content
+        {
+            if *op_type == OpType::Put
+                && *key == crate::make_internal_key(ATOMIC_GROUP_KEY)
+                && value.as_ref().unwrap().len() == std::mem::size_of::<u64>() + 1
+            {
+                let value = &mut value.as_ref().unwrap().as_slice();
+                let id = codec::decode_u64(value).unwrap();
+                if let Some(status) = AtomicGroupStatus::from_u8(value[0]) {
+                    return Some((id, status));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Group multiple log batches as an atomic operation. Two caveats:
+/// (1) The atomicity is provided at persistent level. This means, once an
+/// atomic group fails, the in-memory value will be inconsistent with what can
+/// be recovered from on-disk data files.
+/// (2) The recovery replay order will be different from original write order.
+/// Log batches in a completed atomic group will be replayed as if they were
+/// written together at an arbitary time point within the group.
+///
+/// In practice, we only use atomic group for rewrite operation. (In fact,
+/// atomic group markers in append queue are simply ignored.) It doesn't change
+/// the value of entries, just locations. So first issue doesn't affect
+/// correctness. There could only be one worker doing the rewrite. So second
+/// issue doesn't change observed write order because there's no mixed write.
+pub(crate) struct AtomicGroupBuilder {
+    id: u64,
+    begin: bool,
+}
+
+impl Default for AtomicGroupBuilder {
+    fn default() -> Self {
+        Self {
+            // We only care there's no collision between concurrent groups.
+            id: ATOMIC_GROUP_ID.fetch_add(1, Ordering::Relaxed),
+            begin: false,
+        }
+    }
+}
+
+impl AtomicGroupBuilder {
+    /// Each log batch can only carry one operation. If multiple are present
+    /// only the first is recognized.
+    pub fn begin(&mut self, lb: &mut LogBatch) {
+        fail::fail_point!("atomic_group::begin");
+        assert!(!self.begin);
+        let mut s = Vec::with_capacity(std::mem::size_of::<u64>() + 1);
+        s.encode_u64(self.id).unwrap();
+        s.push(AtomicGroupStatus::Begin as u8);
+        lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
+        self.begin = true;
+    }
+
+    pub fn add(&self, lb: &mut LogBatch) {
+        fail::fail_point!("atomic_group::add");
+        assert!(self.begin);
+        let mut s = Vec::with_capacity(std::mem::size_of::<u64>() + 1);
+        s.encode_u64(self.id).unwrap();
+        s.push(AtomicGroupStatus::Middle as u8);
+        lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
+    }
+
+    pub fn end(self, lb: &mut LogBatch) {
+        assert!(self.begin);
+        let mut s = Vec::with_capacity(std::mem::size_of::<u64>() + 1);
+        s.encode_u64(self.id).unwrap();
+        s.push(AtomicGroupStatus::End as u8);
+        lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
+    }
 }
 
 /// A batch of log items.
