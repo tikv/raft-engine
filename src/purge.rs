@@ -167,11 +167,9 @@ where
     }
 
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
-        if queue == LogQueue::Append {
-            let (first_file, active_file) = self.pipe_log.file_span(queue);
-            if active_file == first_file {
-                return false;
-            }
+        let (first_file, active_file) = self.pipe_log.file_span(queue);
+        if active_file == first_file {
+            return false;
         }
 
         let total_size = self.pipe_log.total_size(queue);

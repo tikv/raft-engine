@@ -596,12 +596,13 @@ mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::FileNameExt;
+    use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
     use std::fs::OpenOptions;
     use std::path::PathBuf;
 
@@ -2234,5 +2235,134 @@ mod tests {
             assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
             assert!(engine.file_span(LogQueue::Append).0 > start);
         }
+    }
+
+    #[test]
+    fn test_rewrite_atomic_group() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_rewrite_atomic_group")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            recovery_threads: 100,
+            ..Default::default()
+        };
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let key = vec![b'x'; 2];
+        let value = vec![b'y'; 8];
+
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let mut data = HashSet::new();
+        let mut rid = 1;
+        // Directly write to pipe log.
+        let mut log_batch = LogBatch::default();
+        let flush = |lb: &mut LogBatch| {
+            lb.finish_populate(0).unwrap();
+            engine.pipe_log.append(LogQueue::Rewrite, lb).unwrap();
+            lb.drain();
+        };
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            rid += 1;
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            // plug a unrelated write.
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            builder.add(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            builder.add(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            rid += 1;
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            rid += 1;
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            rid += 1;
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            // We must change id to avoid getting merged with last group.
+            // It is actually not possible in real life to only have "begin" missing.
+            let mut builder = AtomicGroupBuilder::with_id(4);
+            builder.begin(&mut LogBatch::default());
+            builder.end(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            rid += 1;
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(4);
+            builder.begin(&mut LogBatch::default());
+            builder.add(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            rid += 1;
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(5);
+            builder.begin(&mut LogBatch::default());
+            builder.end(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            rid += 1;
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(5);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone());
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        engine.pipe_log.sync(LogQueue::Rewrite).unwrap();
+
+        let engine = engine.reopen();
+        for rid in engine.raft_groups() {
+            assert!(data.remove(&rid), "{}", rid);
+            assert_eq!(engine.get(rid, &key).unwrap(), value);
+        }
+        assert!(data.is_empty());
     }
 }

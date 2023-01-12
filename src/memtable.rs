@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use fail::fail_point;
 use hashbrown::HashMap;
+use log::warn;
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -1148,6 +1149,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     }
 }
 
+#[derive(Debug)]
 struct PendingAtomicGroup {
     status: AtomicGroupStatus,
     items: Vec<LogItem>,
@@ -1213,18 +1215,29 @@ impl<A: AllocatorTrait> MemTableRecoverContext<A> {
         if let Some(groups) = self.pending_atomic_groups.get_mut(&id) {
             let group = groups.last_mut().unwrap();
             match (group.status, new_group.status) {
+                (AtomicGroupStatus::End, AtomicGroupStatus::Begin) => {
+                    groups.push(new_group);
+                }
+                // (begin, begin), (middle, begin)
                 (_, AtomicGroupStatus::Begin) => {
-                    // discard self.
+                    warn!("discard atomic group: {group:?}");
                     *group = new_group;
+                }
+                // (end, middle), (end, end)
+                (AtomicGroupStatus::End, _) => {
+                    warn!("discard atomic group: {new_group:?}");
                 }
                 (AtomicGroupStatus::Begin, AtomicGroupStatus::Middle)
                 | (AtomicGroupStatus::Middle, AtomicGroupStatus::Middle) => {
-                    // merge.
                     group.items.append(&mut new_group.items);
                     group.tombstone_items.append(&mut new_group.tombstone_items);
                 }
+                (AtomicGroupStatus::Middle, AtomicGroupStatus::End) => {
+                    group.items.append(&mut new_group.items);
+                    group.tombstone_items.append(&mut new_group.tombstone_items);
+                    group.status = new_group.status;
+                }
                 (AtomicGroupStatus::Begin, AtomicGroupStatus::End) => {
-                    // completed.
                     let mut group = groups.pop().unwrap();
                     self.tombstone_items.append(&mut group.tombstone_items);
                     self.tombstone_items.append(&mut new_group.tombstone_items);
@@ -1232,17 +1245,6 @@ impl<A: AllocatorTrait> MemTableRecoverContext<A> {
                         .replay_rewrite_writes(group.items.into_iter());
                     self.memtables
                         .replay_rewrite_writes(new_group.items.into_iter());
-                }
-                (AtomicGroupStatus::Middle, AtomicGroupStatus::End) => {
-                    // merge and update.
-                    group.items.append(&mut new_group.items);
-                    group.tombstone_items.append(&mut new_group.tombstone_items);
-                    group.status = new_group.status;
-                }
-                // (end, end), (end, middle)
-                _ => {
-                    // both discarded.
-                    groups.pop();
                 }
             }
             if groups.is_empty() {
@@ -1279,8 +1281,7 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
                 .drain()
                 .filter(|item| {
                     if let Some(g) = AtomicGroupStatus::parse(item) {
-                        if file_id.queue == LogQueue::Rewrite && is_group.is_none() {
-                            // Ignore append queue because it's unsafe.
+                        if is_group.is_none() {
                             is_group = Some(g);
                         } else {
                             debug_assert!(false, "skipped an atomic group: {:?}", g);

@@ -191,4 +191,10 @@ mod tests {
             e.index
         }
     }
+
+    #[test]
+    fn test_internal_key() {
+        let key = crate::make_internal_key(&[0]);
+        assert!(crate::is_internal_key(&key));
+    }
 }
