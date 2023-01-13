@@ -26,7 +26,7 @@ const REWRITE_RATIO: f64 = 0.7;
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
 
-fn max_rewrite_batch_bytes() -> usize {
+fn max_batch_bytes() -> usize {
     fail_point!("max_rewrite_batch_bytes", |s| s
         .unwrap()
         .parse::<usize>()
@@ -335,17 +335,14 @@ where
             // Split the entries into smaller chunks, so that we don't OOM, and the
             // compression overhead is not too high.
             let mut chunks = vec![Vec::new()];
-            let mut prev_size = log_batch.approximate_size();
-            debug_assert!(prev_size <= max_rewrite_batch_bytes());
             let mut current_size = 0;
             for ei in entry_indexes {
                 current_size += ei.entry_len as usize;
                 chunks.last_mut().unwrap().push(ei);
-                if current_size + prev_size > max_rewrite_batch_bytes() {
-                    if use_atomic_group() && prev_size > 0 {
+                if current_size + log_batch.approximate_size() > max_batch_bytes() {
+                    if use_atomic_group() && !log_batch.is_empty() {
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                        prev_size = 0;
-                        if current_size > max_rewrite_batch_bytes() {
+                        if current_size > max_batch_bytes() {
                             chunks.push(Vec::new());
                             current_size = 0;
                         }
@@ -383,9 +380,7 @@ where
                         g.end(&mut log_batch);
                     }
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                } else if i < total_tasks - 1
-                    || log_batch.approximate_size() > max_rewrite_batch_bytes()
-                {
+                } else if i < total_tasks - 1 || log_batch.approximate_size() > max_batch_bytes() {
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 }
             }
