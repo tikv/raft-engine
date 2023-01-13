@@ -336,16 +336,13 @@ where
             // compression overhead is not too high.
             let mut chunks = vec![Vec::new()];
             let mut current_size = 0;
+            debug_assert!(log_batch.approximate_size() <= max_batch_bytes());
             for ei in entry_indexes {
                 current_size += ei.entry_len as usize;
                 chunks.last_mut().unwrap().push(ei);
                 if current_size + log_batch.approximate_size() > max_batch_bytes() {
                     if use_atomic_group() && !log_batch.is_empty() {
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                        if current_size > max_batch_bytes() {
-                            chunks.push(Vec::new());
-                            current_size = 0;
-                        }
                     } else {
                         debug_assert!(current_size > 0);
                         chunks.push(Vec::new());

@@ -979,17 +979,23 @@ impl AtomicGroupStatus {
     }
 }
 
-/// Group multiple log batches as an atomic operation. Two caveats:
+/// Group multiple log batches as an atomic operation.
+///
+/// Caveats:
 /// (1) The atomicity is provided at persistent level. This means, once an
 /// atomic group fails, the in-memory value will be inconsistent with what can
 /// be recovered from on-disk data files.
 /// (2) The recovery replay order will be different from original write order.
 /// Log batches in a completed atomic group will be replayed as if they were
 /// written together at an arbitary time point within the group.
+/// (3) Atomic group is implemented by embedding normal key-values into user
+/// writes. These keys have internal key prefix and will not be replayed into
+/// memtable. However, when read by an older version, they will behave as user
+/// keys. They may also belong to Raft Group that doesn't exist before.
 ///
 /// In practice, we only use atomic group for rewrite operation. (In fact,
-/// atomic group markers in append queue are simply ignored.) It doesn't change
-/// the value of entries, just locations. So first issue doesn't affect
+/// atomic group markers in append queue are simply ignored.) Rewrite doesn't
+/// change the value of entries, just locations. So first issue doesn't affect
 /// correctness. There could only be one worker doing the rewrite. So second
 /// issue doesn't change observed write order because there's no mixed write.
 pub(crate) struct AtomicGroupBuilder {
@@ -1008,8 +1014,8 @@ impl Default for AtomicGroupBuilder {
 }
 
 impl AtomicGroupBuilder {
-    /// Each log batch can only carry one operation. If multiple are present
-    /// only the first is recognized.
+    /// Each log batch can only carry one atomic group marker. If multiple are
+    /// present only the first is recognized.
     pub fn begin(&mut self, lb: &mut LogBatch) {
         fail::fail_point!("atomic_group::begin");
         assert!(!self.begin);
