@@ -904,3 +904,69 @@ fn test_split_rewrite_batch() {
     test_split_rewrite_batch_imp(10, 40960, 1, 40960 * 2);
     test_split_rewrite_batch_imp(25, 4096, 6000, 40960 * 2);
 }
+
+#[test]
+fn test_split_rewrite_batch_with_only_kvs() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_split_rewrite_batch_with_only_kvs")
+        .tempdir()
+        .unwrap();
+    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let mut log_batch = LogBatch::default();
+    let key = vec![b'x'; 2];
+    let value = vec![b'y'; 8];
+
+    let mut rid = 1;
+    {
+        log_batch.put(rid, key.clone(), Vec::new());
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        log_batch.put(rid, key.clone(), value.clone());
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone());
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone());
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+    }
+    {
+        let _f = fail::FailGuard::new("force_use_atomic_group", "return");
+        log_batch.put(rid, key.clone(), Vec::new());
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        log_batch.put(rid, key.clone(), value.clone());
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone());
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone());
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+    }
+
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    for i in 1..=rid {
+        assert_eq!(engine.get(i, &key).unwrap(), value);
+    }
+}

@@ -317,8 +317,6 @@ where
             rewrite.is_none()
         };
         let mut log_batch = LogBatch::default();
-        // Size of entries from other regions in `log_batch`.
-        let mut prev_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut kvs = Vec::new();
@@ -336,39 +334,45 @@ where
 
             // Split the entries into smaller chunks, so that we don't OOM, and the
             // compression overhead is not too high.
-            let mut split_entry_indexes = vec![Vec::new()];
+            let mut chunks = vec![Vec::new()];
+            let mut prev_size = log_batch.approximate_size();
+            debug_assert!(prev_size <= max_rewrite_batch_bytes());
             let mut current_size = 0;
             for ei in entry_indexes {
-                if current_size + prev_size > max_rewrite_batch_bytes() && ei.entry_len > 0 {
+                current_size += ei.entry_len as usize;
+                chunks.last_mut().unwrap().push(ei);
+                if current_size + prev_size > max_rewrite_batch_bytes() {
                     if use_atomic_group() && prev_size > 0 {
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
                         prev_size = 0;
+                        if current_size > max_rewrite_batch_bytes() {
+                            chunks.push(Vec::new());
+                            current_size = 0;
+                        }
                     } else {
-                        debug_assert!(!split_entry_indexes.last().unwrap().is_empty());
-                        split_entry_indexes.push(Vec::new());
+                        debug_assert!(current_size > 0);
+                        chunks.push(Vec::new());
                         current_size = 0;
                     }
                 }
-                current_size += ei.entry_len as usize;
-                split_entry_indexes.last_mut().unwrap().push(ei);
             }
 
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v);
             }
 
-            let mut atomic_group = if split_entry_indexes.len() > 1 && use_atomic_group() {
+            let mut atomic_group = if chunks.len() > 1 && use_atomic_group() {
                 Some(AtomicGroupBuilder::default())
             } else {
                 None
             };
-            let total_tasks = split_entry_indexes.len();
-            for (i, entry_indexes) in split_entry_indexes.into_iter().enumerate() {
+            let total_tasks = chunks.len();
+            for (i, entry_indexes) in chunks.into_iter().enumerate() {
                 let entries = entry_indexes
                     .iter()
                     .map(|ei| read_entry_bytes_from_file(self.pipe_log.as_ref(), ei))
                     .collect::<Result<Vec<_>>>()?;
-                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
+                log_batch.add_raw_entries(region_id, entry_indexes.to_vec(), entries)?;
 
                 if let Some(g) = atomic_group.as_mut() {
                     if i == 0 {
@@ -385,13 +389,7 @@ where
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 }
             }
-            if atomic_group.is_some() {
-                assert!(log_batch.is_empty());
-                prev_size = 0;
-            } else {
-                prev_size = log_batch.approximate_size();
-                debug_assert!(prev_size <= max_rewrite_batch_bytes());
-            }
+            debug_assert!(atomic_group.is_none() || log_batch.is_empty());
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
     }

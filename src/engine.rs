@@ -2245,6 +2245,7 @@ mod tests {
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            // Make sure each file gets replayed individually.
             recovery_threads: 100,
             ..Default::default()
         };
@@ -2266,63 +2267,68 @@ mod tests {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             log_batch.put(rid, key.clone(), value.clone());
-            rid += 1;
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             // plug a unrelated write.
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             builder.end(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             builder.add(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             builder.add(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             builder.end(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
             data.insert(rid);
-            rid += 1;
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
-            log_batch.put(rid, key.clone(), value.clone());
             rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
             flush(&mut log_batch);
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
-            log_batch.put(rid, key.clone(), value.clone());
             rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
@@ -2332,14 +2338,18 @@ mod tests {
             let mut builder = AtomicGroupBuilder::with_id(4);
             builder.begin(&mut LogBatch::default());
             builder.end(&mut log_batch);
-            log_batch.put(rid, key.clone(), value.clone());
             rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
             flush(&mut log_batch);
             let mut builder = AtomicGroupBuilder::with_id(4);
             builder.begin(&mut LogBatch::default());
             builder.add(&mut log_batch);
-            log_batch.put(rid, key.clone(), value.clone());
             rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
@@ -2347,12 +2357,19 @@ mod tests {
             let mut builder = AtomicGroupBuilder::with_id(5);
             builder.begin(&mut LogBatch::default());
             builder.end(&mut log_batch);
-            log_batch.put(rid, key.clone(), value.clone());
             rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
             flush(&mut log_batch);
             let mut builder = AtomicGroupBuilder::with_id(5);
             builder.begin(&mut log_batch);
+            rid += 1;
             log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone());
+            data.insert(rid);
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
