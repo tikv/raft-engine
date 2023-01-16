@@ -1019,6 +1019,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     /// Applies changes from log items that have been written to append queue.
     pub fn apply_append_writes(&self, log_items: impl Iterator<Item = LogItem>) {
         for item in log_items {
+            debug_assert!(AtomicGroupStatus::parse(&item).is_none());
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
             fail_point!(
@@ -1090,7 +1091,6 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         new_file: FileSeq,
     ) {
         for item in log_items {
-            // We only parse it in rewrite path for performance.
             if AtomicGroupStatus::parse(&item).is_some() {
                 continue;
             }

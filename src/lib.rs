@@ -161,7 +161,7 @@ impl GlobalStats {
     }
 }
 
-const INTERNAL_KEY_PREFIX: &[u8] = b"__";
+pub(crate) const INTERNAL_KEY_PREFIX: &[u8] = b"__";
 
 pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
     assert!(!k.is_empty());
@@ -170,7 +170,7 @@ pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
     v
 }
 
-pub fn is_internal_key(s: &[u8]) -> bool {
+pub(crate) fn is_internal_key(s: &[u8]) -> bool {
     s.len() > INTERNAL_KEY_PREFIX.len() && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
 }
 

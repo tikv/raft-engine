@@ -866,9 +866,9 @@ mod tests {
         let mut batch = LogBatch::default();
         let mut res = Vec::new();
         let mut rich_res = Vec::new();
-        batch.put(rid, key(1), value(1));
-        batch.put(rid, key(2), value(2));
-        batch.put(rid, key(3), value(3));
+        batch.put(rid, key(1), value(1)).unwrap();
+        batch.put(rid, key(2), value(2)).unwrap();
+        batch.put(rid, key(3), value(3)).unwrap();
         engine.write(&mut batch, false).unwrap();
 
         engine
@@ -936,9 +936,9 @@ mod tests {
         let key = b"key".to_vec();
         let (v1, v2) = (b"v1".to_vec(), b"v2".to_vec());
         let mut batch_1 = LogBatch::default();
-        batch_1.put(rid, key.clone(), v1);
+        batch_1.put(rid, key.clone(), v1).unwrap();
         let mut batch_2 = LogBatch::default();
-        batch_2.put(rid, key.clone(), v2.clone());
+        batch_2.put(rid, key.clone(), v2.clone()).unwrap();
         let mut delete_batch = LogBatch::default();
         delete_batch.delete(rid, key.clone());
 
@@ -1416,7 +1416,7 @@ mod tests {
             let mut batch = LogBatch::default();
             for &has_data in writes {
                 if has_data {
-                    batch.put(rid, b"key".to_vec(), data.clone());
+                    batch.put(rid, b"key".to_vec(), data.clone()).unwrap();
                 }
                 engine.write(&mut batch, true).unwrap();
                 assert!(batch.is_empty());
@@ -1593,11 +1593,11 @@ mod tests {
             .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
             .unwrap();
         batch.add_command(7, Command::Clean);
-        batch.put(7, b"key".to_vec(), b"value".to_vec());
+        batch.put(7, b"key".to_vec(), b"value".to_vec()).unwrap();
         batch.delete(7, b"key2".to_vec());
         batches.push(vec![batch.clone()]);
         let mut batch2 = LogBatch::default();
-        batch2.put(8, b"key3".to_vec(), b"value".to_vec());
+        batch2.put(8, b"key3".to_vec(), b"value".to_vec()).unwrap();
         batch2
             .add_entries::<Entry>(8, &generate_entries(5, 15, Some(&entry_data)))
             .unwrap();
@@ -2266,7 +2266,7 @@ mod tests {
         {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
@@ -2274,17 +2274,17 @@ mod tests {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             // plug a unrelated write.
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
@@ -2293,22 +2293,22 @@ mod tests {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             builder.add(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             builder.add(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
@@ -2317,17 +2317,17 @@ mod tests {
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
@@ -2339,17 +2339,17 @@ mod tests {
             builder.begin(&mut LogBatch::default());
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
             let mut builder = AtomicGroupBuilder::with_id(4);
             builder.begin(&mut LogBatch::default());
             builder.add(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
@@ -2358,17 +2358,17 @@ mod tests {
             builder.begin(&mut LogBatch::default());
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
             let mut builder = AtomicGroupBuilder::with_id(5);
             builder.begin(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             builder.end(&mut log_batch);
             rid += 1;
-            log_batch.put(rid, key.clone(), value.clone());
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();

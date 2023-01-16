@@ -352,7 +352,7 @@ where
             }
 
             for (k, v) in kvs {
-                log_batch.put(region_id, k, v);
+                log_batch.put(region_id, k, v)?;
             }
 
             let mut atomic_group = if chunks.len() > 1 && use_atomic_group() {

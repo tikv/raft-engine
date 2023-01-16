@@ -321,7 +321,7 @@ impl LogItem {
                 return Err(Error::Corruption(format!(
                     "Unrecognized log item type: {}",
                     item_type
-                )))
+                )));
             }
         };
         Ok(LogItem {
@@ -716,12 +716,29 @@ impl LogBatch {
 
     /// Adds a protobuf key value pair into the log batch.
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
+        if crate::is_internal_key(&key) {
+            return Err(Error::InvalidArgument(format!(
+                "key prefix `{:?}` reserved for internal use",
+                crate::INTERNAL_KEY_PREFIX
+            )));
+        }
         self.item_batch.put_message(region_id, key, s)
     }
 
     /// Adds a key value pair into the log batch.
-    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
-        self.item_batch.put(region_id, key, value)
+    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        if crate::is_internal_key(&key) {
+            return Err(Error::InvalidArgument(format!(
+                "key prefix `{:?}` reserved for internal use",
+                crate::INTERNAL_KEY_PREFIX
+            )));
+        }
+        self.item_batch.put(region_id, key, value);
+        Ok(())
+    }
+
+    fn put_unchecked(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
+        self.item_batch.put(region_id, key, value);
     }
 
     /// Returns true if the log batch contains no log item.
@@ -1002,7 +1019,7 @@ impl AtomicGroupStatus {
 /// issue doesn't change observed write order because there's no mixed write.
 pub(crate) struct AtomicGroupBuilder {
     id: u64,
-    begin: bool,
+    status: Option<AtomicGroupStatus>,
 }
 
 impl Default for AtomicGroupBuilder {
@@ -1010,7 +1027,7 @@ impl Default for AtomicGroupBuilder {
         Self {
             // We only care there's no collision between concurrent groups.
             id: ATOMIC_GROUP_ID.fetch_add(1, Ordering::Relaxed),
-            begin: false,
+            status: None,
         }
     }
 }
@@ -1020,31 +1037,40 @@ impl AtomicGroupBuilder {
     /// present only the first is recognized.
     pub fn begin(&mut self, lb: &mut LogBatch) {
         fail::fail_point!("atomic_group::begin");
-        assert!(!self.begin);
-        let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
-        s.push(AtomicGroupStatus::Begin as u8);
-        lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
-        self.begin = true;
+        assert_eq!(self.status, None);
+        self.status = Some(AtomicGroupStatus::Begin);
+        self.flush(lb);
     }
 
-    pub fn add(&self, lb: &mut LogBatch) {
+    pub fn add(&mut self, lb: &mut LogBatch) {
         fail::fail_point!("atomic_group::add");
-        assert!(self.begin);
-        let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
-        s.push(AtomicGroupStatus::Middle as u8);
-        lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
+        assert!(matches!(
+            self.status.unwrap(),
+            AtomicGroupStatus::Begin | AtomicGroupStatus::Middle
+        ));
+        self.status = Some(AtomicGroupStatus::Middle);
+        self.flush(lb);
     }
 
-    pub fn end(&self, lb: &mut LogBatch) {
-        assert!(self.begin);
+    pub fn end(&mut self, lb: &mut LogBatch) {
+        assert!(matches!(
+            self.status.unwrap(),
+            AtomicGroupStatus::Begin | AtomicGroupStatus::Middle
+        ));
+        self.status = Some(AtomicGroupStatus::End);
+        self.flush(lb);
+    }
+
+    #[inline]
+    fn flush(&self, lb: &mut LogBatch) {
         let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
-        s.push(AtomicGroupStatus::End as u8);
-        lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
+        s.push(self.status.unwrap() as u8);
+        lb.put_unchecked(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
     }
 
     #[cfg(test)]
     pub fn with_id(id: u64) -> Self {
-        Self { id, begin: false }
+        Self { id, status: None }
     }
 }
 
@@ -1370,7 +1396,7 @@ mod tests {
             .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
             .unwrap();
         batch.add_command(7, Command::Clean);
-        batch.put(7, b"key".to_vec(), b"value".to_vec());
+        batch.put(7, b"key".to_vec(), b"value".to_vec()).unwrap();
         batch.delete(7, b"key2".to_vec());
         batch
             .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
@@ -1414,7 +1440,7 @@ mod tests {
                 format!("k{}", i).into_bytes(),
                 format!("v{}", i).into_bytes(),
             );
-            batch1.put(region_id, k.clone(), v.clone());
+            batch1.put(region_id, k.clone(), v.clone()).unwrap();
             kvs.push((k, v));
         }
 
@@ -1430,7 +1456,7 @@ mod tests {
                 format!("k{}", i).into_bytes(),
                 format!("v{}", i).into_bytes(),
             );
-            batch2.put(region_id, k.clone(), v.clone());
+            batch2.put(region_id, k.clone(), v.clone()).unwrap();
             kvs.push((k, v));
         }
 
@@ -1485,6 +1511,23 @@ mod tests {
         assert!(batch.is_empty());
         batch.add_raw_entries(0, Vec::new(), Vec::new()).unwrap();
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_internal_key() {
+        let mut batch = LogBatch::default();
+        assert!(matches!(
+            batch
+                .put(0, crate::make_internal_key(&[0]), b"v".to_vec())
+                .unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
+        assert!(matches!(
+            batch
+                .put_message(0, crate::make_internal_key(&[1]), &Entry::new())
+                .unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
     }
 
     #[cfg(feature = "nightly")]

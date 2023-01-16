@@ -923,20 +923,20 @@ fn test_split_rewrite_batch_with_only_kvs() {
 
     let mut rid = 1;
     {
-        log_batch.put(rid, key.clone(), Vec::new());
+        log_batch.put(rid, key.clone(), Vec::new()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
 
-        log_batch.put(rid, key.clone(), value.clone());
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
 
         engine.purge_manager().must_rewrite_rewrite_queue();
 
         rid += 1;
-        log_batch.put(rid, key.clone(), value.clone());
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
         rid += 1;
-        log_batch.put(rid, key.clone(), value.clone());
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
 
@@ -944,20 +944,20 @@ fn test_split_rewrite_batch_with_only_kvs() {
     }
     {
         let _f = fail::FailGuard::new("force_use_atomic_group", "return");
-        log_batch.put(rid, key.clone(), Vec::new());
+        log_batch.put(rid, key.clone(), Vec::new()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
 
-        log_batch.put(rid, key.clone(), value.clone());
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
 
         engine.purge_manager().must_rewrite_rewrite_queue();
 
         rid += 1;
-        log_batch.put(rid, key.clone(), value.clone());
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
         rid += 1;
-        log_batch.put(rid, key.clone(), value.clone());
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
 
