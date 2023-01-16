@@ -945,8 +945,8 @@ lazy_static! {
     static ref ATOMIC_GROUP_ID: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 }
 const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
-// <id, status>
-const ATOMIC_GROUP_VALUE_LEN: usize = std::mem::size_of::<u64>() + 1;
+// <status>
+const ATOMIC_GROUP_VALUE_LEN: usize = 1;
 
 #[repr(u8)]
 #[derive(Clone, Copy, FromPrimitive, Debug, PartialEq)]
@@ -971,8 +971,10 @@ impl AtomicGroupStatus {
                 && *key == crate::make_internal_key(ATOMIC_GROUP_KEY)
             {
                 let value = &mut value.as_ref().unwrap().as_slice();
-                let id = codec::decode_u64(value).unwrap();
-                return Some((id, AtomicGroupStatus::from_u8(value[0]).unwrap()));
+                return Some((
+                    item.raft_group_id,
+                    AtomicGroupStatus::from_u8(value[0]).unwrap(),
+                ));
             }
         }
         None
@@ -1020,7 +1022,6 @@ impl AtomicGroupBuilder {
         fail::fail_point!("atomic_group::begin");
         assert!(!self.begin);
         let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
-        s.encode_u64(self.id).unwrap();
         s.push(AtomicGroupStatus::Begin as u8);
         lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
         self.begin = true;
@@ -1030,7 +1031,6 @@ impl AtomicGroupBuilder {
         fail::fail_point!("atomic_group::add");
         assert!(self.begin);
         let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
-        s.encode_u64(self.id).unwrap();
         s.push(AtomicGroupStatus::Middle as u8);
         lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
     }
@@ -1038,7 +1038,6 @@ impl AtomicGroupBuilder {
     pub fn end(&self, lb: &mut LogBatch) {
         assert!(self.begin);
         let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
-        s.encode_u64(self.id).unwrap();
         s.push(AtomicGroupStatus::End as u8);
         lb.put(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
     }
