@@ -312,7 +312,7 @@ where
         rewrite: Option<FileSeq>,
     ) -> Result<()> {
         // Only use atomic group for rewrite-rewrite operation.
-        let use_atomic_group = || {
+        let needs_atomicity = || {
             fail_point!("force_use_atomic_group", |_| true);
             rewrite.is_none()
         };
@@ -341,8 +341,13 @@ where
                 current_size += ei.entry_len as usize;
                 chunks.last_mut().unwrap().push(ei);
                 if current_size + log_batch.approximate_size() > max_batch_bytes() {
-                    if use_atomic_group() && !log_batch.is_empty() {
+                    if needs_atomicity() && !log_batch.is_empty() {
+                        // We are certain that old raft group and current raft group cannot fit
+                        // inside one batch.
+                        // To avoid breaking atomicity, we need to flush.
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                        // It is possible that `current_size` is already large
+                        // enough. We ignore this to make code simpler.
                     } else {
                         debug_assert!(current_size > 0);
                         chunks.push(Vec::new());
@@ -355,7 +360,7 @@ where
                 log_batch.put(region_id, k, v)?;
             }
 
-            let mut atomic_group = if chunks.len() > 1 && use_atomic_group() {
+            let mut atomic_group = if chunks.len() > 1 && needs_atomicity() {
                 Some(AtomicGroupBuilder::default())
             } else {
                 None
@@ -377,6 +382,7 @@ where
                         g.end(&mut log_batch);
                     }
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                // Needs to check whether the last batch is too large as well.
                 } else if i < total_tasks - 1 || log_batch.approximate_size() > max_batch_bytes() {
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 }

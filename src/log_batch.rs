@@ -1045,8 +1045,8 @@ impl AtomicGroupBuilder {
     pub fn add(&mut self, lb: &mut LogBatch) {
         fail::fail_point!("atomic_group::add");
         assert!(matches!(
-            self.status.unwrap(),
-            AtomicGroupStatus::Begin | AtomicGroupStatus::Middle
+            self.status,
+            Some(AtomicGroupStatus::Begin | AtomicGroupStatus::Middle)
         ));
         self.status = Some(AtomicGroupStatus::Middle);
         self.flush(lb);
@@ -1054,8 +1054,8 @@ impl AtomicGroupBuilder {
 
     pub fn end(&mut self, lb: &mut LogBatch) {
         assert!(matches!(
-            self.status.unwrap(),
-            AtomicGroupStatus::Begin | AtomicGroupStatus::Middle
+            self.status,
+            Some(AtomicGroupStatus::Begin | AtomicGroupStatus::Middle)
         ));
         self.status = Some(AtomicGroupStatus::End);
         self.flush(lb);
