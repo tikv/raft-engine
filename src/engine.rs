@@ -1483,6 +1483,19 @@ mod tests {
         engine.purge_manager.must_rewrite_rewrite_queue();
         assert!(engine.file_span(LogQueue::Rewrite).0 > old_active_file);
 
+        for rid in engine.raft_groups() {
+            let mut total = 0;
+            engine
+                .scan_raw_messages(rid, None, None, false, |k, _| {
+                    assert!(!crate::is_internal_key(k));
+                    total += 1;
+                    true
+                })
+                .unwrap();
+            assert_eq!(total, 1);
+        }
+        assert_eq!(engine.raft_groups().len(), 3);
+
         let engine = engine.reopen();
         for rid in 1..=3 {
             engine.scan_entries(rid, 1, 11, |_, _, d| {
@@ -2381,5 +2394,48 @@ mod tests {
             assert_eq!(engine.get(rid, &key).unwrap(), value);
         }
         assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_internal_key_filter() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_internal_key_filter")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let value = vec![b'y'; 8];
+        let mut log_batch = LogBatch::default();
+        log_batch.put_unchecked(1, crate::make_internal_key(&[1]), value.clone());
+        log_batch.put_unchecked(2, crate::make_internal_key(&[1]), value.clone());
+        engine.write(&mut log_batch, false).unwrap();
+        // Apply of append filtered.
+        assert!(engine.raft_groups().is_empty());
+
+        let engine = engine.reopen();
+        // Replay of append filtered.
+        assert!(engine.raft_groups().is_empty());
+
+        log_batch.put_unchecked(3, crate::make_internal_key(&[1]), value.clone());
+        log_batch.put_unchecked(4, crate::make_internal_key(&[1]), value);
+        log_batch.finish_populate(0).unwrap();
+        let block_handle = engine
+            .pipe_log
+            .append(LogQueue::Rewrite, &mut log_batch)
+            .unwrap();
+        log_batch.finish_write(block_handle);
+        engine
+            .memtables
+            .apply_rewrite_writes(log_batch.drain(), None, 0);
+        // Apply of rewrite filtered.
+        assert!(engine.raft_groups().is_empty());
+
+        let engine = engine.reopen();
+        // Replay of rewrite filtered.
+        assert!(engine.raft_groups().is_empty());
     }
 }

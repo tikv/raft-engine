@@ -1019,7 +1019,9 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     /// Applies changes from log items that have been written to append queue.
     pub fn apply_append_writes(&self, log_items: impl Iterator<Item = LogItem>) {
         for item in log_items {
-            debug_assert!(AtomicGroupStatus::parse(&item).is_none());
+            if has_internal_key(&item) {
+                continue;
+            }
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
             fail_point!(
@@ -1057,6 +1059,9 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     /// This method is only used for recovery.
     pub fn replay_append_writes(&self, log_items: impl Iterator<Item = LogItem>) {
         for item in log_items {
+            if has_internal_key(&item) {
+                continue;
+            }
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
             match item.content {
@@ -1091,7 +1096,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         new_file: FileSeq,
     ) {
         for item in log_items {
-            if AtomicGroupStatus::parse(&item).is_some() {
+            if has_internal_key(&item) {
                 continue;
             }
             let raft = item.raft_group_id;
@@ -1119,6 +1124,9 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     /// This method is only used for recovery.
     pub fn replay_rewrite_writes(&self, log_items: impl Iterator<Item = LogItem>) {
         for item in log_items {
+            if has_internal_key(&item) {
+                continue;
+            }
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
             match item.content {
@@ -1151,6 +1159,11 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         debug_assert!(MEMTABLE_SLOT_COUNT.is_power_of_two());
         hash_u64(id) as usize & (MEMTABLE_SLOT_COUNT - 1)
     }
+}
+
+#[inline]
+fn has_internal_key(item: &LogItem) -> bool {
+    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key))
 }
 
 #[derive(Debug)]

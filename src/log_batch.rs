@@ -737,7 +737,7 @@ impl LogBatch {
         Ok(())
     }
 
-    fn put_unchecked(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
+    pub(crate) fn put_unchecked(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
         self.item_batch.put(region_id, key, value);
     }
 

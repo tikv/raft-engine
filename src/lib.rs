@@ -170,6 +170,11 @@ pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
     v
 }
 
+/// We ensure internal keys are not visible to the user by:
+/// (1) Writing internal keys will be rejected by `LogBatch::put`.
+/// (2) Internal keys are filtered out during apply and replay of both queues.
+/// This also makes sure future internal keys under the prefix won't become
+/// visible after downgrading.
 pub(crate) fn is_internal_key(s: &[u8]) -> bool {
     s.len() > INTERNAL_KEY_PREFIX.len() && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
 }
