@@ -1090,6 +1090,10 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         new_file: FileSeq,
     ) {
         for item in log_items {
+            // We only parse it in rewrite path for performance.
+            if AtomicGroupStatus::parse(&item).is_some() {
+                continue;
+            }
             let raft = item.raft_group_id;
             let memtable = self.get_or_insert(raft);
             match item.content {
