@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -331,63 +332,63 @@ where
                 }
                 m.region_id()
             };
+            let mut entry_indexes: VecDeque<_> = entry_indexes.into();
 
+            let mut alien_size = log_batch.approximate_size();
+            let mut atomic_group = None;
+            let mut current_entry_indexes = Vec::new();
+            let mut current_entries = Vec::new();
+            let mut current_size = 0;
             // Split the entries into smaller chunks, so that we don't OOM, and the
             // compression overhead is not too high.
-            let mut chunks = vec![Vec::new()];
-            let mut current_size = 0;
-            debug_assert!(log_batch.approximate_size() <= max_batch_bytes());
-            for ei in entry_indexes {
-                current_size += ei.entry_len as usize;
-                chunks.last_mut().unwrap().push(ei);
-                if current_size + log_batch.approximate_size() > max_batch_bytes() {
-                    if needs_atomicity() && !log_batch.is_empty() {
+            while let Some(ei) = entry_indexes.pop_front() {
+                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), &ei)?;
+                current_size += entry.len();
+                current_entries.push(entry);
+                current_entry_indexes.push(ei);
+                if entry_indexes.is_empty() {
+                    // This is the last batch.
+                    log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
+                    break;
+                }
+                if current_size + alien_size > max_batch_bytes() {
+                    if needs_atomicity() && alien_size > 0 {
                         // We are certain that old raft group and current raft group cannot fit
                         // inside one batch.
                         // To avoid breaking atomicity, we need to flush.
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                        alien_size = 0;
                         // It is possible that `current_size` is already large
                         // enough. We ignore this to make code simpler.
                     } else {
-                        debug_assert!(current_size > 0);
-                        chunks.push(Vec::new());
-                        current_size = 0;
+                        log_batch.add_raw_entries(
+                            region_id,
+                            mem::take(&mut current_entry_indexes),
+                            mem::take(&mut current_entries),
+                        )?;
+
+                        if needs_atomicity() && atomic_group.is_none() {
+                            let mut g = AtomicGroupBuilder::default();
+                            g.begin(&mut log_batch);
+                            atomic_group = Some(g);
+                        } else if let Some(g) = atomic_group.as_mut() {
+                            g.add(&mut log_batch);
+                        }
+
+                        self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                        alien_size = 0;
                     }
                 }
             }
-
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v)?;
             }
-
-            let mut atomic_group = if chunks.len() > 1 && needs_atomicity() {
-                Some(AtomicGroupBuilder::default())
-            } else {
-                None
-            };
-            let total_tasks = chunks.len();
-            for (i, entry_indexes) in chunks.into_iter().enumerate() {
-                let entries = entry_indexes
-                    .iter()
-                    .map(|ei| read_entry_bytes_from_file(self.pipe_log.as_ref(), ei))
-                    .collect::<Result<Vec<_>>>()?;
-                log_batch.add_raw_entries(region_id, entry_indexes.to_vec(), entries)?;
-
-                if let Some(g) = atomic_group.as_mut() {
-                    if i == 0 {
-                        g.begin(&mut log_batch);
-                    } else if i < total_tasks - 1 {
-                        g.add(&mut log_batch);
-                    } else {
-                        g.end(&mut log_batch);
-                    }
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                // Needs to check whether the last batch is too large as well.
-                } else if i < total_tasks - 1 || log_batch.approximate_size() > max_batch_bytes() {
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                }
+            if let Some(g) = atomic_group.as_mut() {
+                g.end(&mut log_batch);
+                self.rewrite_impl(&mut log_batch, rewrite, false)?;
+            } else if current_size + alien_size > max_batch_bytes() {
+                self.rewrite_impl(&mut log_batch, rewrite, false)?;
             }
-            debug_assert!(atomic_group.is_none() || log_batch.is_empty());
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
     }
