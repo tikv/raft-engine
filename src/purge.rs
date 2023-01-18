@@ -332,7 +332,6 @@ where
                 }
                 m.region_id()
             };
-            let mut entry_indexes: VecDeque<_> = entry_indexes.into();
 
             let mut alien_size = log_batch.approximate_size();
             let mut atomic_group = None;
@@ -341,12 +340,13 @@ where
             let mut current_size = 0;
             // Split the entries into smaller chunks, so that we don't OOM, and the
             // compression overhead is not too high.
-            while let Some(ei) = entry_indexes.pop_front() {
+            let mut entry_indexes = entry_indexes.into_iter().peekable();
+            while let Some(ei) = entry_indexes.next() {
                 let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), &ei)?;
                 current_size += entry.len();
                 current_entries.push(entry);
                 current_entry_indexes.push(ei);
-                if entry_indexes.is_empty() {
+                if entry_indexes.peek().is_none() {
                     // This is the last batch.
                     log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
                     break;
