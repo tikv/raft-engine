@@ -30,6 +30,12 @@ pub trait FileSystem: Send + Sync {
         self.rename(src_path, dst_path)
     }
 
+    #[inline]
+    fn reuse_and_open<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<Self::Handle> {
+        self.reuse(src_path.as_ref(), dst_path.as_ref())?;
+        self.open(dst_path)
+    }
+
     /// Deletes user implemented metadata associated with `path`. Returns
     /// `true` if any metadata is deleted.
     ///

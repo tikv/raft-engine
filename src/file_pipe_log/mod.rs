@@ -4,14 +4,13 @@
 //!
 //! [`PipeLog`]: crate::pipe_log::PipeLog
 
-mod file_mgr;
 mod format;
 mod log_file;
 mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{FileNameExt, StaleFileNameExt};
+pub use format::FileNameExt;
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,

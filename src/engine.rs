@@ -590,7 +590,7 @@ where
 mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
-    use crate::file_pipe_log::{FileNameExt, StaleFileNameExt};
+    use crate::file_pipe_log::FileNameExt;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
@@ -1966,7 +1966,8 @@ mod tests {
         fn update_metadata(&self, path: &Path, delete: bool) -> bool {
             let path = path.file_name().unwrap().to_str().unwrap();
             let parse_append = FileId::parse_file_name(path);
-            let parse_stale = FileId::parse_stale_file_name(path);
+            // let parse_stale = parse_recycled_file_name(path);
+            let parse_stale = None;
             match (parse_append, parse_stale) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     if delete {
@@ -2036,7 +2037,8 @@ mod tests {
             }
             let path = path.as_ref().file_name().unwrap().to_str().unwrap();
             let parse_append = FileId::parse_file_name(path);
-            let parse_stale = FileId::parse_stale_file_name(path);
+            let parse_stale = None;
+            // let parse_stale = FileId::parse_stale_file_name(path);
             match (parse_append, parse_stale) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     self.append_metadata.lock().unwrap().contains(&id.seq)

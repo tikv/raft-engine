@@ -87,41 +87,26 @@ impl FileNameExt for FileId {
     }
 }
 
-pub trait StaleFileNameExt: Sized {
-    fn parse_stale_file_name(file_name: &str) -> Option<FileSeq>;
-
-    fn build_stale_file_name(&self) -> String;
-
-    fn build_stale_file_path<P: AsRef<Path>>(&self, dir: P) -> PathBuf {
-        let mut path = PathBuf::from(dir.as_ref());
-        path.push(self.build_stale_file_name());
-        path
-    }
-}
-
-impl StaleFileNameExt for FileId {
-    fn parse_stale_file_name(file_name: &str) -> Option<FileSeq> {
-        if file_name.len() > LOG_SEQ_WIDTH {
-            if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
-                if file_name.ends_with(LOG_APPEND_RESERVED_SUFFIX) {
-                    // As reserved files are only used for LogQueue::Append,
-                    // we just return the related FileSeq of it.
-                    return Some(seq);
-                }
+pub fn parse_recycled_file_name(file_name: &str) -> Option<FileSeq> {
+    if file_name.len() > LOG_SEQ_WIDTH {
+        if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
+            if file_name.ends_with(LOG_APPEND_RESERVED_SUFFIX) {
+                // As reserved files are only used for LogQueue::Append,
+                // we just return the related FileSeq of it.
+                return Some(seq);
             }
         }
-        None
     }
+    None
+}
 
-    fn build_stale_file_name(&self) -> String {
-        debug_assert!(self.queue == LogQueue::Append);
-        format!(
-            "{:0width$}{}",
-            self.seq,
-            LOG_APPEND_RESERVED_SUFFIX,
-            width = LOG_SEQ_WIDTH
-        )
-    }
+pub fn build_recycled_file_name(seq: FileSeq) -> String {
+    format!(
+        "{:0width$}{}",
+        seq,
+        LOG_APPEND_RESERVED_SUFFIX,
+        width = LOG_SEQ_WIDTH
+    )
 }
 
 /// Path to the lock file under `dir`.
