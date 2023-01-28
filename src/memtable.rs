@@ -1163,7 +1163,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
 
 #[inline]
 fn has_internal_key(item: &LogItem) -> bool {
-    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key))
+    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key, None))
 }
 
 #[derive(Debug)]

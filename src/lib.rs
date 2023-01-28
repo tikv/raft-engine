@@ -163,6 +163,7 @@ impl GlobalStats {
 
 pub(crate) const INTERNAL_KEY_PREFIX: &[u8] = b"__";
 
+#[inline]
 pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
     assert!(!k.is_empty());
     let mut v = INTERNAL_KEY_PREFIX.to_vec();
@@ -175,8 +176,16 @@ pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
 /// (2) Internal keys are filtered out during apply and replay of both queues.
 /// This also makes sure future internal keys under the prefix won't become
 /// visible after downgrading.
-pub(crate) fn is_internal_key(s: &[u8]) -> bool {
-    s.len() > INTERNAL_KEY_PREFIX.len() && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+#[inline]
+pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
+    if let Some(ext) = ext {
+        s.len() == INTERNAL_KEY_PREFIX.len() + ext.len()
+            && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+            && s[INTERNAL_KEY_PREFIX.len()..] == *ext
+    } else {
+        s.len() > INTERNAL_KEY_PREFIX.len()
+            && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +209,8 @@ mod tests {
     #[test]
     fn test_internal_key() {
         let key = crate::make_internal_key(&[0]);
-        assert!(crate::is_internal_key(&key));
+        assert!(crate::is_internal_key(&key, None));
+        assert!(crate::is_internal_key(&key, Some(&[0])));
+        assert!(!crate::is_internal_key(&key, Some(&[1])));
     }
 }

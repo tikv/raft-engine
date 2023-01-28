@@ -1487,7 +1487,7 @@ mod tests {
             let mut total = 0;
             engine
                 .scan_raw_messages(rid, None, None, false, |k, _| {
-                    assert!(!crate::is_internal_key(k));
+                    assert!(!crate::is_internal_key(k, None));
                     total += 1;
                     true
                 })

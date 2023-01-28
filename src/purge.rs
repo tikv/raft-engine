@@ -333,6 +333,7 @@ where
                 m.region_id()
             };
 
+            // Size of entries from other raft groups.
             let mut alien_size = log_batch.approximate_size();
             let mut atomic_group = None;
             let mut current_entry_indexes = Vec::new();
@@ -353,7 +354,7 @@ where
                 }
                 if current_size + alien_size > max_batch_bytes() {
                     if needs_atomicity() && alien_size > 0 {
-                        // We are certain that old raft group and current raft group cannot fit
+                        // We are certain that prev raft group and current raft group cannot fit
                         // inside one batch.
                         // To avoid breaking atomicity, we need to flush.
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
@@ -376,6 +377,7 @@ where
                         }
 
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                        current_size = 0;
                         alien_size = 0;
                     }
                 }

@@ -716,7 +716,7 @@ impl LogBatch {
 
     /// Adds a protobuf key value pair into the log batch.
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
-        if crate::is_internal_key(&key) {
+        if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",
                 crate::INTERNAL_KEY_PREFIX
@@ -727,7 +727,7 @@ impl LogBatch {
 
     /// Adds a key value pair into the log batch.
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        if crate::is_internal_key(&key) {
+        if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",
                 crate::INTERNAL_KEY_PREFIX
@@ -984,8 +984,8 @@ impl AtomicGroupStatus {
         }) = &item.content
         {
             if *op_type == OpType::Put
+                && crate::is_internal_key(key, Some(ATOMIC_GROUP_KEY))
                 && value.as_ref().unwrap().len() == ATOMIC_GROUP_VALUE_LEN
-                && *key == crate::make_internal_key(ATOMIC_GROUP_KEY)
             {
                 let value = &mut value.as_ref().unwrap().as_slice();
                 return Some((
