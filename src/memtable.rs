@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use fail::fail_point;
 use hashbrown::HashMap;
-use log::warn;
+use log::{error, warn};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
@@ -1301,7 +1301,9 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
                         if is_group.is_none() {
                             is_group = Some(g);
                         } else {
-                            debug_assert!(false, "skipped an atomic group: {:?}", g);
+                            let msg = format!("skipped an atomic group: {:?}", g);
+                            error!("{}", msg);
+                            debug_assert!(false, "{}", msg);
                         }
                         return false;
                     }
