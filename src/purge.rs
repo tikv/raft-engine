@@ -313,10 +313,10 @@ where
         rewrite: Option<FileSeq>,
     ) -> Result<()> {
         // Only use atomic group for rewrite-rewrite operation.
-        let needs_atomicity = || {
+        let needs_atomicity = (|| {
             fail_point!("force_use_atomic_group", |_| true);
             rewrite.is_none()
-        };
+        })();
         let mut log_batch = LogBatch::default();
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
@@ -333,8 +333,7 @@ where
                 m.region_id()
             };
 
-            // Size of entries from other raft groups.
-            let mut alien_size = log_batch.approximate_size();
+            let mut previous_size = log_batch.approximate_size();
             let mut atomic_group = None;
             let mut current_entry_indexes = Vec::new();
             let mut current_entries = Vec::new();
@@ -347,40 +346,40 @@ where
                 current_size += entry.len();
                 current_entries.push(entry);
                 current_entry_indexes.push(ei);
-                if entry_indexes.peek().is_none() {
-                    // This is the last batch.
-                    log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
-                    break;
-                }
-                if current_size + alien_size > max_batch_bytes() {
-                    if needs_atomicity() && alien_size > 0 {
+                // If this is the last entry, we handle them outside the loop.
+                if entry_indexes.peek().is_some()
+                    && current_size + previous_size > max_batch_bytes()
+                {
+                    if needs_atomicity && previous_size > 0 {
                         // We are certain that prev raft group and current raft group cannot fit
                         // inside one batch.
                         // To avoid breaking atomicity, we need to flush.
                         self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                        alien_size = 0;
-                        // It is possible that `current_size` is already large
-                        // enough. We ignore this to make code simpler.
-                    } else {
-                        log_batch.add_raw_entries(
-                            region_id,
-                            mem::take(&mut current_entry_indexes),
-                            mem::take(&mut current_entries),
-                        )?;
-
-                        if needs_atomicity() && atomic_group.is_none() {
-                            let mut g = AtomicGroupBuilder::default();
-                            g.begin(&mut log_batch);
-                            atomic_group = Some(g);
-                        } else if let Some(g) = atomic_group.as_mut() {
-                            g.add(&mut log_batch);
+                        previous_size = 0;
+                        if current_size <= max_batch_bytes() {
+                            continue;
                         }
-
-                        self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                        current_size = 0;
-                        alien_size = 0;
                     }
+                    if needs_atomicity && atomic_group.is_none() {
+                        let mut g = AtomicGroupBuilder::default();
+                        g.begin(&mut log_batch);
+                        atomic_group = Some(g);
+                    } else if let Some(g) = atomic_group.as_mut() {
+                        g.add(&mut log_batch);
+                    }
+
+                    log_batch.add_raw_entries(
+                        region_id,
+                        mem::take(&mut current_entry_indexes),
+                        mem::take(&mut current_entries),
+                    )?;
+                    current_size = 0;
+                    previous_size = 0;
+                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 }
+            }
+            if !current_entry_indexes.is_empty() {
+                log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
             }
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v)?;
@@ -388,7 +387,7 @@ where
             if let Some(g) = atomic_group.as_mut() {
                 g.end(&mut log_batch);
                 self.rewrite_impl(&mut log_batch, rewrite, false)?;
-            } else if current_size + alien_size > max_batch_bytes() {
+            } else if log_batch.approximate_size() > max_batch_bytes() {
                 self.rewrite_impl(&mut log_batch, rewrite, false)?;
             }
         }
