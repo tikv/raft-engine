@@ -350,22 +350,27 @@ where
                 if entry_indexes.peek().is_some()
                     && current_size + previous_size > max_batch_bytes()
                 {
-                    if needs_atomicity && previous_size > 0 {
-                        // We are certain that prev raft group and current raft group cannot fit
-                        // inside one batch.
-                        // To avoid breaking atomicity, we need to flush.
-                        self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                        previous_size = 0;
-                        if current_size <= max_batch_bytes() {
-                            continue;
+                    if needs_atomicity {
+                        if previous_size > 0 {
+                            // We are certain that prev raft group and current raft group cannot fit
+                            // inside one batch.
+                            // To avoid breaking atomicity, we need to flush.
+                            self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                            previous_size = 0;
+                            if current_size <= max_batch_bytes() {
+                                continue;
+                            }
                         }
-                    }
-                    if needs_atomicity && atomic_group.is_none() {
-                        let mut g = AtomicGroupBuilder::default();
-                        g.begin(&mut log_batch);
-                        atomic_group = Some(g);
-                    } else if let Some(g) = atomic_group.as_mut() {
-                        g.add(&mut log_batch);
+                        match atomic_group.as_mut() {
+                            None => {
+                                let mut g = AtomicGroupBuilder::default();
+                                g.begin(&mut log_batch);
+                                atomic_group = Some(g);
+                            }
+                            Some(g) => {
+                                g.add(&mut log_batch);
+                            }
+                        }
                     }
 
                     log_batch.add_raw_entries(
@@ -378,9 +383,7 @@ where
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
                 }
             }
-            if !current_entry_indexes.is_empty() {
-                log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
-            }
+            log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
             for (k, v) in kvs {
                 log_batch.put(region_id, k, v)?;
             }
