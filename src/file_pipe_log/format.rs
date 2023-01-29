@@ -17,7 +17,7 @@ const LOG_SEQ_WIDTH: usize = 16;
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
 /// Name suffix for Rewrite queue files.
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
-/// Name suffix for stale log files.
+/// Name suffix for recycled log files.
 const LOG_APPEND_RESERVED_SUFFIX: &str = ".raftlog.reserved";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";

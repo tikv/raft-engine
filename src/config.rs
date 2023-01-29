@@ -8,6 +8,7 @@ use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
+const MAX_RECYCLE_CAPACITY: usize = ReadableSize::kb(16).0 as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -93,7 +94,7 @@ pub struct Config {
     pub enable_log_recycle: bool,
 
     /// Whether to prepare log files for recycling when start.
-    /// If `true`, batch stale log files will be prepared for recycling when
+    /// If `true`, batch empty log files will be prepared for recycling when
     /// starting engine.
     /// Only available for `enable-log-reycle` is true.
     ///
@@ -186,12 +187,12 @@ impl Config {
             return 0;
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
-            // (1) At most u32::MAX so that the file number can be capped into an u32
-            // without colliding. (2) Add some more file as an additional buffer to
-            // avoid jitters.
+            // (1) At most MAX_RECYCLE_CAPACITY so that the file number can be capped into
+            // an u32 without colliding. (2) Add some more file as an additional
+            // buffer to avoid jitters.
             std::cmp::min(
                 (self.purge_threshold.0 / self.target_file_size.0) as usize + 2,
-                u32::MAX as usize,
+                MAX_RECYCLE_CAPACITY as usize,
             )
         } else {
             0

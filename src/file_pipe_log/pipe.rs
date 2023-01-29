@@ -83,15 +83,16 @@ impl<F: FileSystem> SinglePipe<F> {
     ) -> Result<Self> {
         let paths = vec![Path::new(&cfg.dir).to_path_buf()];
         let alignment = || {
-            fail_point!("pipe::force_set_alignment", |_| { 16 });
+            fail_point!("file_pipe_log::open::force_set_alignment", |_| { 16 });
             0
         };
         let default_format = LogFileFormat::new(cfg.format_version, alignment());
 
         // Open or create active file.
-        if active_files.is_empty() {
+        let no_active_files = active_files.is_empty();
+        if no_active_files {
             let path_id = DEFAULT_PATH_ID;
-            let file_id = FileId::new(queue, FileSeq::default());
+            let file_id = FileId::new(queue, 1 as FileSeq);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
                 seq: file_id.seq,
@@ -101,13 +102,15 @@ impl<F: FileSystem> SinglePipe<F> {
             });
         }
         let f = active_files.last().unwrap();
+        // If starting from active_files.emtpy(), we should reset the first file with
+        // given file format.
         let writable_file = WritableFile {
             seq: f.seq,
             writer: build_file_writer(
                 file_system.as_ref(),
                 f.handle.clone(),
                 f.format,
-                true, /* force_reset */
+                no_active_files, /* force_reset */
             )?,
             format: f.format,
         };
@@ -232,15 +235,16 @@ impl<F: FileSystem> SinglePipe<F> {
 
 impl<F: FileSystem> SinglePipe<F> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        if let Some(fd) = {
-            let files = self.active_files.read();
-            let off = handle.id.seq - files[0].seq;
-            files.get(off as usize).map(|f| f.handle.clone())
-        } {
-            let mut reader = build_file_reader(self.file_system.as_ref(), fd)?;
-            reader.read(handle)
-        } else {
-            Err(Error::Corruption("file seqno out of range".to_string()))
+        let files = self.active_files.read();
+        if_chain::if_chain! {
+            if (files[0].seq..files[0].seq + files.len() as u64).contains(&handle.id.seq);
+            if let Some(fd) = files.get((handle.id.seq - files[0].seq) as usize).map(|f| f.handle.clone());
+            then {
+                let mut reader = build_file_reader(self.file_system.as_ref(), fd)?;
+                reader.read(handle)
+            } else {
+                Err(Error::Corruption("file seqno out of range".to_string()))
+            }
         }
     }
 
@@ -352,16 +356,14 @@ impl<F: FileSystem> SinglePipe<F> {
             let remains_capacity = self.capacity.saturating_sub(len);
             let (recycled_start, mut recycled_len) = {
                 let files = self.recycled_files.read();
-                if let Some(f) = files.front() {
-                    (f.seq, files.len())
-                } else {
-                    (FileSeq::default(), 0)
-                }
+                files
+                    .front()
+                    .map_or_else(|| (1, 0), |f| (f.seq, files.len()))
             };
             let mut new_recycled = VecDeque::new();
-            // The newly purged files from `self.active_files` should be RENAME
-            // to stale files with `.raftlog.stale` suffix, to reduce the unnecessary
-            // recovery timecost when RESTART.
+            // The newly purged files from `self.active_files` should be renamed
+            // to recycled files with LOG_APPEND_RESERVED_SUFFIX suffix, to reduce the
+            // unnecessary recovery timecost when restarting.
             for f in purged_files {
                 let file_id = FileId {
                     seq: f.seq,
@@ -388,8 +390,8 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
                 self.file_system.delete(&path)?;
             }
-            // If there exists several stale files out of space, contained in
-            // `self.stale_files` and `purged_files`, we should check and remove them
+            // If there exists several recycled files out of space, contained in
+            // `self.recycled_files` and `purged_files`, we should check and remove them
             // to avoid the `size` of whole files beyond `self.capacity`.
             if recycled_len > remains_capacity {
                 assert!(new_recycled.is_empty());
@@ -618,7 +620,7 @@ mod tests {
         };
         let queue = LogQueue::Append;
         let fs = Arc::new(ObfuscatedFileSystem::default());
-        let pipe_log = new_test_pipe(&cfg, queue, fs.clone()).unwrap();
+        let pipe_log = new_test_pipe(&cfg, queue, fs).unwrap();
         assert_eq!(pipe_log.file_span(), (1, 1));
 
         fn content(i: usize) -> Vec<u8> {
@@ -631,18 +633,11 @@ mod tests {
         }
         pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
-        // By `purge`, all stale files will be automatically renamed to reserved files.
+        // By `purge`, all stale files will be automatically renamed to recycled files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
-        // Try to read stale file.
+        // Try to read recycled file.
         for (_, handle) in handles.into_iter().enumerate() {
             assert!(pipe_log.read_bytes(handle).is_err());
-            let path = dir.path().join(build_recycled_file_name(handle.id.seq));
-            // Bypass pipe log
-            let mut reader =
-                build_file_reader(fs.as_ref(), Arc::new(fs.open(&path).unwrap())).unwrap();
-            assert!(reader.read(handle).unwrap().is_empty());
-            // Delete file so that it cannot be reused.
-            fs.delete(&path).unwrap();
         }
         // Try to reuse.
         let mut handles = Vec::new();

@@ -672,7 +672,7 @@ fn test_build_engine_with_multi_datalayout() {
     }
     drop(engine);
     // File with DataLayout::Alignment
-    let _f = FailGuard::new("file_mgr::file_collection::force_set_alignment", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_alignment", "return");
     let cfg_v2 = Config {
         format_version: Version::V2,
         ..cfg
@@ -700,7 +700,7 @@ fn test_build_engine_with_datalayout_abnormal() {
         format_version: Version::V2,
         ..Default::default()
     };
-    let _f = FailGuard::new("file_mgr::file_collection::force_set_alignment", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_alignment", "return");
     let engine = Engine::open(cfg.clone()).unwrap();
     // Content durable with DataLayout::Alignment.
     append(&engine, 1, 1, 11, Some(&data));

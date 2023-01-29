@@ -440,9 +440,9 @@ fn test_file_allocate_error() {
 }
 
 #[test]
-fn test_start_with_stale_file_allocate_error() {
+fn test_start_with_recycled_file_allocate_error() {
     let dir = tempfile::Builder::new()
-        .prefix("test_start_with_stale_file_allocate_error")
+        .prefix("test_start_with_recycled_file_allocate_error")
         .tempdir()
         .unwrap();
     let cfg = Config {
@@ -455,19 +455,19 @@ fn test_start_with_stale_file_allocate_error() {
     };
     let entry = vec![b'x'; 1024];
     // Mock that the engine starts with the circumstance where
-    // the stale file with seqno[5] failed to be generated.
+    // the pref-reserved file with seqno[5] failed to be generated.
     {
         let _f = FailGuard::new("log_fd::write::zero", "4*off->1*return->off");
         Engine::open(cfg.clone()).unwrap();
     }
-    // Extra stale files have been supplemented.
+    // Extra recycled files have been supplemented.
     let engine = Engine::open(cfg).unwrap();
     engine
         .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
         .unwrap();
     let (start, end) = engine.file_span(LogQueue::Append);
     assert_eq!(start, end);
-    // Append several entries to make Engine reuse the stale logs.
+    // Append several entries to make Engine reuse the recycled logs.
     for r in 2..6 {
         engine
             .write(&mut generate_batch(r, 1, 5, Some(&entry)), true)

@@ -429,10 +429,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     fn initialize_files(&mut self) -> Result<()> {
         let now = Instant::now();
         let target_file_size = self.cfg.target_file_size.0 as usize;
-        let mut target = self
-            .cfg
-            .recycle_capacity()
-            .saturating_sub(self.append_files.len());
+        let mut target = if self.cfg.prefill_for_recycle {
+            self.cfg
+                .recycle_capacity()
+                .saturating_sub(self.append_files.len())
+        } else {
+            0
+        };
         target = cmp::min(target, MAX_PREFILL_SIZE / target_file_size);
         let mut created = 0;
         let root_path = Path::new(&self.cfg.dir);
@@ -441,7 +444,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 .recycled_files
                 .last()
                 .map(|f| f.seq + 1)
-                .unwrap_or_default();
+                .unwrap_or_else(|| 1);
             let path = root_path.join(build_recycled_file_name(seq));
             let handle = Arc::new(self.file_system.create(&path)?);
             let mut writer = self.file_system.new_writer(handle.clone())?;
@@ -449,7 +452,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
             while written < target_file_size {
                 writer.write_all(&buf).unwrap_or_else(|e| {
-                    warn!("failed to build stale file, err: {}", e);
+                    warn!("failed to build recycled file, err: {}", e);
                 });
                 written += buf.len();
             }
@@ -462,16 +465,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             created += 1;
         }
         if created > 0 {
-            info!("prefill logs takes {:?}, created {created}", now.elapsed(),);
+            info!("prefill logs takes {:?}, created {created}", now.elapsed());
         }
-        // If stale_capacity has been changed when restarting by manually modifications,
-        // such as setting `Config::enable-log-recycle` from TRUE to FALSE,
-        // setting `Config::prefill-for-recycle` from TRUE to FALSE or
+        // If target recycled capacity has been changed when restarting by manually
+        // modifications, such as setting `Config::enable-log-recycle` from TRUE to
+        // FALSE, setting `Config::prefill-for-recycle` from TRUE to FALSE or
         // changing the recycle capacity, we should remove redundant
-        // stale files in advance.
+        // recycled files in advance.
         while self.recycled_files.len() > target {
             let f = self.recycled_files.pop().unwrap();
-            let path = build_recycled_file_name(f.seq);
+            let path = root_path.join(build_recycled_file_name(f.seq));
             self.file_system.delete(&path)?;
         }
         Ok(())
