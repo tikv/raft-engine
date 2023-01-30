@@ -724,3 +724,32 @@ fn test_build_engine_with_datalayout_abnormal() {
         Engine::open(cfg).unwrap();
     }
 }
+
+#[test]
+fn test_build_engine_with_huge_capacity() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_huge_capacity")
+        .tempdir()
+        .unwrap();
+    // Start engine with prefilled recycling. Testing too many
+    // prefilled files
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        enable_log_recycle: true,
+        prefill_for_recycle: true,
+        ..Default::default()
+    };
+    if let Some(max_fd_limit) = fdlimit::raise_fd_limit() {
+        let recycle_capacity = std::cmp::min(
+            (cfg.purge_threshold.0 / cfg.target_file_size.0) as usize + 2,
+            u32::MAX as usize,
+        );
+        if recycle_capacity >= max_fd_limit as usize {
+            // It should panic by **open too many files**.
+            assert!(catch_unwind_silent(|| { Engine::open(cfg).unwrap() }).is_err());
+        } else {
+            Engine::open(cfg).unwrap();
+        }
+    }
+}

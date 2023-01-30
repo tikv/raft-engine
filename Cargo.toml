@@ -66,6 +66,7 @@ rand = "0.8"
 rand_distr = "0.4"
 tempfile = "3.1"
 toml = "0.5"
+fdlimit = "0.2"
 
 [features]
 internals = []

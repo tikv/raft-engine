@@ -700,24 +700,8 @@ mod tests {
             dir: sub_dir.to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        RaftLogEngine::open_with_file_system(
-            cfg.clone(),
-            Arc::new(ObfuscatedFileSystem::default()),
-        )
-        .unwrap();
-        // Start engine with prefilled recycling. Testing too many
-        // prefilled files.
-        let cfg_recycle = Config {
-            target_file_size: ReadableSize(1),
-            enable_log_recycle: true,
-            prefill_for_recycle: true,
-            ..cfg
-        };
-        RaftLogEngine::open_with_file_system(
-            cfg_recycle,
-            Arc::new(ObfuscatedFileSystem::default()),
-        )
-        .unwrap();
+        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+            .unwrap();
     }
 
     #[test]

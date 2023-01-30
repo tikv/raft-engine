@@ -92,7 +92,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let no_active_files = active_files.is_empty();
         if no_active_files {
             let path_id = DEFAULT_PATH_ID;
-            let file_id = FileId::new(queue, 1 as FileSeq);
+            let file_id = FileId::new(queue, 1_u64);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
                 seq: file_id.seq,
@@ -235,13 +235,21 @@ impl<F: FileSystem> SinglePipe<F> {
 
 impl<F: FileSystem> SinglePipe<F> {
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
+        let fd = self.get_fd(handle.id.seq)?;
+        // As the header of each log file already parsed in the processing of loading
+        // log files, we just need to build the `LogFileReader`.
+        let mut reader = build_file_reader(self.file_system.as_ref(), fd)?;
+        reader.read(handle)
+    }
+
+    /// Returns a shared [`LogFd`] for the specified file sequence number.
+    fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
         let files = self.active_files.read();
         if_chain::if_chain! {
-            if (files[0].seq..files[0].seq + files.len() as u64).contains(&handle.id.seq);
-            if let Some(fd) = files.get((handle.id.seq - files[0].seq) as usize).map(|f| f.handle.clone());
+            if (files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq);
+            if let Some(f) = files.get((file_seq - files[0].seq) as usize).map(|f| f.handle.clone());
             then {
-                let mut reader = build_file_reader(self.file_system.as_ref(), fd)?;
-                reader.read(handle)
+                Ok(f)
             } else {
                 Err(Error::Corruption("file seqno out of range".to_string()))
             }

@@ -8,7 +8,6 @@ use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
-const MAX_RECYCLE_CAPACITY: usize = ReadableSize::kb(16).0 as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -187,12 +186,12 @@ impl Config {
             return 0;
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
-            // (1) At most MAX_RECYCLE_CAPACITY so that the file number can be capped into
+            // (1) At most u32::MAX  so that the file number can be capped into
             // an u32 without colliding. (2) Add some more file as an additional
             // buffer to avoid jitters.
             std::cmp::min(
                 (self.purge_threshold.0 / self.target_file_size.0) as usize + 2,
-                MAX_RECYCLE_CAPACITY as usize,
+                u32::MAX as usize,
             )
         } else {
             0
