@@ -5,6 +5,11 @@
 ### Behavior Changes
 
 * Disable log recycling by default.
+* `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.
+
+### Bug Fixes
+
+* Fix data loss caused by aborted rewrite operation. Downgrading to an earlier version without the fix may produce phantom Raft Groups or keys, i.e. never written but appear in queries.
 
 ## [0.3.0] - 2022-09-14
 

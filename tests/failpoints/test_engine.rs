@@ -1,5 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -39,7 +40,6 @@ fn append<FS: FileSystem>(
 #[test]
 fn test_pipe_log_listeners() {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct QueueHook {
@@ -722,5 +722,251 @@ fn test_build_engine_with_datalayout_abnormal() {
         }
         drop(engine);
         Engine::open(cfg).unwrap();
+    }
+}
+
+// issue-228
+#[test]
+fn test_partial_rewrite_rewrite() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_partial_rewrite_rewrite")
+        .tempdir()
+        .unwrap();
+    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        recovery_threads: 1,
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let data = vec![b'x'; 128];
+
+    for rid in 1..=3 {
+        append(&engine, rid, 1, 5, Some(&data));
+        append(&engine, rid, 5, 11, Some(&data));
+    }
+
+    let old_active_file = engine.file_span(LogQueue::Append).1;
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+
+    for rid in 1..=3 {
+        append(&engine, rid, 11, 16, Some(&data));
+    }
+
+    {
+        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        assert!(
+            catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
+        );
+    }
+
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    for rid in 1..=3 {
+        assert_eq!(engine.first_index(rid).unwrap(), 1);
+        assert_eq!(engine.last_index(rid).unwrap(), 15);
+    }
+}
+
+#[test]
+fn test_partial_rewrite_rewrite_online() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_partial_rewrite_rewrite_online")
+        .tempdir()
+        .unwrap();
+    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let data = vec![b'x'; 128];
+
+    for rid in 1..=3 {
+        append(&engine, rid, 1, 5, Some(&data));
+        append(&engine, rid, 5, 11, Some(&data));
+    }
+
+    let old_active_file = engine.file_span(LogQueue::Append).1;
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+
+    {
+        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        assert!(
+            catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
+        );
+    }
+
+    for rid in 1..=3 {
+        append(&engine, rid, 11, 16, Some(&data));
+    }
+    let old_active_file = engine.file_span(LogQueue::Append).1;
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    for rid in 1..=3 {
+        assert_eq!(engine.first_index(rid).unwrap(), 1);
+        assert_eq!(engine.last_index(rid).unwrap(), 15);
+    }
+}
+
+fn test_split_rewrite_batch_imp(regions: u64, region_size: u64, split_size: u64, file_size: u64) {
+    let dir = tempfile::Builder::new()
+        .prefix("test_split_rewrite_batch")
+        .tempdir()
+        .unwrap();
+    let _f1 = fail::FailGuard::new("max_rewrite_batch_bytes", &format!("return({split_size})"));
+    let _f2 = fail::FailGuard::new("force_use_atomic_group", "return");
+
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(file_size),
+        batch_compression_threshold: ReadableSize(0),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let data = vec![b'x'; region_size as usize / 10];
+
+    for rid in 1..=regions {
+        append(&engine, rid, 1, 5, Some(&data));
+        append(&engine, rid, 5, 11, Some(&data));
+    }
+
+    let old_active_file = engine.file_span(LogQueue::Append).1;
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+
+    drop(engine);
+    let engine = Engine::open(cfg.clone()).unwrap();
+    for rid in 1..=regions {
+        assert_eq!(engine.first_index(rid).unwrap(), 1);
+        assert_eq!(engine.last_index(rid).unwrap(), 10);
+    }
+
+    for rid in 1..=regions {
+        append(&engine, rid, 11, 16, Some(&data));
+    }
+    let old_active_file = engine.file_span(LogQueue::Append).1;
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
+    drop(engine);
+
+    for i in 1..=10 {
+        let engine = Engine::open(cfg.clone()).unwrap();
+        let count = AtomicU64::new(0);
+        fail::cfg_callback("atomic_group::begin", move || {
+            if count.fetch_add(1, Ordering::Relaxed) + 1 == i {
+                fail::cfg("log_fd::write::err", "return").unwrap();
+            }
+        })
+        .unwrap();
+        let r = catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue());
+        fail::remove("atomic_group::begin");
+        fail::remove("log_fd::write::err");
+        if r.is_ok() {
+            break;
+        }
+    }
+    for i in 1..=10 {
+        let engine = Engine::open(cfg.clone()).unwrap();
+        for rid in 1..=regions {
+            assert_eq!(engine.first_index(rid).unwrap(), 1);
+            assert_eq!(engine.last_index(rid).unwrap(), 15);
+        }
+        let count = AtomicU64::new(0);
+        fail::cfg_callback("atomic_group::add", move || {
+            if count.fetch_add(1, Ordering::Relaxed) + 1 == i {
+                fail::cfg("log_fd::write::err", "return").unwrap();
+            }
+        })
+        .unwrap();
+        let r = catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue());
+        fail::remove("atomic_group::begin");
+        fail::remove("log_fd::write::err");
+        if r.is_ok() {
+            break;
+        }
+    }
+    let engine = Engine::open(cfg).unwrap();
+    for rid in 1..=regions {
+        assert_eq!(engine.first_index(rid).unwrap(), 1);
+        assert_eq!(engine.last_index(rid).unwrap(), 15);
+    }
+}
+
+#[test]
+fn test_split_rewrite_batch() {
+    test_split_rewrite_batch_imp(10, 40960, 1, 1);
+    test_split_rewrite_batch_imp(10, 40960, 1, 40960 * 2);
+    test_split_rewrite_batch_imp(25, 4096, 6000, 40960 * 2);
+}
+
+#[test]
+fn test_split_rewrite_batch_with_only_kvs() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_split_rewrite_batch_with_only_kvs")
+        .tempdir()
+        .unwrap();
+    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg.clone()).unwrap();
+    let mut log_batch = LogBatch::default();
+    let key = vec![b'x'; 2];
+    let value = vec![b'y'; 8];
+
+    let mut rid = 1;
+    {
+        log_batch.put(rid, key.clone(), Vec::new()).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+    }
+    {
+        let _f = fail::FailGuard::new("force_use_atomic_group", "return");
+        log_batch.put(rid, key.clone(), Vec::new()).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
+        rid += 1;
+        log_batch.put(rid, key.clone(), value.clone()).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+
+        engine.purge_manager().must_rewrite_rewrite_queue();
+    }
+
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    for i in 1..=rid {
+        assert_eq!(engine.get(i, &key).unwrap(), value);
     }
 }

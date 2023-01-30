@@ -78,6 +78,7 @@ pub mod internals {
     pub use crate::file_pipe_log::*;
     pub use crate::memtable::*;
     pub use crate::pipe_log::*;
+    pub use crate::purge::*;
     #[cfg(feature = "swap")]
     pub use crate::swappy_allocator::*;
     pub use crate::write_barrier::*;
@@ -160,6 +161,33 @@ impl GlobalStats {
     }
 }
 
+pub(crate) const INTERNAL_KEY_PREFIX: &[u8] = b"__";
+
+#[inline]
+pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
+    assert!(!k.is_empty());
+    let mut v = INTERNAL_KEY_PREFIX.to_vec();
+    v.extend_from_slice(k);
+    v
+}
+
+/// We ensure internal keys are not visible to the user by:
+/// (1) Writing internal keys will be rejected by `LogBatch::put`.
+/// (2) Internal keys are filtered out during apply and replay of both queues.
+/// This also makes sure future internal keys under the prefix won't become
+/// visible after downgrading.
+#[inline]
+pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
+    if let Some(ext) = ext {
+        s.len() == INTERNAL_KEY_PREFIX.len() + ext.len()
+            && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+            && s[INTERNAL_KEY_PREFIX.len()..] == *ext
+    } else {
+        s.len() > INTERNAL_KEY_PREFIX.len()
+            && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::log_batch::MessageExt;
@@ -176,5 +204,13 @@ mod tests {
         fn index(e: &Self::Entry) -> u64 {
             e.index
         }
+    }
+
+    #[test]
+    fn test_internal_key() {
+        let key = crate::make_internal_key(&[0]);
+        assert!(crate::is_internal_key(&key, None));
+        assert!(crate::is_internal_key(&key, Some(&[0])));
+        assert!(!crate::is_internal_key(&key, Some(&[1])));
     }
 }
