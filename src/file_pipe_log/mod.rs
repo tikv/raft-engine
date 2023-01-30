@@ -197,11 +197,11 @@ pub mod debug {
                 .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
                 .unwrap();
             batch.add_command(7, Command::Clean);
-            batch.put(7, b"key".to_vec(), b"value".to_vec());
+            batch.put(7, b"key".to_vec(), b"value".to_vec()).unwrap();
             batch.delete(7, b"key2".to_vec());
             batches.push(vec![batch.clone()]);
             let mut batch2 = LogBatch::default();
-            batch2.put(8, b"key3".to_vec(), b"value".to_vec());
+            batch2.put(8, b"key3".to_vec(), b"value".to_vec()).unwrap();
             batch2
                 .add_entries::<Entry>(8, &generate_entries(5, 15, Some(&entry_data)))
                 .unwrap();

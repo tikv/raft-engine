@@ -78,7 +78,7 @@ where
         mut listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<F, FilePipeLog<F>>> {
         cfg.sanitize()?;
-        listeners.push(Arc::new(PurgeHook::new()) as Arc<dyn EventListener>);
+        listeners.push(Arc::new(PurgeHook::default()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
         let mut builder = FilePipeLogBuilder::new(cfg.clone(), file_system, listeners.clone());
@@ -371,6 +371,11 @@ where
     pub fn path(&self) -> &str {
         self.cfg.dir.as_str()
     }
+
+    #[cfg(feature = "internals")]
+    pub fn purge_manager(&self) -> &PurgeManager<P> {
+        &self.purge_manager
+    }
 }
 
 impl<F, P> Drop for Engine<F, P>
@@ -591,12 +596,13 @@ mod tests {
     use super::*;
     use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
+    use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
     use std::fs::OpenOptions;
     use std::path::PathBuf;
 
@@ -658,13 +664,13 @@ mod tests {
                 &mut entries,
             )
             .unwrap();
-            assert_eq!(entries.len(), (end - start) as usize);
-            assert_eq!(entries.first().unwrap().index, start);
+            assert_eq!(entries.first().unwrap().index, start, "{}", rid);
+            assert_eq!(entries.last().unwrap().index + 1, end);
             assert_eq!(
                 entries.last().unwrap().index,
                 self.decode_last_index(rid).unwrap()
             );
-            assert_eq!(entries.last().unwrap().index + 1, end);
+            assert_eq!(entries.len(), (end - start) as usize);
             for e in entries.iter() {
                 let entry_index = self
                     .memtables
@@ -860,9 +866,9 @@ mod tests {
         let mut batch = LogBatch::default();
         let mut res = Vec::new();
         let mut rich_res = Vec::new();
-        batch.put(rid, key(1), value(1));
-        batch.put(rid, key(2), value(2));
-        batch.put(rid, key(3), value(3));
+        batch.put(rid, key(1), value(1)).unwrap();
+        batch.put(rid, key(2), value(2)).unwrap();
+        batch.put(rid, key(3), value(3)).unwrap();
         engine.write(&mut batch, false).unwrap();
 
         engine
@@ -930,9 +936,9 @@ mod tests {
         let key = b"key".to_vec();
         let (v1, v2) = (b"v1".to_vec(), b"v2".to_vec());
         let mut batch_1 = LogBatch::default();
-        batch_1.put(rid, key.clone(), v1);
+        batch_1.put(rid, key.clone(), v1).unwrap();
         let mut batch_2 = LogBatch::default();
-        batch_2.put(rid, key.clone(), v2.clone());
+        batch_2.put(rid, key.clone(), v2.clone()).unwrap();
         let mut delete_batch = LogBatch::default();
         delete_batch.delete(rid, key.clone());
 
@@ -1410,7 +1416,7 @@ mod tests {
             let mut batch = LogBatch::default();
             for &has_data in writes {
                 if has_data {
-                    batch.put(rid, b"key".to_vec(), data.clone());
+                    batch.put(rid, b"key".to_vec(), data.clone()).unwrap();
                 }
                 engine.write(&mut batch, true).unwrap();
                 assert!(batch.is_empty());
@@ -1476,6 +1482,19 @@ mod tests {
         let old_active_file = engine.file_span(LogQueue::Rewrite).1;
         engine.purge_manager.must_rewrite_rewrite_queue();
         assert!(engine.file_span(LogQueue::Rewrite).0 > old_active_file);
+
+        for rid in engine.raft_groups() {
+            let mut total = 0;
+            engine
+                .scan_raw_messages(rid, None, None, false, |k, _| {
+                    assert!(!crate::is_internal_key(k, None));
+                    total += 1;
+                    true
+                })
+                .unwrap();
+            assert_eq!(total, 1);
+        }
+        assert_eq!(engine.raft_groups().len(), 3);
 
         let engine = engine.reopen();
         for rid in 1..=3 {
@@ -1593,11 +1612,11 @@ mod tests {
             .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
             .unwrap();
         batch.add_command(7, Command::Clean);
-        batch.put(7, b"key".to_vec(), b"value".to_vec());
+        batch.put(7, b"key".to_vec(), b"value".to_vec()).unwrap();
         batch.delete(7, b"key2".to_vec());
         batches.push(vec![batch.clone()]);
         let mut batch2 = LogBatch::default();
-        batch2.put(8, b"key3".to_vec(), b"value".to_vec());
+        batch2.put(8, b"key3".to_vec(), b"value".to_vec()).unwrap();
         batch2
             .add_entries::<Entry>(8, &generate_entries(5, 15, Some(&entry_data)))
             .unwrap();
@@ -2351,5 +2370,194 @@ mod tests {
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system.clone()).unwrap();
         assert_eq!(file_system.inner.file_count(), engine.file_count(None));
+    }
+
+    #[test]
+    fn test_rewrite_atomic_group() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_rewrite_atomic_group")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            // Make sure each file gets replayed individually.
+            recovery_threads: 100,
+            ..Default::default()
+        };
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let key = vec![b'x'; 2];
+        let value = vec![b'y'; 8];
+
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let mut data = HashSet::new();
+        let mut rid = 1;
+        // Directly write to pipe log.
+        let mut log_batch = LogBatch::default();
+        let flush = |lb: &mut LogBatch| {
+            lb.finish_populate(0).unwrap();
+            engine.pipe_log.append(LogQueue::Rewrite, lb).unwrap();
+            lb.drain();
+        };
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            // plug a unrelated write.
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.add(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.add(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(3);
+            builder.begin(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            // We must change id to avoid getting merged with last group.
+            // It is actually not possible in real life to only have "begin" missing.
+            let mut builder = AtomicGroupBuilder::with_id(4);
+            builder.begin(&mut LogBatch::default());
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(4);
+            builder.begin(&mut LogBatch::default());
+            builder.add(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            let mut builder = AtomicGroupBuilder::with_id(5);
+            builder.begin(&mut LogBatch::default());
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(5);
+            builder.begin(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        engine.pipe_log.sync(LogQueue::Rewrite).unwrap();
+
+        let engine = engine.reopen();
+        for rid in engine.raft_groups() {
+            assert!(data.remove(&rid), "{}", rid);
+            assert_eq!(engine.get(rid, &key).unwrap(), value);
+        }
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_internal_key_filter() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_internal_key_filter")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        let fs = Arc::new(ObfuscatedFileSystem::default());
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let value = vec![b'y'; 8];
+        let mut log_batch = LogBatch::default();
+        log_batch.put_unchecked(1, crate::make_internal_key(&[1]), value.clone());
+        log_batch.put_unchecked(2, crate::make_internal_key(&[1]), value.clone());
+        engine.write(&mut log_batch, false).unwrap();
+        // Apply of append filtered.
+        assert!(engine.raft_groups().is_empty());
+
+        let engine = engine.reopen();
+        // Replay of append filtered.
+        assert!(engine.raft_groups().is_empty());
+
+        log_batch.put_unchecked(3, crate::make_internal_key(&[1]), value.clone());
+        log_batch.put_unchecked(4, crate::make_internal_key(&[1]), value);
+        log_batch.finish_populate(0).unwrap();
+        let block_handle = engine
+            .pipe_log
+            .append(LogQueue::Rewrite, &mut log_batch)
+            .unwrap();
+        log_batch.finish_write(block_handle);
+        engine
+            .memtables
+            .apply_rewrite_writes(log_batch.drain(), None, 0);
+        // Apply of rewrite filtered.
+        assert!(engine.raft_groups().is_empty());
+
+        let engine = engine.reopen();
+        // Replay of rewrite filtered.
+        assert!(engine.raft_groups().is_empty());
     }
 }

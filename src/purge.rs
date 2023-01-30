@@ -2,16 +2,18 @@
 
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use fail::fail_point;
 use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
 use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
-use crate::log_batch::LogBatch;
+use crate::log_batch::{AtomicGroupBuilder, LogBatch};
 use crate::memtable::{MemTableHandle, MemTables};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
@@ -23,8 +25,15 @@ const FORCE_COMPACT_RATIO: f64 = 0.2;
 const REWRITE_RATIO: f64 = 0.7;
 // Only rewrite region with stale logs less than this threshold.
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
-const MAX_REWRITE_BATCH_BYTES: usize = 128 * 1024;
 const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
+
+fn max_batch_bytes() -> usize {
+    fail_point!("max_rewrite_batch_bytes", |s| s
+        .unwrap()
+        .parse::<usize>()
+        .unwrap());
+    128 * 1024
+}
 
 pub struct PurgeManager<P>
 where
@@ -121,7 +130,6 @@ where
 
     /// Rewrite append files with seqno no larger than `watermark`. When it's
     /// None, rewrite the entire queue. Returns the number of purged files.
-    #[cfg(test)]
     pub fn must_rewrite_append_queue(
         &self,
         watermark: Option<FileSeq>,
@@ -149,7 +157,6 @@ where
         .unwrap();
     }
 
-    #[cfg(test)]
     pub fn must_rewrite_rewrite_queue(&self) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
         self.rewrite_rewrite_queue().unwrap();
@@ -305,11 +312,14 @@ where
         expect_rewrites_per_memtable: usize,
         rewrite: Option<FileSeq>,
     ) -> Result<()> {
+        // Only use atomic group for rewrite-rewrite operation.
+        let needs_atomicity = (|| {
+            fail_point!("force_use_atomic_group", |_| true);
+            rewrite.is_none()
+        })();
         let mut log_batch = LogBatch::default();
-        let mut total_size = 0;
         for memtable in memtables {
             let mut entry_indexes = Vec::with_capacity(expect_rewrites_per_memtable);
-            let mut entries = Vec::with_capacity(expect_rewrites_per_memtable);
             let mut kvs = Vec::new();
             let region_id = {
                 let m = memtable.read();
@@ -323,31 +333,65 @@ where
                 m.region_id()
             };
 
-            // FIXME: This code makes my brain hurt.
-            let mut cursor = 0;
-            while cursor < entry_indexes.len() {
-                let entry =
-                    read_entry_bytes_from_file(self.pipe_log.as_ref(), &entry_indexes[cursor])?;
-                total_size += entry.len();
-                entries.push(entry);
-                if total_size > MAX_REWRITE_BATCH_BYTES {
-                    let mut take_entries = Vec::with_capacity(expect_rewrites_per_memtable);
-                    std::mem::swap(&mut take_entries, &mut entries);
-                    let mut take_entry_indexes = entry_indexes.split_off(cursor + 1);
-                    std::mem::swap(&mut take_entry_indexes, &mut entry_indexes);
-                    log_batch.add_raw_entries(region_id, take_entry_indexes, take_entries)?;
+            let mut previous_size = log_batch.approximate_size();
+            let mut atomic_group = None;
+            let mut current_entry_indexes = Vec::new();
+            let mut current_entries = Vec::new();
+            let mut current_size = 0;
+            // Split the entries into smaller chunks, so that we don't OOM, and the
+            // compression overhead is not too high.
+            let mut entry_indexes = entry_indexes.into_iter().peekable();
+            while let Some(ei) = entry_indexes.next() {
+                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), &ei)?;
+                current_size += entry.len();
+                current_entries.push(entry);
+                current_entry_indexes.push(ei);
+                // If this is the last entry, we handle them outside the loop.
+                if entry_indexes.peek().is_some()
+                    && current_size + previous_size > max_batch_bytes()
+                {
+                    if needs_atomicity {
+                        if previous_size > 0 {
+                            // We are certain that prev raft group and current raft group cannot fit
+                            // inside one batch.
+                            // To avoid breaking atomicity, we need to flush.
+                            self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                            previous_size = 0;
+                            if current_size <= max_batch_bytes() {
+                                continue;
+                            }
+                        }
+                        match atomic_group.as_mut() {
+                            None => {
+                                let mut g = AtomicGroupBuilder::default();
+                                g.begin(&mut log_batch);
+                                atomic_group = Some(g);
+                            }
+                            Some(g) => {
+                                g.add(&mut log_batch);
+                            }
+                        }
+                    }
+
+                    log_batch.add_raw_entries(
+                        region_id,
+                        mem::take(&mut current_entry_indexes),
+                        mem::take(&mut current_entries),
+                    )?;
+                    current_size = 0;
+                    previous_size = 0;
                     self.rewrite_impl(&mut log_batch, rewrite, false)?;
-                    total_size = 0;
-                    cursor = 0;
-                } else {
-                    cursor += 1;
                 }
             }
-            if !entries.is_empty() {
-                log_batch.add_raw_entries(region_id, entry_indexes, entries)?;
-            }
+            log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
             for (k, v) in kvs {
-                log_batch.put(region_id, k, v);
+                log_batch.put(region_id, k, v)?;
+            }
+            if let Some(g) = atomic_group.as_mut() {
+                g.end(&mut log_batch);
+                self.rewrite_impl(&mut log_batch, rewrite, false)?;
+            } else if log_batch.approximate_size() > max_batch_bytes() {
+                self.rewrite_impl(&mut log_batch, rewrite, false)?;
             }
         }
         self.rewrite_impl(&mut log_batch, rewrite, true)
@@ -390,6 +434,7 @@ where
     }
 }
 
+#[derive(Default)]
 pub struct PurgeHook {
     // Append queue log files that are not yet fully applied to MemTable must not be
     // purged even when not referenced by any MemTable.
@@ -397,14 +442,6 @@ pub struct PurgeHook {
     // log files in append queue. No need to track rewrite queue because it is only
     // written by purge thread.
     active_log_files: RwLock<VecDeque<(FileSeq, AtomicUsize)>>,
-}
-
-impl PurgeHook {
-    pub fn new() -> Self {
-        PurgeHook {
-            active_log_files: Default::default(),
-        }
-    }
 }
 
 impl EventListener for PurgeHook {
