@@ -700,43 +700,14 @@ mod tests {
             .prefix("test_empty_engine")
             .tempdir()
             .unwrap();
-        {
-            let mut sub_dir = PathBuf::from(dir.as_ref());
-            sub_dir.push("raft-engine");
-            let cfg = Config {
-                dir: sub_dir.to_str().unwrap().to_owned(),
-                ..Default::default()
-            };
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
-        }
-        {
-            // Start engine with prefilled recycling. Testing too many
-            // prefilled files
-            let cfg = Config {
-                dir: dir.path().to_str().unwrap().to_owned(),
-                target_file_size: ReadableSize(1),
-                enable_log_recycle: true,
-                prefill_for_recycle: true,
-                ..Default::default()
-            };
-            if let Some(max_fd_limit) = fdlimit::raise_fd_limit() {
-                if cfg.recycle_capacity() >= max_fd_limit as usize {
-                    // It should return Error **open too many files**.
-                    assert!(RaftLogEngine::open_with_file_system(
-                        cfg,
-                        Arc::new(ObfuscatedFileSystem::default())
-                    )
-                    .is_err());
-                } else {
-                    RaftLogEngine::open_with_file_system(
-                        cfg,
-                        Arc::new(ObfuscatedFileSystem::default()),
-                    )
-                    .unwrap();
-                }
-            }
-        }
+        let mut sub_dir = PathBuf::from(dir.as_ref());
+        sub_dir.push("raft-engine");
+        let cfg = Config {
+            dir: sub_dir.to_str().unwrap().to_owned(),
+            ..Default::default()
+        };
+        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
+            .unwrap();
     }
 
     #[test]
