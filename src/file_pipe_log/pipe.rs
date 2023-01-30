@@ -245,15 +245,10 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
         let files = self.active_files.read();
-        if_chain::if_chain! {
-            if (files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq);
-            if let Some(f) = files.get((file_seq - files[0].seq) as usize).map(|f| f.handle.clone());
-            then {
-                Ok(f)
-            } else {
-                Err(Error::Corruption("file seqno out of range".to_string()))
-            }
+        if !(files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq) {
+            return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
+        Ok(files[(file_seq - files[0].seq) as usize].handle.clone())
     }
 
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {

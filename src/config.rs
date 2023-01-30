@@ -186,7 +186,7 @@ impl Config {
             return 0;
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
-            // (1) At most u32::MAX  so that the file number can be capped into
+            // (1) At most u32::MAX so that the file number can be capped into
             // an u32 without colliding. (2) Add some more file as an additional
             // buffer to avoid jitters.
             std::cmp::min(
