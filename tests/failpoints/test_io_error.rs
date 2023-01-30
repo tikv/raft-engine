@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use fail::FailGuard;
 use raft::eraftpb::Entry;
 use raft_engine::env::ObfuscatedFileSystem;
 use raft_engine::internals::*;
