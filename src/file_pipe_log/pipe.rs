@@ -346,16 +346,16 @@ impl<F: FileSystem> SinglePipe<F> {
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
         let (len, purged_files) = {
             let mut files = self.active_files.write();
-            let off = (file_seq - files[0].seq) as usize;
-            if off >= files.len() {
-                return Err(box_err!("Active file cannot be purged"));
+            if !(files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq) {
+                return Err(box_err!("FileSeq out of range, cannot be purged"));
             }
+            let off = (file_seq - files[0].seq) as usize;
             let mut tail = files.split_off(off);
             std::mem::swap(&mut tail, &mut files);
             (files.len(), tail)
         };
         let purged_len = purged_files.len();
-        {
+        if purged_len > 0 {
             let remains_capacity = self.capacity.saturating_sub(len);
             let (recycled_start, mut recycled_len) = {
                 let files = self.recycled_files.read();
@@ -373,6 +373,7 @@ impl<F: FileSystem> SinglePipe<F> {
                     queue: self.queue,
                 };
                 let path = file_id.build_file_path(&self.paths[f.path_id]);
+                // Recycle purged files whose version meets the requirement.
                 if f.format.version.has_log_signing() && recycled_len < remains_capacity {
                     let recycled_seq = recycled_start + recycled_len as u64;
                     let dst_path =
@@ -391,26 +392,11 @@ impl<F: FileSystem> SinglePipe<F> {
                         Err(e) => error!("failed to reuse purged file {:?}", e),
                     }
                 }
+                // Remove purged files which are out of capacity and files whose version is marked
+                // not recycled.
                 self.file_system.delete(&path)?;
             }
-            // If there exists several recycled files out of space, contained in
-            // `self.recycled_files` and `purged_files`, we should check and remove them
-            // to avoid the `size` of whole files beyond `self.capacity`.
-            if recycled_len > remains_capacity {
-                assert!(new_recycled.is_empty());
-                let overflow = {
-                    let mut files = self.recycled_files.write();
-                    let mut tail = files.split_off(recycled_len - remains_capacity);
-                    std::mem::swap(&mut tail, &mut files);
-                    tail
-                };
-                for f in overflow {
-                    let path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
-                    self.file_system.delete(&path)?;
-                }
-            } else {
-                self.recycled_files.write().append(&mut new_recycled);
-            }
+            self.recycled_files.write().append(&mut new_recycled);
         }
         self.flush_metrics(len);
         Ok(purged_len)
