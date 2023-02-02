@@ -392,8 +392,8 @@ impl<F: FileSystem> SinglePipe<F> {
                         Err(e) => error!("failed to reuse purged file {:?}", e),
                     }
                 }
-                // Remove purged files which are out of capacity and files whose version is marked
-                // not recycled.
+                // Remove purged files which are out of capacity and files whose version is
+                // marked not recycled.
                 self.file_system.delete(&path)?;
             }
             self.recycled_files.write().append(&mut new_recycled);
