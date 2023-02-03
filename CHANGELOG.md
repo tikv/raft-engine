@@ -12,6 +12,7 @@
 * Fix data loss caused by aborted rewrite operation. Downgrading to an earlier version without the fix may produce phantom Raft Groups or keys, i.e. never written but appear in queries.
 
 ### New Features
+
 * Support preparing prefilled logs to enable log recycling when start-up.
 
 ## [0.3.0] - 2022-09-14
