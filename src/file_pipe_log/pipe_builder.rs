@@ -434,7 +434,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     }
 
     fn initialize_files(&mut self) -> Result<()> {
-        let now = Instant::now();
         let target_file_size = self.cfg.target_file_size.0 as usize;
         let mut target = if self.cfg.prefill_for_recycle {
             self.cfg
@@ -447,6 +446,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         target = cmp::min(target, MAX_PREFILL_SIZE / target_file_size);
         let to_create = target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
+            let now = Instant::now();
             for _ in 0..to_create {
                 let seq = self
                     .recycled_files
