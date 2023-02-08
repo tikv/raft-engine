@@ -24,6 +24,8 @@ use super::log_file::build_file_reader;
 use super::log_file::{build_file_writer, LogFileWriter};
 
 pub const DEFAULT_PATH_ID: PathId = 0;
+/// FileSeq of logs must start from `1` by default to keep backward compatibility.
+pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
 
 pub type PathId = usize;
 pub type Paths = Vec<PathBuf>;
@@ -92,7 +94,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let no_active_files = active_files.is_empty();
         if no_active_files {
             let path_id = DEFAULT_PATH_ID;
-            let file_id = FileId::new(queue, 1_u64);
+            let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
                 seq: file_id.seq,
@@ -191,7 +193,7 @@ impl<F: FileSystem> SinglePipe<F> {
             perf_context!(log_rotate_duration),
         ));
         let new_seq = writable_file.seq + 1;
-        debug_assert!(new_seq > 1);
+        debug_assert!(new_seq > DEFAULT_FIRST_FILE_SEQ);
 
         writable_file.writer.close()?;
 
@@ -361,7 +363,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 let files = self.recycled_files.read();
                 files
                     .front()
-                    .map_or_else(|| (1, 0), |f| (f.seq, files.len()))
+                    .map_or_else(|| (DEFAULT_FIRST_FILE_SEQ, 0), |f| (f.seq, files.len()))
             };
             let mut new_recycled = VecDeque::new();
             // The newly purged files from `self.active_files` should be renamed
