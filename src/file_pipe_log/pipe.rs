@@ -396,6 +396,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // marked not recycled.
                 self.file_system.delete(&path)?;
             }
+            debug_assert!(recycled_len <= remains_capacity);
             self.recycled_files.write().append(&mut new_recycled);
         }
         self.flush_metrics(len);
@@ -622,6 +623,9 @@ mod tests {
         }
         pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
+        // Cannot purge already expired logs or not existsed logs.
+        assert!(pipe_log.purge_to(first - 1).is_err());
+        assert!(pipe_log.purge_to(last + 1).is_err());
         // By `purge`, all stale files will be automatically renamed to recycled files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read recycled file.
