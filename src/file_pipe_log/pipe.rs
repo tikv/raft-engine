@@ -24,7 +24,8 @@ use super::log_file::build_file_reader;
 use super::log_file::{build_file_writer, LogFileWriter};
 
 pub const DEFAULT_PATH_ID: PathId = 0;
-/// FileSeq of logs must start from `1` by default to keep backward compatibility.
+/// FileSeq of logs must start from `1` by default to keep backward
+/// compatibility.
 pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
 
 pub type PathId = usize;
