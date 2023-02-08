@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 use crate::codec::{self, NumberEncoder};
-use crate::pipe_log::{FileId, LogQueue, Version};
+use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
 use crate::{Error, Result};
 
 /// Width to format log sequence number.
@@ -17,6 +17,8 @@ const LOG_SEQ_WIDTH: usize = 16;
 const LOG_APPEND_SUFFIX: &str = ".raftlog";
 /// Name suffix for Rewrite queue files.
 const LOG_REWRITE_SUFFIX: &str = ".rewrite";
+/// Name suffix for recycled log files.
+const LOG_APPEND_RESERVED_SUFFIX: &str = ".raftlog.reserved";
 /// File header.
 const LOG_FILE_MAGIC_HEADER: &[u8] = b"RAFT-LOG-FILE-HEADER-9986AB3E47F320B394C8E84916EB0ED5";
 
@@ -83,6 +85,28 @@ impl FileNameExt for FileId {
             ),
         }
     }
+}
+
+pub fn parse_recycled_file_name(file_name: &str) -> Option<FileSeq> {
+    if file_name.len() > LOG_SEQ_WIDTH {
+        if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
+            if file_name.ends_with(LOG_APPEND_RESERVED_SUFFIX) {
+                // As reserved files are only used for LogQueue::Append,
+                // we just return the related FileSeq of it.
+                return Some(seq);
+            }
+        }
+    }
+    None
+}
+
+pub fn build_recycled_file_name(seq: FileSeq) -> String {
+    format!(
+        "{:0width$}{}",
+        seq,
+        LOG_APPEND_RESERVED_SUFFIX,
+        width = LOG_SEQ_WIDTH
+    )
 }
 
 /// Path to the lock file under `dir`.

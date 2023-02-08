@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use fail::FailGuard;
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 use raft_engine::env::{FileSystem, ObfuscatedFileSystem};
@@ -373,7 +374,7 @@ fn test_incomplete_purge() {
     let engine = Engine::open(cfg.clone()).unwrap();
 
     {
-        let _f = FailGuard::new("file_pipe_log::remove_file_skipped", "return");
+        let _f = FailGuard::new("default_fs::delete_skipped", "return");
         append(&engine, rid, 0, 20, Some(&data));
         let append_first = engine.file_span(LogQueue::Append).0;
         engine.compact_to(rid, 18);
@@ -672,7 +673,7 @@ fn test_build_engine_with_multi_datalayout() {
     }
     drop(engine);
     // File with DataLayout::Alignment
-    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_alignment", "return");
     let cfg_v2 = Config {
         format_version: Version::V2,
         ..cfg
@@ -700,7 +701,7 @@ fn test_build_engine_with_datalayout_abnormal() {
         format_version: Version::V2,
         ..Default::default()
     };
-    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_alignment", "return");
     let engine = Engine::open(cfg.clone()).unwrap();
     // Content durable with DataLayout::Alignment.
     append(&engine, 1, 1, 11, Some(&data));
@@ -732,7 +733,7 @@ fn test_partial_rewrite_rewrite() {
         .prefix("test_partial_rewrite_rewrite")
         .tempdir()
         .unwrap();
-    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         recovery_threads: 1,
@@ -755,7 +756,7 @@ fn test_partial_rewrite_rewrite() {
     }
 
     {
-        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        let _f = FailGuard::new("log_fd::write::err", "10*off->return->off");
         assert!(
             catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
         );
@@ -775,7 +776,7 @@ fn test_partial_rewrite_rewrite_online() {
         .prefix("test_partial_rewrite_rewrite_online")
         .tempdir()
         .unwrap();
-    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         ..Default::default()
@@ -793,7 +794,7 @@ fn test_partial_rewrite_rewrite_online() {
     assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
 
     {
-        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        let _f = FailGuard::new("log_fd::write::err", "10*off->return->off");
         assert!(
             catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
         );
@@ -819,8 +820,8 @@ fn test_split_rewrite_batch_imp(regions: u64, region_size: u64, split_size: u64,
         .prefix("test_split_rewrite_batch")
         .tempdir()
         .unwrap();
-    let _f1 = fail::FailGuard::new("max_rewrite_batch_bytes", &format!("return({split_size})"));
-    let _f2 = fail::FailGuard::new("force_use_atomic_group", "return");
+    let _f1 = FailGuard::new("max_rewrite_batch_bytes", &format!("return({split_size})"));
+    let _f2 = FailGuard::new("force_use_atomic_group", "return");
 
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
@@ -911,7 +912,7 @@ fn test_split_rewrite_batch_with_only_kvs() {
         .prefix("test_split_rewrite_batch_with_only_kvs")
         .tempdir()
         .unwrap();
-    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         ..Default::default()
@@ -943,7 +944,7 @@ fn test_split_rewrite_batch_with_only_kvs() {
         engine.purge_manager().must_rewrite_rewrite_queue();
     }
     {
-        let _f = fail::FailGuard::new("force_use_atomic_group", "return");
+        let _f = FailGuard::new("force_use_atomic_group", "return");
         log_batch.put(rid, key.clone(), Vec::new()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
