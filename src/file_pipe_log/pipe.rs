@@ -23,13 +23,48 @@ use super::format::{build_recycled_file_name, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
 use super::log_file::{build_file_writer, LogFileWriter};
 
+pub type PathId = usize;
+pub type Paths = Vec<PathBuf>;
+
+/// Main directory path id.
 pub const DEFAULT_PATH_ID: PathId = 0;
+/// Auxiliary directory path id.
+pub const AUXILIARY_PATH_ID: PathId = 1;
 /// FileSeq of logs must start from `1` by default to keep backward
 /// compatibility.
 pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
 
-pub type PathId = usize;
-pub type Paths = Vec<PathBuf>;
+pub fn fetch_dir(paths: &Paths, target_size: usize) -> Result<PathId> {
+    #[cfg(feature = "failpoints")]
+    {
+        fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
+            Ok(AUXILIARY_PATH_ID)
+        });
+        fail::fail_point!("file_pipe_log::force_no_free_space", |_| {
+            Err(Error::Corruption("no enough space for new file".to_owned()))
+        });
+    }
+    for t in [DEFAULT_PATH_ID, AUXILIARY_PATH_ID] {
+        let idx = t as usize;
+        if idx >= paths.len() {
+            break;
+        }
+        let disk_stats = match fs2::statvfs(&paths[idx]) {
+            Err(e) => {
+                return Err(Error::Corruption(format!(
+                    "get disk stat for raft engine failed, dir_path: {}, err: {}",
+                    paths[idx].display(),
+                    e
+                )));
+            }
+            Ok(stats) => stats,
+        };
+        if target_size <= disk_stats.available_space() as usize {
+            return Ok(t);
+        }
+    }
+    Err(Error::Corruption("no enough space for new file".to_owned()))
+}
 
 #[derive(Debug)]
 pub struct File<F: FileSystem> {
@@ -84,7 +119,10 @@ impl<F: FileSystem> SinglePipe<F> {
         mut active_files: Vec<File<F>>,
         recycled_files: Vec<File<F>>,
     ) -> Result<Self> {
-        let paths = vec![Path::new(&cfg.dir).to_path_buf()];
+        let mut paths = vec![Path::new(&cfg.dir).to_path_buf()];
+        if let Some(auxiliary_dir) = &cfg.auxiliary_dir {
+            paths.push(Path::new(&auxiliary_dir).to_path_buf());
+        }
         let alignment = || {
             fail_point!("file_pipe_log::open::force_set_alignment", |_| { 16 });
             0
@@ -94,7 +132,9 @@ impl<F: FileSystem> SinglePipe<F> {
         // Open or create active file.
         let no_active_files = active_files.is_empty();
         if no_active_files {
-            let path_id = DEFAULT_PATH_ID;
+            // TODO: If no enough space for later appending, we should not refuse to open
+            // Pipe.
+            let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize)?;
             let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
@@ -147,9 +187,9 @@ impl<F: FileSystem> SinglePipe<F> {
 
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
-    fn sync_dir(&self) -> Result<()> {
+    fn sync_dir(&self, path_id: PathId) -> Result<()> {
         debug_assert!(!self.paths.is_empty());
-        let path = PathBuf::from(&self.paths[0]);
+        let path = PathBuf::from(&self.paths[path_id]);
         std::fs::File::open(path).and_then(|d| d.sync_all())?;
         Ok(())
     }
@@ -171,7 +211,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok((f.path_id, self.file_system.open(&dst_path)?));
             }
         }
-        let path_id = DEFAULT_PATH_ID;
+        let path_id = fetch_dir(&self.paths, self.target_file_size)?;
         let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
         Ok((path_id, self.file_system.create(&dst_path)?))
     }
@@ -218,7 +258,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
-        self.sync_dir()?;
+        self.sync_dir(path_id)?;
 
         **writable_file = new_file;
         let len = {
@@ -301,6 +341,35 @@ impl<F: FileSystem> SinglePipe<F> {
                     "error when truncate {} after error: {}, get: {}",
                     seq, e, te
                 );
+            }
+            // TODO: make the following judgement more elegant when the error type
+            // `ErrorKind::StorageFull` is stable.
+            let no_space_err = {
+                if_chain::if_chain! {
+                    if let Error::Io(ref e) = e;
+                    let err_msg = format!("{}", e.get_ref().unwrap());
+                    if err_msg.contains("nospace");
+                    then {
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if no_space_err {
+                if let Err(e) = self.rotate_imp(&mut writable_file) {
+                    panic!(
+                        "error when rotate [{:?}:{}]: {}",
+                        self.queue, writable_file.seq, e
+                    );
+                }
+                // If there still exists free space for this record, rotate the file
+                // and return a special Err (for retry) to the caller.
+                return Err(Error::Other(box_err!(
+                    "failed to write {} file, get {} try to flush it to another dir",
+                    seq,
+                    e
+                )));
             }
             return Err(e);
         }
@@ -411,14 +480,14 @@ impl<F: FileSystem> SinglePipe<F> {
 pub struct DualPipes<F: FileSystem> {
     pipes: [SinglePipe<F>; 2],
 
-    _dir_lock: StdFile,
+    _dir_locks: Vec<StdFile>,
 }
 
 impl<F: FileSystem> DualPipes<F> {
     /// Open a new [`DualPipes`]. Assumes the two [`SinglePipe`]s share the
     /// same directory, and that directory is locked by `dir_lock`.
     pub(super) fn open(
-        dir_lock: StdFile,
+        dir_locks: Vec<StdFile>,
         appender: SinglePipe<F>,
         rewriter: SinglePipe<F>,
     ) -> Result<Self> {
@@ -428,7 +497,7 @@ impl<F: FileSystem> DualPipes<F> {
 
         Ok(Self {
             pipes: [appender, rewriter],
-            _dir_lock: dir_lock,
+            _dir_locks: dir_locks,
         })
     }
 
@@ -500,7 +569,7 @@ mod tests {
 
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
         DualPipes::open(
-            lock_dir(&cfg.dir)?,
+            vec![lock_dir(&cfg.dir)?],
             new_test_pipe(cfg, LogQueue::Append, Arc::new(DefaultFileSystem))?,
             new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem))?,
         )

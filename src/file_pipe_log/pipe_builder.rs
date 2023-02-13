@@ -27,7 +27,10 @@ use super::format::{
     build_recycled_file_name, lock_file_path, parse_recycled_file_name, FileNameExt, LogFileFormat,
 };
 use super::log_file::build_file_reader;
-use super::pipe::{DualPipes, File, SinglePipe, DEFAULT_FIRST_FILE_SEQ, DEFAULT_PATH_ID};
+use super::pipe::{
+    fetch_dir, DualPipes, File, PathId, Paths, SinglePipe, AUXILIARY_PATH_ID,
+    DEFAULT_FIRST_FILE_SEQ, DEFAULT_PATH_ID,
+};
 use super::reader::LogItemBatchFileReader;
 
 const PREFILL_BUFFER_SIZE: usize = ReadableSize::mb(16).0 as usize;
@@ -77,7 +80,8 @@ pub struct DualPipesBuilder<F: FileSystem> {
     listeners: Vec<Arc<dyn EventListener>>,
 
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    dir_lock: Option<StdFile>,
+    dirs: Paths,
+    dir_locks: Vec<StdFile>,
     append_files: Vec<File<F>>,
     rewrite_files: Vec<File<F>>,
     recycled_files: Vec<File<F>>,
@@ -90,7 +94,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             cfg,
             file_system,
             listeners,
-            dir_lock: None,
+            dirs: Vec::new(),
+            dir_locks: Vec::new(),
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
             recycled_files: Vec::new(),
@@ -100,141 +105,139 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
-        let root_path = Path::new(&self.cfg.dir);
-        if !root_path.exists() {
-            info!("Create raft log directory: {}", root_path.display());
-            fs::create_dir(root_path)?;
-            self.dir_lock = Some(lock_dir(root_path)?);
-            return Ok(());
-        }
-        if !root_path.is_dir() {
-            return Err(box_err!("Not directory: {}", root_path.display()));
-        }
-        self.dir_lock = Some(lock_dir(root_path)?);
+        self.scan_dir(DEFAULT_PATH_ID)?; // scan Main dir
+        self.scan_dir(AUXILIARY_PATH_ID)?; // scan Auxiliary dir
 
-        let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
-        let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
-        let (mut min_recycled_id, mut max_recycled_id) = (u64::MAX, 0);
-        fs::read_dir(root_path)?.for_each(|e| {
-            if let Ok(e) = e {
-                let p = e.path();
-                if !p.is_file() {
-                    return;
-                }
-                let name = p.file_name().unwrap().to_str().unwrap();
-                match FileId::parse_file_name(name) {
-                    Some(FileId {
-                        queue: LogQueue::Append,
-                        seq,
-                    }) => {
-                        min_append_id = cmp::min(min_append_id, seq);
-                        max_append_id = cmp::max(max_append_id, seq);
-                    }
-                    Some(FileId {
-                        queue: LogQueue::Rewrite,
-                        seq,
-                    }) => {
-                        min_rewrite_id = cmp::min(min_rewrite_id, seq);
-                        max_rewrite_id = cmp::max(max_rewrite_id, seq);
-                    }
-                    _ => {
-                        if let Some(seq) = parse_recycled_file_name(name) {
-                            min_recycled_id = cmp::min(min_recycled_id, seq);
-                            max_recycled_id = cmp::max(max_recycled_id, seq);
-                        }
-                    }
+        // Sorts the expected `file_list` according to `file_seq`.
+        self.append_files.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.rewrite_files.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.recycled_files.sort_by(|a, b| a.seq.cmp(&b.seq));
+
+        // Validate and clear obsolete metadata and log files.
+        for (queue, files, is_recycled_file) in [
+            (LogQueue::Append, &mut self.append_files, false),
+            (LogQueue::Rewrite, &mut self.rewrite_files, false),
+            (LogQueue::Append, &mut self.recycled_files, true),
+        ] {
+            if files.is_empty() {
+                continue;
+            }
+            // Check the file_list and remove the hole of files.
+            let mut current_seq = files[0].seq;
+            let mut invalid_files = 0_usize;
+            debug_assert!(current_seq > 0);
+            for (i, f) in files.iter().enumerate() {
+                if f.seq > current_seq + (i - invalid_files) as u64 {
+                    warn!(
+                        "Detected a hole when scanning directory, discarding files before file_seq {}.",
+                        f.seq,
+                    );
+                    current_seq = f.seq + 1;
+                    invalid_files = i;
+                } else if f.seq < current_seq {
+                    return Err(Error::InvalidArgument("Duplicate file".to_string()));
                 }
             }
-        });
-
-        for (queue, min_id, max_id, files, is_recycled_file) in [
-            (
-                LogQueue::Append,
-                min_append_id,
-                max_append_id,
-                &mut self.append_files,
-                false, /* active file */
-            ),
-            (
-                LogQueue::Rewrite,
-                min_rewrite_id,
-                max_rewrite_id,
-                &mut self.rewrite_files,
-                false, /* active file */
-            ),
-            (
-                LogQueue::Append,
-                min_recycled_id,
-                max_recycled_id,
-                &mut self.recycled_files,
-                true, /* recycled file */
-            ),
-        ] {
-            if max_id > 0 {
-                // Try to cleanup stale metadata left by the previous version.
-                let max_sample = 100;
-                // Find the first obsolete metadata.
-                let mut delete_start = None;
-                for i in 0..max_sample {
-                    let seq = i * min_id / max_sample;
-                    let file_id = FileId { queue, seq };
-                    let path = if is_recycled_file {
-                        root_path.join(build_recycled_file_name(file_id.seq))
-                    } else {
-                        file_id.build_file_path(root_path)
-                    };
-                    if self.file_system.exists_metadata(&path) {
-                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
+            files.drain(..invalid_files);
+            // Try to cleanup stale metadata left by the previous version.
+            if files.is_empty() {
+                continue;
+            }
+            let mut cleared = 0_u64;
+            let clear_start: u64 = {
+                // TODO: Need a more efficient way to remove sparse stale metadata,
+                // without iterating one by one.
+                1
+            };
+            let dir = &self.dirs[files[0].path_id];
+            for seq in (clear_start..files[0].seq).rev() {
+                let file_id = FileId { queue, seq };
+                let path = if is_recycled_file {
+                    dir.join(build_recycled_file_name(seq))
+                } else {
+                    file_id.build_file_path(dir)
+                };
+                if self.file_system.exists_metadata(&path) {
+                    if let Err(e) = self.file_system.delete_metadata(&path) {
+                        error!("failed to delete metadata of {}: {}.", path.display(), e);
                         break;
                     }
+                    cleared += 1;
                 }
-                // Delete metadata starting from the oldest. Abort on error.
-                if let Some(start) = delete_start {
-                    let mut success = 0;
-                    for seq in start..min_id {
-                        let file_id = FileId { queue, seq };
-                        let path = if is_recycled_file {
-                            root_path.join(build_recycled_file_name(file_id.seq))
-                        } else {
-                            file_id.build_file_path(root_path)
-                        };
-                        if let Err(e) = self.file_system.delete_metadata(&path) {
-                            error!("failed to delete metadata of {}: {}.", path.display(), e);
-                            break;
-                        }
-                        success += 1;
-                    }
-                    warn!(
-                        "deleted {} stale files of {:?} in range [{}, {}).",
-                        success, queue, start, min_id,
-                    );
-                }
-                for seq in min_id..=max_id {
-                    let file_id = FileId { queue, seq };
-                    let path = if is_recycled_file {
-                        root_path.join(build_recycled_file_name(file_id.seq))
-                    } else {
-                        file_id.build_file_path(root_path)
-                    };
-                    if !path.exists() {
-                        warn!(
-                            "Detected a hole when scanning directory, discarding files before {:?}.",
-                            file_id,
-                        );
-                        files.clear();
-                    } else {
-                        let handle = Arc::new(self.file_system.open(&path)?);
-                        files.push(File {
-                            seq,
-                            handle,
-                            format: LogFileFormat::default(),
-                            path_id: DEFAULT_PATH_ID,
-                        });
-                    }
-                }
+            }
+            if cleared > 0 {
+                warn!(
+                    "clear {} stale files of {:?} in range [{}, {}).",
+                    cleared, queue, 0, files[0].seq,
+                );
             }
         }
         Ok(())
+    }
+
+    fn scan_dir(&mut self, path_id: PathId) -> Result<()> {
+        let root_path = match path_id {
+            DEFAULT_PATH_ID => Some(Path::new(&self.cfg.dir)),
+            AUXILIARY_PATH_ID => self.cfg.auxiliary_dir.as_ref().map(Path::new),
+            _ => None,
+        };
+        if root_path.is_none() {
+            return Ok(());
+        }
+        debug_assert!(root_path.is_some());
+        let dir = root_path.unwrap();
+        if !dir.exists() {
+            info!("Create raft log directory: {}", dir.display());
+            fs::create_dir(dir)?;
+            self.dir_locks.push(lock_dir(dir)?);
+            return Ok(());
+        }
+        if !dir.is_dir() {
+            return Err(box_err!("Not directory: {}", dir.display()));
+        }
+        self.dir_locks.push(lock_dir(dir)?);
+        self.dirs.push(dir.to_path_buf());
+
+        fs::read_dir(dir)?.try_for_each(|e| -> Result<()> {
+            if let Ok(e) = e {
+                let p = e.path();
+                if !p.is_file() {
+                    return Ok(());
+                }
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                match FileId::parse_file_name(file_name) {
+                    Some(FileId {
+                        queue: LogQueue::Append,
+                        seq,
+                    }) => self.append_files.push(File {
+                        seq,
+                        handle: Arc::new(self.file_system.open(&p)?),
+                        format: LogFileFormat::default(),
+                        path_id,
+                    }),
+                    Some(FileId {
+                        queue: LogQueue::Rewrite,
+                        seq,
+                    }) => self.rewrite_files.push(File {
+                        seq,
+                        handle: Arc::new(self.file_system.open(&p)?),
+                        format: LogFileFormat::default(),
+                        path_id,
+                    }),
+                    _ => {
+                        if let Some(seq) = parse_recycled_file_name(file_name) {
+                            self.recycled_files.push(File {
+                                seq,
+                                handle: Arc::new(self.file_system.open(&p)?),
+                                format: LogFileFormat::default(),
+                                path_id,
+                            })
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Reads through log items in all available log files, and replays them to
@@ -442,7 +445,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         } else {
             0
         };
-        let root_path = Path::new(&self.cfg.dir);
         target = cmp::min(target, MAX_PREFILL_SIZE / target_file_size);
         let to_create = target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
@@ -453,23 +455,29 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     .last()
                     .map(|f| f.seq + 1)
                     .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
-                let path = root_path.join(build_recycled_file_name(seq));
-                let handle = Arc::new(self.file_system.create(&path)?);
-                let mut writer = self.file_system.new_writer(handle.clone())?;
-                let mut written = 0;
-                let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
-                while written < target_file_size {
-                    writer.write_all(&buf).unwrap_or_else(|e| {
-                        warn!("failed to build recycled file, err: {}", e);
+                if let Ok(path_id) = fetch_dir(&self.dirs, target_file_size) {
+                    let root_path = &self.dirs[path_id];
+                    let path = root_path.join(build_recycled_file_name(seq));
+                    let handle = Arc::new(self.file_system.create(&path)?);
+                    let mut writer = self.file_system.new_writer(handle.clone())?;
+                    let mut written = 0;
+                    let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
+                    while written < target_file_size {
+                        writer.write_all(&buf).unwrap_or_else(|e| {
+                            warn!("failed to build recycled file, err: {}", e);
+                        });
+                        written += buf.len();
+                    }
+                    self.recycled_files.push(File {
+                        seq,
+                        handle,
+                        format: LogFileFormat::default(),
+                        path_id: DEFAULT_PATH_ID,
                     });
-                    written += buf.len();
+                } else {
+                    warn!("no enough space for preparing recycled logs");
+                    break;
                 }
-                self.recycled_files.push(File {
-                    seq,
-                    handle,
-                    format: LogFileFormat::default(),
-                    path_id: DEFAULT_PATH_ID,
-                });
             }
             info!(
                 "prefill logs takes {:?}, created {} files",
@@ -484,6 +492,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // recycled files in advance.
         while self.recycled_files.len() > target {
             let f = self.recycled_files.pop().unwrap();
+            let root_path = &self.dirs[f.path_id];
             let path = root_path.join(build_recycled_file_name(f.seq));
             let _ = self.file_system.delete(&path);
         }
@@ -509,7 +518,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.rewrite_files,
             Vec::new(),
         )?;
-        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
+        DualPipes::open(self.dir_locks, appender, rewriter)
     }
 }
 

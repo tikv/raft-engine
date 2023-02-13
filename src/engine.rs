@@ -25,6 +25,8 @@ use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{perf_context, Error, GlobalStats, Result};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+/// Max retry count for `write`.
+const WRITE_MAX_RETRY_TIMES: u64 = 2;
 
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
@@ -142,7 +144,14 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         debug_assert!(len > 0);
-        let block_handle = {
+
+        let mut attempt_count = 0_u64;
+        let block_handle = loop {
+            // Max retry count is limited to `WRITE_MAX_RETRY_TIMES`, that is, 2.
+            // If the first `append` retry because of NOSPC error, the next `append`
+            // should success, unless there exists several abnormal cases in the IO device.
+            // In that case, `Engine::write` must return `Err`.
+            attempt_count += 1;
             let mut writer = Writer::new(log_batch, sync);
             // Snapshot and clear the current perf context temporarily, so the write group
             // leader will collect the perf context diff later.
@@ -178,7 +187,27 @@ where
             debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
-            writer.finish()?
+            // Retry if `writer.finish()` returns a special 'Error::Other', remarking that
+            // there still exists free space for this `LogBatch`.
+            match writer.finish() {
+                Ok(handle) => {
+                    break handle;
+                }
+                Err(Error::Other(_)) => {
+                    if attempt_count >= WRITE_MAX_RETRY_TIMES {
+                        // A special err, we will retry this LogBatch `append` by appending
+                        // this writer to the next write group, and the current write leader
+                        // will not hang on this write and will return timely.
+                        return Err(Error::Other(box_err!(
+                            "Failed to write logbatch, exceed max_retry_count: ({})",
+                            WRITE_MAX_RETRY_TIMES
+                        )));
+                    }
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         };
         let mut now = Instant::now();
         log_batch.finish_write(block_handle);
@@ -2559,5 +2588,18 @@ mod tests {
         let engine = engine.reopen();
         // Replay of rewrite filtered.
         assert!(engine.raft_groups().is_empty());
+    }
+
+    #[test]
+    fn test_start_engine_with_multi_dir() {
+        // start from zeros - no recycling
+
+        // restart and mv some files to the Auxiliary Dir, then restart
+
+        // restart with prefill, then write and purge
+
+        // restart with no prefill, then write and purge
+
+        // restart with no recycling
     }
 }

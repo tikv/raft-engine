@@ -26,10 +26,19 @@ pub enum RecoveryMode {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
-    /// Directory to store log files. Will create on startup if not exists.
+    /// Main directory to store log files. Will create on startup if not exists.
     ///
     /// Default: ""
     pub dir: String,
+
+    /// Auxiliary directory to store log files. Will create on startup if
+    /// set and not exists.
+    ///
+    /// Newly logs will be put into this dir when the main `dir` is full
+    /// or not accessible.
+    ///
+    /// Default: ""
+    pub auxiliary_dir: Option<String>,
 
     /// How to deal with file corruption during recovery.
     ///
@@ -106,6 +115,7 @@ impl Default for Config {
         #[allow(unused_mut)]
         let mut cfg = Config {
             dir: "".to_owned(),
+            auxiliary_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
