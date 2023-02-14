@@ -34,38 +34,6 @@ pub const AUXILIARY_PATH_ID: PathId = 1;
 /// compatibility.
 pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
 
-pub fn fetch_dir(paths: &Paths, target_size: usize) -> Result<PathId> {
-    #[cfg(feature = "failpoints")]
-    {
-        fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
-            Ok(AUXILIARY_PATH_ID)
-        });
-        fail::fail_point!("file_pipe_log::force_no_free_space", |_| {
-            Err(Error::Corruption("no enough space for new file".to_owned()))
-        });
-    }
-    for t in [DEFAULT_PATH_ID, AUXILIARY_PATH_ID] {
-        let idx = t as usize;
-        if idx >= paths.len() {
-            break;
-        }
-        let disk_stats = match fs2::statvfs(&paths[idx]) {
-            Err(e) => {
-                return Err(Error::Corruption(format!(
-                    "get disk stat for raft engine failed, dir_path: {}, err: {}",
-                    paths[idx].display(),
-                    e
-                )));
-            }
-            Ok(stats) => stats,
-        };
-        if target_size <= disk_stats.available_space() as usize {
-            return Ok(t);
-        }
-    }
-    Err(Error::Corruption("no enough space for new file".to_owned()))
-}
-
 #[derive(Debug)]
 pub struct File<F: FileSystem> {
     pub seq: FileSeq,
@@ -132,8 +100,6 @@ impl<F: FileSystem> SinglePipe<F> {
         // Open or create active file.
         let no_active_files = active_files.is_empty();
         if no_active_files {
-            // TODO: If no enough space for later appending, we should not refuse to open
-            // Pipe.
             let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize)?;
             let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
             let path = file_id.build_file_path(&paths[path_id]);
@@ -546,6 +512,39 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     fn purge_to(&self, file_id: FileId) -> Result<usize> {
         self.pipes[file_id.queue as usize].purge_to(file_id.seq)
     }
+}
+
+/// Fetch and return a valid `PathId` of the specific directories.
+pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> Result<PathId> {
+    #[cfg(feature = "failpoints")]
+    {
+        fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
+            Ok(AUXILIARY_PATH_ID)
+        });
+        fail::fail_point!("file_pipe_log::force_no_free_space", |_| {
+            Err(Error::Corruption("no enough space for new file".to_owned()))
+        });
+    }
+    for t in [DEFAULT_PATH_ID, AUXILIARY_PATH_ID] {
+        let idx = t as usize;
+        if idx >= paths.len() {
+            break;
+        }
+        let disk_stats = match fs2::statvfs(&paths[idx]) {
+            Err(e) => {
+                return Err(Error::Corruption(format!(
+                    "get disk stat for raft engine failed, dir_path: {}, err: {}",
+                    paths[idx].display(),
+                    e
+                )));
+            }
+            Ok(stats) => stats,
+        };
+        if target_size <= disk_stats.available_space() as usize {
+            return Ok(t);
+        }
+    }
+    Err(Error::Corruption("no enough space for new file".to_owned()))
 }
 
 #[cfg(test)]

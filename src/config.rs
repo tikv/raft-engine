@@ -37,7 +37,7 @@ pub struct Config {
     /// Newly logs will be put into this dir when the main `dir` is full
     /// or not accessible.
     ///
-    /// Default: ""
+    /// Default: None
     pub auxiliary_dir: Option<String>,
 
     /// How to deal with file corruption during recovery.
@@ -219,12 +219,14 @@ mod tests {
         let dump = toml::to_string_pretty(&value).unwrap();
         let load = toml::from_str(&dump).unwrap();
         assert_eq!(value, load);
+        assert!(load.auxiliary_dir.is_none());
     }
 
     #[test]
     fn test_custom() {
         let custom = r#"
             dir = "custom_dir"
+            auxiliary-dir = "custom_auxiliary_dir"
             recovery-mode = "tolerate-tail-corruption"
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
@@ -235,6 +237,7 @@ mod tests {
         "#;
         let mut load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
+        assert_eq!(load.auxiliary_dir, Some("custom_auxiliary_dir".to_owned()));
         assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
         assert_eq!(load.bytes_per_sync, Some(ReadableSize::kb(2)));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));

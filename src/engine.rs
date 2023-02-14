@@ -2591,15 +2591,150 @@ mod tests {
     }
 
     #[test]
-    fn test_start_engine_with_multi_dir() {
-        // start from zeros - no recycling
+    fn test_start_engine_with_multi_dirs() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_default")
+            .tempdir()
+            .unwrap();
+        let auxiliary_dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_auxiliary")
+            .tempdir()
+            .unwrap();
+        let paths = [
+            dir.path().to_str().unwrap(),
+            auxiliary_dir.path().to_str().unwrap(),
+        ];
+        let file_system = Arc::new(DeleteMonitoredFileSystem::new());
+        let entry_data = vec![b'x'; 512];
 
-        // restart and mv some files to the Auxiliary Dir, then restart
+        // Preparations for multi-dirs.
+        {
+            // Step 1: write data into the main directory.
+            let cfg = Config {
+                dir: paths[0].to_owned(),
+                enable_log_recycle: false,
+                target_file_size: ReadableSize(1),
+                ..Default::default()
+            };
+            let engine = RaftLogEngine::open_with_file_system(cfg, file_system.clone()).unwrap();
+            for rid in 1..=10 {
+                engine.append(rid, 1, 10, Some(&entry_data));
+            }
+            let mut file_count = engine.file_count(Some(LogQueue::Append));
+            let halve_file_count = (file_count + 1) / 2;
+            drop(engine);
 
-        // restart with prefill, then write and purge
+            // Step 2: select several log files and move them into the auxiliary directory.
+            std::fs::read_dir(paths[0])
+                .unwrap()
+                .try_for_each(|e| -> Result<()> {
+                    if let Ok(e) = e {
+                        let p = e.path();
+                        if !p.is_file() || file_count < halve_file_count {
+                            return Ok(());
+                        }
+                        let file_name = p.file_name().unwrap().to_str().unwrap();
+                        match FileId::parse_file_name(file_name) {
+                            Some(FileId {
+                                queue: LogQueue::Append,
+                                seq: _,
+                            }) => {
+                                let mut dst_path = PathBuf::from(&paths[1]);
+                                dst_path.push(file_name);
+                                file_system.rename(p, dst_path).unwrap();
+                                file_count -= 1;
+                            }
+                            _ => return Ok(()),
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
 
-        // restart with no prefill, then write and purge
+        // Case 1: start an engine with no recycling.
+        let cfg = Config {
+            dir: paths[0].to_owned(),
+            auxiliary_dir: Some(paths[1].to_owned()),
+            target_file_size: ReadableSize(1),
+            enable_log_recycle: false,
+            ..Default::default()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
+        let (start, end) = engine.file_span(LogQueue::Append);
+        // Append data.
+        for rid in 1..=10 {
+            engine.append(rid, 10, 20, Some(&entry_data));
+        }
+        let (start_1, end_1) = engine.file_span(LogQueue::Append);
+        assert_eq!(start_1, start);
+        assert!(end_1 > end);
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
+        drop(engine);
 
-        // restart with no recycling
+        // Case 2: restart the engine with recycle and prefill.
+        let cfg_2 = Config {
+            enable_log_recycle: true,
+            prefill_for_recycle: true,
+            purge_threshold: ReadableSize(40),
+            ..cfg
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg_2.clone(), file_system.clone()).unwrap();
+        let file_count = file_system.inner.file_count();
+        let (start_2, end_2) = engine.file_span(LogQueue::Append);
+        assert!(file_count > engine.file_count(None));
+        assert_eq!((start_1, end_1), (start_2, end_2));
+        // Append data, recycled files are reused.
+        for rid in 1..=10 {
+            engine.append(rid, 20, 30, Some(&entry_data));
+        }
+        assert_eq!(file_count, file_system.inner.file_count());
+        // Mark all data obsolete.
+        for rid in 1..=10 {
+            engine.clean(rid);
+        }
+        let (start_2, end_2) = engine.file_span(LogQueue::Append);
+        assert_eq!(start_2, start_1);
+        assert!(end_2 > end_1);
+        assert_eq!(file_count, file_system.inner.file_count());
+        // Purge and check the file span. As all logs are reused from recycled files,
+        // the whole file_count won't change.
+        engine.purge_expired_files().unwrap();
+        let (start_3, end_3) = engine.file_span(LogQueue::Append);
+        assert!(start_3 > start_2);
+        assert_eq!(start_3, end_3);
+        let engine = engine.reopen();
+        // As the `purge_threshold` < the count of real append count, there exists
+        // newly created file for appending, which are not generated by reusing recycled
+        // logs.
+        assert!(file_count < file_system.inner.file_count());
+        let file_count = file_system.inner.file_count();
+        // Reuse all files for appending new data. Here, recycled files in auxiliary
+        // directory also are reused.
+        for rid in 1..=30 {
+            engine.append(rid, 1, 10, Some(&entry_data));
+        }
+        assert_eq!(file_count, file_system.inner.file_count());
+        let (start_4, end_4) = engine.file_span(LogQueue::Append);
+        drop(engine);
+
+        // Case 3: restart the engine with no recycle.
+        let cfg_3 = Config {
+            enable_log_recycle: false,
+            prefill_for_recycle: false,
+            purge_threshold: ReadableSize(40),
+            ..cfg_2
+        };
+        let engine = RaftLogEngine::open_with_file_system(cfg_3, file_system.clone()).unwrap();
+        assert_eq!((start_4, end_4), engine.file_span(LogQueue::Append));
+        // All prefilled - recycled files are cleared.
+        assert!(file_count > file_system.inner.file_count());
+        for rid in 1..=5 {
+            engine.append(rid, 10, 20, Some(&entry_data));
+        }
+        assert!(end_4 < engine.file_span(LogQueue::Append).1);
     }
 }

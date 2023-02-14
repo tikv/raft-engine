@@ -817,7 +817,9 @@ impl LogBatch {
     #[inline]
     pub(crate) fn prepare_write(&mut self, file_context: &LogFileContext) -> Result<()> {
         match self.buf_state {
-            BufState::Encoded(header_offset, entries_len) => {
+            // `BufState::Sealed` means that `LogBatch` is under a repeated state of dumping.
+            BufState::Encoded(header_offset, entries_len)
+            | BufState::Sealed(header_offset, entries_len) => {
                 LogItemBatch::prepare_write(&mut self.buf, self.item_batch.checksum, file_context)?;
                 self.buf_state = BufState::Sealed(header_offset, entries_len);
             }
@@ -1565,13 +1567,55 @@ mod tests {
     }
 
     #[test]
-    fn test_log_batch_sign_signature_repeatly() {
-        // set a LogBatch and encoding with finish_populate
+    fn test_log_batch_sign_signature_repeatedly() {
+        // Set a LogBatch and encode the LogBatch by `finish_populate`.
+        let mut batch = LogBatch::default();
+        batch
+            .add_entries::<Entry>(17, &generate_entries(0, 1, None))
+            .unwrap();
+        batch
+            .add_entries::<Entry>(27, &generate_entries(1, 11, None))
+            .unwrap();
 
-        // sign signature with file 1 => prepare_write()
-        // verify the checksum with file 1
+        let mocked_file_block_handles = [
+            FileBlockHandle {
+                id: FileId::new(LogQueue::Append, 12),
+                len: 0,
+                offset: 0,
+            },
+            FileBlockHandle {
+                id: FileId::new(LogQueue::Append, 18),
+                len: 0,
+                offset: 0,
+            },
+            FileBlockHandle {
+                id: FileId::new(LogQueue::Append, 2001),
+                len: 0,
+                offset: 0,
+            },
+        ];
+        let old_approximate_size = batch.approximate_size();
+        let len = batch.finish_populate(1).unwrap();
+        assert!(old_approximate_size >= len);
+        assert_eq!(batch.approximate_size(), len);
+        let checksum = batch.item_batch.checksum;
 
-        // sign signature with file 2 => prepare_write()
-        // verify the checksum with file 2
+        // Repeatedly sign signature to this batch, followed by decoding the signature
+        // and verifying the checksum.
+        for handle in mocked_file_block_handles {
+            let mut batch_handle = handle;
+            batch_handle.len = len;
+            let file_context = LogFileContext::new(batch_handle.id, Version::V2);
+            batch.prepare_write(&file_context).unwrap();
+            // batch.finish_write(batch_handle);
+            let encoded = batch.encoded_bytes();
+            assert_eq!(encoded.len(), len);
+            let mut bytes_slice = encoded;
+            let (offset, _, _) = LogBatch::decode_header(&mut bytes_slice).unwrap();
+            let expected =
+                verify_checksum_with_signature(&encoded[offset..], file_context.get_signature())
+                    .unwrap();
+            assert_eq!(expected, checksum);
+        }
     }
 }
