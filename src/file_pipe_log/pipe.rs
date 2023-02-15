@@ -516,15 +516,10 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 
 /// Fetch and return a valid `PathId` of the specific directories.
 pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> Result<PathId> {
-    #[cfg(feature = "failpoints")]
-    {
-        fail::fail_point!("file_pipe_log::force_use_secondary_dir", |_| {
-            Ok(AUXILIARY_PATH_ID)
-        });
-        fail::fail_point!("file_pipe_log::force_no_free_space", |_| {
-            Err(Error::Corruption("no enough space for new file".to_owned()))
-        });
-    }
+    let force_no_spare_space = || {
+        fail_point!("file_pipe_log::force_no_spare_space", |_| true);
+        false
+    };
     for t in [DEFAULT_PATH_ID, AUXILIARY_PATH_ID] {
         let idx = t as usize;
         if idx >= paths.len() {
@@ -540,7 +535,7 @@ pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> Result<PathId> {
             }
             Ok(stats) => stats,
         };
-        if target_size <= disk_stats.available_space() as usize {
+        if !force_no_spare_space() && target_size <= disk_stats.available_space() as usize {
             return Ok(t);
         }
     }

@@ -971,3 +971,81 @@ fn test_split_rewrite_batch_with_only_kvs() {
         assert_eq!(engine.get(i, &key).unwrap(), value);
     }
 }
+
+#[test]
+fn test_build_engine_with_recycling_and_multi_dirs() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dirs_main")
+        .tempdir()
+        .unwrap();
+    let auxiliary_dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dirs_auxiliary")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        auxiliary_dir: Some(auxiliary_dir.path().to_str().unwrap().to_owned()),
+        target_file_size: ReadableSize::kb(1),
+        purge_threshold: ReadableSize::kb(20),
+        enable_log_recycle: true,
+        prefill_for_recycle: true,
+        ..Default::default()
+    };
+    let data = vec![b'x'; 1024];
+    {
+        // Case 1: prefill recycled logs into multi-dirs
+        let engine = {
+            let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space",
+                                    "1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return");
+            Engine::open(cfg.clone()).unwrap()
+        };
+        for rid in 1..10 {
+            append(&engine, rid, 1, 5, Some(&data));
+        }
+        let append_first = engine.file_span(LogQueue::Append).0;
+        for rid in 1..10 {
+            engine.compact_to(rid, 3);
+        }
+        // Purge do not exceed purge_threshold, and first active file_seq won't change.
+        engine.purge_expired_files().unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, append_first);
+        for rid in 1..20 {
+            append(&engine, rid, 3, 5, Some(&data));
+            engine.compact_to(rid, 4);
+        }
+        // Purge obsolete logs.
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    }
+    {
+        // Case 2: prefill is on but no spare space for new log files.
+        let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        let append_end = engine.file_span(LogQueue::Append).1;
+        // As there still exists several recycled logs for incoming writes, so the
+        // following writes will success.
+        for rid in 1..10 {
+            append(&engine, rid, 5, 7, Some(&data));
+        }
+        assert!(engine.file_span(LogQueue::Append).1 > append_end);
+    }
+    {
+        // Case 3: no prefill and no spare space for new log files.
+        let cfg_no_prefill = Config {
+            enable_log_recycle: true,
+            prefill_for_recycle: false,
+            ..cfg
+        };
+        let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+        let engine = Engine::open(cfg_no_prefill).unwrap();
+        let (append_first, append_end) = engine.file_span(LogQueue::Append);
+        // Cannot dump new data into engine as no spare space.
+        for rid in 1..20 {
+            assert!(catch_unwind_silent(|| append(&engine, rid, 8, 9, Some(&data))).is_err());
+        }
+        assert_eq!(
+            engine.file_span(LogQueue::Append),
+            (append_first, append_end)
+        );
+    }
+}
