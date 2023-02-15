@@ -993,7 +993,9 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     };
     let data = vec![b'x'; 1024];
     {
-        // Case 1: prefill recycled logs into multi-dirs
+        // Case 1: prefill recycled logs into multi-dirs (when preparing recycled logs,
+        // this circumstance also equals to `main dir is full, but auxiliary dir
+        // is free`.)
         let engine = {
             let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space",
                                     "1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return");
