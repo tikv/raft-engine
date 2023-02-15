@@ -993,12 +993,27 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     };
     let data = vec![b'x'; 1024];
     {
+        // Extra case: prefill several recycled logs but no space for remains, making
+        // prefilling progress exit in advance.
+        let _f1 = FailGuard::new(
+            "file_pipe_log::force_no_spare_space",
+            "10*off->1*return->1*off->1*return->1*off->2*return",
+        );
+        let _ = Engine::open(cfg.clone()).unwrap();
+        let cfg_err = Config {
+            enable_log_recycle: false,
+            prefill_for_recycle: false,
+            ..cfg.clone()
+        };
+        let _ = Engine::open(cfg_err).unwrap();
+    }
+    {
         // Case 1: prefill recycled logs into multi-dirs (when preparing recycled logs,
         // this circumstance also equals to `main dir is full, but auxiliary dir
         // is free`.)
         let engine = {
             let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space",
-                                    "1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return");
+                                    "1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off->1*return->1*off");
             Engine::open(cfg.clone()).unwrap()
         };
         for rid in 1..10 {
