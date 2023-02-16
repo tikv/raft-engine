@@ -330,11 +330,10 @@ impl<F: FileSystem> SinglePipe<F> {
                     );
                 }
                 // If there still exists free space for this record, rotate the file
-                // and return a special Err (for retry) to the caller.
-                return Err(Error::Other(box_err!(
+                // and return a special TryAgain Err (for retry) to the caller.
+                return Err(Error::TryAgain(format!(
                     "failed to write {} file, get {} try to flush it to another dir",
-                    seq,
-                    e
+                    seq, e
                 )));
             }
             return Err(e);

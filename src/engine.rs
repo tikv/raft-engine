@@ -193,7 +193,7 @@ where
                 Ok(handle) => {
                     break handle;
                 }
-                Err(Error::Other(_)) => {
+                Err(Error::TryAgain(_)) => {
                     if attempt_count >= WRITE_MAX_RETRY_TIMES {
                         // A special err, we will retry this LogBatch `append` by appending
                         // this writer to the next write group, and the current write leader
