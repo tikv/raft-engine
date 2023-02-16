@@ -993,13 +993,45 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     };
     let data = vec![b'x'; 1024];
     {
-        // Extra case: prefill several recycled logs but no space for remains, making
-        // prefilling progress exit in advance.
-        let _f1 = FailGuard::new(
-            "file_pipe_log::force_no_spare_space",
-            "10*off->1*return->1*off->1*return->1*off->2*return",
-        );
-        let _ = Engine::open(cfg.clone()).unwrap();
+        // Prerequisite - case 1: all disks are full, a new Engine cannot be opened.
+        {
+            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+            // Multi directories.
+            assert!(Engine::open(cfg.clone()).is_err());
+            // Single diretory - auxiliary-dir is None.
+            let cfg_single_dir = Config {
+                auxiliary_dir: None,
+                ..cfg.clone()
+            };
+            assert!(Engine::open(cfg_single_dir).is_err());
+        }
+        // Prerequisite - case 2: all disks are full after writing, and the current
+        // engine should be available for `read`.
+        {
+            let engine = Engine::open(cfg.clone()).unwrap();
+            engine
+                .write(&mut generate_batch(101, 11, 21, Some(&data)), true)
+                .unwrap();
+            drop(engine);
+            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+            let engine = Engine::open(cfg.clone()).unwrap();
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(101, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
+        // Prerequisite - case 3: prefill several recycled logs but no space for
+        // remains, making prefilling progress exit in advance.
+        {
+            let _f1 = FailGuard::new(
+                "file_pipe_log::force_no_spare_space",
+                "10*off->1*return->1*off->1*return->1*off->2*return",
+            );
+            let _ = Engine::open(cfg.clone()).unwrap();
+        }
+        // Clean-up the env for later testing.
         let cfg_err = Config {
             enable_log_recycle: false,
             prefill_for_recycle: false,

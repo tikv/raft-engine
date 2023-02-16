@@ -527,29 +527,7 @@ fn test_no_space_write_error() {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.auxiliary_dir = Some(auxiliary_dir.path().to_str().unwrap().to_owned());
         {
-            // Case 1: all disks are full, a new Engine cannot be opened.
-            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
-            assert!(Engine::open(cfg.clone()).is_err());
-        }
-        {
-            // Case 2: all disks are full after writing, and the current engine should be
-            // available for `read`.
-            let engine = Engine::open(cfg.clone()).unwrap();
-            engine
-                .write(&mut generate_batch(1, 11, 21, Some(&entry)), true)
-                .unwrap();
-            drop(engine);
-            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
-            let engine = Engine::open(cfg.clone()).unwrap();
-            assert_eq!(
-                10,
-                engine
-                    .fetch_entries_to::<MessageExtTyped>(1, 11, 21, None, &mut vec![])
-                    .unwrap()
-            );
-        }
-        {
-            // Case 3: `Write` is abnormal for no space left, Engine should panic at
+            // Case 1: `Write` is abnormal for no space left, Engine should panic at
             // `rotate`.
             let cfg_err = Config {
                 target_file_size: ReadableSize(1),
@@ -572,7 +550,7 @@ fn test_no_space_write_error() {
         }
         {
             let engine = Engine::open(cfg.clone()).unwrap();
-            // Case 4: disk goes from `full(nospace err)` -> `spare for writing`.
+            // Case 2: disk goes from `full(nospace err)` -> `spare for writing`.
             let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "2*return->off");
             let _f2 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
             // The first write should fail, because all dirs run out of space for writing.
@@ -601,7 +579,7 @@ fn test_no_space_write_error() {
             );
         }
         {
-            // Case 5: disk status -- `main dir is full (has nospace err)` -> `auxiliary dir
+            // Case 3: disk status -- `main dir is full (has nospace err)` -> `auxiliary dir
             // is spare (has enough space)`.
             let engine = Engine::open(cfg.clone()).unwrap();
             let _f1 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
@@ -629,7 +607,7 @@ fn test_no_space_write_error() {
             );
         }
         {
-            // Case 6: disk goes into endless `spare(nospace err)`, engine do panic for
+            // Case 4: disk goes into endless `spare(nospace err)`, engine do panic for
             // multi-retrying.
             let engine = Engine::open(cfg.clone()).unwrap();
             let _f = FailGuard::new(
