@@ -476,18 +476,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     });
                 } else {
                     warn!("no enough space for preparing recycled logs");
-                    // Clear redundant prefilled logs to ensure the build of `Pipe` successful.
-                    for is_empty in [self.append_files.is_empty(), self.rewrite_files.is_empty()] {
-                        if_chain::if_chain! {
-                            if is_empty;
-                            if let Some(f) = self.recycled_files.pop();
-                            then {
-                                let root_path = &self.dirs[f.path_id];
-                                let path = root_path.join(build_recycled_file_name(f.seq));
-                                let _ = self.file_system.delete(&path);
-                            }
+                    // Checks whether several prefilled logs need to be cleared to ensure that
+                    // there exists enough space for successfully building the `Pipe`.
+                    [self.append_files.is_empty(), self.rewrite_files.is_empty()].map(|is_empty| {
+                        if is_empty {
+                            target = target.saturating_sub(1);
                         }
-                    }
+                    });
                     break;
                 }
             }
