@@ -179,7 +179,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let root_path = match path_id {
             DEFAULT_PATH_ID => Some(Path::new(&self.cfg.dir)),
             AUXILIARY_PATH_ID => self.cfg.auxiliary_dir.as_ref().map(Path::new),
-            _ => None,
+            _ => unreachable!(),
         };
         if root_path.is_none() {
             return Ok(());
@@ -455,7 +455,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     .last()
                     .map(|f| f.seq + 1)
                     .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
-                if let Ok(path_id) = fetch_dir(&self.dirs, target_file_size) {
+                if let Ok(path_id) = fetch_dir(&self.dirs, target_file_size, true) {
                     let root_path = &self.dirs[path_id];
                     let path = root_path.join(build_recycled_file_name(seq));
                     let handle = Arc::new(self.file_system.create(&path)?);

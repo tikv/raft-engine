@@ -100,7 +100,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // Open or create active file.
         let no_active_files = active_files.is_empty();
         if no_active_files {
-            let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize)?;
+            let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize, true)?;
             let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
@@ -177,7 +177,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok((f.path_id, self.file_system.open(&dst_path)?));
             }
         }
-        let path_id = fetch_dir(&self.paths, self.target_file_size)?;
+        let path_id = fetch_dir(&self.paths, self.target_file_size, false)?;
         let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
         Ok((path_id, self.file_system.create(&dst_path)?))
     }
@@ -514,28 +514,25 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 }
 
 /// Fetch and return a valid `PathId` of the specific directories.
-pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> Result<PathId> {
+pub(crate) fn fetch_dir(
+    paths: &Paths,
+    target_size: usize,
+    forcely_check_space: bool,
+) -> Result<PathId> {
     let force_no_spare_space = || {
         fail_point!("file_pipe_log::force_no_spare_space", |_| true);
         false
     };
-    for t in [DEFAULT_PATH_ID, AUXILIARY_PATH_ID] {
-        let idx = t as usize;
-        if idx >= paths.len() {
-            break;
-        }
-        let disk_stats = match fs2::statvfs(&paths[idx]) {
-            Err(e) => {
-                return Err(Error::Corruption(format!(
-                    "get disk stat for raft engine failed, dir_path: {}, err: {}",
-                    paths[idx].display(),
-                    e
-                )));
+    // Only if one single dir is set by `Config::dir` or no need to check space
+    // usage, can we skip the check of disk space usage.
+    if paths.len() == 1 && !forcely_check_space {
+        return Ok(DEFAULT_PATH_ID);
+    }
+    for (t, p) in paths.iter().enumerate() {
+        if let Ok(disk_stats) = fs2::statvfs(&p) {
+            if !force_no_spare_space() && target_size <= disk_stats.available_space() as usize {
+                return Ok(t);
             }
-            Ok(stats) => stats,
-        };
-        if !force_no_spare_space() && target_size <= disk_stats.available_space() as usize {
-            return Ok(t);
         }
     }
     Err(Error::Corruption("no enough space for new file".to_owned()))

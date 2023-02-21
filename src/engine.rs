@@ -198,7 +198,7 @@ where
                         // A special err, we will retry this LogBatch `append` by appending
                         // this writer to the next write group, and the current write leader
                         // will not hang on this write and will return timely.
-                        return Err(Error::Other(box_err!(
+                        return Err(Error::TryAgain(format!(
                             "Failed to write logbatch, exceed max_retry_count: ({})",
                             WRITE_MAX_RETRY_TIMES
                         )));
