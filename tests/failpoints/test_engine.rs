@@ -993,17 +993,24 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     };
     let data = vec![b'x'; 1024];
     {
-        // Prerequisite - case 1: all disks are full, a new Engine cannot be opened.
+        // Prerequisite - case 1: all disks are full, Engine can be opened normally.
         {
-            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
             // Multi directories.
-            assert!(Engine::open(cfg.clone()).is_err());
+            {
+                let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+                let _f2 = FailGuard::new("log_fd::write::err", "1*return->off");
+                Engine::open(cfg.clone()).unwrap();
+            }
             // Single diretory - auxiliary-dir is None.
-            let cfg_single_dir = Config {
-                auxiliary_dir: None,
-                ..cfg.clone()
-            };
-            assert!(Engine::open(cfg_single_dir).is_err());
+            {
+                let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+                let _f2 = FailGuard::new("log_fd::write::err", "1*return->off");
+                let cfg_single_dir = Config {
+                    auxiliary_dir: None,
+                    ..cfg.clone()
+                };
+                Engine::open(cfg_single_dir).unwrap();
+            }
         }
         // Prerequisite - case 2: all disks are full after writing, and the current
         // engine should be available for `read`.
@@ -1013,7 +1020,8 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
                 .write(&mut generate_batch(101, 11, 21, Some(&data)), true)
                 .unwrap();
             drop(engine);
-            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+            let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+            let _f2 = FailGuard::new("log_fd::write::err", "return");
             let engine = Engine::open(cfg.clone()).unwrap();
             assert_eq!(
                 10,
@@ -1085,7 +1093,8 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
             prefill_for_recycle: false,
             ..cfg
         };
-        let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+        let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+        let _f2 = FailGuard::new("log_fd::write::err", "return");
         let engine = Engine::open(cfg_no_prefill).unwrap();
         let (append_first, append_end) = engine.file_span(LogQueue::Append);
         // Cannot dump new data into engine as no spare space.

@@ -27,10 +27,7 @@ use super::format::{
     build_recycled_file_name, lock_file_path, parse_recycled_file_name, FileNameExt, LogFileFormat,
 };
 use super::log_file::build_file_reader;
-use super::pipe::{
-    fetch_dir, DualPipes, File, PathId, Paths, SinglePipe, AUXILIARY_PATH_ID,
-    DEFAULT_FIRST_FILE_SEQ, DEFAULT_PATH_ID,
-};
+use super::pipe::{fetch_dir, DualPipes, File, Paths, SinglePipe, DEFAULT_FIRST_FILE_SEQ};
 use super::reader::LogItemBatchFileReader;
 
 const PREFILL_BUFFER_SIZE: usize = ReadableSize::mb(16).0 as usize;
@@ -105,9 +102,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
-        self.scan_dir(DEFAULT_PATH_ID)?; // scan Main dir
-        self.scan_dir(AUXILIARY_PATH_ID)?; // scan Auxiliary dir
-
+        self.scan_dir(self.cfg.dir.clone())?; // scan Main dir
+        if let Some(dir) = self.cfg.auxiliary_dir.as_ref() {
+            let auxiliary_dir = dir.clone();
+            self.scan_dir(auxiliary_dir)?; // scan Auxiliary dir
+        }
         // Sorts the expected `file_list` according to `file_seq`.
         self.append_files.sort_by(|a, b| a.seq.cmp(&b.seq));
         self.rewrite_files.sort_by(|a, b| a.seq.cmp(&b.seq));
@@ -175,21 +174,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         Ok(())
     }
 
-    fn scan_dir(&mut self, path_id: PathId) -> Result<()> {
-        let root_path = match path_id {
-            DEFAULT_PATH_ID => Some(Path::new(&self.cfg.dir)),
-            AUXILIARY_PATH_ID => self.cfg.auxiliary_dir.as_ref().map(Path::new),
-            _ => unreachable!(),
-        };
-        if root_path.is_none() {
-            return Ok(());
-        }
-        debug_assert!(root_path.is_some());
-        let dir = root_path.unwrap();
+    fn scan_dir(&mut self, dir: String) -> Result<()> {
+        let dir = Path::new(&dir);
         if !dir.exists() {
             info!("Create raft log directory: {}", dir.display());
             fs::create_dir(dir)?;
             self.dir_locks.push(lock_dir(dir)?);
+            self.dirs.push(dir.to_path_buf());
             return Ok(());
         }
         if !dir.is_dir() {
@@ -197,6 +188,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         }
         self.dir_locks.push(lock_dir(dir)?);
         self.dirs.push(dir.to_path_buf());
+        assert_eq!(self.dirs.len(), self.dir_locks.len());
+        assert!(!self.dirs.is_empty());
+        let path_id = self.dirs.len() - 1; // path_id to current dir.
 
         fs::read_dir(dir)?.try_for_each(|e| -> Result<()> {
             if let Ok(e) = e {
@@ -449,33 +443,31 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let to_create = target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
             let now = Instant::now();
+            let mut no_enough_space = false;
             for _ in 0..to_create {
                 let seq = self
                     .recycled_files
                     .last()
                     .map(|f| f.seq + 1)
                     .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
-                if let Ok(path_id) = fetch_dir(&self.dirs, target_file_size, true) {
-                    let root_path = &self.dirs[path_id];
-                    let path = root_path.join(build_recycled_file_name(seq));
-                    let handle = Arc::new(self.file_system.create(&path)?);
-                    let mut writer = self.file_system.new_writer(handle.clone())?;
-                    let mut written = 0;
-                    let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
-                    while written < target_file_size {
-                        writer.write_all(&buf).unwrap_or_else(|e| {
-                            warn!("failed to build recycled file, err: {}", e);
-                        });
-                        written += buf.len();
-                    }
-                    self.recycled_files.push(File {
-                        seq,
-                        handle,
-                        format: LogFileFormat::default(),
-                        path_id: DEFAULT_PATH_ID,
+                let path_id = fetch_dir(&self.dirs, target_file_size);
+                let root_path = &self.dirs[path_id];
+                let path = root_path.join(build_recycled_file_name(seq));
+                let handle = Arc::new(self.file_system.create(&path)?);
+                let mut writer = self.file_system.new_writer(handle.clone())?;
+                let mut written = 0;
+                let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
+                while written < target_file_size {
+                    writer.write_all(&buf).unwrap_or_else(|e| {
+                        warn!("failed to build recycled file, err: {}", e);
+                        no_enough_space = true;
                     });
-                } else {
+                    written += buf.len();
+                }
+                if no_enough_space {
                     warn!("no enough space for preparing recycled logs");
+                    // Clear the incompletely prefilled recycled log.
+                    let _ = self.file_system.delete(&path);
                     // Checks whether several prefilled logs need to be cleared to ensure that
                     // there exists enough space for successfully building the `Pipe`.
                     [self.append_files.is_empty(), self.rewrite_files.is_empty()].map(|is_empty| {
@@ -485,6 +477,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     });
                     break;
                 }
+                self.recycled_files.push(File {
+                    seq,
+                    handle,
+                    format: LogFileFormat::default(),
+                    path_id,
+                });
             }
             info!(
                 "prefill logs takes {:?}, created {} files",
@@ -511,6 +509,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         self.initialize_files()?;
         let appender = SinglePipe::open(
             &self.cfg,
+            self.dirs.clone(),
             self.file_system.clone(),
             self.listeners.clone(),
             LogQueue::Append,
@@ -519,6 +518,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         )?;
         let rewriter = SinglePipe::open(
             &self.cfg,
+            self.dirs.clone(),
             self.file_system.clone(),
             self.listeners.clone(),
             LogQueue::Rewrite,

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File as StdFile;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam::utils::CachePadded;
@@ -28,8 +28,6 @@ pub type Paths = Vec<PathBuf>;
 
 /// Main directory path id.
 pub const DEFAULT_PATH_ID: PathId = 0;
-/// Auxiliary directory path id.
-pub const AUXILIARY_PATH_ID: PathId = 1;
 /// FileSeq of logs must start from `1` by default to keep backward
 /// compatibility.
 pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
@@ -81,16 +79,13 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Opens a new [`SinglePipe`].
     pub fn open(
         cfg: &Config,
+        paths: Paths,
         file_system: Arc<F>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut active_files: Vec<File<F>>,
         recycled_files: Vec<File<F>>,
     ) -> Result<Self> {
-        let mut paths = vec![Path::new(&cfg.dir).to_path_buf()];
-        if let Some(auxiliary_dir) = &cfg.auxiliary_dir {
-            paths.push(Path::new(&auxiliary_dir).to_path_buf());
-        }
         let alignment = || {
             fail_point!("file_pipe_log::open::force_set_alignment", |_| { 16 });
             0
@@ -100,7 +95,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // Open or create active file.
         let no_active_files = active_files.is_empty();
         if no_active_files {
-            let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize, true)?;
+            let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize);
             let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
@@ -177,7 +172,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok((f.path_id, self.file_system.open(&dst_path)?));
             }
         }
-        let path_id = fetch_dir(&self.paths, self.target_file_size, false)?;
+        let path_id = fetch_dir(&self.paths, self.target_file_size);
         let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
         Ok((path_id, self.file_system.create(&dst_path)?))
     }
@@ -514,32 +509,28 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 }
 
 /// Fetch and return a valid `PathId` of the specific directories.
-pub(crate) fn fetch_dir(
-    paths: &Paths,
-    target_size: usize,
-    forcely_check_space: bool,
-) -> Result<PathId> {
+pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> PathId {
     let force_no_spare_space = || {
         fail_point!("file_pipe_log::force_no_spare_space", |_| true);
         false
     };
-    // Only if one single dir is set by `Config::dir` or no need to check space
-    // usage, can we skip the check of disk space usage.
-    if paths.len() == 1 && !forcely_check_space {
-        return Ok(DEFAULT_PATH_ID);
-    }
-    for (t, p) in paths.iter().enumerate() {
-        if let Ok(disk_stats) = fs2::statvfs(&p) {
-            if !force_no_spare_space() && target_size <= disk_stats.available_space() as usize {
-                return Ok(t);
+    // Only if one single dir is set by `Config::dir`, can it skip the check of disk
+    // space usage.
+    if paths.len() > 1 {
+        for (t, p) in paths.iter().enumerate() {
+            if let Ok(disk_stats) = fs2::statvfs(&p) {
+                if !force_no_spare_space() && target_size <= disk_stats.available_space() as usize {
+                    return t;
+                }
             }
         }
     }
-    Err(Error::Corruption("no enough space for new file".to_owned()))
+    DEFAULT_PATH_ID
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use tempfile::Builder;
 
     use super::super::format::LogFileFormat;
@@ -551,17 +542,28 @@ mod tests {
 
     fn new_test_pipe<F: FileSystem>(
         cfg: &Config,
+        paths: Paths,
         queue: LogQueue,
         fs: Arc<F>,
     ) -> Result<SinglePipe<F>> {
-        SinglePipe::open(cfg, fs, Vec::new(), queue, Vec::new(), Vec::new())
+        SinglePipe::open(cfg, paths, fs, Vec::new(), queue, Vec::new(), Vec::new())
     }
 
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
         DualPipes::open(
             vec![lock_dir(&cfg.dir)?],
-            new_test_pipe(cfg, LogQueue::Append, Arc::new(DefaultFileSystem))?,
-            new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem))?,
+            new_test_pipe(
+                cfg,
+                vec![Path::new(&cfg.dir).to_path_buf()],
+                LogQueue::Append,
+                Arc::new(DefaultFileSystem),
+            )?,
+            new_test_pipe(
+                cfg,
+                vec![Path::new(&cfg.dir).to_path_buf()],
+                LogQueue::Rewrite,
+                Arc::new(DefaultFileSystem),
+            )?,
         )
     }
 
@@ -672,7 +674,8 @@ mod tests {
         };
         let queue = LogQueue::Append;
         let fs = Arc::new(ObfuscatedFileSystem::default());
-        let pipe_log = new_test_pipe(&cfg, queue, fs).unwrap();
+        let pipe_log =
+            new_test_pipe(&cfg, vec![Path::new(&cfg.dir).to_path_buf()], queue, fs).unwrap();
         assert_eq!(pipe_log.file_span(), (1, 1));
 
         fn content(i: usize) -> Vec<u8> {
