@@ -2625,31 +2625,23 @@ mod tests {
             drop(engine);
 
             // Step 2: select several log files and move them into the auxiliary directory.
-            std::fs::read_dir(paths[0])
-                .unwrap()
-                .try_for_each(|e| -> Result<()> {
-                    if let Ok(e) = e {
-                        let p = e.path();
-                        if !p.is_file() || file_count < halve_file_count {
-                            return Ok(());
-                        }
-                        let file_name = p.file_name().unwrap().to_str().unwrap();
-                        match FileId::parse_file_name(file_name) {
-                            Some(FileId {
-                                queue: LogQueue::Append,
-                                seq: _,
-                            }) => {
-                                let mut dst_path = PathBuf::from(&paths[1]);
-                                dst_path.push(file_name);
-                                file_system.rename(p, dst_path).unwrap();
-                                file_count -= 1;
-                            }
-                            _ => return Ok(()),
-                        }
-                    }
-                    Ok(())
-                })
-                .unwrap();
+            std::fs::read_dir(paths[0]).unwrap().for_each(|e| {
+                let p = e.unwrap().path();
+                if !p.is_file() || file_count < halve_file_count {
+                    return;
+                }
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    let mut dst_path = PathBuf::from(&paths[1]);
+                    dst_path.push(file_name);
+                    file_system.rename(p, dst_path).unwrap();
+                    file_count -= 1;
+                }
+            });
         }
 
         // Case 1: start an engine with no recycling.

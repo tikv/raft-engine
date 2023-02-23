@@ -17,6 +17,7 @@ use rayon::prelude::*;
 use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::env::Handle;
+use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, LogQueue};
@@ -122,46 +123,57 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 continue;
             }
             // Check the file_list and remove the hole of files.
-            let mut current_seq = files[0].seq;
-            let mut invalid_files = 0_usize;
-            debug_assert!(current_seq > 0);
-            for (i, f) in files.iter().enumerate() {
-                if f.seq > current_seq + (i - invalid_files) as u64 {
-                    warn!(
-                        "Detected a hole when scanning directory, discarding files before file_seq {}.",
-                        f.seq,
-                    );
-                    current_seq = f.seq + 1;
-                    invalid_files = i;
-                } else if f.seq < current_seq {
-                    return Err(Error::InvalidArgument("Duplicate file".to_string()));
+            let mut invalid_idx = 0_usize;
+            for (i, file_pair) in files.windows(2).enumerate() {
+                if file_pair.len() > 1 && file_pair[0].seq + 1 < file_pair[1].seq {
+                    invalid_idx = i + 1;
                 }
             }
-            files.drain(..invalid_files);
+            files.drain(..invalid_idx);
             // Try to cleanup stale metadata left by the previous version.
             if files.is_empty() {
                 continue;
             }
-            let mut cleared = 0_u64;
-            let clear_start: u64 = {
-                // TODO: Need a more efficient way to remove sparse stale metadata,
-                // without iterating one by one.
-                1
-            };
-            let dir = &self.dirs[files[0].path_id];
-            for seq in (clear_start..files[0].seq).rev() {
+            let max_sample = 100;
+            // Find the first obsolete metadata.
+            let mut delete_start = None;
+            for i in 0..max_sample {
+                let seq = i * files[0].seq / max_sample;
                 let file_id = FileId { queue, seq };
-                let path = if is_recycled_file {
-                    dir.join(build_recycled_file_name(seq))
-                } else {
-                    file_id.build_file_path(dir)
-                };
-                if self.file_system.exists_metadata(&path) {
-                    if let Err(e) = self.file_system.delete_metadata(&path) {
-                        error!("failed to delete metadata of {}: {}.", path.display(), e);
+                for dir in self.dirs.iter() {
+                    let path = if is_recycled_file {
+                        dir.join(build_recycled_file_name(file_id.seq))
+                    } else {
+                        file_id.build_file_path(dir)
+                    };
+                    if self.file_system.exists_metadata(&path) {
+                        delete_start = Some(i.saturating_sub(1) * files[0].seq / max_sample + 1);
                         break;
                     }
-                    cleared += 1;
+                }
+                if delete_start.is_some() {
+                    break;
+                }
+            }
+            // Delete metadata starting from the oldest. Abort on error.
+            let mut cleared = 0_u64;
+            if let Some(clear_start) = delete_start {
+                for seq in (clear_start..files[0].seq).rev() {
+                    let file_id = FileId { queue, seq };
+                    for dir in self.dirs.iter() {
+                        let path = if is_recycled_file {
+                            dir.join(build_recycled_file_name(seq))
+                        } else {
+                            file_id.build_file_path(dir)
+                        };
+                        if self.file_system.exists_metadata(&path) {
+                            if let Err(e) = self.file_system.delete_metadata(&path) {
+                                error!("failed to delete metadata of {}: {}.", path.display(), e);
+                                break;
+                            }
+                            cleared += 1;
+                        }
+                    }
                 }
             }
             if cleared > 0 {
@@ -460,22 +472,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 while written < target_file_size {
                     writer.write_all(&buf).unwrap_or_else(|e| {
                         warn!("failed to build recycled file, err: {}", e);
-                        no_enough_space = true;
+                        no_enough_space = is_no_space_err(&Error::Io(e));
                     });
                     written += buf.len();
-                }
-                if no_enough_space {
-                    warn!("no enough space for preparing recycled logs");
-                    // Clear the incompletely prefilled recycled log.
-                    let _ = self.file_system.delete(&path);
-                    // Checks whether several prefilled logs need to be cleared to ensure that
-                    // there exists enough space for successfully building the `Pipe`.
-                    [self.append_files.is_empty(), self.rewrite_files.is_empty()].map(|is_empty| {
-                        if is_empty {
-                            target = target.saturating_sub(1);
-                        }
-                    });
-                    break;
                 }
                 self.recycled_files.push(File {
                     seq,
@@ -483,6 +482,13 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     format: LogFileFormat::default(),
                     path_id,
                 });
+                if no_enough_space {
+                    warn!("no enough space for preparing recycled logs");
+                    // Clear partially prepared recycled log list if there has no enough space
+                    // for it.
+                    target = 0;
+                    break;
+                }
             }
             info!(
                 "prefill logs takes {:?}, created {} files",
@@ -518,7 +524,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         )?;
         let rewriter = SinglePipe::open(
             &self.cfg,
-            self.dirs.clone(),
+            self.dirs,
             self.file_system.clone(),
             self.listeners.clone(),
             LogQueue::Rewrite,

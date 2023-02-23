@@ -12,6 +12,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
 use crate::env::FileSystem;
+use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
@@ -303,21 +304,7 @@ impl<F: FileSystem> SinglePipe<F> {
                     seq, e, te
                 );
             }
-            // TODO: make the following judgement more elegant when the error type
-            // `ErrorKind::StorageFull` is stable.
-            let no_space_err = {
-                if_chain::if_chain! {
-                    if let Error::Io(ref e) = e;
-                    let err_msg = format!("{}", e.get_ref().unwrap());
-                    if err_msg.contains("nospace");
-                    then {
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-            if no_space_err {
+            if is_no_space_err(&e) {
                 if let Err(e) = self.rotate_imp(&mut writable_file) {
                     panic!(
                         "error when rotate [{:?}:{}]: {}",
@@ -510,6 +497,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 
 /// Fetch and return a valid `PathId` of the specific directories.
 pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> PathId {
+    fail_point!("file_pipe_log::force_choose_dir", |s| s
+        .map_or(DEFAULT_PATH_ID, |n| n.parse::<usize>().unwrap()));
     let force_no_spare_space = || {
         fail_point!("file_pipe_log::force_no_spare_space", |_| true);
         false
