@@ -996,7 +996,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
         // Prerequisite - case 1: all disks are full, Engine can be opened normally.
         {
             // Multi directories.
-            let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+            let _f = FailGuard::new("file_pipe_log::force_choose_dir", "return");
             Engine::open(cfg.clone()).unwrap();
             // Single diretory - spill-dir is None.
             let cfg_single_dir = Config {
@@ -1017,7 +1017,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
                 .write(&mut generate_batch(101, 11, 21, Some(&data)), true)
                 .unwrap();
             drop(engine);
-            let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+            let _f1 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
             let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
             let engine = Engine::open(cfg_no_prefill).unwrap();
             assert_eq!(
@@ -1034,8 +1034,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
                 "file_pipe_log::force_choose_dir",
                 "10*return(0)->5*return(1)",
             );
-            let _f2 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
-            let _f3 = FailGuard::new("log_fd::write::no_space_err", "return");
+            let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
             let _ = Engine::open(cfg.clone()).unwrap();
         }
         // Clean-up the env for later testing.
@@ -1074,7 +1073,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     }
     {
         // Case 2: prefill is on but no spare space for new log files.
-        let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+        let _f = FailGuard::new("file_pipe_log::force_choose_dir", "return");
         let engine = Engine::open(cfg.clone()).unwrap();
         let append_end = engine.file_span(LogQueue::Append).1;
         // As there still exists several recycled logs for incoming writes, so the
@@ -1091,7 +1090,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
             prefill_for_recycle: false,
             ..cfg
         };
-        let _f1 = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
+        let _f1 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
         let engine = Engine::open(cfg_no_prefill).unwrap();
         let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
         let (append_first, append_end) = engine.file_span(LogQueue::Append);

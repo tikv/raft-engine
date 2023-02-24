@@ -552,7 +552,7 @@ fn test_no_space_write_error() {
             let engine = Engine::open(cfg.clone()).unwrap();
             // Case 2: disk goes from `full(nospace err)` -> `spare for writing`.
             let _f1 = FailGuard::new("log_fd::write::no_space_err", "2*return->off");
-            let _f2 = FailGuard::new("file_pipe_log::force_no_spare_space", "2*return->off");
+            let _f2 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
             // The first write should fail, because all dirs run out of space for writing.
             assert!(catch_unwind_silent(|| {
                 engine

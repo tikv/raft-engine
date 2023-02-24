@@ -499,16 +499,12 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> PathId {
     fail_point!("file_pipe_log::force_choose_dir", |s| s
         .map_or(DEFAULT_PATH_ID, |n| n.parse::<usize>().unwrap()));
-    let force_no_spare_space = || {
-        fail_point!("file_pipe_log::force_no_spare_space", |_| true);
-        false
-    };
     // Only if one single dir is set by `Config::dir`, can it skip the check of disk
     // space usage.
     if paths.len() > 1 {
         for (t, p) in paths.iter().enumerate() {
             if let Ok(disk_stats) = fs2::statvfs(&p) {
-                if !force_no_spare_space() && target_size <= disk_stats.available_space() as usize {
+                if target_size <= disk_stats.available_space() as usize {
                     return t;
                 }
             }
