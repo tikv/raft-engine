@@ -103,10 +103,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
-        self.scan_dir(self.cfg.dir.clone())?; // scan Main dir
-        if let Some(dir) = self.cfg.auxiliary_dir.as_ref() {
-            let auxiliary_dir = dir.clone();
-            self.scan_dir(auxiliary_dir)?; // scan Auxiliary dir
+        self.scan_dir(self.cfg.dir.clone())?; // scan the main dir
+        if let Some(dir) = self.cfg.spill_dir.as_ref() {
+            let spill_dir = dir.clone();
+            self.scan_dir(spill_dir)?; // scan the auxiliary dir
         }
         // Sorts the expected `file_list` according to `file_seq`.
         self.append_files.sort_by(|a, b| a.seq.cmp(&b.seq));

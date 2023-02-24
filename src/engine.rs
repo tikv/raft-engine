@@ -2596,13 +2596,13 @@ mod tests {
             .prefix("test_start_engine_with_multi_dirs_default")
             .tempdir()
             .unwrap();
-        let auxiliary_dir = tempfile::Builder::new()
-            .prefix("test_start_engine_with_multi_dirs_auxiliary")
+        let spill_dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_spill")
             .tempdir()
             .unwrap();
         let paths = [
             dir.path().to_str().unwrap(),
-            auxiliary_dir.path().to_str().unwrap(),
+            spill_dir.path().to_str().unwrap(),
         ];
         let file_system = Arc::new(DeleteMonitoredFileSystem::new());
         let entry_data = vec![b'x'; 512];
@@ -2624,7 +2624,8 @@ mod tests {
             let halve_file_count = (file_count + 1) / 2;
             drop(engine);
 
-            // Step 2: select several log files and move them into the auxiliary directory.
+            // Step 2: select several log files and move them into the `spill_dir`
+            // directory.
             std::fs::read_dir(paths[0]).unwrap().for_each(|e| {
                 let p = e.unwrap().path();
                 if !p.is_file() || file_count < halve_file_count {
@@ -2647,7 +2648,7 @@ mod tests {
         // Case 1: start an engine with no recycling.
         let cfg = Config {
             dir: paths[0].to_owned(),
-            auxiliary_dir: Some(paths[1].to_owned()),
+            spill_dir: Some(paths[1].to_owned()),
             target_file_size: ReadableSize(1),
             enable_log_recycle: false,
             ..Default::default()
@@ -2705,7 +2706,7 @@ mod tests {
         assert!(file_count < file_system.inner.file_count());
         let file_count = file_system.inner.file_count();
         // Reuse all files for appending new data. Here, recycled files in auxiliary
-        // directory also are reused.
+        // directory (`spill-dir`) also are reused.
         for rid in 1..=30 {
             engine.append(rid, 1, 10, Some(&entry_data));
         }

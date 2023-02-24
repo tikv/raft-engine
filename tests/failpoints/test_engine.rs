@@ -978,13 +978,13 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
         .prefix("test_build_engine_with_multi_dirs_main")
         .tempdir()
         .unwrap();
-    let auxiliary_dir = tempfile::Builder::new()
-        .prefix("test_build_engine_with_multi_dirs_auxiliary")
+    let spill_dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dirs_spill")
         .tempdir()
         .unwrap();
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        auxiliary_dir: Some(auxiliary_dir.path().to_str().unwrap().to_owned()),
+        spill_dir: Some(spill_dir.path().to_str().unwrap().to_owned()),
         target_file_size: ReadableSize::kb(1),
         purge_threshold: ReadableSize::kb(20),
         enable_log_recycle: true,
@@ -998,9 +998,9 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
             // Multi directories.
             let _f = FailGuard::new("file_pipe_log::force_no_spare_space", "return");
             Engine::open(cfg.clone()).unwrap();
-            // Single diretory - auxiliary-dir is None.
+            // Single diretory - spill-dir is None.
             let cfg_single_dir = Config {
-                auxiliary_dir: None,
+                spill_dir: None,
                 ..cfg.clone()
             };
             Engine::open(cfg_single_dir).unwrap();
@@ -1048,7 +1048,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     }
     {
         // Case 1: prefill recycled logs into multi-dirs (when preparing recycled logs,
-        // this circumstance also equals to `main dir is full, but auxiliary dir
+        // this circumstance also equals to `main dir is full, but spill-dir
         // is free`.)
         let engine = {
             let _f = FailGuard::new("file_pipe_log::force_choose_dir", "10*return(0)->return(1)");

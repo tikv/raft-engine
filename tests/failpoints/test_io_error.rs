@@ -520,12 +520,12 @@ fn test_no_space_write_error() {
             .prefix("test_no_space_write_error_main")
             .tempdir()
             .unwrap();
-        let auxiliary_dir = tempfile::Builder::new()
-            .prefix("test_no_space_write_error_auxiliary")
+        let spill_dir = tempfile::Builder::new()
+            .prefix("test_no_space_write_error_spill")
             .tempdir()
             .unwrap();
         cfg.dir = dir.path().to_str().unwrap().to_owned();
-        cfg.auxiliary_dir = Some(auxiliary_dir.path().to_str().unwrap().to_owned());
+        cfg.spill_dir = Some(spill_dir.path().to_str().unwrap().to_owned());
         {
             // Case 1: `Write` is abnormal for no space left, Engine should panic at
             // `rotate`.
@@ -579,7 +579,7 @@ fn test_no_space_write_error() {
             );
         }
         {
-            // Case 3: disk status -- `main dir is full (has nospace err)` -> `auxiliary dir
+            // Case 3: disk status -- `main dir is full (has nospace err)` -> `spill-dir
             // is spare (has enough space)`.
             let engine = Engine::open(cfg.clone()).unwrap();
             let _f1 = FailGuard::new("log_fd::write::no_space_err", "1*return->off");
