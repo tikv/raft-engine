@@ -341,9 +341,8 @@ where
                 start.elapsed().as_micros()
             );
 
-            self.pipe_log
-                .async_entry_read::<M>(&mut ents_idx, vec)
-                .unwrap();
+            let bytes = self.pipe_log.async_read_bytes(&mut ents_idx).unwrap();
+            parse_entries_from_bytes::<M>(bytes, &mut ents_idx, vec);
 
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
             println!(
@@ -582,7 +581,36 @@ impl BlockCache {
 thread_local! {
     static BLOCK_CACHE: BlockCache = BlockCache::new();
 }
-
+pub(crate) fn parse_entries_from_bytes<M: MessageExt>(
+    bytes: Vec<Vec<u8>>,
+    ents_idx: &mut Vec<EntryIndex>,
+    vec: &mut Vec<M::Entry>,
+) {
+    let mut decode_buf = vec![];
+    let mut seq: i32 = -1;
+    for (t, idx) in ents_idx.iter().enumerate() {
+        decode_buf =
+            match t == 0 || ents_idx[t - 1].entries.unwrap() != ents_idx[t].entries.unwrap() {
+                true => {
+                    seq += 1;
+                    bytes[seq as usize].to_vec()
+                }
+                false => decode_buf,
+            };
+        vec.push(
+            parse_from_bytes(
+                &LogBatch::decode_entries_block(
+                    &decode_buf,
+                    idx.entries.unwrap(),
+                    idx.compression_type,
+                )
+                .unwrap()
+                    [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
+            )
+            .unwrap(),
+        );
+    }
+}
 pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
 where
     M: MessageExt,
@@ -834,7 +862,7 @@ mod tests {
 
     #[test]
     fn test_async_read() {
-        let normal_batch_size = 4096;
+        let normal_batch_size = 10;
         let compressed_batch_size = 5120;
         for &entry_size in &[normal_batch_size] {
             if entry_size == normal_batch_size {
@@ -2086,14 +2114,20 @@ mod tests {
         type Handle = <ObfuscatedFileSystem as FileSystem>::Handle;
         type Reader = <ObfuscatedFileSystem as FileSystem>::Reader;
         type Writer = <ObfuscatedFileSystem as FileSystem>::Writer;
-        type AsyncIoContext = AioContext;
+        type AsyncIoContext = <ObfuscatedFileSystem as FileSystem>::AsyncIoContext;
 
-        fn new_async_reader(
+        fn async_read(
             &self,
-            handle: Arc<Self::Handle>,
             ctx: &mut Self::AsyncIoContext,
+            handle: Arc<Self::Handle>,
+            buf: Vec<u8>,
+            block: &mut FileBlockHandle,
         ) -> std::io::Result<()> {
-            ctx.new_reader(handle)
+            todo!()
+        }
+
+        fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> std::io::Result<Vec<Vec<u8>>> {
+            todo!()
         }
 
         fn create<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {
@@ -2156,7 +2190,7 @@ mod tests {
         }
 
         fn new_async_io_context(&self, block_sum: usize) -> std::io::Result<Self::AsyncIoContext> {
-            todo!()
+            self.inner.new_async_io_context(block_sum)
         }
     }
 

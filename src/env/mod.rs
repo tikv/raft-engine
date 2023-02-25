@@ -12,6 +12,7 @@ pub use default::AioContext;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
+use crate::pipe_log::FileBlockHandle;
 /// FileSystem
 pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
@@ -19,11 +20,14 @@ pub trait FileSystem: Send + Sync {
     type Writer: Seek + Write + Send + WriteExt;
     type AsyncIoContext: AsyncContext;
 
-    fn new_async_reader(
+    fn async_read(
         &self,
-        handle: Arc<Self::Handle>,
         ctx: &mut Self::AsyncIoContext,
+        handle: Arc<Self::Handle>,
+        buf: Vec<u8>,
+        block: &mut FileBlockHandle,
     ) -> Result<()>;
+    fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> Result<Vec<Vec<u8>>>;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 

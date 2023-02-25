@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use crate::env::default::AioContext;
 use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
 
+use super::AsyncContext;
+use crate::pipe_log::FileBlockHandle;
 pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
 
 impl Read for ObfuscatedReader {
@@ -86,19 +88,53 @@ impl ObfuscatedFileSystem {
         self.files.load(Ordering::Relaxed)
     }
 }
+pub struct ObfuscatedContext(<DefaultFileSystem as FileSystem>::AsyncIoContext);
+impl AsyncContext for ObfuscatedContext {
+    fn wait(&mut self) -> IoResult<usize> {
+        self.0.wait()
+    }
+
+    fn data(&self, seq: usize) -> Vec<u8> {
+        self.0.data(seq)
+    }
+
+    fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
+        self.0.single_wait(seq)
+    }
+
+    fn submit_read_req(&mut self, buf: Vec<u8>, offset: u64) -> IoResult<()> {
+        self.0.submit_read_req(buf, offset)
+    }
+}
 
 impl FileSystem for ObfuscatedFileSystem {
     type Handle = <DefaultFileSystem as FileSystem>::Handle;
     type Reader = ObfuscatedReader;
     type Writer = ObfuscatedWriter;
-    type AsyncIoContext = AioContext;
+    type AsyncIoContext = ObfuscatedContext;
 
-    fn new_async_reader(
+    fn async_read(
         &self,
-        handle: Arc<Self::Handle>,
         ctx: &mut Self::AsyncIoContext,
+        handle: Arc<Self::Handle>,
+        buf: Vec<u8>,
+        block: &mut FileBlockHandle,
     ) -> IoResult<()> {
-        ctx.new_reader(handle)
+        self.inner.async_read(&mut ctx.0, handle, buf, block)
+    }
+
+    fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+        let base = self.inner.async_finish(&mut ctx.0).unwrap();
+        let mut res = vec![];
+        for v in base {
+            let mut temp = vec![];
+            //do obfuscation.
+            for c in v {
+                temp.push(c.wrapping_sub(1));
+            }
+            res.push(temp);
+        }
+        Ok(res)
     }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
@@ -140,6 +176,8 @@ impl FileSystem for ObfuscatedFileSystem {
     }
 
     fn new_async_io_context(&self, block_sum: usize) -> IoResult<Self::AsyncIoContext> {
-        Ok(AioContext::new(block_sum))
+        Ok(ObfuscatedContext(
+            self.inner.new_async_io_context(block_sum)?,
+        ))
     }
 }

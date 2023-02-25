@@ -176,18 +176,8 @@ pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
 
-    /// Read entries from pipe logs using 'Async IO'.
-    fn async_entry_read<M: Message + MessageExt<Entry = M>>(
-        &self,
-        ents_idx: &mut Vec<EntryIndex>,
-        vec: &mut Vec<M::Entry>,
-    ) -> Result<()>;
-
     /// Reads bytes from multi blocks using 'Async IO'.
-    fn async_read_bytes(
-        &self,
-        handles: &mut Vec<FileBlockHandle>,
-    ) -> Result<Vec<Vec<u8>>>;
+    fn async_read_bytes(&self, ents_idx: &mut Vec<EntryIndex>) -> Result<Vec<Vec<u8>>>;
 
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.

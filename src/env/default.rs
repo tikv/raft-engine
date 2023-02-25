@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::ffi::c_void;
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write,Error, ErrorKind};
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,9 @@ use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
 use crate::env::{AsyncContext, FileSystem, Handle, WriteExt};
-use crate::Error;
+use crate::pipe_log::FileBlockHandle;
+
+const MAX_ASYNC_READ_TRY_TIME:usize = 10;
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -300,9 +302,8 @@ impl AioContext {
         }
     }
 
-    pub fn new_reader(&mut self, fd: Arc<LogFd>) -> IoResult<()> {
+    pub fn set_fd(&mut self, fd: Arc<LogFd>) {
         self.inner = Some(fd);
-        Ok(())
     }
 }
 
@@ -324,8 +325,9 @@ impl AsyncContext for AioContext {
 
     fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
         let buf_len = self.buf_vec[seq].len();
+        
         unsafe {
-            loop {
+            for _ in 0..MAX_ASYNC_READ_TRY_TIME{
                 libc::aio_suspend(
                     vec![&mut self.aio_vec[seq]].as_ptr() as *const *const aiocb,
                     1 as i32,
@@ -336,6 +338,7 @@ impl AsyncContext for AioContext {
                 }
             }
         }
+        Err(Error::new(ErrorKind::Other, "Async IO panic."))
     }
 
     fn submit_read_req(&mut self, buf: Vec<u8>, offset: u64) -> IoResult<()> {
@@ -362,12 +365,24 @@ impl FileSystem for DefaultFileSystem {
     type Writer = LogFile;
     type AsyncIoContext = AioContext;
 
-    fn new_async_reader(
+    fn async_read(
         &self,
-        handle: Arc<Self::Handle>,
         ctx: &mut Self::AsyncIoContext,
+        handle: Arc<Self::Handle>,
+        buf: Vec<u8>,
+        block: &mut FileBlockHandle,
     ) -> IoResult<()> {
-        ctx.new_reader(handle)
+        ctx.set_fd(handle);
+        ctx.submit_read_req(buf, block.offset)
+    }
+
+    fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+        let mut res = vec![];
+        for seq in 0..ctx.index {
+            ctx.single_wait(seq);
+            res.push(ctx.data(seq).to_vec());
+        }
+        Ok(res)
     }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
