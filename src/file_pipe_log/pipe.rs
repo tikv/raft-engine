@@ -156,7 +156,7 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(())
     }
 
-    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
+    fn new_file(&self, seq: FileSeq, expected_file_size: usize) -> Result<(PathId, F::Handle)> {
         let new_file_id = FileId {
             seq,
             queue: self.queue,
@@ -173,7 +173,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok((f.path_id, self.file_system.open(&dst_path)?));
             }
         }
-        let path_id = fetch_dir(&self.paths, self.target_file_size);
+        let path_id = fetch_dir(&self.paths, expected_file_size);
         let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
         Ok((path_id, self.file_system.create(&dst_path)?))
     }
@@ -190,7 +190,11 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
-    fn rotate_imp(&self, writable_file: &mut MutexGuard<WritableFile<F>>) -> Result<()> {
+    fn rotate_imp(
+        &self,
+        writable_file: &mut MutexGuard<WritableFile<F>>,
+        expected_file_size: usize,
+    ) -> Result<()> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
             perf_context!(log_rotate_duration),
@@ -200,7 +204,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (path_id, handle) = self.new_file(new_seq)?;
+        let (path_id, handle) = self.new_file(new_seq, expected_file_size)?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -260,7 +264,7 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut writable_file) {
+            if let Err(e) = self.rotate_imp(&mut writable_file, self.target_file_size) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
                     self.queue, writable_file.seq, e
@@ -297,7 +301,8 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
         let start_offset = writer.offset();
-        if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
+        let buf_bytes = bytes.as_bytes(&ctx);
+        if let Err(e) = writer.write(buf_bytes, self.target_file_size) {
             if let Err(te) = writer.truncate() {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
@@ -305,7 +310,14 @@ impl<F: FileSystem> SinglePipe<F> {
                 );
             }
             if is_no_space_err(&e) {
-                if let Err(e) = self.rotate_imp(&mut writable_file) {
+                // To avoid incorrect `rotate_imp` on the same dir when the size of
+                // accessible space less than `buf_bytes.len()` in this dir,
+                // the expected file size for `rotate_imp` should be calibrated by
+                // `max(buf_bytes.len(), target_file_size)`.
+                if let Err(e) = self.rotate_imp(
+                    &mut writable_file,
+                    std::cmp::max(buf_bytes.len(), self.target_file_size),
+                ) {
                     panic!(
                         "error when rotate [{:?}:{}]: {}",
                         self.queue, writable_file.seq, e
@@ -359,7 +371,7 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn rotate(&self) -> Result<()> {
-        self.rotate_imp(&mut self.writable_file.lock())
+        self.rotate_imp(&mut self.writable_file.lock(), self.target_file_size)
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
