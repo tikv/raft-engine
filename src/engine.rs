@@ -1,9 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use libc::{aio_return, aiocb};
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
-use std::mem;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
@@ -14,7 +12,7 @@ use protobuf::{parse_from_bytes, Message};
 
 use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
-use crate::env::{AioContext, AsyncContext, DefaultFileSystem, FileSystem};
+use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
@@ -653,14 +651,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::{AioContext, ObfuscatedFileSystem};
+    use crate::env::ObfuscatedFileSystem;
     use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
     use kvproto::raft_serverpb::RaftLocalState;
-    use libc::aiocb;
     use raft::eraftpb::Entry;
     use std::collections::{BTreeSet, HashSet};
     use std::fs::OpenOptions;
@@ -2106,11 +2103,11 @@ mod tests {
             buf: Vec<u8>,
             block: &mut FileBlockHandle,
         ) -> std::io::Result<()> {
-            todo!()
+            self.inner.async_read(ctx, handle, buf, block)
         }
 
         fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> std::io::Result<Vec<Vec<u8>>> {
-            todo!()
+            self.inner.async_finish(ctx)
         }
 
         fn create<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {

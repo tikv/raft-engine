@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{mem, ptr};
 
 use fail::fail_point;
@@ -286,9 +286,9 @@ pub struct AioContext {
 impl AioContext {
     pub fn new(block_sum: usize) -> Self {
         let mut aio_vec = vec![];
-        let mut buf_vec = vec![];
+        let buf_vec = vec![];
         unsafe {
-            for i in 0..block_sum {
+            for _ in 0..block_sum {
                 aio_vec.push(mem::zeroed::<libc::aiocb>());
             }
         }
@@ -310,7 +310,7 @@ impl AsyncContext for AioContext {
         let mut total = 0;
         for seq in 0..self.aio_vec.len() {
             match self.single_wait(seq) {
-                Ok(len) => total += 1,
+                Ok(_) => total += 1,
                 Err(e) => return Err(e),
             }
         }

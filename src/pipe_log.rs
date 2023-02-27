@@ -5,17 +5,14 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
-use crate::env::AioContext;
 use crate::memtable::EntryIndex;
 use fail::fail_point;
-use libc::aiocb;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::ToPrimitive;
-use protobuf::Message;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum::EnumIter;
 
-use crate::{MessageExt, Result};
+use crate::Result;
 
 /// The type of log queue.
 #[repr(u8)]

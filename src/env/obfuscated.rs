@@ -1,12 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use libc::aiocb;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::env::default::AioContext;
 use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
 
 use super::AsyncContext;
