@@ -472,7 +472,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 while written < target_file_size {
                     writer.write_all(&buf).unwrap_or_else(|e| {
                         warn!("failed to build recycled file, err: {}", e);
-                        no_enough_space = is_no_space_err(&Error::Io(e));
+                        no_enough_space = is_no_space_err(&e);
                     });
                     written += buf.len();
                 }

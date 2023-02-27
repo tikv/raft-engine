@@ -25,8 +25,8 @@ use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{perf_context, Error, GlobalStats, Result};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
-/// Max retry count for `write`.
-const WRITE_MAX_RETRY_TIMES: u64 = 2;
+/// Max times for `write`.
+const MAX_WRITE_ATTEMPT: u64 = 2;
 
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
@@ -180,27 +180,27 @@ where
                 }
             }
             let entered_time = writer.entered_time.unwrap();
-            ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
-                .observe(entered_time.saturating_duration_since(start).as_secs_f64());
             perf_context.write_wait_duration +=
                 entered_time.saturating_duration_since(before_enter);
             debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
-            // Retry if `writer.finish()` returns a special 'Error::Other', remarking that
-            // there still exists free space for this `LogBatch`.
+            // Retry if `writer.finish()` returns a special 'Error::TryAgain', remarking
+            // that there still exists free space for this `LogBatch`.
             match writer.finish() {
                 Ok(handle) => {
+                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
+                        .observe(entered_time.saturating_duration_since(start).as_secs_f64());
                     break handle;
                 }
-                Err(Error::TryAgain(_)) => {
-                    if attempt_count >= WRITE_MAX_RETRY_TIMES {
+                Err(Error::TryAgain(e)) => {
+                    if attempt_count >= MAX_WRITE_ATTEMPT {
                         // A special err, we will retry this LogBatch `append` by appending
                         // this writer to the next write group, and the current write leader
                         // will not hang on this write and will return timely.
                         return Err(Error::TryAgain(format!(
-                            "Failed to write logbatch, exceed max_retry_count: ({})",
-                            WRITE_MAX_RETRY_TIMES
+                            "Failed to write logbatch, exceed MAX_WRITE_ATTEMPT: ({}), err: {}",
+                            MAX_WRITE_ATTEMPT, e
                         )));
                     }
                 }

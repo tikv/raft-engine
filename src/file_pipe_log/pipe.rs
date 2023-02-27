@@ -330,7 +330,7 @@ impl<F: FileSystem> SinglePipe<F> {
                     seq, e
                 )));
             }
-            return Err(e);
+            return Err(Error::Io(e));
         }
         let handle = FileBlockHandle {
             id: FileId {
