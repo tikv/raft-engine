@@ -2,10 +2,14 @@
 
 use std::fmt::Debug;
 use std::io::BufRead;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
+use num_derive::FromPrimitive;
+use num_traits::FromPrimitive;
 use protobuf::Message;
 
 use crate::codec::{self, NumberEncoder};
@@ -317,7 +321,7 @@ impl LogItem {
                 return Err(Error::Corruption(format!(
                     "Unrecognized log item type: {}",
                     item_type
-                )))
+                )));
             }
         };
         Ok(LogItem {
@@ -571,8 +575,13 @@ enum BufState {
 ///
 /// Error will be raised if a to-be-added log item cannot fit within those
 /// limits.
-// Calling protocol:
-// Insert log items -> [`finish_populate`] -> [`finish_write`]
+// Calling order:
+// 1. Insert some log items
+// 2. [`finish_populate`]
+// 3. Write to disk with [`encoded_bytes`]
+// 4. Update disk location with [`finish_write`]
+// 5. Clean up the memory states with [`drain`]. Step 4 can be skipped if the states are not used
+// (e.g. to apply memtable).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogBatch {
     item_batch: LogItemBatch,
@@ -707,12 +716,29 @@ impl LogBatch {
 
     /// Adds a protobuf key value pair into the log batch.
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
+        if crate::is_internal_key(&key, None) {
+            return Err(Error::InvalidArgument(format!(
+                "key prefix `{:?}` reserved for internal use",
+                crate::INTERNAL_KEY_PREFIX
+            )));
+        }
         self.item_batch.put_message(region_id, key, s)
     }
 
     /// Adds a key value pair into the log batch.
-    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
-        self.item_batch.put(region_id, key, value)
+    pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        if crate::is_internal_key(&key, None) {
+            return Err(Error::InvalidArgument(format!(
+                "key prefix `{:?}` reserved for internal use",
+                crate::INTERNAL_KEY_PREFIX
+            )));
+        }
+        self.item_batch.put(region_id, key, value);
+        Ok(())
+    }
+
+    pub(crate) fn put_unchecked(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) {
+        self.item_batch.put(region_id, key, value);
     }
 
     /// Returns true if the log batch contains no log item.
@@ -930,6 +956,122 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
         )));
     }
     Ok(())
+}
+
+lazy_static! {
+    static ref ATOMIC_GROUP_ID: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+}
+const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
+// <status>
+const ATOMIC_GROUP_VALUE_LEN: usize = 1;
+
+#[repr(u8)]
+#[derive(Clone, Copy, FromPrimitive, Debug, PartialEq)]
+pub(crate) enum AtomicGroupStatus {
+    Begin = 0,
+    Middle = 1,
+    End = 2,
+}
+
+impl AtomicGroupStatus {
+    /// Whether the log batch with `item` belongs to an atomic group.
+    pub fn parse(item: &LogItem) -> Option<(u64, AtomicGroupStatus)> {
+        if let LogItemContent::Kv(KeyValue {
+            op_type,
+            key,
+            value,
+            ..
+        }) = &item.content
+        {
+            if *op_type == OpType::Put
+                && crate::is_internal_key(key, Some(ATOMIC_GROUP_KEY))
+                && value.as_ref().unwrap().len() == ATOMIC_GROUP_VALUE_LEN
+            {
+                let value = &mut value.as_ref().unwrap().as_slice();
+                return Some((
+                    item.raft_group_id,
+                    AtomicGroupStatus::from_u8(value[0]).unwrap(),
+                ));
+            }
+        }
+        None
+    }
+}
+
+/// Group multiple log batches as an atomic operation.
+///
+/// Caveats:
+/// (1) The atomicity is provided at persistent level. This means, once an
+/// atomic group fails, the in-memory value will be inconsistent with what can
+/// be recovered from on-disk data files.
+/// (2) The recovery replay order will be different from original write order.
+/// Log batches in a completed atomic group will be replayed as if they were
+/// written together at an arbitary time point within the group.
+/// (3) Atomic group is implemented by embedding normal key-values into user
+/// writes. These keys have internal key prefix and will not be replayed into
+/// memtable. However, when read by an older version, they will behave as user
+/// keys. They may also belong to Raft Group that doesn't exist before.
+///
+/// In practice, we only use atomic group for rewrite operation. (In fact,
+/// atomic group markers in append queue are simply ignored.) Rewrite doesn't
+/// change the value of entries, just locations. So first issue doesn't affect
+/// correctness. There could only be one worker doing the rewrite. So second
+/// issue doesn't change observed write order because there's no mixed write.
+pub(crate) struct AtomicGroupBuilder {
+    id: u64,
+    status: Option<AtomicGroupStatus>,
+}
+
+impl Default for AtomicGroupBuilder {
+    fn default() -> Self {
+        Self {
+            // We only care there's no collision between concurrent groups.
+            id: ATOMIC_GROUP_ID.fetch_add(1, Ordering::Relaxed),
+            status: None,
+        }
+    }
+}
+
+impl AtomicGroupBuilder {
+    /// Each log batch can only carry one atomic group marker. If multiple are
+    /// present only the first is recognized.
+    pub fn begin(&mut self, lb: &mut LogBatch) {
+        fail::fail_point!("atomic_group::begin");
+        assert_eq!(self.status, None);
+        self.status = Some(AtomicGroupStatus::Begin);
+        self.flush(lb);
+    }
+
+    pub fn add(&mut self, lb: &mut LogBatch) {
+        fail::fail_point!("atomic_group::add");
+        assert!(matches!(
+            self.status,
+            Some(AtomicGroupStatus::Begin | AtomicGroupStatus::Middle)
+        ));
+        self.status = Some(AtomicGroupStatus::Middle);
+        self.flush(lb);
+    }
+
+    pub fn end(&mut self, lb: &mut LogBatch) {
+        assert!(matches!(
+            self.status,
+            Some(AtomicGroupStatus::Begin | AtomicGroupStatus::Middle)
+        ));
+        self.status = Some(AtomicGroupStatus::End);
+        self.flush(lb);
+    }
+
+    #[inline]
+    fn flush(&self, lb: &mut LogBatch) {
+        let mut s = Vec::with_capacity(ATOMIC_GROUP_VALUE_LEN);
+        s.push(self.status.unwrap() as u8);
+        lb.put_unchecked(self.id, crate::make_internal_key(ATOMIC_GROUP_KEY), s);
+    }
+
+    #[cfg(test)]
+    pub fn with_id(id: u64) -> Self {
+        Self { id, status: None }
+    }
 }
 
 #[cfg(test)]
@@ -1254,7 +1396,7 @@ mod tests {
             .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
             .unwrap();
         batch.add_command(7, Command::Clean);
-        batch.put(7, b"key".to_vec(), b"value".to_vec());
+        batch.put(7, b"key".to_vec(), b"value".to_vec()).unwrap();
         batch.delete(7, b"key2".to_vec());
         batch
             .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
@@ -1298,7 +1440,7 @@ mod tests {
                 format!("k{}", i).into_bytes(),
                 format!("v{}", i).into_bytes(),
             );
-            batch1.put(region_id, k.clone(), v.clone());
+            batch1.put(region_id, k.clone(), v.clone()).unwrap();
             kvs.push((k, v));
         }
 
@@ -1314,7 +1456,7 @@ mod tests {
                 format!("k{}", i).into_bytes(),
                 format!("v{}", i).into_bytes(),
             );
-            batch2.put(region_id, k.clone(), v.clone());
+            batch2.put(region_id, k.clone(), v.clone()).unwrap();
             kvs.push((k, v));
         }
 
@@ -1369,6 +1511,23 @@ mod tests {
         assert!(batch.is_empty());
         batch.add_raw_entries(0, Vec::new(), Vec::new()).unwrap();
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_internal_key() {
+        let mut batch = LogBatch::default();
+        assert!(matches!(
+            batch
+                .put(0, crate::make_internal_key(&[0]), b"v".to_vec())
+                .unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
+        assert!(matches!(
+            batch
+                .put_message(0, crate::make_internal_key(&[1]), &Entry::new())
+                .unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
     }
 
     #[cfg(feature = "nightly")]

@@ -7,6 +7,7 @@ mod util;
 mod test_engine;
 mod test_io_error;
 
+use fail::FailGuard;
 use raft_engine::*;
 use util::*;
 

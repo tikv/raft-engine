@@ -55,23 +55,6 @@ where
     result
 }
 
-pub struct FailGuard {
-    fp: String,
-}
-
-impl FailGuard {
-    pub fn new(fp: &str, action: &str) -> Self {
-        fail::cfg(fp, action).unwrap();
-        Self { fp: fp.to_owned() }
-    }
-}
-
-impl Drop for FailGuard {
-    fn drop(&mut self) {
-        fail::remove(&self.fp);
-    }
-}
-
 pub struct ConcurrentWriteContext<FS: 'static + FileSystem> {
     engine: Arc<Engine<FS>>,
     ths: Vec<std::thread::JoinHandle<()>>,

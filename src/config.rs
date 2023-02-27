@@ -91,6 +91,14 @@ pub struct Config {
     ///
     /// Default: false
     pub enable_log_recycle: bool,
+
+    /// Whether to prepare log files for recycling when start.
+    /// If `true`, batch empty log files will be prepared for recycling when
+    /// starting engine.
+    /// Only available for `enable-log-reycle` is true.
+    ///
+    /// Default: false
+    pub prefill_for_recycle: bool,
 }
 
 impl Default for Config {
@@ -110,6 +118,7 @@ impl Default for Config {
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
             enable_log_recycle: false,
+            prefill_for_recycle: false,
         };
         // Test-specific configurations.
         #[cfg(test)]
@@ -154,6 +163,11 @@ impl Config {
             return Err(box_err!(
                 "format version {} doesn't support log recycle, use 2 or above",
                 self.format_version
+            ));
+        }
+        if !self.enable_log_recycle && self.prefill_for_recycle {
+            return Err(box_err!(
+                "prefill is not allowed when log recycle is disabled"
             ));
         }
         #[cfg(not(feature = "swap"))]
@@ -207,6 +221,7 @@ mod tests {
             purge-threshold = "3MB"
             format-version = 1
             enable-log-recycle = false
+            prefill-for-recycle = false
         "#;
         let mut load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
@@ -233,6 +248,7 @@ mod tests {
             target-file-size = "5000MB"
             format-version = 2
             enable-log-recycle = true
+            prefill-for-recycle = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
         let mut soft_sanitized = soft_load;
@@ -251,6 +267,14 @@ mod tests {
             format-version = 1
         "#;
         let mut cfg_load: Config = toml::from_str(recycle_error).unwrap();
+        assert!(cfg_load.sanitize().is_err());
+
+        let prefill_error = r#"
+            enable-log-recycle = false
+            prefill-for-recycle = true
+            format-version = 2
+        "#;
+        let mut cfg_load: Config = toml::from_str(prefill_error).unwrap();
         assert!(cfg_load.sanitize().is_err());
     }
 

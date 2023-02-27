@@ -218,8 +218,8 @@ pub trait PipeLog: Sized {
     /// necessarily panic-safe.
     fn rotate(&self, queue: LogQueue) -> Result<()>;
 
-    /// Deletes all log files up to the specified file ID. The scope is limited
-    /// to the log queue of `file_id`.
+    /// Deletes all log files smaller than the specified file ID. The scope is
+    /// limited to the log queue of `file_id`.
     ///
     /// Returns the number of deleted files.
     fn purge_to(&self, file_id: FileId) -> Result<usize>;

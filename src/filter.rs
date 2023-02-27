@@ -308,7 +308,9 @@ impl RhaiFilterMachine {
                             value,
                             ..
                         }) => match op_type {
-                            OpType::Put => log_batch.put(item.raft_group_id, key, value.unwrap()),
+                            OpType::Put => {
+                                log_batch.put(item.raft_group_id, key, value.unwrap())?
+                            }
                             OpType::Del => log_batch.delete(item.raft_group_id, key),
                         },
                     }
