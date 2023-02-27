@@ -300,7 +300,6 @@ where
         max_size: Option<usize>,
         vec: &mut Vec<M::Entry>,
     ) -> Result<usize> {
-        let start = Instant::now();
         let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
@@ -311,10 +310,7 @@ where
                 vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?);
             }
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
-            println!(
-                "[fetch_entries_to] time cost: {:?} us",
-                start.elapsed().as_micros()
-            );
+
             return Ok(ents_idx.len());
         }
         Ok(0)
@@ -328,7 +324,6 @@ where
         max_size: Option<usize>,
         vec: &mut Vec<M::Entry>,
     ) -> Result<usize> {
-        let start = Instant::now();
         let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             let length = (end - begin) as usize;
@@ -336,13 +331,12 @@ where
             memtable
                 .read()
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
-            
 
             let bytes = self.pipe_log.async_read_bytes(&mut ents_idx).unwrap();
             parse_entries_from_bytes::<M>(bytes, &mut ents_idx, vec);
 
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
-            
+
             return Ok(ents_idx.len());
         }
 
@@ -582,7 +576,7 @@ thread_local! {
 }
 pub(crate) fn parse_entries_from_bytes<M: MessageExt>(
     bytes: Vec<Vec<u8>>,
-    ents_idx: &mut Vec<EntryIndex>,
+    ents_idx: &mut [EntryIndex],
     vec: &mut Vec<M::Entry>,
 ) {
     let mut decode_buf = vec![];

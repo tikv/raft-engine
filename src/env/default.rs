@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::ffi::c_void;
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write,Error, ErrorKind};
+use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ use nix::NixPath;
 use crate::env::{AsyncContext, FileSystem, Handle, WriteExt};
 use crate::pipe_log::FileBlockHandle;
 
-const MAX_ASYNC_READ_TRY_TIME:usize = 10;
+const MAX_ASYNC_READ_TRY_TIME: usize = 10;
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -279,7 +279,6 @@ impl WriteExt for LogFile {
 
 pub struct AioContext {
     inner: Option<Arc<LogFd>>,
-    offset: u64,
     index: usize,
     aio_vec: Vec<aiocb>,
     pub(crate) buf_vec: Vec<Vec<u8>>,
@@ -295,7 +294,6 @@ impl AioContext {
         }
         Self {
             inner: None,
-            offset: 0,
             index: 0,
             aio_vec,
             buf_vec,
@@ -319,18 +317,18 @@ impl AsyncContext for AioContext {
         Ok(total as usize)
     }
 
-    fn data(&self, seq: usize) -> Vec<u8> {
-        self.buf_vec[seq].to_vec()
+    fn data(&self, seq: usize) -> &[u8] {
+        &self.buf_vec[seq]
     }
 
     fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
         let buf_len = self.buf_vec[seq].len();
-        
+
         unsafe {
-            for _ in 0..MAX_ASYNC_READ_TRY_TIME{
+            for _ in 0..MAX_ASYNC_READ_TRY_TIME {
                 libc::aio_suspend(
                     vec![&mut self.aio_vec[seq]].as_ptr() as *const *const aiocb,
-                    1 as i32,
+                    1_i32,
                     ptr::null::<libc::timespec>(),
                 );
                 if buf_len == aio_return(&mut self.aio_vec[seq]) as usize {
@@ -379,8 +377,10 @@ impl FileSystem for DefaultFileSystem {
     fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
         let mut res = vec![];
         for seq in 0..ctx.index {
-            ctx.single_wait(seq);
-            res.push(ctx.data(seq).to_vec());
+            match ctx.single_wait(seq) {
+                Ok(_) => res.push(ctx.data(seq).to_vec()),
+                Err(e) => return Err(e),
+            }
         }
         Ok(res)
     }

@@ -89,7 +89,7 @@ pub trait WriteExt {
 
 pub trait AsyncContext {
     fn wait(&mut self) -> Result<usize>;
-    fn data(&self, seq: usize) -> Vec<u8>;
+    fn data(&self, seq: usize) -> &[u8];
     fn single_wait(&mut self, seq: usize) -> Result<usize>;
 
     fn submit_read_req(&mut self, buf: Vec<u8>, offset: u64) -> Result<()>;

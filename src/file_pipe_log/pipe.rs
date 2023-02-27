@@ -259,7 +259,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
     fn async_read(&self, block: &mut FileBlockHandle, ctx: &mut F::AsyncIoContext) {
         let fd = self.get_fd(block.id.seq).unwrap();
-        let buf = vec![0 as u8; block.len];
+        let buf = vec![0_u8; block.len];
 
         self.file_system.async_read(ctx, fd, buf, block).unwrap();
     }
@@ -545,7 +545,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
         let mut res: Vec<Vec<u8>> = vec![];
 
         let fs = &self.pipes[LogQueue::Append as usize].file_system;
-        let mut ctx = fs.new_async_io_context(blocks.len() as usize).unwrap();
+        let mut ctx = fs.new_async_io_context(blocks.len()).unwrap();
 
         for (seq, block) in blocks.iter_mut().enumerate() {
             match block.id.queue {

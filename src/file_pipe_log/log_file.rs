@@ -172,7 +172,7 @@ impl<F: FileSystem> LogFileReader<F> {
     }
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        let mut buf = vec![0; handle.len as usize];
+        let mut buf = vec![0; handle.len];
         let size = self.read_to(handle.offset, &mut buf)?;
         buf.truncate(size);
         Ok(buf)

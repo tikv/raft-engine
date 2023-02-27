@@ -94,7 +94,7 @@ impl AsyncContext for ObfuscatedContext {
         self.0.wait()
     }
 
-    fn data(&self, seq: usize) -> Vec<u8> {
+    fn data(&self, seq: usize) -> &[u8] {
         self.0.data(seq)
     }
 
