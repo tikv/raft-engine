@@ -11,7 +11,7 @@ use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
-use crate::env::FileSystem;
+use crate::env::{FileSystem, OFlag};
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
@@ -168,7 +168,7 @@ impl<F: FileSystem> SinglePipe<F> {
                     error!("error while trying to delete recycled file, err: {}", e);
                 }
             } else {
-                return Ok((f.path_id, self.file_system.open(&dst_path)?));
+                return Ok((f.path_id, self.file_system.open(&dst_path, OFlag::O_RDWR)?));
             }
         }
         let path_id = DEFAULT_PATH_ID;

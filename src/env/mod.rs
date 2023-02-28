@@ -7,8 +7,30 @@ use std::sync::Arc;
 mod default;
 mod obfuscated;
 
+use bitflags::bitflags;
 pub use default::DefaultFileSystem;
+use nix::fcntl::OFlag as NixOFlag;
 pub use obfuscated::ObfuscatedFileSystem;
+
+bitflags!(
+    /// All flags conflict with each other.
+    pub struct OFlag: i32 {
+        const O_RDONLY = 0b00000001;
+        const O_RDWR = 0b00000010;
+        const O_WRONLY = 0b00000100;
+    }
+);
+
+impl Into<NixOFlag> for OFlag {
+    fn into(self) -> NixOFlag {
+        match self {
+            OFlag::O_RDONLY => NixOFlag::O_RDONLY,
+            OFlag::O_RDWR => NixOFlag::O_RDWR,
+            OFlag::O_WRONLY => NixOFlag::O_WRONLY,
+            _ => unreachable!(),
+        }
+    }
+}
 
 /// FileSystem
 pub trait FileSystem: Send + Sync {
@@ -18,7 +40,7 @@ pub trait FileSystem: Send + Sync {
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
-    fn open<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
+    fn open<P: AsRef<Path>>(&self, path: P, flags: OFlag) -> Result<Self::Handle>;
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> Result<()>;
 
@@ -33,7 +55,7 @@ pub trait FileSystem: Send + Sync {
     #[inline]
     fn reuse_and_open<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<Self::Handle> {
         self.reuse(src_path.as_ref(), dst_path.as_ref())?;
-        self.open(dst_path)
+        self.open(dst_path, OFlag::O_RDWR)
     }
 
     /// Deletes user implemented metadata associated with `path`. Returns

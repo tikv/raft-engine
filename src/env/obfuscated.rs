@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
+use crate::env::{DefaultFileSystem, FileSystem, OFlag, WriteExt};
 
 pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
 
@@ -98,8 +98,8 @@ impl FileSystem for ObfuscatedFileSystem {
         r
     }
 
-    fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
-        self.inner.open(path)
+    fn open<P: AsRef<Path>>(&self, path: P, flags: OFlag) -> IoResult<Self::Handle> {
+        self.inner.open(path, flags)
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {

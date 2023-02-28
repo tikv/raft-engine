@@ -23,7 +23,7 @@ pub mod debug {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::env::FileSystem;
+    use crate::env::{FileSystem, OFlag};
     use crate::log_batch::LogItem;
     use crate::pipe_log::FileId;
     use crate::{Error, Result};
@@ -44,7 +44,7 @@ pub mod debug {
         let fd = if create {
             file_system.create(path)?
         } else {
-            file_system.open(path)?
+            file_system.open(path, OFlag::O_RDWR)?
         };
         let fd = Arc::new(fd);
         super::log_file::build_file_writer(file_system, fd, format, create /* force_reset */)
@@ -55,7 +55,7 @@ pub mod debug {
         file_system: &F,
         path: &Path,
     ) -> Result<LogFileReader<F>> {
-        let fd = Arc::new(file_system.open(path)?);
+        let fd = Arc::new(file_system.open(path, OFlag::O_RDONLY)?);
         super::log_file::build_file_reader(file_system, fd)
     }
 

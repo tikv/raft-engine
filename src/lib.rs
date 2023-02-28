@@ -60,6 +60,7 @@ mod test_util;
 mod util;
 mod write_barrier;
 
+pub mod copy;
 pub mod env;
 
 pub use config::{Config, RecoveryMode};

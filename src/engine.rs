@@ -592,9 +592,9 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::env::ObfuscatedFileSystem;
+    use crate::env::{OFlag, ObfuscatedFileSystem};
     use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
@@ -606,7 +606,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::path::PathBuf;
 
-    type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
+    pub(crate) type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
     impl<F: FileSystem> RaftLogEngine<F> {
         fn append(&self, rid: u64, start_index: u64, end_index: u64, data: Option<&[u8]>) {
             let entries = generate_entries(start_index, end_index, data);
@@ -2001,8 +2001,8 @@ mod tests {
             Ok(handle)
         }
 
-        fn open<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {
-            let handle = self.inner.open(&path)?;
+        fn open<P: AsRef<Path>>(&self, path: P, flag: OFlag) -> std::io::Result<Self::Handle> {
+            let handle = self.inner.open(&path, flag)?;
             self.update_metadata(path.as_ref(), false);
             Ok(handle)
         }

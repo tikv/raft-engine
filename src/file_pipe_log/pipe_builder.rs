@@ -15,8 +15,7 @@ use log::{error, info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
-use crate::env::FileSystem;
-use crate::env::Handle;
+use crate::env::{FileSystem, Handle, OFlag};
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, LogQueue};
@@ -100,6 +99,20 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
+        let get_open_flag = |recovery_mode: RecoveryMode, last_in_queue: bool| -> OFlag {
+            if recovery_mode == RecoveryMode::TolerateAnyCorruption || last_in_queue {
+                OFlag::O_RDWR
+            } else {
+                OFlag::O_RDONLY
+            }
+        };
+        self.scan_impl(get_open_flag)
+    }
+
+    pub(crate) fn scan_impl<G>(&mut self, get_open_flag: G) -> Result<()>
+    where
+        G: Fn(RecoveryMode, bool /* the last one or not */) -> OFlag,
+    {
         let root_path = Path::new(&self.cfg.dir);
         if !root_path.exists() {
             info!("Create raft log directory: {}", root_path.display());
@@ -223,7 +236,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         );
                         files.clear();
                     } else {
-                        let handle = Arc::new(self.file_system.open(&path)?);
+                        let flag = get_open_flag(self.cfg.recovery_mode, seq == max_id);
+                        let handle = Arc::new(self.file_system.open(&path, flag)?);
                         files.push(File {
                             seq,
                             handle,
@@ -235,6 +249,14 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn get_append_queue_files(&self) -> &[File<F>] {
+        &self.append_files
+    }
+
+    pub(crate) fn get_rewrite_queue_files(&self) -> &[File<F>] {
+        &self.rewrite_files
     }
 
     /// Reads through log items in all available log files, and replays them to
