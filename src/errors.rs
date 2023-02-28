@@ -37,14 +37,5 @@ pub type Result<T> = ::std::result::Result<T, Error>;
 pub(crate) fn is_no_space_err(e: &IoError) -> bool {
     // TODO: make the following judgement more elegant when the error type
     // `ErrorKind::StorageFull` is stable.
-    if_chain::if_chain! {
-        if let Some(err) = e.get_ref();
-        let err_msg = format!("{}", err);
-        if err_msg.contains("nospace");
-        then {
-            true
-        } else {
-            false
-        }
-    }
+    format!("{}", e).contains("nospace")
 }

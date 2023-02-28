@@ -70,9 +70,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.writer.seek(SeekFrom::Start(0))?;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileFormat::encoded_len(format.version));
-        format
-            .encode(&mut buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        format.encode(&mut buf).unwrap();
         self.write(&buf, 0)
     }
 

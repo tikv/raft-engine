@@ -151,8 +151,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// filesystem.
     fn sync_dir(&self, path_id: PathId) -> Result<()> {
         debug_assert!(!self.paths.is_empty());
-        let path = PathBuf::from(&self.paths[path_id]);
-        std::fs::File::open(path).and_then(|d| d.sync_all())?;
+        std::fs::File::open(&PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
         Ok(())
     }
 
@@ -326,8 +325,8 @@ impl<F: FileSystem> SinglePipe<F> {
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.
                 return Err(Error::TryAgain(format!(
-                    "failed to write {} file, get {} try to flush it to another dir",
-                    seq, e
+                    "error when append [{:?}:{}]: {}",
+                    self.queue, seq, e
                 )));
             }
             return Err(Error::Io(e));

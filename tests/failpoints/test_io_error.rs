@@ -604,8 +604,9 @@ fn test_no_space_write_error() {
             );
         }
         {
-            // Case 4: disk goes into endless `spare(nospace err)`, engine do panic for
-            // multi-retrying.
+            // Case 4: disk status -- `main dir has free space for rotating new files
+            // but no space for dumping LogBatch`, disk goes into endless `spare(nospace
+            // err)`, engine do panic for multi-retrying.
             let engine = Engine::open(cfg.clone()).unwrap();
             let _f = FailGuard::new(
                 "log_fd::write::no_space_err",
