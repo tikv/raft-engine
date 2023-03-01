@@ -377,6 +377,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
+                                f.handle.sync()?;
                                 break;
                             }
                             Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
@@ -385,6 +386,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
+                                f.handle.sync()?;
                                 break;
                             }
                             Err(e) => {
