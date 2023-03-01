@@ -950,7 +950,7 @@ impl ReactiveBytes for LogBatch {
 /// Verifies the checksum of a slice of bytes that sequentially holds data and
 /// checksum. The checksum field may be signed by XOR-ing with an u32.
 ///
-/// Returns the decoded checksum of the buffer.
+/// Returns the checksum of the buffer without signature.
 fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<u32> {
     if buf.len() <= LOG_BATCH_CHECKSUM_LEN {
         return Err(Error::Corruption(format!(
@@ -958,11 +958,10 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
             buf.len()
         )));
     }
-    let checksum = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
-    let expected = codec::decode_u32_le(&mut &buf[buf.len() - LOG_BATCH_CHECKSUM_LEN..])?;
-    let mut actual = checksum;
+    let actual = crc32(&buf[..buf.len() - LOG_BATCH_CHECKSUM_LEN]);
+    let mut expected = codec::decode_u32_le(&mut &buf[buf.len() - LOG_BATCH_CHECKSUM_LEN..])?;
     if let Some(signature) = signature {
-        actual ^= signature;
+        expected ^= signature;
     }
     if actual != expected {
         return Err(Error::Corruption(format!(
@@ -970,7 +969,7 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
             expected, actual
         )));
     }
-    Ok(checksum)
+    Ok(actual)
 }
 
 lazy_static! {

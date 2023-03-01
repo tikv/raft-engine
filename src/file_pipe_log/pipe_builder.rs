@@ -104,9 +104,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
         self.scan_dir(self.cfg.dir.clone())?; // scan the main dir
-        if let Some(dir) = self.cfg.spill_dir.as_ref() {
-            let spill_dir = dir.clone();
-            self.scan_dir(spill_dir)?; // scan the auxiliary dir
+        if let Some(dir) = self.cfg.spill_dir.clone() {
+            self.scan_dir(dir)?; // scan the auxiliary dir
         }
         // Sorts the expected `file_list` according to `file_seq`.
         self.append_files.sort_by(|a, b| a.seq.cmp(&b.seq));
@@ -119,13 +118,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             (LogQueue::Rewrite, &mut self.rewrite_files, false),
             (LogQueue::Append, &mut self.recycled_files, true),
         ] {
-            if files.is_empty() {
-                continue;
-            }
             // Check the file_list and remove the hole of files.
             let mut invalid_idx = 0_usize;
             for (i, file_pair) in files.windows(2).enumerate() {
-                if file_pair.len() > 1 && file_pair[0].seq + 1 < file_pair[1].seq {
+                if file_pair[0].seq + 1 < file_pair[1].seq {
                     invalid_idx = i + 1;
                 }
             }
@@ -200,10 +196,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         }
         self.dir_locks.push(lock_dir(dir)?);
         self.dirs.push(dir.to_path_buf());
-        assert_eq!(self.dirs.len(), self.dir_locks.len());
-        assert!(!self.dirs.is_empty());
-        let path_id = self.dirs.len() - 1; // path_id to current dir.
 
+        let path_id = self.dirs.len() - 1; // path_id to current dir.
         fs::read_dir(dir)?.try_for_each(|e| -> Result<()> {
             if let Ok(e) = e {
                 let p = e.path();
@@ -455,7 +449,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let to_create = target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
             let now = Instant::now();
-            let mut no_enough_space = false;
             for _ in 0..to_create {
                 let seq = self
                     .recycled_files
@@ -470,10 +463,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let mut written = 0;
                 let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
                 while written < target_file_size {
-                    writer.write_all(&buf).unwrap_or_else(|e| {
+                    if let Err(e) = writer.write_all(&buf) {
                         warn!("failed to build recycled file, err: {}", e);
-                        no_enough_space = is_no_space_err(&e);
-                    });
+                        if is_no_space_err(&e) {
+                            warn!("no enough space for preparing recycled logs");
+                            // Clear partially prepared recycled log list if there has no enough
+                            // space for it.
+                            target = 0;
+                        }
+                        break;
+                    }
                     written += buf.len();
                 }
                 self.recycled_files.push(File {
@@ -482,13 +481,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     format: LogFileFormat::default(),
                     path_id,
                 });
-                if no_enough_space {
-                    warn!("no enough space for preparing recycled logs");
-                    // Clear partially prepared recycled log list if there has no enough space
-                    // for it.
-                    target = 0;
-                    break;
-                }
             }
             info!(
                 "prefill logs takes {:?}, created {} files",

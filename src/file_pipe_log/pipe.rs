@@ -160,7 +160,24 @@ impl<F: FileSystem> SinglePipe<F> {
             seq,
             queue: self.queue,
         };
-        if let Some(f) = self.recycled_files.write().pop_front() {
+        if expected_file_size > self.target_file_size {
+            // On this state, it means that there already exists `nospace` errors and
+            // current buffer is too huge to be appended directly. So, we should free
+            // enough space by clearing several recycled log files until this buffer
+            // could be dumped.
+            println!("[Debugging] Try to release recycled logs for more free space");
+            let mut expected_size = expected_file_size;
+            while let Some(f) = self.recycled_files.write().pop_front() {
+                let path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
+                if let Err(e) = self.file_system.delete(&path) {
+                    error!("error while trying to delete recycled file, err: {}", e);
+                }
+                expected_size = expected_size.saturating_sub(self.target_file_size);
+                if expected_size == 0 {
+                    break;
+                }
+            }
+        } else if let Some(f) = self.recycled_files.write().pop_front() {
             let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
