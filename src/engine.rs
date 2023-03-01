@@ -2728,6 +2728,34 @@ mod tests {
         for rid in 1..=5 {
             engine.append(rid, 10, 20, Some(&entry_data));
         }
-        assert!(end_4 < engine.file_span(LogQueue::Append).1);
+        let (start_5, end_5) = engine.file_span(LogQueue::Append);
+        assert!(end_4 < end_5);
+        // Case 4: abnormal case - duplicate FileSeq among different dirs.
+        {
+            // Prerequisite: choose several files and duplicate them to main dir.
+            let mut file_count = 0;
+            std::fs::read_dir(paths[1]).unwrap().for_each(|e| {
+                let p = e.unwrap().path();
+                if !p.is_file() {
+                    return;
+                }
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    let mut dst_path = PathBuf::from(&paths[0]);
+                    dst_path.push(file_name);
+                    if file_count % 2 == 0 {
+                        std::fs::copy(p, dst_path).unwrap();
+                    }
+                    file_count += 1;
+                }
+            });
+        }
+        let engine = engine.reopen();
+        // Duplicate log files will be skipped and cleared.
+        assert!(engine.file_span(LogQueue::Append).0 > start_5);
     }
 }

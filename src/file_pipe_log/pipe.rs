@@ -165,7 +165,6 @@ impl<F: FileSystem> SinglePipe<F> {
             // current buffer is too huge to be appended directly. So, we should free
             // enough space by clearing several recycled log files until this buffer
             // could be dumped.
-            println!("[Debugging] Try to release recycled logs for more free space");
             let mut expected_size = expected_file_size;
             while let Some(f) = self.recycled_files.write().pop_front() {
                 let path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));

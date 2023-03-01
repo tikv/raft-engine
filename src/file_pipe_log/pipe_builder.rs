@@ -121,7 +121,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             // Check the file_list and remove the hole of files.
             let mut invalid_idx = 0_usize;
             for (i, file_pair) in files.windows(2).enumerate() {
-                if file_pair[0].seq + 1 < file_pair[1].seq {
+                if file_pair[0].seq + 1 < file_pair[1].seq || file_pair[0].seq == file_pair[1].seq {
                     invalid_idx = i + 1;
                 }
             }
@@ -199,40 +199,39 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
         let path_id = self.dirs.len() - 1; // path_id to current dir.
         fs::read_dir(dir)?.try_for_each(|e| -> Result<()> {
-            if let Ok(e) = e {
-                let p = e.path();
-                if !p.is_file() {
-                    return Ok(());
-                }
-                let file_name = p.file_name().unwrap().to_str().unwrap();
-                match FileId::parse_file_name(file_name) {
-                    Some(FileId {
-                        queue: LogQueue::Append,
-                        seq,
-                    }) => self.append_files.push(File {
-                        seq,
-                        handle: Arc::new(self.file_system.open(&p)?),
-                        format: LogFileFormat::default(),
-                        path_id,
-                    }),
-                    Some(FileId {
-                        queue: LogQueue::Rewrite,
-                        seq,
-                    }) => self.rewrite_files.push(File {
-                        seq,
-                        handle: Arc::new(self.file_system.open(&p)?),
-                        format: LogFileFormat::default(),
-                        path_id,
-                    }),
-                    _ => {
-                        if let Some(seq) = parse_recycled_file_name(file_name) {
-                            self.recycled_files.push(File {
-                                seq,
-                                handle: Arc::new(self.file_system.open(&p)?),
-                                format: LogFileFormat::default(),
-                                path_id,
-                            })
-                        }
+            let dir_entry = e?;
+            let p = dir_entry.path();
+            if !p.is_file() {
+                return Ok(());
+            }
+            let file_name = p.file_name().unwrap().to_str().unwrap();
+            match FileId::parse_file_name(file_name) {
+                Some(FileId {
+                    queue: LogQueue::Append,
+                    seq,
+                }) => self.append_files.push(File {
+                    seq,
+                    handle: Arc::new(self.file_system.open(&p)?),
+                    format: LogFileFormat::default(),
+                    path_id,
+                }),
+                Some(FileId {
+                    queue: LogQueue::Rewrite,
+                    seq,
+                }) => self.rewrite_files.push(File {
+                    seq,
+                    handle: Arc::new(self.file_system.open(&p)?),
+                    format: LogFileFormat::default(),
+                    path_id,
+                }),
+                _ => {
+                    if let Some(seq) = parse_recycled_file_name(file_name) {
+                        self.recycled_files.push(File {
+                            seq,
+                            handle: Arc::new(self.file_system.open(&p)?),
+                            format: LogFileFormat::default(),
+                            path_id,
+                        })
                     }
                 }
             }
