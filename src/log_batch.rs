@@ -1531,6 +1531,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_corruption() {
+        let region_id = 7;
+        let data = vec![b'x'; 16];
+        let mut batch = LogBatch::default();
+        batch
+            .add_entries::<Entry>(region_id, &generate_entries(1, 11, Some(&data)))
+            .unwrap();
+        batch
+            .put(region_id, b"key".to_vec(), b"value".to_vec())
+            .unwrap();
+        // enable compression so that len_and_type > len.
+        batch.finish_populate(1).unwrap();
+        let file_context = LogFileContext::new(FileId::dummy(LogQueue::Append), Version::default());
+        batch.prepare_write(&file_context).unwrap();
+        let encoded = batch.encoded_bytes();
+
+        let mut copy = encoded.to_owned();
+        copy.truncate(LOG_BATCH_HEADER_LEN - 1);
+        assert!(LogBatch::decode_header(&mut copy.as_slice())
+            .unwrap_err()
+            .to_string()
+            .contains("Log batch header too short"));
+
+        let mut copy = encoded.to_owned();
+        (&mut copy[LOG_BATCH_HEADER_LEN - 8..LOG_BATCH_HEADER_LEN])
+            .write_u64::<BigEndian>(encoded.len() as u64 + 1)
+            .unwrap();
+        assert!(LogBatch::decode_header(&mut copy.as_slice())
+            .unwrap_err()
+            .to_string()
+            .contains("Log item offset exceeds log batch length"));
+
+        let mut copy = encoded.to_owned();
+        (&mut copy[LOG_BATCH_HEADER_LEN - 8..LOG_BATCH_HEADER_LEN])
+            .write_u64::<BigEndian>(LOG_BATCH_HEADER_LEN as u64 - 1)
+            .unwrap();
+        assert!(LogBatch::decode_header(&mut copy.as_slice())
+            .unwrap_err()
+            .to_string()
+            .contains("Log item offset is smaller than log batch header length"));
+    }
+
     #[cfg(feature = "nightly")]
     #[bench]
     fn bench_log_batch_add_entry_and_encode(b: &mut test::Bencher) {
