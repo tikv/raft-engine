@@ -1,27 +1,27 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::ffi::c_void;
-use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::pin::Pin;
+use std::slice;
 use std::sync::Arc;
-use std::{mem, ptr};
 
 use fail::fail_point;
-use libc::{aio_return, aiocb, off_t};
+use libc::{aiocb, off_t};
 use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
+use nix::sys::aio::{aio_suspend, Aio, AioRead};
 use nix::sys::signal::{SigEvent, SigevNotify};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
-use crate::env::{AsyncContext, FileSystem, Handle, WriteExt};
+use crate::env::{FileSystem, Handle, WriteExt};
 use crate::pipe_log::FileBlockHandle;
-
-const MAX_ASYNC_READ_TRY_TIME: usize = 10;
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -278,80 +278,16 @@ impl WriteExt for LogFile {
 }
 
 pub struct AioContext {
-    inner: Option<Arc<LogFd>>,
-    index: usize,
-    aio_vec: Vec<aiocb>,
-    pub(crate) buf_vec: Vec<Vec<u8>>,
+    aio_vec: Vec<Pin<Box<AioRead<'static>>>>,
+    buf_vec: Vec<Vec<u8>>,
 }
+
 impl AioContext {
-    pub fn new(block_sum: usize) -> Self {
-        let mut aio_vec = vec![];
-        let buf_vec = vec![];
-        unsafe {
-            for _ in 0..block_sum {
-                aio_vec.push(mem::zeroed::<libc::aiocb>());
-            }
-        }
+    pub fn new() -> Self {
         Self {
-            inner: None,
-            index: 0,
-            aio_vec,
-            buf_vec,
+            aio_vec: Vec::new(),
+            buf_vec: Vec::new(),
         }
-    }
-
-    pub fn set_fd(&mut self, fd: Arc<LogFd>) {
-        self.inner = Some(fd);
-    }
-}
-
-impl AsyncContext for AioContext {
-    fn wait(&mut self) -> IoResult<usize> {
-        let mut total = 0;
-        for seq in 0..self.aio_vec.len() {
-            match self.single_wait(seq) {
-                Ok(_) => total += 1,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(total as usize)
-    }
-
-    fn data(&self, seq: usize) -> &[u8] {
-        &self.buf_vec[seq]
-    }
-
-    fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
-        let buf_len = self.buf_vec[seq].len();
-
-        unsafe {
-            for _ in 0..MAX_ASYNC_READ_TRY_TIME {
-                libc::aio_suspend(
-                    vec![&mut self.aio_vec[seq]].as_ptr() as *const *const aiocb,
-                    1_i32,
-                    ptr::null::<libc::timespec>(),
-                );
-                if buf_len == aio_return(&mut self.aio_vec[seq]) as usize {
-                    return Ok(buf_len);
-                }
-            }
-        }
-        Err(Error::new(ErrorKind::Other, "Async IO panic."))
-    }
-
-    fn submit_read_req(&mut self, buf: Vec<u8>, offset: u64) -> IoResult<()> {
-        let seq = self.index;
-        self.index += 1;
-        self.buf_vec.push(buf);
-
-        self.inner.as_ref().unwrap().read_aio(
-            &mut self.aio_vec[seq],
-            self.buf_vec[seq].len(),
-            self.buf_vec[seq].as_mut_ptr(),
-            offset,
-        );
-
-        Ok(())
     }
 }
 
@@ -367,21 +303,34 @@ impl FileSystem for DefaultFileSystem {
         &self,
         ctx: &mut Self::AsyncIoContext,
         handle: Arc<Self::Handle>,
-        buf: Vec<u8>,
-        block: &mut FileBlockHandle,
+        block: &FileBlockHandle,
     ) -> IoResult<()> {
-        ctx.set_fd(handle);
-        ctx.submit_read_req(buf, block.offset)
-    }
+        let buf = vec![0_u8; block.len];
+        ctx.buf_vec.push(buf);
 
+        let mut aior = Box::pin(AioRead::new(
+            handle.0,
+            block.offset as i64,
+            unsafe {
+                slice::from_raw_parts_mut(ctx.buf_vec.last_mut().unwrap().as_mut_ptr(), block.len)
+            },
+            0,
+            SigevNotify::SigevNone,
+        ));
+        aior.as_mut()
+            .submit()
+            .expect("aio read request submit failed");
+        ctx.aio_vec.push(aior);
+
+        Ok(())
+    }
     fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
-        let mut res = vec![];
-        for seq in 0..ctx.index {
-            match ctx.single_wait(seq) {
-                Ok(_) => res.push(ctx.data(seq).to_vec()),
-                Err(e) => return Err(e),
-            }
+        for seq in 0..ctx.aio_vec.len() {
+            let buf_len = ctx.buf_vec[seq].len();
+            aio_suspend(&[&*ctx.aio_vec[seq]], None).expect("aio_suspend failed");
+            assert_eq!(ctx.aio_vec[seq].as_mut().aio_return().unwrap(), buf_len);
         }
+        let res = ctx.buf_vec.to_owned();
         Ok(res)
     }
 
@@ -410,7 +359,7 @@ impl FileSystem for DefaultFileSystem {
         Ok(LogFile::new(handle))
     }
 
-    fn new_async_io_context(&self, block_sum: usize) -> IoResult<Self::AsyncIoContext> {
-        Ok(AioContext::new(block_sum))
+    fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
+        Ok(AioContext::new())
     }
 }

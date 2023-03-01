@@ -254,11 +254,11 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn async_read(&self, block: &mut FileBlockHandle, ctx: &mut F::AsyncIoContext) {
-        let fd = self.get_fd(block.id.seq).unwrap();
-        let buf = vec![0_u8; block.len];
-
-        self.file_system.async_read(ctx, fd, buf, block).unwrap();
+    fn async_read(&self, blocks: Vec<FileBlockHandle>, ctx: &mut F::AsyncIoContext) {
+        for block in blocks.iter() {
+            let fd = self.get_fd(block.id.seq).unwrap();
+            self.file_system.async_read(ctx, fd, block).unwrap();
+        }
     }
 
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
@@ -452,27 +452,11 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn async_read_bytes(&self, ents_idx: &mut Vec<EntryIndex>) -> Result<Vec<Vec<u8>>> {
-        let mut blocks: Vec<FileBlockHandle> = vec![];
-        for (t, i) in ents_idx.iter().enumerate() {
-            if t == 0 || (i.entries.unwrap() != ents_idx[t - 1].entries.unwrap()) {
-                blocks.push(i.entries.unwrap());
-            }
-        }
-
+    fn async_read_bytes(&self, blocks: Vec<FileBlockHandle>) -> Result<Vec<Vec<u8>>> {
         let fs = &self.pipes[LogQueue::Append as usize].file_system;
-        let mut ctx = fs.new_async_io_context(blocks.len()).unwrap();
+        let mut ctx = fs.new_async_io_context().unwrap();
 
-        for block in blocks.iter_mut() {
-            match block.id.queue {
-                LogQueue::Append => {
-                    self.pipes[LogQueue::Append as usize].async_read(block, &mut ctx);
-                }
-                LogQueue::Rewrite => {
-                    self.pipes[LogQueue::Rewrite as usize].async_read(block, &mut ctx);
-                }
-            }
-        }
+        self.pipes[LogQueue::Append as usize].async_read(blocks, &mut ctx);
         let res = fs.async_finish(&mut ctx).unwrap();
         Ok(res)
     }

@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
 
-use super::AsyncContext;
 use crate::pipe_log::FileBlockHandle;
 pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
 
@@ -86,43 +85,24 @@ impl ObfuscatedFileSystem {
         self.files.load(Ordering::Relaxed)
     }
 }
-pub struct ObfuscatedContext(<DefaultFileSystem as FileSystem>::AsyncIoContext);
-impl AsyncContext for ObfuscatedContext {
-    fn wait(&mut self) -> IoResult<usize> {
-        self.0.wait()
-    }
-
-    fn data(&self, seq: usize) -> &[u8] {
-        self.0.data(seq)
-    }
-
-    fn single_wait(&mut self, seq: usize) -> IoResult<usize> {
-        self.0.single_wait(seq)
-    }
-
-    fn submit_read_req(&mut self, buf: Vec<u8>, offset: u64) -> IoResult<()> {
-        self.0.submit_read_req(buf, offset)
-    }
-}
 
 impl FileSystem for ObfuscatedFileSystem {
     type Handle = <DefaultFileSystem as FileSystem>::Handle;
     type Reader = ObfuscatedReader;
     type Writer = ObfuscatedWriter;
-    type AsyncIoContext = ObfuscatedContext;
+    type AsyncIoContext = <DefaultFileSystem as FileSystem>::AsyncIoContext;
 
     fn async_read(
         &self,
         ctx: &mut Self::AsyncIoContext,
         handle: Arc<Self::Handle>,
-        buf: Vec<u8>,
-        block: &mut FileBlockHandle,
+        block: &FileBlockHandle,
     ) -> IoResult<()> {
-        self.inner.async_read(&mut ctx.0, handle, buf, block)
+        self.inner.async_read(ctx, handle, block)
     }
 
     fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
-        let base = self.inner.async_finish(&mut ctx.0).unwrap();
+        let base = self.inner.async_finish(ctx).unwrap();
         let mut res = vec![];
         for v in base {
             let mut temp = vec![];
@@ -173,9 +153,7 @@ impl FileSystem for ObfuscatedFileSystem {
         Ok(ObfuscatedWriter(self.inner.new_writer(handle)?))
     }
 
-    fn new_async_io_context(&self, block_sum: usize) -> IoResult<Self::AsyncIoContext> {
-        Ok(ObfuscatedContext(
-            self.inner.new_async_io_context(block_sum)?,
-        ))
+    fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
+        Ok(self.inner.new_async_io_context()?)
     }
 }

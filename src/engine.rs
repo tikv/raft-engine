@@ -330,7 +330,13 @@ where
                 .read()
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
 
-            let bytes = self.pipe_log.async_read_bytes(&mut ents_idx).unwrap();
+            let mut blocks: Vec<FileBlockHandle> = Vec::new();
+            for (t, i) in ents_idx.iter().enumerate() {
+                if t == 0 || (i.entries.unwrap() != ents_idx[t - 1].entries.unwrap()) {
+                    blocks.push(i.entries.unwrap());
+                }
+            }
+            let bytes = self.pipe_log.async_read_bytes(blocks).unwrap();
             parse_entries_from_bytes::<M>(bytes, &mut ents_idx, vec);
 
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
@@ -2100,10 +2106,9 @@ mod tests {
             &self,
             ctx: &mut Self::AsyncIoContext,
             handle: Arc<Self::Handle>,
-            buf: Vec<u8>,
-            block: &mut FileBlockHandle,
+            block: &FileBlockHandle,
         ) -> std::io::Result<()> {
-            self.inner.async_read(ctx, handle, buf, block)
+            self.inner.async_read(ctx, handle, block)
         }
 
         fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> std::io::Result<Vec<Vec<u8>>> {
@@ -2172,8 +2177,8 @@ mod tests {
             self.inner.new_writer(h)
         }
 
-        fn new_async_io_context(&self, block_sum: usize) -> std::io::Result<Self::AsyncIoContext> {
-            self.inner.new_async_io_context(block_sum)
+        fn new_async_io_context(&self) -> std::io::Result<Self::AsyncIoContext> {
+            self.inner.new_async_io_context()
         }
     }
 
