@@ -121,7 +121,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             // Check the file_list and remove the hole of files.
             let mut invalid_idx = 0_usize;
             for (i, file_pair) in files.windows(2).enumerate() {
-                if file_pair[0].seq + 1 < file_pair[1].seq || file_pair[0].seq == file_pair[1].seq {
+                // If there exists a black hole or duplicate scenario on FileSeq, these
+                // files should be skipped and cleared.
+                if file_pair[1].seq - file_pair[0].seq != 1 {
                     invalid_idx = i + 1;
                 }
             }
