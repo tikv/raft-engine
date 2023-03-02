@@ -155,28 +155,12 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(())
     }
 
-    fn new_file(&self, seq: FileSeq, expected_file_size: usize) -> Result<(PathId, F::Handle)> {
+    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
         let new_file_id = FileId {
             seq,
             queue: self.queue,
         };
-        if expected_file_size > self.target_file_size {
-            // On this state, it means that there already exists `nospace` errors and
-            // current buffer is too huge to be appended directly. So, we should free
-            // enough space by clearing several recycled log files until this buffer
-            // could be dumped.
-            let mut expected_size = vec![self.paths.len(); 0];
-            while let Some(f) = self.recycled_files.write().pop_front() {
-                let path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
-                if let Err(e) = self.file_system.delete(&path) {
-                    error!("error while trying to delete recycled file, err: {}", e);
-                }
-                expected_size[f.path_id] += self.target_file_size;
-                if expected_size[f.path_id] >= expected_file_size {
-                    break;
-                }
-            }
-        } else if let Some(f) = self.recycled_files.write().pop_front() {
+        if let Some(f) = self.recycled_files.write().pop_front() {
             let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
@@ -188,7 +172,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok((f.path_id, self.file_system.open(&dst_path)?));
             }
         }
-        let path_id = find_available_dir(&self.paths, expected_file_size);
+        let path_id = find_available_dir(&self.paths, self.target_file_size);
         let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
         Ok((path_id, self.file_system.create(&dst_path)?))
     }
@@ -205,11 +189,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
-    fn rotate_imp(
-        &self,
-        writable_file: &mut MutexGuard<WritableFile<F>>,
-        expected_file_size: usize,
-    ) -> Result<()> {
+    fn rotate_imp(&self, writable_file: &mut MutexGuard<WritableFile<F>>) -> Result<()> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
             perf_context!(log_rotate_duration),
@@ -219,7 +199,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (path_id, handle) = self.new_file(new_seq, expected_file_size)?;
+        let (path_id, handle) = self.new_file(new_seq)?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -279,7 +259,7 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut writable_file, self.target_file_size) {
+            if let Err(e) = self.rotate_imp(&mut writable_file) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
                     self.queue, writable_file.seq, e
@@ -316,8 +296,7 @@ impl<F: FileSystem> SinglePipe<F> {
             }
         }
         let start_offset = writer.offset();
-        let buf_bytes = bytes.as_bytes(&ctx);
-        if let Err(e) = writer.write(buf_bytes, self.target_file_size) {
+        if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
             if let Err(te) = writer.truncate() {
                 panic!(
                     "error when truncate {} after error: {}, get: {}",
@@ -325,14 +304,16 @@ impl<F: FileSystem> SinglePipe<F> {
                 );
             }
             if is_no_space_err(&e) {
-                // To avoid incorrect `rotate_imp` on the same dir when the size of
-                // accessible space less than `buf_bytes.len()` in this dir,
-                // the expected file size for `rotate_imp` should be calibrated by
-                // `max(buf_bytes.len(), target_file_size)`.
-                if let Err(e) = self.rotate_imp(
-                    &mut writable_file,
-                    std::cmp::max(buf_bytes.len(), self.target_file_size),
-                ) {
+                // TODO: There exists several corner cases should be tackled if
+                // `bytes.len()` > `target_file_size`. For example,
+                // - [1] main-dir has no recycled logs, and spill-dir have several recycled
+                //   logs.
+                // - [2] main-dir has several recycled logs, and sum(recycled_logs.size()) <
+                //   expected_file_size, but no recycled logs exist in spill-dir.
+                // - [3] Both main-dir and spill-dir have several recycled logs.
+                // But as `bytes.len()` is always smaller than `target_file_size` in common
+                // cases, this issue will be ignored temprorarily.
+                if let Err(e) = self.rotate_imp(&mut writable_file) {
                     panic!(
                         "error when rotate [{:?}:{}]: {}",
                         self.queue, writable_file.seq, e
@@ -386,7 +367,7 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn rotate(&self) -> Result<()> {
-        self.rotate_imp(&mut self.writable_file.lock(), self.target_file_size)
+        self.rotate_imp(&mut self.writable_file.lock())
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
