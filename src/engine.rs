@@ -203,6 +203,7 @@ where
                             MAX_WRITE_ATTEMPT, e
                         )));
                     }
+                    info!("got err: {}, try to write this LogBatch again", e);
                 }
                 Err(e) => {
                     return Err(e);
@@ -2628,7 +2629,7 @@ mod tests {
             // directory.
             std::fs::read_dir(paths[0]).unwrap().for_each(|e| {
                 let p = e.unwrap().path();
-                if !p.is_file() || file_count < halve_file_count {
+                if file_count < halve_file_count {
                     return;
                 }
                 let file_name = p.file_name().unwrap().to_str().unwrap();
@@ -2736,9 +2737,6 @@ mod tests {
             let mut file_count = 0;
             std::fs::read_dir(paths[1]).unwrap().for_each(|e| {
                 let p = e.unwrap().path();
-                if !p.is_file() {
-                    return;
-                }
                 let file_name = p.file_name().unwrap().to_str().unwrap();
                 if let Some(FileId {
                     queue: LogQueue::Append,

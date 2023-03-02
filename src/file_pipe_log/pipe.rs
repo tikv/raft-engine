@@ -96,7 +96,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // Open or create active file.
         let no_active_files = active_files.is_empty();
         if no_active_files {
-            let path_id = fetch_dir(&paths, cfg.target_file_size.0 as usize);
+            let path_id = find_available_dir(&paths, cfg.target_file_size.0 as usize);
             let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
@@ -165,14 +165,14 @@ impl<F: FileSystem> SinglePipe<F> {
             // current buffer is too huge to be appended directly. So, we should free
             // enough space by clearing several recycled log files until this buffer
             // could be dumped.
-            let mut expected_size = expected_file_size;
+            let mut expected_size = vec![self.paths.len(); 0];
             while let Some(f) = self.recycled_files.write().pop_front() {
                 let path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
                 if let Err(e) = self.file_system.delete(&path) {
                     error!("error while trying to delete recycled file, err: {}", e);
                 }
-                expected_size = expected_size.saturating_sub(self.target_file_size);
-                if expected_size == 0 {
+                expected_size[f.path_id] += self.target_file_size;
+                if expected_size[f.path_id] >= expected_file_size {
                     break;
                 }
             }
@@ -188,7 +188,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 return Ok((f.path_id, self.file_system.open(&dst_path)?));
             }
         }
-        let path_id = fetch_dir(&self.paths, expected_file_size);
+        let path_id = find_available_dir(&self.paths, expected_file_size);
         let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
         Ok((path_id, self.file_system.create(&dst_path)?))
     }
@@ -523,7 +523,7 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
 }
 
 /// Fetch and return a valid `PathId` of the specific directories.
-pub(crate) fn fetch_dir(paths: &Paths, target_size: usize) -> PathId {
+pub(crate) fn find_available_dir(paths: &Paths, target_size: usize) -> PathId {
     fail_point!("file_pipe_log::force_choose_dir", |s| s
         .map_or(DEFAULT_PATH_ID, |n| n.parse::<usize>().unwrap()));
     // Only if one single dir is set by `Config::dir`, can it skip the check of disk

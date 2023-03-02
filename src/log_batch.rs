@@ -424,7 +424,7 @@ impl LogItemBatch {
     /// `signature` and the original `checksum` of the contents.
     pub(crate) fn prepare_write(
         &self,
-        buf: &mut Vec<u8>,
+        buf: &mut [u8],
         file_context: &LogFileContext,
     ) -> Result<()> {
         if !buf.is_empty() {
@@ -822,7 +822,8 @@ impl LogBatch {
             // `BufState::Sealed` means that `LogBatch` is under a repeated state of dumping.
             BufState::Encoded(header_offset, entries_len)
             | BufState::Sealed(header_offset, entries_len) => {
-                self.item_batch.prepare_write(&mut self.buf, file_context)?;
+                self.item_batch
+                    .prepare_write(&mut self.buf[header_offset + entries_len..], file_context)?;
                 self.buf_state = BufState::Sealed(header_offset, entries_len);
             }
             _ => unreachable!(),

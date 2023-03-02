@@ -28,7 +28,7 @@ use super::format::{
     build_recycled_file_name, lock_file_path, parse_recycled_file_name, FileNameExt, LogFileFormat,
 };
 use super::log_file::build_file_reader;
-use super::pipe::{fetch_dir, DualPipes, File, Paths, SinglePipe, DEFAULT_FIRST_FILE_SEQ};
+use super::pipe::{find_available_dir, DualPipes, File, Paths, SinglePipe, DEFAULT_FIRST_FILE_SEQ};
 use super::reader::LogItemBatchFileReader;
 
 const PREFILL_BUFFER_SIZE: usize = ReadableSize::mb(16).0 as usize;
@@ -458,7 +458,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     .last()
                     .map(|f| f.seq + 1)
                     .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
-                let path_id = fetch_dir(&self.dirs, target_file_size);
+                let path_id = find_available_dir(&self.dirs, target_file_size);
                 let root_path = &self.dirs[path_id];
                 let path = root_path.join(build_recycled_file_name(seq));
                 let handle = Arc::new(self.file_system.create(&path)?);
