@@ -154,6 +154,6 @@ impl FileSystem for ObfuscatedFileSystem {
     }
 
     fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
-        Ok(self.inner.new_async_io_context()?)
+        self.inner.new_async_io_context()
     }
 }

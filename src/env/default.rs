@@ -1,6 +1,5 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::ffi::c_void;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
@@ -9,12 +8,11 @@ use std::slice;
 use std::sync::Arc;
 
 use fail::fail_point;
-use libc::{aiocb, off_t};
 use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::aio::{aio_suspend, Aio, AioRead};
-use nix::sys::signal::{SigEvent, SigevNotify};
+use nix::sys::signal::SigevNotify;
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
@@ -102,19 +100,6 @@ impl LogFd {
             offset += bytes;
         }
         Ok(readed)
-    }
-
-    pub fn read_aio(&self, aior: &mut aiocb, len: usize, pbuf: *mut u8, offset: u64) {
-        unsafe {
-            aior.aio_fildes = self.0;
-            aior.aio_reqprio = 0;
-            aior.aio_sigevent = SigEvent::new(SigevNotify::SigevNone).sigevent();
-            aior.aio_nbytes = len;
-            aior.aio_buf = pbuf as *mut c_void;
-            aior.aio_lio_opcode = libc::LIO_READ;
-            aior.aio_offset = offset as off_t;
-            libc::aio_read(aior);
-        }
     }
 
     /// Writes some bytes to this file starting at `offset`. Returns how many
