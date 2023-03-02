@@ -266,7 +266,11 @@ pub struct AioContext {
     aio_vec: Vec<Pin<Box<AioRead<'static>>>>,
     buf_vec: Vec<Vec<u8>>,
 }
-
+impl Default for AioContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl AioContext {
     pub fn new() -> Self {
         Self {
