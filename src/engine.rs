@@ -2731,6 +2731,7 @@ mod tests {
         }
         let (start_5, end_5) = engine.file_span(LogQueue::Append);
         assert!(end_4 < end_5);
+
         // Case 4: abnormal case - duplicate FileSeq among different dirs.
         {
             // Prerequisite: choose several files and duplicate them to main dir.

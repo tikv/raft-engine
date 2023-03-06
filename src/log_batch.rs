@@ -1530,6 +1530,22 @@ mod tests {
         assert!(batch.is_empty());
         batch.add_raw_entries(0, Vec::new(), Vec::new()).unwrap();
         assert!(batch.is_empty());
+        // Encoding empty LogBatch.
+        {
+            let mocked_file_block_handles = FileBlockHandle {
+                id: FileId::new(LogQueue::Append, 12),
+                len: 0,
+                offset: 0,
+            };
+            let buf_len = batch.buf.len();
+            let len = batch.finish_populate(1).unwrap();
+            assert!(len == 0);
+            assert_eq!(batch.buf_state, BufState::Encoded(buf_len, 0));
+            let file_context = LogFileContext::new(mocked_file_block_handles.id, Version::V2);
+            batch.prepare_write(&file_context).unwrap();
+            assert!(batch.is_empty());
+            assert_eq!(batch.buf_state, BufState::Sealed(buf_len, 0));
+        }
     }
 
     #[test]
