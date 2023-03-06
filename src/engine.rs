@@ -594,7 +594,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::env::{OFlag, ObfuscatedFileSystem};
+    use crate::env::{ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
@@ -2001,8 +2001,8 @@ pub(crate) mod tests {
             Ok(handle)
         }
 
-        fn open<P: AsRef<Path>>(&self, path: P, flag: OFlag) -> std::io::Result<Self::Handle> {
-            let handle = self.inner.open(&path, flag)?;
+        fn open<P: AsRef<Path>>(&self, path: P, pmt: Permission) -> std::io::Result<Self::Handle> {
+            let handle = self.inner.open(&path, pmt)?;
             self.update_metadata(path.as_ref(), false);
             Ok(handle)
         }

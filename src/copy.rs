@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::env::{FileSystem, OFlag};
+use crate::env::{FileSystem, Permission};
 use crate::file_pipe_log::{FileNameExt, FilePipeLogBuilder};
 use crate::pipe_log::{FileId, LogQueue};
 
@@ -37,7 +37,7 @@ where
 
     let mut builder = FilePipeLogBuilder::new(cfg.clone(), fs, vec![]);
     builder
-        .scan_impl(|_, _| -> OFlag { OFlag::O_RDONLY })
+        .scan_impl(|_, _| -> Permission { Permission::ReadOnly })
         .map_err(|e| format!("scan files: {}", e))?;
 
     // Iterate all log files and rewrite files.

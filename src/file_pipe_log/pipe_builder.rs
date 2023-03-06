@@ -15,7 +15,7 @@ use log::{error, info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
-use crate::env::{FileSystem, Handle, OFlag};
+use crate::env::{FileSystem, Handle, Permission};
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, LogQueue};
@@ -99,19 +99,22 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
-        let get_open_flag = |recovery_mode: RecoveryMode, last_in_queue: bool| -> OFlag {
+        let get_permission = |recovery_mode: RecoveryMode, last_in_queue: bool| -> Permission {
+            // If recovery_mode is TolerateAnyCorruption it means all log files
+            // can be truncated or modified internally. Otherwise only the last file
+            // can be changed.
             if recovery_mode == RecoveryMode::TolerateAnyCorruption || last_in_queue {
-                OFlag::O_RDWR
+                Permission::ReadWrite
             } else {
-                OFlag::O_RDONLY
+                Permission::ReadOnly
             }
         };
-        self.scan_impl(get_open_flag)
+        self.scan_impl(get_permission)
     }
 
-    pub(crate) fn scan_impl<G>(&mut self, get_open_flag: G) -> Result<()>
+    pub(crate) fn scan_impl<G>(&mut self, get_permission: G) -> Result<()>
     where
-        G: Fn(RecoveryMode, bool /* the last one or not */) -> OFlag,
+        G: Fn(RecoveryMode, bool /* the last one or not */) -> Permission,
     {
         let root_path = Path::new(&self.cfg.dir);
         if !root_path.exists() {
@@ -236,7 +239,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         );
                         files.clear();
                     } else {
-                        let flag = get_open_flag(self.cfg.recovery_mode, seq == max_id);
+                        let flag = get_permission(self.cfg.recovery_mode, seq == max_id);
                         let handle = Arc::new(self.file_system.open(&path, flag)?);
                         files.push(File {
                             seq,

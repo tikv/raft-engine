@@ -8,13 +8,13 @@ use std::sync::Arc;
 use fail::fail_point;
 use log::error;
 use nix::errno::Errno;
-use nix::fcntl::{self, OFlag as NixOFlag};
+use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
-use crate::env::{FileSystem, Handle, OFlag, WriteExt};
+use crate::env::{FileSystem, Handle, Permission, WriteExt};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -32,8 +32,8 @@ pub struct LogFd(RawFd);
 
 impl LogFd {
     /// Opens a file with the given `path`.
-    pub fn open<P: ?Sized + NixPath>(path: &P, flags: OFlag) -> IoResult<Self> {
-        let flags: NixOFlag = flags.into();
+    pub fn open<P: ?Sized + NixPath>(path: &P, pmt: Permission) -> IoResult<Self> {
+        let flags: OFlag = OFlag::from(pmt);
         fail_point!("log_fd::open::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });
@@ -59,7 +59,7 @@ impl LogFd {
         fail_point!("log_fd::create::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });
-        let flags = NixOFlag::O_RDWR | NixOFlag::O_CREAT;
+        let flags = OFlag::O_RDWR | OFlag::O_CREAT;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         let fd = fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?;
@@ -268,8 +268,8 @@ impl FileSystem for DefaultFileSystem {
         LogFd::create(path.as_ref())
     }
 
-    fn open<P: AsRef<Path>>(&self, path: P, flags: OFlag) -> IoResult<Self::Handle> {
-        LogFd::open(path.as_ref(), flags)
+    fn open<P: AsRef<Path>>(&self, path: P, pmt: Permission) -> IoResult<Self::Handle> {
+        LogFd::open(path.as_ref(), pmt)
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
