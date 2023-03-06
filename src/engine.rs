@@ -2111,7 +2111,7 @@ mod tests {
             self.inner.async_read(ctx, handle, block)
         }
 
-        fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> std::io::Result<Vec<Vec<u8>>> {
+        fn async_finish(&self, ctx: Self::AsyncIoContext) -> std::io::Result<Vec<Vec<u8>>> {
             self.inner.async_finish(ctx)
         }
 

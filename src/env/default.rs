@@ -313,7 +313,7 @@ impl FileSystem for DefaultFileSystem {
 
         Ok(())
     }
-    fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+    fn async_finish(&self, mut ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
         for seq in 0..ctx.aio_vec.len() {
             let buf_len = ctx.buf_vec[seq].len();
             aio_suspend(&[&*ctx.aio_vec[seq]], None).expect("aio_suspend failed");

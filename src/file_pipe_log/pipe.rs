@@ -185,6 +185,7 @@ impl<F: FileSystem> SinglePipe<F> {
         }
         Ok(files[(file_seq - files[0].seq) as usize].handle.clone())
     }
+
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
@@ -254,10 +255,12 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn async_read(&self, blocks: Vec<FileBlockHandle>, ctx: &mut F::AsyncIoContext) {
+    fn async_read(&self, ctx: &mut F::AsyncIoContext, blocks: Vec<FileBlockHandle>) {
         for block in blocks.iter() {
             let fd = self.get_fd(block.id.seq).unwrap();
-            self.file_system.async_read(ctx, fd, block).unwrap();
+            self.file_system
+                .async_read(ctx, fd, block)
+                .expect("Async read failed.");
         }
     }
 
@@ -456,8 +459,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
         let fs = &self.pipes[LogQueue::Append as usize].file_system;
         let mut ctx = fs.new_async_io_context().unwrap();
 
-        self.pipes[LogQueue::Append as usize].async_read(blocks, &mut ctx);
-        let res = fs.async_finish(&mut ctx).unwrap();
+        self.pipes[LogQueue::Append as usize].async_read(&mut ctx, blocks);
+        let res = fs.async_finish(ctx).unwrap();
         Ok(res)
     }
 

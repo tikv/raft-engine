@@ -101,18 +101,16 @@ impl FileSystem for ObfuscatedFileSystem {
         self.inner.async_read(ctx, handle, block)
     }
 
-    fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
-        let base = self.inner.async_finish(ctx).unwrap();
-        let mut res = vec![];
-        for v in base {
-            let mut temp = vec![];
-            //do obfuscation.
-            for c in v {
-                temp.push(c.wrapping_sub(1));
+    fn async_finish(&self, ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+        let mut base = self.inner.async_finish(ctx).unwrap();
+
+        for v in base.iter_mut() {
+            for c in v.iter_mut() {
+                // do obfuscation.
+                *c = c.wrapping_sub(1);
             }
-            res.push(temp);
         }
-        Ok(res)
+        Ok(base)
     }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {

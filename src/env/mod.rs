@@ -7,7 +7,6 @@ use std::sync::Arc;
 mod default;
 mod obfuscated;
 
-pub use default::AioContext;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
@@ -25,7 +24,7 @@ pub trait FileSystem: Send + Sync {
         handle: Arc<Self::Handle>,
         block: &FileBlockHandle,
     ) -> Result<()>;
-    fn async_finish(&self, ctx: &mut Self::AsyncIoContext) -> Result<Vec<Vec<u8>>>;
+    fn async_finish(&self, ctx: Self::AsyncIoContext) -> Result<Vec<Vec<u8>>>;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
