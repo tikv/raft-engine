@@ -457,10 +457,11 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn async_read_bytes(&self, blocks: Vec<FileBlockHandle>) -> Result<Vec<Vec<u8>>> {
         let fs = &self.pipes[LogQueue::Append as usize].file_system;
-        let mut ctx = fs.new_async_io_context().unwrap();
+        let mut ctx = fs.new_async_io_context()?;
 
         self.pipes[LogQueue::Append as usize].async_read(&mut ctx, blocks);
-        let res = fs.async_finish(ctx).unwrap();
+        let res = fs.async_finish(ctx)?;
+
         Ok(res)
     }
 

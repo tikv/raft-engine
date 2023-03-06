@@ -261,23 +261,10 @@ impl WriteExt for LogFile {
         self.inner.allocate(offset, size)
     }
 }
-
+#[derive(Default)]
 pub struct AioContext {
     aio_vec: Vec<Pin<Box<AioRead<'static>>>>,
     buf_vec: Vec<Vec<u8>>,
-}
-impl Default for AioContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl AioContext {
-    pub fn new() -> Self {
-        Self {
-            aio_vec: Vec::new(),
-            buf_vec: Vec::new(),
-        }
-    }
 }
 
 pub struct DefaultFileSystem;
@@ -306,9 +293,7 @@ impl FileSystem for DefaultFileSystem {
             0,
             SigevNotify::SigevNone,
         ));
-        aior.as_mut()
-            .submit()
-            .expect("aio read request submit failed");
+        aior.as_mut().submit()?;
         ctx.aio_vec.push(aior);
 
         Ok(())
@@ -316,8 +301,8 @@ impl FileSystem for DefaultFileSystem {
     fn async_finish(&self, mut ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
         for seq in 0..ctx.aio_vec.len() {
             let buf_len = ctx.buf_vec[seq].len();
-            aio_suspend(&[&*ctx.aio_vec[seq]], None).expect("aio_suspend failed");
-            assert_eq!(ctx.aio_vec[seq].as_mut().aio_return().unwrap(), buf_len);
+            aio_suspend(&[&*ctx.aio_vec[seq]], None)?;
+            assert_eq!(ctx.aio_vec[seq].as_mut().aio_return()?, buf_len);
         }
         let res = ctx.buf_vec.to_owned();
         Ok(res)
@@ -349,6 +334,6 @@ impl FileSystem for DefaultFileSystem {
     }
 
     fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
-        Ok(AioContext::new())
+        Ok(AioContext::default())
     }
 }

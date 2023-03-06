@@ -336,8 +336,8 @@ where
                     blocks.push(i.entries.unwrap());
                 }
             }
-            let bytes = self.pipe_log.async_read_bytes(blocks).unwrap();
-            parse_entries_from_bytes::<M>(bytes, &mut ents_idx, vec);
+            let bytes = self.pipe_log.async_read_bytes(blocks)?;
+            parse_entries_from_bytes::<M>(bytes, &mut ents_idx, vec)?;
 
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
 
@@ -582,7 +582,7 @@ pub(crate) fn parse_entries_from_bytes<M: MessageExt>(
     bytes: Vec<Vec<u8>>,
     ents_idx: &mut [EntryIndex],
     vec: &mut Vec<M::Entry>,
-) {
+) -> Result<()> {
     let mut decode_buf = vec![];
     let mut seq: i32 = -1;
     for (t, idx) in ents_idx.iter().enumerate() {
@@ -594,19 +594,15 @@ pub(crate) fn parse_entries_from_bytes<M: MessageExt>(
                 }
                 false => decode_buf,
             };
-        vec.push(
-            parse_from_bytes(
-                &LogBatch::decode_entries_block(
-                    &decode_buf,
-                    idx.entries.unwrap(),
-                    idx.compression_type,
-                )
-                .unwrap()
-                    [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
-            )
-            .unwrap(),
-        );
+        vec.push(parse_from_bytes(
+            &LogBatch::decode_entries_block(
+                &decode_buf,
+                idx.entries.unwrap(),
+                idx.compression_type,
+            )?[idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
+        )?);
     }
+    Ok(())
 }
 pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
 where
@@ -843,6 +839,47 @@ mod tests {
                     assert_eq!(d, &data);
                 });
             }
+
+            // Recover the engine.
+            let engine = engine.reopen();
+            for i in 10..20 {
+                let rid = i;
+                let index = i;
+                engine.scan_entries(rid, index, index + 2, |_, q, d| {
+                    assert_eq!(q, LogQueue::Append);
+                    assert_eq!(d, &data);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_async_get_entry() {
+        let normal_batch_size = 10;
+        let compressed_batch_size = 5120;
+        for &entry_size in &[normal_batch_size, compressed_batch_size] {
+            let dir = tempfile::Builder::new()
+                .prefix("test_get_entry")
+                .tempdir()
+                .unwrap();
+            let cfg = Config {
+                dir: dir.path().to_str().unwrap().to_owned(),
+                target_file_size: ReadableSize(1),
+                ..Default::default()
+            };
+
+            let engine = RaftLogEngine::open_with_file_system(
+                cfg.clone(),
+                Arc::new(ObfuscatedFileSystem::default()),
+            )
+            .unwrap();
+            assert_eq!(engine.path(), dir.path().to_str().unwrap());
+            let data = vec![b'x'; entry_size];
+            for i in 10..20 {
+                let rid = i;
+                let index = i;
+                engine.append(rid, index, index + 2, Some(&data));
+            }
             for i in 10..20 {
                 let rid = i;
                 let index = i;
@@ -857,7 +894,7 @@ mod tests {
             for i in 10..20 {
                 let rid = i;
                 let index = i;
-                engine.scan_entries(rid, index, index + 2, |_, q, d| {
+                engine.scan_entries_aio(rid, index, index + 2, |_, q, d| {
                     assert_eq!(q, LogQueue::Append);
                     assert_eq!(d, &data);
                 });
