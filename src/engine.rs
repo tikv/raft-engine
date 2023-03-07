@@ -25,6 +25,8 @@ use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{perf_context, Error, GlobalStats, Result};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+/// Max times for `write`.
+const MAX_WRITE_ATTEMPT: u64 = 2;
 
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
@@ -142,7 +144,14 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         debug_assert!(len > 0);
-        let block_handle = {
+
+        let mut attempt_count = 0_u64;
+        let block_handle = loop {
+            // Max retry count is limited to `WRITE_MAX_RETRY_TIMES`, that is, 2.
+            // If the first `append` retry because of NOSPC error, the next `append`
+            // should success, unless there exists several abnormal cases in the IO device.
+            // In that case, `Engine::write` must return `Err`.
+            attempt_count += 1;
             let mut writer = Writer::new(log_batch, sync);
             // Snapshot and clear the current perf context temporarily, so the write group
             // leader will collect the perf context diff later.
@@ -171,14 +180,35 @@ where
                 }
             }
             let entered_time = writer.entered_time.unwrap();
-            ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
-                .observe(entered_time.saturating_duration_since(start).as_secs_f64());
             perf_context.write_wait_duration +=
                 entered_time.saturating_duration_since(before_enter);
             debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
-            writer.finish()?
+            // Retry if `writer.finish()` returns a special 'Error::TryAgain', remarking
+            // that there still exists free space for this `LogBatch`.
+            match writer.finish() {
+                Ok(handle) => {
+                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
+                        .observe(entered_time.saturating_duration_since(start).as_secs_f64());
+                    break handle;
+                }
+                Err(Error::TryAgain(e)) => {
+                    if attempt_count >= MAX_WRITE_ATTEMPT {
+                        // A special err, we will retry this LogBatch `append` by appending
+                        // this writer to the next write group, and the current write leader
+                        // will not hang on this write and will return timely.
+                        return Err(Error::TryAgain(format!(
+                            "Failed to write logbatch, exceed MAX_WRITE_ATTEMPT: ({}), err: {}",
+                            MAX_WRITE_ATTEMPT, e
+                        )));
+                    }
+                    info!("got err: {}, try to write this LogBatch again", e);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         };
         let mut now = Instant::now();
         log_batch.finish_write(block_handle);
@@ -2559,5 +2589,172 @@ mod tests {
         let engine = engine.reopen();
         // Replay of rewrite filtered.
         assert!(engine.raft_groups().is_empty());
+    }
+
+    #[test]
+    fn test_start_engine_with_multi_dirs() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_default")
+            .tempdir()
+            .unwrap();
+        let spill_dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_spill")
+            .tempdir()
+            .unwrap();
+        let paths = [
+            dir.path().to_str().unwrap(),
+            spill_dir.path().to_str().unwrap(),
+        ];
+        let file_system = Arc::new(DeleteMonitoredFileSystem::new());
+        let entry_data = vec![b'x'; 512];
+
+        // Preparations for multi-dirs.
+        {
+            // Step 1: write data into the main directory.
+            let cfg = Config {
+                dir: paths[0].to_owned(),
+                enable_log_recycle: false,
+                target_file_size: ReadableSize(1),
+                ..Default::default()
+            };
+            let engine = RaftLogEngine::open_with_file_system(cfg, file_system.clone()).unwrap();
+            for rid in 1..=10 {
+                engine.append(rid, 1, 10, Some(&entry_data));
+            }
+            let mut file_count = engine.file_count(Some(LogQueue::Append));
+            let halve_file_count = (file_count + 1) / 2;
+            drop(engine);
+
+            // Step 2: select several log files and move them into the `spill_dir`
+            // directory.
+            std::fs::read_dir(paths[0]).unwrap().for_each(|e| {
+                let p = e.unwrap().path();
+                if file_count < halve_file_count {
+                    return;
+                }
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    let mut dst_path = PathBuf::from(&paths[1]);
+                    dst_path.push(file_name);
+                    file_system.rename(p, dst_path).unwrap();
+                    file_count -= 1;
+                }
+            });
+        }
+
+        // Case 1: start an engine with no recycling.
+        let cfg = Config {
+            dir: paths[0].to_owned(),
+            spill_dir: Some(paths[1].to_owned()),
+            target_file_size: ReadableSize(1),
+            enable_log_recycle: false,
+            ..Default::default()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
+        let (start, end) = engine.file_span(LogQueue::Append);
+        // Append data.
+        for rid in 1..=10 {
+            engine.append(rid, 10, 20, Some(&entry_data));
+        }
+        let (start_1, end_1) = engine.file_span(LogQueue::Append);
+        assert_eq!(start_1, start);
+        assert!(end_1 > end);
+        assert_eq!(file_system.inner.file_count(), engine.file_count(None));
+        drop(engine);
+
+        // Case 2: restart the engine with recycle and prefill.
+        let cfg_2 = Config {
+            enable_log_recycle: true,
+            prefill_for_recycle: true,
+            purge_threshold: ReadableSize(40),
+            ..cfg
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg_2.clone(), file_system.clone()).unwrap();
+        let file_count = file_system.inner.file_count();
+        let (start_2, end_2) = engine.file_span(LogQueue::Append);
+        assert!(file_count > engine.file_count(None));
+        assert_eq!((start_1, end_1), (start_2, end_2));
+        // Append data, recycled files are reused.
+        for rid in 1..=10 {
+            engine.append(rid, 20, 30, Some(&entry_data));
+        }
+        assert_eq!(file_count, file_system.inner.file_count());
+        // Mark all data obsolete.
+        for rid in 1..=10 {
+            engine.clean(rid);
+        }
+        let (start_2, end_2) = engine.file_span(LogQueue::Append);
+        assert_eq!(start_2, start_1);
+        assert!(end_2 > end_1);
+        assert_eq!(file_count, file_system.inner.file_count());
+        // Purge and check the file span. As all logs are reused from recycled files,
+        // the whole file_count won't change.
+        engine.purge_expired_files().unwrap();
+        let (start_3, end_3) = engine.file_span(LogQueue::Append);
+        assert!(start_3 > start_2);
+        assert_eq!(start_3, end_3);
+        let engine = engine.reopen();
+        // As the `purge_threshold` < the count of real append count, there exists
+        // newly created file for appending, which are not generated by reusing recycled
+        // logs.
+        assert!(file_count < file_system.inner.file_count());
+        let file_count = file_system.inner.file_count();
+        // Reuse all files for appending new data. Here, recycled files in auxiliary
+        // directory (`spill-dir`) also are reused.
+        for rid in 1..=30 {
+            engine.append(rid, 1, 10, Some(&entry_data));
+        }
+        assert_eq!(file_count, file_system.inner.file_count());
+        let (start_4, end_4) = engine.file_span(LogQueue::Append);
+        drop(engine);
+
+        // Case 3: restart the engine with no recycle.
+        let cfg_3 = Config {
+            enable_log_recycle: false,
+            prefill_for_recycle: false,
+            purge_threshold: ReadableSize(40),
+            ..cfg_2
+        };
+        let engine = RaftLogEngine::open_with_file_system(cfg_3, file_system.clone()).unwrap();
+        assert_eq!((start_4, end_4), engine.file_span(LogQueue::Append));
+        // All prefilled - recycled files are cleared.
+        assert!(file_count > file_system.inner.file_count());
+        for rid in 1..=5 {
+            engine.append(rid, 10, 20, Some(&entry_data));
+        }
+        let (start_5, end_5) = engine.file_span(LogQueue::Append);
+        assert!(end_4 < end_5);
+
+        // Case 4: abnormal case - duplicate FileSeq among different dirs.
+        {
+            // Prerequisite: choose several files and duplicate them to main dir.
+            let mut file_count = 0;
+            std::fs::read_dir(paths[1]).unwrap().for_each(|e| {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    let mut dst_path = PathBuf::from(&paths[0]);
+                    dst_path.push(file_name);
+                    if file_count % 2 == 0 {
+                        std::fs::copy(p, dst_path).unwrap();
+                    }
+                    file_count += 1;
+                }
+            });
+        }
+        let engine = engine.reopen();
+        // Duplicate log files will be skipped and cleared.
+        assert!(engine.file_span(LogQueue::Append).0 > start_5);
     }
 }

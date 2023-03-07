@@ -14,6 +14,7 @@
 ### New Features
 
 * Support preparing prefilled logs to enable log recycling when start-up.
+* Add a new configuration `spill-dir` to allow automatic placement of logs into an auxiliary directory when `dir` is full.
 
 ## [0.3.0] - 2022-09-14
 
