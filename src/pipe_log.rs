@@ -5,6 +5,7 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
+use crate::memtable::EntryIndex;
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::ToPrimitive;
@@ -171,6 +172,9 @@ where
 pub trait PipeLog: Sized {
     /// Reads some bytes from the specified position.
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>>;
+
+    /// Reads bytes from multi blocks using 'Async IO'.
+    fn async_read_bytes(&self, blocks: Vec<FileBlockHandle>) -> Result<Vec<Vec<u8>>>;
 
     /// Appends some bytes to the specified log queue. Returns file position of
     /// the written bytes.

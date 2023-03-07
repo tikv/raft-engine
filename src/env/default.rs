@@ -3,18 +3,23 @@
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::pin::Pin;
+use std::slice;
 use std::sync::Arc;
 
 use fail::fail_point;
 use log::error;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
+use nix::sys::aio::{aio_suspend, Aio, AioRead};
+use nix::sys::signal::SigevNotify;
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
 use crate::env::{FileSystem, Handle, WriteExt};
+use crate::pipe_log::FileBlockHandle;
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
@@ -260,6 +265,11 @@ impl WriteExt for LogFile {
         self.inner.allocate(offset, size)
     }
 }
+#[derive(Default)]
+pub struct AioContext {
+    aio_vec: Vec<Pin<Box<AioRead<'static>>>>,
+    buf_vec: Vec<Vec<u8>>,
+}
 
 pub struct DefaultFileSystem;
 
@@ -267,6 +277,40 @@ impl FileSystem for DefaultFileSystem {
     type Handle = LogFd;
     type Reader = LogFile;
     type Writer = LogFile;
+    type AsyncIoContext = AioContext;
+
+    fn async_read(
+        &self,
+        ctx: &mut Self::AsyncIoContext,
+        handle: Arc<Self::Handle>,
+        block: &FileBlockHandle,
+    ) -> IoResult<()> {
+        let buf = vec![0_u8; block.len];
+        ctx.buf_vec.push(buf);
+
+        let mut aior = Box::pin(AioRead::new(
+            handle.0,
+            block.offset as i64,
+            unsafe {
+                slice::from_raw_parts_mut(ctx.buf_vec.last_mut().unwrap().as_mut_ptr(), block.len)
+            },
+            0,
+            SigevNotify::SigevNone,
+        ));
+        aior.as_mut().submit()?;
+        ctx.aio_vec.push(aior);
+
+        Ok(())
+    }
+    fn async_finish(&self, mut ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+        for seq in 0..ctx.aio_vec.len() {
+            let buf_len = ctx.buf_vec[seq].len();
+            aio_suspend(&[&*ctx.aio_vec[seq]], None)?;
+            assert_eq!(ctx.aio_vec[seq].as_mut().aio_return()?, buf_len);
+        }
+        let res = ctx.buf_vec.to_owned();
+        Ok(res)
+    }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         LogFd::create(path.as_ref())
@@ -291,5 +335,9 @@ impl FileSystem for DefaultFileSystem {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
         Ok(LogFile::new(handle))
+    }
+
+    fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
+        Ok(AioContext::default())
     }
 }

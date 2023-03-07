@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::env::{DefaultFileSystem, FileSystem, WriteExt};
 
+use crate::pipe_log::FileBlockHandle;
 pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
 
 impl Read for ObfuscatedReader {
@@ -89,6 +90,28 @@ impl FileSystem for ObfuscatedFileSystem {
     type Handle = <DefaultFileSystem as FileSystem>::Handle;
     type Reader = ObfuscatedReader;
     type Writer = ObfuscatedWriter;
+    type AsyncIoContext = <DefaultFileSystem as FileSystem>::AsyncIoContext;
+
+    fn async_read(
+        &self,
+        ctx: &mut Self::AsyncIoContext,
+        handle: Arc<Self::Handle>,
+        block: &FileBlockHandle,
+    ) -> IoResult<()> {
+        self.inner.async_read(ctx, handle, block)
+    }
+
+    fn async_finish(&self, ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+        let mut base = self.inner.async_finish(ctx).unwrap();
+
+        for v in base.iter_mut() {
+            for c in v.iter_mut() {
+                // do obfuscation.
+                *c = c.wrapping_sub(1);
+            }
+        }
+        Ok(base)
+    }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         let r = self.inner.create(path);
@@ -126,5 +149,9 @@ impl FileSystem for ObfuscatedFileSystem {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
         Ok(ObfuscatedWriter(self.inner.new_writer(handle)?))
+    }
+
+    fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
+        self.inner.new_async_io_context()
     }
 }

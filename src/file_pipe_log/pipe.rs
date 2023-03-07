@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::env::FileSystem;
 use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
+use crate::memtable::EntryIndex;
 use crate::metrics::*;
 use crate::pipe_log::{
     FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
@@ -255,6 +256,15 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
+    fn async_read(&self, ctx: &mut F::AsyncIoContext, blocks: Vec<FileBlockHandle>) {
+        for block in blocks.iter() {
+            let fd = self.get_fd(block.id.seq).unwrap();
+            self.file_system
+                .async_read(ctx, fd, block)
+                .expect("Async read failed.");
+        }
+    }
+
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
@@ -466,6 +476,17 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     #[inline]
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         self.pipes[handle.id.queue as usize].read_bytes(handle)
+    }
+
+    #[inline]
+    fn async_read_bytes(&self, blocks: Vec<FileBlockHandle>) -> Result<Vec<Vec<u8>>> {
+        let fs = &self.pipes[LogQueue::Append as usize].file_system;
+        let mut ctx = fs.new_async_io_context()?;
+
+        self.pipes[LogQueue::Append as usize].async_read(&mut ctx, blocks);
+        let res = fs.async_finish(ctx)?;
+
+        Ok(res)
     }
 
     #[inline]

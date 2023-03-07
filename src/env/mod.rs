@@ -10,11 +10,21 @@ mod obfuscated;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
+use crate::pipe_log::FileBlockHandle;
 /// FileSystem
 pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
+    type AsyncIoContext;
+
+    fn async_read(
+        &self,
+        ctx: &mut Self::AsyncIoContext,
+        handle: Arc<Self::Handle>,
+        block: &FileBlockHandle,
+    ) -> Result<()>;
+    fn async_finish(&self, ctx: Self::AsyncIoContext) -> Result<Vec<Vec<u8>>>;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
@@ -55,6 +65,8 @@ pub trait FileSystem: Send + Sync {
     fn new_reader(&self, handle: Arc<Self::Handle>) -> Result<Self::Reader>;
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
+
+    fn new_async_io_context(&self) -> Result<Self::AsyncIoContext>;
 }
 
 pub trait Handle {
