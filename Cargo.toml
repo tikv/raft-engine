@@ -16,6 +16,10 @@ features = ["internals"]
 name = "append-compact-purge"
 path = "examples/append_compact_purge.rs"
 
+[[example]]
+name = "raft-engine-copy"
+path = "examples/minimum_copy.rs"
+
 [[test]]
 name = "failpoints"
 path = "tests/failpoints/mod.rs"

@@ -99,6 +99,18 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
+        let root_path = Path::new(&self.cfg.dir);
+        if !root_path.exists() {
+            info!("Create raft log directory: {}", root_path.display());
+            fs::create_dir(root_path)?;
+            self.dir_lock = Some(lock_dir(root_path)?);
+            return Ok(());
+        }
+        if !root_path.is_dir() {
+            return Err(box_err!("Not directory: {}", root_path.display()));
+        }
+        self.dir_lock = Some(lock_dir(root_path)?);
+
         let get_permission = |recovery_mode: RecoveryMode, last_in_queue: bool| -> Permission {
             // If recovery_mode is TolerateAnyCorruption it means all log files
             // can be truncated or modified internally. Otherwise only the last file
@@ -117,17 +129,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         G: Fn(RecoveryMode, bool /* the last one or not */) -> Permission,
     {
         let root_path = Path::new(&self.cfg.dir);
-        if !root_path.exists() {
-            info!("Create raft log directory: {}", root_path.display());
-            fs::create_dir(root_path)?;
-            self.dir_lock = Some(lock_dir(root_path)?);
-            return Ok(());
-        }
-        if !root_path.is_dir() {
-            return Err(box_err!("Not directory: {}", root_path.display()));
-        }
-        self.dir_lock = Some(lock_dir(root_path)?);
-
         let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
         let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
         let (mut min_recycled_id, mut max_recycled_id) = (u64::MAX, 0);
