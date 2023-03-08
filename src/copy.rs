@@ -5,10 +5,19 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, RecoveryMode};
 use crate::env::{FileSystem, Permission};
 use crate::file_pipe_log::{FileNameExt, FilePipeLogBuilder};
 use crate::pipe_log::{FileId, LogQueue};
+
+/// Returned by `minimum_copy`.
+#[derive(Default)]
+pub struct CopyDetails {
+    /// Paths of copied log files.
+    pub copied: Vec<String>,
+    /// Paths of symlinked log files.
+    pub symlinked: Vec<String>,
+}
 
 /// Make a copy from `source` to `target`. `source` should exists but `target`
 /// shouldn't.
@@ -19,13 +28,16 @@ use crate::pipe_log::{FileId, LogQueue};
 ///
 /// After the copy is made both of 2 engines can be started and run at the same
 /// time.
-pub fn minimum_copy<F, P>(cfg: &Config, fs: Arc<F>, target: P) -> Result<(), String>
+pub fn minimum_copy<F, P>(cfg: &Config, fs: Arc<F>, target: P) -> Result<CopyDetails, String>
 where
     F: FileSystem,
     P: AsRef<Path>,
 {
     if cfg.enable_log_recycle {
         return Err("enable_log_recycle should be false".to_owned());
+    }
+    if cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption {
+        return Err("recovery_mode shouldn't be TolerateAnyCorruption".to_owned());
     }
 
     let mut cfg = cfg.clone();
@@ -41,6 +53,7 @@ where
         .map_err(|e| format!("scan files: {}", e))?;
 
     // Iterate all log files and rewrite files.
+    let mut details = CopyDetails::default();
     for (queue, files) in [
         (LogQueue::Append, builder.get_append_queue_files()),
         (LogQueue::Rewrite, builder.get_rewrite_queue_files()),
@@ -50,16 +63,19 @@ where
             let file_id = FileId::new(queue, f.seq);
             let src = file_id.build_file_path(&cfg.dir);
             let tgt = file_id.build_file_path(&target);
+            let path = tgt.canonicalize().unwrap().to_str().unwrap().to_owned();
             let (tag, res) = if i < count - 1 {
+                details.symlinked.push(path);
                 ("symlink", symlink(&src, &tgt))
             } else {
+                details.copied.push(path);
                 ("copy", copy(&src, &tgt).map(|_| ()))
             };
             res.map_err(|e| format!("{}({}, {}): {}", tag, src.display(), tgt.display(), e))?;
         }
     }
 
-    Ok(())
+    Ok(details)
 }
 
 #[cfg(test)]
