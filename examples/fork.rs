@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use raft_engine::copy::minimum_copy;
 use raft_engine::env::DefaultFileSystem;
 use raft_engine::Config;
+use raft_engine::Engine;
 
 fn main() {
     let mut args = std::env::args();
@@ -22,6 +22,6 @@ fn main() {
         ..Default::default()
     };
     let fs = Arc::new(DefaultFileSystem);
-    minimum_copy(&cfg, fs, &target).unwrap();
+    Engine::<_, _>::fork(&cfg, fs, &target).unwrap();
     println!("success!");
 }

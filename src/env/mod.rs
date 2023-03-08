@@ -34,7 +34,7 @@ pub trait FileSystem: Send + Sync {
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
-    fn open<P: AsRef<Path>>(&self, path: P, pmt: Permission) -> Result<Self::Handle>;
+    fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> Result<Self::Handle>;
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> Result<()>;
 

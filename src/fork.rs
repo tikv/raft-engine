@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
-use crate::file_pipe_log::{FileNameExt, FilePipeLogBuilder};
+use crate::file_pipe_log::{FileNameExt, FilePipeLog, FilePipeLogBuilder};
 use crate::pipe_log::{FileId, LogQueue};
+use crate::Engine;
 
-/// Returned by `minimum_copy`.
+/// Returned by `Engine::fork`.
 #[derive(Default)]
 pub struct CopyDetails {
     /// Paths of copied log files.
@@ -22,13 +23,30 @@ pub struct CopyDetails {
 /// Make a copy from `source` to `target`. `source` should exists but `target`
 /// shouldn't.
 ///
-/// *minimum* means *symlink* will be used if possbile, otherwise *copy* will be
-/// used instead. Generally all inactive log files will be symlinked, but the
+/// *symlink* will be used if possbile, otherwise *copy* will be used instead.
+/// Generally all inactive log files will be symlinked, but the
 /// last active one will be copied.
 ///
 /// After the copy is made both of 2 engines can be started and run at the same
 /// time.
-pub fn minimum_copy<F, P>(cfg: &Config, fs: Arc<F>, target: P) -> Result<CopyDetails, String>
+///
+/// It reports errors if the source instance
+///   * is specified with `enable_log_recycle = true`, because `source` and
+/// `target`     can sharesomethings.
+///   * is specified with `recovery_mode =
+/// RecoveryMode::TolerateAnyCorruption`,     in which case *symlink* can't be
+/// use. Users should consider to copy the instance directly.
+impl<F: FileSystem> Engine<F, FilePipeLog<F>> {
+    pub fn fork<T: AsRef<Path>>(
+        source: &Config,
+        fs: Arc<F>,
+        target: T,
+    ) -> Result<CopyDetails, String> {
+        minimum_copy(source, fs, target)
+    }
+}
+
+fn minimum_copy<F, P>(cfg: &Config, fs: Arc<F>, target: P) -> Result<CopyDetails, String>
 where
     F: FileSystem,
     P: AsRef<Path>,
@@ -89,9 +107,9 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_minimum_copy() {
+    fn test_fork() {
         let dir = tempfile::Builder::new()
-            .prefix("test_minimum_copy")
+            .prefix("test_engine_fork")
             .tempdir()
             .unwrap();
 
@@ -122,17 +140,36 @@ mod tests {
         let mut log_batch = LogBatch::default();
         log_batch.put(1, vec![b'4'; 16], vec![b'v'; 1024]).unwrap();
         engine.write(&mut log_batch, false).unwrap();
-        drop(engine);
 
         let mut target = PathBuf::from(dir.as_ref());
         target.push("target");
-        minimum_copy(&cfg, Arc::new(DefaultFileSystem), &target).unwrap();
+        Engine::<_, _>::fork(&cfg, Arc::new(DefaultFileSystem), &target).unwrap();
         cfg.dir = target.to_str().unwrap().to_owned();
-        let engine = RaftLogEngine::open(cfg).unwrap();
+        let engine1 = RaftLogEngine::open(cfg.clone()).unwrap();
 
-        assert!(engine.get(1, vec![b'1'; 16].as_ref()).is_some());
-        assert!(engine.get(1, vec![b'2'; 16].as_ref()).is_some());
-        assert!(engine.get(1, vec![b'3'; 16].as_ref()).is_some());
-        assert!(engine.get(1, vec![b'4'; 16].as_ref()).is_some());
+        assert!(engine1.get(1, vec![b'1'; 16].as_ref()).is_some());
+        assert!(engine1.get(1, vec![b'2'; 16].as_ref()).is_some());
+        assert!(engine1.get(1, vec![b'3'; 16].as_ref()).is_some());
+        assert!(engine1.get(1, vec![b'4'; 16].as_ref()).is_some());
+
+        let mut log_batch = LogBatch::default();
+        log_batch.put(1, vec![b'5'; 16], vec![b'v'; 1024]).unwrap();
+        engine.write(&mut log_batch, false).unwrap();
+
+        let mut log_batch = LogBatch::default();
+        log_batch.put(1, vec![b'6'; 16], vec![b'v'; 1024]).unwrap();
+        engine1.write(&mut log_batch, false).unwrap();
+
+        assert!(engine.get(1, vec![b'5'; 16].as_ref()).is_some());
+        assert!(engine1.get(1, vec![b'6'; 16].as_ref()).is_some());
+
+        let mut target = PathBuf::from(dir.as_ref());
+        target.push("target-1");
+        let mut cfg1 = cfg.clone();
+        cfg1.enable_log_recycle = true;
+        assert!(Engine::<_, _>::fork(&cfg1, Arc::new(DefaultFileSystem), &target).is_err());
+        let mut cfg1 = cfg.clone();
+        cfg1.recovery_mode = RecoveryMode::TolerateAnyCorruption;
+        assert!(Engine::<_, _>::fork(&cfg1, Arc::new(DefaultFileSystem), &target).is_err());
     }
 }

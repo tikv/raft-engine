@@ -98,8 +98,8 @@ impl FileSystem for ObfuscatedFileSystem {
         r
     }
 
-    fn open<P: AsRef<Path>>(&self, path: P, pmt: Permission) -> IoResult<Self::Handle> {
-        self.inner.open(path, pmt)
+    fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> IoResult<Self::Handle> {
+        self.inner.open(path, perm)
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {

@@ -48,6 +48,7 @@ mod event_listener;
 mod file_pipe_log;
 #[cfg(feature = "scripting")]
 mod filter;
+mod fork;
 mod log_batch;
 mod memtable;
 mod metrics;
@@ -60,7 +61,6 @@ mod test_util;
 mod util;
 mod write_barrier;
 
-pub mod copy;
 pub mod env;
 
 pub use config::{Config, RecoveryMode};

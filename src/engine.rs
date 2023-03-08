@@ -2031,8 +2031,8 @@ pub(crate) mod tests {
             Ok(handle)
         }
 
-        fn open<P: AsRef<Path>>(&self, path: P, pmt: Permission) -> std::io::Result<Self::Handle> {
-            let handle = self.inner.open(&path, pmt)?;
+        fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> std::io::Result<Self::Handle> {
+            let handle = self.inner.open(&path, perm)?;
             self.update_metadata(path.as_ref(), false);
             Ok(handle)
         }

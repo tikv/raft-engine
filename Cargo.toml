@@ -17,8 +17,8 @@ name = "append-compact-purge"
 path = "examples/append_compact_purge.rs"
 
 [[example]]
-name = "raft-engine-copy"
-path = "examples/minimum_copy.rs"
+name = "raft-engine-fork"
+path = "examples/fork.rs"
 
 [[test]]
 name = "failpoints"

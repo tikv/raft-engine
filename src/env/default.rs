@@ -32,8 +32,8 @@ pub struct LogFd(RawFd);
 
 impl LogFd {
     /// Opens a file with the given `path`.
-    pub fn open<P: ?Sized + NixPath>(path: &P, pmt: Permission) -> IoResult<Self> {
-        let flags: OFlag = OFlag::from(pmt);
+    pub fn open<P: ?Sized + NixPath>(path: &P, perm: Permission) -> IoResult<Self> {
+        let flags: OFlag = OFlag::from(perm);
         fail_point!("log_fd::open::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });
@@ -272,8 +272,8 @@ impl FileSystem for DefaultFileSystem {
         LogFd::create(path.as_ref())
     }
 
-    fn open<P: AsRef<Path>>(&self, path: P, pmt: Permission) -> IoResult<Self::Handle> {
-        LogFd::open(path.as_ref(), pmt)
+    fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> IoResult<Self::Handle> {
+        LogFd::open(path.as_ref(), perm)
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
