@@ -101,11 +101,15 @@ impl LogFd {
     /// bytes were written.
     pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
         fail_point!("log_fd::write::zero", |_| { Ok(0) });
+        fail_point!("log_fd::write::no_space_err", |_| {
+            Err(from_nix_error(nix::Error::ENOSPC, "nospace"))
+        });
         let mut written = 0;
         while written < content.len() {
             let bytes = match pwrite(self.0, &content[written..], offset as i64) {
                 Ok(bytes) => bytes,
                 Err(e) if e == Errno::EINTR => continue,
+                Err(e) if e == Errno::ENOSPC => return Err(from_nix_error(e, "nospace")),
                 Err(e) => return Err(from_nix_error(e, "pwrite")),
             };
             if bytes == 0 {

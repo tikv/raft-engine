@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::{Config, RecoveryMode};
-use crate::env::{FileSystem, Permission};
+use crate::env::FileSystem;
 use crate::file_pipe_log::{FileNameExt, FilePipeLogBuilder};
 use crate::pipe_log::{FileId, LogQueue};
 
@@ -49,29 +49,31 @@ where
 
     let mut builder = FilePipeLogBuilder::new(cfg.clone(), fs, vec![]);
     builder
-        .scan_impl(|_, _| -> Permission { Permission::ReadOnly })
+        .scan_and_sort(false)
         .map_err(|e| format!("scan files: {}", e))?;
 
     // Iterate all log files and rewrite files.
     let mut details = CopyDetails::default();
     for (queue, files) in [
-        (LogQueue::Append, builder.get_append_queue_files()),
-        (LogQueue::Rewrite, builder.get_rewrite_queue_files()),
+        (LogQueue::Append, &builder.append_file_names),
+        (LogQueue::Rewrite, &builder.rewrite_file_names),
     ] {
         let count = files.len();
         for (i, f) in files.iter().enumerate() {
-            let file_id = FileId::new(queue, f.seq);
-            let src = file_id.build_file_path(&cfg.dir);
-            let tgt = file_id.build_file_path(&target);
-            let path = tgt.canonicalize().unwrap().to_str().unwrap().to_owned();
-            let (tag, res) = if i < count - 1 {
+            let src = builder.file_path(f);
+            let dst = FileId::new(queue, f.seq).build_file_path(&target);
+            if i < count - 1 {
+                symlink(&src, &dst)
+                    .map_err(|e| format!("symlink({}, {}): {}", src.display(), dst.display(), e))?;
+                let path = dst.canonicalize().unwrap().to_str().unwrap().to_owned();
                 details.symlinked.push(path);
-                ("symlink", symlink(&src, &tgt))
             } else {
+                copy(&src, &dst)
+                    .map(|_| ())
+                    .map_err(|e| format!("copy({}, {}): {}", src.display(), dst.display(), e))?;
+                let path = dst.canonicalize().unwrap().to_str().unwrap().to_owned();
                 details.copied.push(path);
-                ("copy", copy(&src, &tgt).map(|_| ()))
             };
-            res.map_err(|e| format!("{}({}, {}): {}", tag, src.display(), tgt.display(), e))?;
         }
     }
 

@@ -2,7 +2,7 @@
 
 //! Log file types.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use fail::fail_point;
@@ -66,21 +66,21 @@ impl<F: FileSystem> LogFileWriter<F> {
         Ok(f)
     }
 
-    fn write_header(&mut self, format: LogFileFormat) -> Result<()> {
+    fn write_header(&mut self, format: LogFileFormat) -> IoResult<()> {
         self.writer.seek(SeekFrom::Start(0))?;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileFormat::encoded_len(format.version));
-        format.encode(&mut buf)?;
+        format.encode(&mut buf).unwrap();
         self.write(&buf, 0)
     }
 
-    pub fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> IoResult<()> {
         // Necessary to truncate extra zeros from fallocate().
         self.truncate()?;
         self.sync()
     }
 
-    pub fn truncate(&mut self) -> Result<()> {
+    pub fn truncate(&mut self) -> IoResult<()> {
         if self.written < self.capacity {
             fail_point!("file_pipe_log::log_file_writer::skip_truncate", |_| {
                 Ok(())
@@ -91,7 +91,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         Ok(())
     }
 
-    pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> Result<()> {
+    pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> IoResult<()> {
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
             let _t = StopWatch::new(&*LOG_ALLOCATE_DURATION_HISTOGRAM);
@@ -119,7 +119,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         Ok(())
     }
 
-    pub fn sync(&mut self) -> Result<()> {
+    pub fn sync(&mut self) -> IoResult<()> {
         let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
         self.handle.sync()?;
         Ok(())
