@@ -21,6 +21,15 @@ fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     std::io::Error::new(kind, custom)
 }
 
+impl From<Permission> for OFlag {
+    fn from(value: Permission) -> OFlag {
+        match value {
+            Permission::ReadOnly => OFlag::O_RDONLY,
+            Permission::ReadWrite => OFlag::O_RDWR,
+        }
+    }
+}
+
 /// A RAII-style low-level file. Errors occurred during automatic resource
 /// release are logged and ignored.
 ///

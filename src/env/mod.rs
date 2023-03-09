@@ -8,22 +8,12 @@ mod default;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;
-use nix::fcntl::OFlag as NixOFlag;
 pub use obfuscated::ObfuscatedFileSystem;
 
 #[derive(Clone, Copy)]
 pub enum Permission {
     ReadOnly,
     ReadWrite,
-}
-
-impl From<Permission> for NixOFlag {
-    fn from(value: Permission) -> NixOFlag {
-        match value {
-            Permission::ReadOnly => NixOFlag::O_RDONLY,
-            Permission::ReadWrite => NixOFlag::O_RDWR,
-        }
-    }
 }
 
 /// FileSystem
