@@ -168,7 +168,7 @@ mod tests {
         let mut cfg1 = cfg.clone();
         cfg1.enable_log_recycle = true;
         assert!(Engine::<_, _>::fork(&cfg1, Arc::new(DefaultFileSystem), &target).is_err());
-        let mut cfg1 = cfg.clone();
+        let mut cfg1 = cfg;
         cfg1.recovery_mode = RecoveryMode::TolerateAnyCorruption;
         assert!(Engine::<_, _>::fork(&cfg1, Arc::new(DefaultFileSystem), &target).is_err());
     }

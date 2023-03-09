@@ -12,13 +12,13 @@ fn main() {
         .file_name()
         .and_then(|x| x.to_str())
         .unwrap();
-    println!("usage: {} {} {}", prog, "{source}", "{target}");
+    println!("usage: {} {{source}} {{target}}", prog);
 
     let source = args.next().unwrap();
     let target = args.next().unwrap();
 
     let cfg = Config {
-        dir: source.to_owned(),
+        dir: source,
         ..Default::default()
     };
     let fs = Arc::new(DefaultFileSystem);
