@@ -143,7 +143,8 @@ impl<F: FileSystem> SinglePipe<F> {
             recycled_files: RwLock::new(recycled_files.into()).into(),
             writable_file: Mutex::new(writable_file).into(),
         };
-        pipe.flush_metrics(len, recycled_len);
+        pipe.flush_metrics(len);
+        pipe.flush_recycle_metrics(recycled_len);
         Ok(pipe)
     }
 
@@ -227,8 +228,7 @@ impl<F: FileSystem> SinglePipe<F> {
             files.push_back(f);
             files.len()
         };
-        let recycled_len = self.recycled_files.read().len();
-        self.flush_metrics(len, recycled_len);
+        self.flush_metrics(len);
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
                 queue: self.queue,
@@ -239,16 +239,18 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     /// Synchronizes current states to related metrics.
-    fn flush_metrics(&self, len: usize, recycled_len: usize) {
+    fn flush_metrics(&self, len: usize) {
         match self.queue {
-            LogQueue::Append => {
-                LOG_FILE_COUNT.append.set(len as i64);
-                RECYCLED_FILE_COUNT.append.set(recycled_len as i64);
-            }
-            LogQueue::Rewrite => {
-                LOG_FILE_COUNT.rewrite.set(len as i64);
-                RECYCLED_FILE_COUNT.rewrite.set(recycled_len as i64);
-            }
+            LogQueue::Append => LOG_FILE_COUNT.append.set(len as i64),
+            LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(len as i64),
+        }
+    }
+
+    /// Synchronizes current recycled states to related metrics.
+    fn flush_recycle_metrics(&self, len: usize) {
+        match self.queue {
+            LogQueue::Append => RECYCLED_FILE_COUNT.append.set(len as i64),
+            LogQueue::Rewrite => RECYCLED_FILE_COUNT.rewrite.set(len as i64),
         }
     }
 }
@@ -437,7 +439,8 @@ impl<F: FileSystem> SinglePipe<F> {
             self.recycled_files.write().append(&mut new_recycled);
             recycled_len
         };
-        self.flush_metrics(len, recycled_len);
+        self.flush_metrics(len);
+        self.flush_recycle_metrics(recycled_len);
         Ok(purged_len)
     }
 }
