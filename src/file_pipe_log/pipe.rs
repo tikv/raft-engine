@@ -156,12 +156,22 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(())
     }
 
-    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
+    /// Recycles one obsolete file from the recycled file list.
+    fn recycle_file(&self) -> (usize, Option<File<F>>) {
+        let mut recycled_files = self.recycled_files.write();
+        let f = recycled_files.pop_front();
+        (recycled_files.len(), f)
+    }
+
+    /// Creates a new log file according to the given [`FileSeq`].
+    ///
+    /// If `recycle_file` is valid, it will reuse it as priority.
+    fn new_file(&self, seq: FileSeq, recycle_file: Option<File<F>>) -> Result<(PathId, F::Handle)> {
         let new_file_id = FileId {
             seq,
             queue: self.queue,
         };
-        if let Some(f) = self.recycled_files.write().pop_front() {
+        if let Some(f) = recycle_file {
             let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
@@ -200,7 +210,8 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (path_id, handle) = self.new_file(new_seq)?;
+        let (recycle_len, recycle_file) = self.recycle_file();
+        let (path_id, handle) = self.new_file(new_seq, recycle_file)?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -229,6 +240,7 @@ impl<F: FileSystem> SinglePipe<F> {
             files.len()
         };
         self.flush_metrics(len);
+        self.flush_recycle_metrics(recycle_len);
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
                 queue: self.queue,
@@ -391,10 +403,7 @@ impl<F: FileSystem> SinglePipe<F> {
             (files.len(), tail)
         };
         let purged_len = purged_files.len();
-        let recycled_len = if purged_len == 0 {
-            // No need to purge files, return the count of recycled files directly.
-            self.recycled_files.read().len()
-        } else {
+        if purged_len > 0 {
             let remains_capacity = self.capacity.saturating_sub(len);
             let (recycled_start, mut recycled_len) = {
                 let files = self.recycled_files.read();
@@ -437,10 +446,9 @@ impl<F: FileSystem> SinglePipe<F> {
             }
             debug_assert!(recycled_len <= remains_capacity);
             self.recycled_files.write().append(&mut new_recycled);
-            recycled_len
-        };
+            self.flush_recycle_metrics(recycled_len);
+        }
         self.flush_metrics(len);
-        self.flush_recycle_metrics(recycled_len);
         Ok(purged_len)
     }
 }
