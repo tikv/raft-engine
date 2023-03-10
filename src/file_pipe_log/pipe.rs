@@ -156,20 +156,16 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(())
     }
 
-    /// Recycles one obsolete file from the recycled file list.
-    fn recycle_file(&self) -> (usize, Option<File<F>>) {
-        let mut recycled_files = self.recycled_files.write();
-        let f = recycled_files.pop_front();
-        (recycled_files.len(), f)
-    }
-
-    /// Creates a new log file according to the given [`FileSeq`].
-    ///
-    /// If `recycle_file` is valid, it will reuse it as priority.
-    fn new_file(&self, seq: FileSeq, recycle_file: Option<File<F>>) -> Result<(PathId, F::Handle)> {
+    /// Recycles one obsolete file from the recycled file list and return its
+    /// [`PathId`] and [`PathBuf`] if success.
+    fn recycle_file(&self, seq: FileSeq) -> Option<(PathId, PathBuf)> {
         let new_file_id = FileId {
             seq,
             queue: self.queue,
+        };
+        let (recycle_file, recycle_len) = {
+            let mut recycled_files = self.recycled_files.write();
+            (recycled_files.pop_front(), recycled_files.len())
         };
         if let Some(f) = recycle_file {
             let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
@@ -179,13 +175,24 @@ impl<F: FileSystem> SinglePipe<F> {
                 if let Err(e) = self.file_system.delete(&src_path) {
                     error!("error while trying to delete recycled file, err: {}", e);
                 }
+                return None;
             } else {
-                return Ok((f.path_id, self.file_system.open(&dst_path)?));
+                self.flush_recycle_metrics(recycle_len);
+                return Some((f.path_id, dst_path));
             }
         }
+        None
+    }
+
+    /// Creates a new log file according to the given [`FileSeq`].
+    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
+        let new_file_id = FileId {
+            seq,
+            queue: self.queue,
+        };
         let path_id = find_available_dir(&self.paths, self.target_file_size);
-        let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
-        Ok((path_id, self.file_system.create(&dst_path)?))
+        let path = new_file_id.build_file_path(&self.paths[path_id]);
+        Ok((path_id, self.file_system.create(&path)?))
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -210,8 +217,14 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (recycle_len, recycle_file) = self.recycle_file();
-        let (path_id, handle) = self.new_file(new_seq, recycle_file)?;
+        let (path_id, handle) = {
+            if let Some((id, path)) = self.recycle_file(new_seq) {
+                (id, self.file_system.open(&path)?)
+            } else {
+                self.new_file(new_seq)?
+            }
+        };
+        // let (path_id, handle) = self.new_file(new_seq, self.recycle_file(new_seq))?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -240,7 +253,6 @@ impl<F: FileSystem> SinglePipe<F> {
             files.len()
         };
         self.flush_metrics(len);
-        self.flush_recycle_metrics(recycle_len);
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
                 queue: self.queue,
