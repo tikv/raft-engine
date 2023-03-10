@@ -175,7 +175,6 @@ impl<F: FileSystem> SinglePipe<F> {
                 if let Err(e) = self.file_system.delete(&src_path) {
                     error!("error while trying to delete recycled file, err: {}", e);
                 }
-                return None;
             } else {
                 self.flush_recycle_metrics(recycle_len);
                 return Some((f.path_id, dst_path));
