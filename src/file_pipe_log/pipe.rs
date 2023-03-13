@@ -177,10 +177,10 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             } else {
                 self.flush_recycle_metrics(recycle_len);
-                match self.file_system.open(&dst_path, Permission::ReadWrite) {
-                    Ok(handle) => return Some(Ok((f.path_id, handle))),
-                    Err(e) => return Some(Err(Error::Io(e))),
-                }
+                return match self.file_system.open(&dst_path, Permission::ReadWrite) {
+                    Ok(handle) => Some(Ok((f.path_id, handle))),
+                    Err(e) => Some(Err(e.into())),
+                };
             }
         }
         None
