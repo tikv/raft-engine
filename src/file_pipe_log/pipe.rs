@@ -120,7 +120,7 @@ impl<F: FileSystem> SinglePipe<F> {
             format: f.format,
         };
 
-        let len = active_files.len();
+        let (len, recycled_len) = (active_files.len(), recycled_files.len());
         for f in active_files.iter() {
             for listener in &listeners {
                 listener.post_new_log_file(FileId { queue, seq: f.seq });
@@ -144,6 +144,7 @@ impl<F: FileSystem> SinglePipe<F> {
             writable_file: Mutex::new(writable_file).into(),
         };
         pipe.flush_metrics(len);
+        pipe.flush_recycle_metrics(recycled_len);
         Ok(pipe)
     }
 
@@ -155,12 +156,18 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(())
     }
 
-    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
+    /// Recycles one obsolete file from the recycled file list and return its
+    /// [`PathId`] and [`F::Handle`] if success.
+    fn recycle_file(&self, seq: FileSeq) -> Option<Result<(PathId, F::Handle)>> {
         let new_file_id = FileId {
             seq,
             queue: self.queue,
         };
-        if let Some(f) = self.recycled_files.write().pop_front() {
+        let (recycle_file, recycle_len) = {
+            let mut recycled_files = self.recycled_files.write();
+            (recycled_files.pop_front(), recycled_files.len())
+        };
+        if let Some(f) = recycle_file {
             let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
@@ -169,13 +176,25 @@ impl<F: FileSystem> SinglePipe<F> {
                     error!("error while trying to delete recycled file, err: {}", e);
                 }
             } else {
-                let handle = self.file_system.open(&dst_path, Permission::ReadWrite)?;
-                return Ok((f.path_id, handle));
+                self.flush_recycle_metrics(recycle_len);
+                return match self.file_system.open(&dst_path, Permission::ReadWrite) {
+                    Ok(handle) => Some(Ok((f.path_id, handle))),
+                    Err(e) => Some(Err(e.into())),
+                };
             }
         }
+        None
+    }
+
+    /// Creates a new log file according to the given [`FileSeq`].
+    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
+        let new_file_id = FileId {
+            seq,
+            queue: self.queue,
+        };
         let path_id = find_available_dir(&self.paths, self.target_file_size);
-        let dst_path = new_file_id.build_file_path(&self.paths[path_id]);
-        Ok((path_id, self.file_system.create(&dst_path)?))
+        let path = new_file_id.build_file_path(&self.paths[path_id]);
+        Ok((path_id, self.file_system.create(&path)?))
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -200,7 +219,9 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (path_id, handle) = self.new_file(new_seq)?;
+        let (path_id, handle) = self
+            .recycle_file(new_seq)
+            .unwrap_or_else(|| self.new_file(new_seq))?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -243,6 +264,14 @@ impl<F: FileSystem> SinglePipe<F> {
         match self.queue {
             LogQueue::Append => LOG_FILE_COUNT.append.set(len as i64),
             LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(len as i64),
+        }
+    }
+
+    /// Synchronizes current recycled states to related metrics.
+    fn flush_recycle_metrics(&self, len: usize) {
+        match self.queue {
+            LogQueue::Append => RECYCLED_FILE_COUNT.append.set(len as i64),
+            LogQueue::Rewrite => RECYCLED_FILE_COUNT.rewrite.set(len as i64),
         }
     }
 }
@@ -426,6 +455,7 @@ impl<F: FileSystem> SinglePipe<F> {
             }
             debug_assert!(recycled_len <= remains_capacity);
             self.recycled_files.write().append(&mut new_recycled);
+            self.flush_recycle_metrics(recycled_len);
         }
         self.flush_metrics(len);
         Ok(purged_len)

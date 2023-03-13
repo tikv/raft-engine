@@ -272,6 +272,13 @@ lazy_static! {
         &["type"]
     )
     .unwrap();
+    pub static ref RECYCLED_FILE_COUNT: LogQueueGaugeVec = register_static_int_gauge_vec!(
+        LogQueueGaugeVec,
+        "raft_engine_recycled_file_count",
+        "Amount of recycled files in Raft engine",
+        &["type"]
+    )
+    .unwrap();
     pub static ref SWAP_FILE_COUNT: IntGauge = register_int_gauge!(
         "raft_engine_swap_file_count",
         "Amount of swap files in Raft engine"
