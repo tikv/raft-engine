@@ -566,12 +566,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     }
 
     fn open(&self, file_name: &FileName, is_last_one: bool) -> Result<File<F>> {
-        let perm = if false ||
-            // For recovery mode TolerateAnyCorruption, all files should be writable.
-            self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption
-            // For other recovery modes, only the last log file needs to be writable.
-            || is_last_one
-        {
+        // For recovery mode TolerateAnyCorruption, all files should be writable.
+        // For other recovery modes, only the last log file needs to be writable.
+        let perm = if self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption || is_last_one {
             Permission::ReadWrite
         } else {
             Permission::ReadOnly
