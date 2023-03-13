@@ -14,11 +14,20 @@ use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
-use crate::env::{FileSystem, Handle, WriteExt};
+use crate::env::{FileSystem, Handle, Permission, WriteExt};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
     std::io::Error::new(kind, custom)
+}
+
+impl From<Permission> for OFlag {
+    fn from(value: Permission) -> OFlag {
+        match value {
+            Permission::ReadOnly => OFlag::O_RDONLY,
+            Permission::ReadWrite => OFlag::O_RDWR,
+        }
+    }
 }
 
 /// A RAII-style low-level file. Errors occurred during automatic resource
@@ -32,15 +41,15 @@ pub struct LogFd(RawFd);
 
 impl LogFd {
     /// Opens a file with the given `path`.
-    pub fn open<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
+    pub fn open<P: ?Sized + NixPath>(path: &P, perm: Permission) -> IoResult<Self> {
         fail_point!("log_fd::open::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });
-        let flags = OFlag::O_RDWR;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         fail_point!("log_fd::open::fadvise_dontneed", |_| {
-            let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
+            let fd =
+                LogFd(fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?);
             #[cfg(target_os = "linux")]
             unsafe {
                 extern crate libc;
@@ -49,7 +58,7 @@ impl LogFd {
             Ok(fd)
         });
         Ok(LogFd(
-            fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?,
+            fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?,
         ))
     }
 
@@ -272,8 +281,8 @@ impl FileSystem for DefaultFileSystem {
         LogFd::create(path.as_ref())
     }
 
-    fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
-        LogFd::open(path.as_ref())
+    fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> IoResult<Self::Handle> {
+        LogFd::open(path.as_ref(), perm)
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {

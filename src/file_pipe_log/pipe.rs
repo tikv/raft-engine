@@ -11,7 +11,7 @@ use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
-use crate::env::FileSystem;
+use crate::env::{FileSystem, Permission};
 use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
@@ -169,7 +169,8 @@ impl<F: FileSystem> SinglePipe<F> {
                     error!("error while trying to delete recycled file, err: {}", e);
                 }
             } else {
-                return Ok((f.path_id, self.file_system.open(&dst_path)?));
+                let handle = self.file_system.open(&dst_path, Permission::ReadWrite)?;
+                return Ok((f.path_id, handle));
             }
         }
         let path_id = find_available_dir(&self.paths, self.target_file_size);
