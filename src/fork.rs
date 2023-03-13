@@ -79,15 +79,15 @@ where
     ] {
         let count = files.len();
         for (i, f) in files.iter().enumerate() {
-            let src = builder.file_path(f);
+            let src: &Path = f.path.as_ref();
             let dst = FileId::new(queue, f.seq).build_file_path(&target);
             if i < count - 1 {
-                symlink(&src, &dst)
+                symlink(src, &dst)
                     .map_err(|e| format!("symlink({}, {}): {}", src.display(), dst.display(), e))?;
                 let path = dst.canonicalize().unwrap().to_str().unwrap().to_owned();
                 details.symlinked.push(path);
             } else {
-                copy(&src, &dst)
+                copy(src, &dst)
                     .map(|_| ())
                     .map_err(|e| format!("copy({}, {}): {}", src.display(), dst.display(), e))?;
                 let path = dst.canonicalize().unwrap().to_str().unwrap().to_owned();

@@ -82,13 +82,13 @@ pub struct DualPipesBuilder<F: FileSystem> {
     dirs: Paths,
     dir_locks: Vec<StdFile>,
 
-    append_files: Vec<File<F>>,
-    rewrite_files: Vec<File<F>>,
-    recycled_files: Vec<File<F>>,
-
     pub(crate) append_file_names: Vec<FileName>,
     pub(crate) rewrite_file_names: Vec<FileName>,
     pub(crate) recycled_file_names: Vec<FileName>,
+
+    append_files: Vec<File<F>>,
+    rewrite_files: Vec<File<F>>,
+    recycled_files: Vec<File<F>>,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -100,12 +100,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             listeners,
             dirs: Vec::new(),
             dir_locks: Vec::new(),
-            append_files: Vec::new(),
-            rewrite_files: Vec::new(),
-            recycled_files: Vec::new(),
             append_file_names: Vec::new(),
             rewrite_file_names: Vec::new(),
             recycled_file_names: Vec::new(),
+            append_files: Vec::new(),
+            rewrite_files: Vec::new(),
+            recycled_files: Vec::new(),
         }
     }
 
@@ -203,12 +203,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         Ok(())
     }
 
-    pub(crate) fn scan_and_sort(&mut self, exclude_others: bool) -> Result<()> {
+    pub(crate) fn scan_and_sort(&mut self, lock: bool) -> Result<()> {
         let dir = self.cfg.dir.clone();
-        self.scan_dir(&dir, exclude_others)?;
+        self.scan_dir(&dir, lock)?;
 
         if let Some(dir) = self.cfg.spill_dir.clone() {
-            self.scan_dir(&dir, exclude_others)?;
+            self.scan_dir(&dir, lock)?;
         }
 
         self.append_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
@@ -235,12 +235,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.dir_locks.push(lock_dir(dir)?);
         }
         self.dirs.push(dir.to_path_buf());
-
         let path_id = self.dirs.len() - 1;
-        self.do_scan(dir, path_id)
-    }
 
-    pub fn do_scan(&mut self, dir: &Path, path_id: usize) -> Result<()> {
         fs::read_dir(dir)?.try_for_each(|e| -> Result<()> {
             let dir_entry = e?;
             let p = dir_entry.path();
@@ -254,7 +250,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     seq,
                 }) => self.append_file_names.push(FileName {
                     seq,
-                    name: file_name.to_owned(),
+                    path: p,
                     path_id,
                     recycled: false,
                 }),
@@ -263,7 +259,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     seq,
                 }) => self.rewrite_file_names.push(FileName {
                     seq,
-                    name: file_name.to_owned(),
+                    path: p,
                     path_id,
                     recycled: false,
                 }),
@@ -271,7 +267,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     if let Some(seq) = parse_recycled_file_name(file_name) {
                         self.recycled_file_names.push(FileName {
                             seq,
-                            name: file_name.to_owned(),
+                            path: p,
                             path_id,
                             recycled: true,
                         })
@@ -572,14 +568,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         DualPipes::open(self.dir_locks, appender, rewriter)
     }
 
-    pub(crate) fn file_path(&self, file_name: &FileName) -> PathBuf {
-        let mut p = PathBuf::from(&self.dirs[file_name.path_id]);
-        p.push(&file_name.name);
-        p
-    }
-
     fn open(&self, file_name: &FileName, is_last_one: bool) -> Result<File<F>> {
-        let p = self.file_path(file_name);
         let perm = if file_name.recycled
             // For recovery mode TolerateAnyCorruption, all files should be writable.
             || self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption
@@ -592,7 +581,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         };
         Ok(File {
             seq: file_name.seq,
-            handle: Arc::new(self.file_system.open(&p, perm)?),
+            handle: Arc::new(self.file_system.open(&file_name.path, perm)?),
             format: LogFileFormat::default(),
             path_id: file_name.path_id,
         })
@@ -613,7 +602,7 @@ pub(super) fn lock_dir<P: AsRef<Path>>(dir: P) -> Result<StdFile> {
 
 pub(crate) struct FileName {
     pub seq: FileSeq,
-    name: String,
+    pub path: PathBuf,
     path_id: PathId,
     recycled: bool,
 }
