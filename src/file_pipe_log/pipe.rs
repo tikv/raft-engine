@@ -11,7 +11,7 @@ use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
-use crate::env::FileSystem;
+use crate::env::{FileSystem, Permission};
 use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
@@ -177,7 +177,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             } else {
                 self.flush_recycle_metrics(recycle_len);
-                match self.file_system.open(&dst_path) {
+                match self.file_system.open(&dst_path, Permission::ReadWrite) {
                     Ok(handle) => return Some(Ok((f.path_id, handle))),
                     Err(e) => return Some(Err(Error::Io(e))),
                 }
