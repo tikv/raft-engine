@@ -157,8 +157,8 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     /// Recycles one obsolete file from the recycled file list and return its
-    /// [`PathId`] and [`PathBuf`] if success.
-    fn recycle_file(&self, seq: FileSeq) -> Option<(PathId, PathBuf)> {
+    /// [`PathId`] and [`F::Handle`] if success.
+    fn recycle_file(&self, seq: FileSeq) -> Option<(PathId, F::Handle)> {
         let new_file_id = FileId {
             seq,
             queue: self.queue,
@@ -177,7 +177,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             } else {
                 self.flush_recycle_metrics(recycle_len);
-                return Some((f.path_id, dst_path));
+                if let Ok(handle) = self.file_system.open(&dst_path) {
+                    return Some((f.path_id, handle));
+                }
             }
         }
         None
@@ -216,14 +218,11 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (path_id, handle) = {
-            if let Some((id, path)) = self.recycle_file(new_seq) {
-                (id, self.file_system.open(&path)?)
-            } else {
-                self.new_file(new_seq)?
-            }
+        let (path_id, handle) = if let Some((id, fd)) = self.recycle_file(new_seq) {
+            (id, fd)
+        } else {
+            self.new_file(new_seq)?
         };
-        // let (path_id, handle) = self.new_file(new_seq, self.recycle_file(new_seq))?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
