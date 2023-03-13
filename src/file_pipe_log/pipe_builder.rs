@@ -217,10 +217,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         Ok(())
     }
 
-    fn scan_dir(&mut self, dir: &str, exclude_others: bool) -> Result<()> {
+    fn scan_dir(&mut self, dir: &str, lock: bool) -> Result<()> {
         let dir = Path::new(dir);
         if !dir.exists() {
-            if exclude_others {
+            if lock {
                 info!("Create raft log directory: {}", dir.display());
                 fs::create_dir(dir)?;
                 self.dir_locks.push(lock_dir(dir)?);
@@ -231,7 +231,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         if !dir.is_dir() {
             return Err(box_err!("Not directory: {}", dir.display()));
         }
-        if exclude_others {
+        if lock {
             self.dir_locks.push(lock_dir(dir)?);
         }
         self.dirs.push(dir.to_path_buf());
@@ -252,7 +252,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     seq,
                     path: p,
                     path_id,
-                    recycled: false,
                 }),
                 Some(FileId {
                     queue: LogQueue::Rewrite,
@@ -261,7 +260,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     seq,
                     path: p,
                     path_id,
-                    recycled: false,
                 }),
                 _ => {
                     if let Some(seq) = parse_recycled_file_name(file_name) {
@@ -269,7 +267,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             seq,
                             path: p,
                             path_id,
-                            recycled: true,
                         })
                     }
                 }
@@ -569,9 +566,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     }
 
     fn open(&self, file_name: &FileName, is_last_one: bool) -> Result<File<F>> {
-        let perm = if file_name.recycled
+        let perm = if false ||
             // For recovery mode TolerateAnyCorruption, all files should be writable.
-            || self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption
+            self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption
             // For other recovery modes, only the last log file needs to be writable.
             || is_last_one
         {
@@ -604,5 +601,4 @@ pub(crate) struct FileName {
     pub seq: FileSeq,
     pub path: PathBuf,
     path_id: PathId,
-    recycled: bool,
 }
