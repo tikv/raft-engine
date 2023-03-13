@@ -20,23 +20,24 @@ pub struct CopyDetails {
     pub symlinked: Vec<String>,
 }
 
-/// Make a copy from `source` to `target`. `source` should exists but `target`
-/// shouldn't.
-///
-/// *symlink* will be used if possbile, otherwise *copy* will be used instead.
-/// Generally all inactive log files will be symlinked, but the
-/// last active one will be copied.
-///
-/// After the copy is made both of 2 engines can be started and run at the same
-/// time.
-///
-/// It reports errors if the source instance
-///   * is specified with `enable_log_recycle = true`, because `source` and
-/// `target`     can sharesomethings.
-///   * is specified with `recovery_mode =
-/// RecoveryMode::TolerateAnyCorruption`,     in which case *symlink* can't be
-/// use. Users should consider to copy the instance directly.
 impl<F: FileSystem> Engine<F, FilePipeLog<F>> {
+    /// Make a copy from `source` to `target`. `source` should exists but
+    /// `target` shouldn't. And `source` shouldn't be opened, otherwise
+    /// data corruption can happen.
+    ///
+    /// *symlink* will be used if possbile, otherwise *copy* will be used
+    /// instead. Generally all inactive log files will be symlinked, but the
+    /// last active one will be copied.
+    ///
+    /// After the copy is made both of 2 engines can be started and run at the
+    /// same time.
+    ///
+    /// It reports errors if the source instance
+    ///   * is specified with `enable_log_recycle = true`. `source` and `target`
+    ///     can share log files, so log file reusing can cause data corruption.
+    ///   * is specified with `recovery_mode = TolerateAnyCorruption`, in which
+    ///     case *symlink* can't be use. Users should consider to copy the
+    ///     instance directly.
     pub fn fork<T: AsRef<Path>>(
         source: &Config,
         fs: Arc<F>,

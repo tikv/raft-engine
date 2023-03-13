@@ -42,14 +42,14 @@ pub struct LogFd(RawFd);
 impl LogFd {
     /// Opens a file with the given `path`.
     pub fn open<P: ?Sized + NixPath>(path: &P, perm: Permission) -> IoResult<Self> {
-        let flags: OFlag = OFlag::from(perm);
         fail_point!("log_fd::open::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         fail_point!("log_fd::open::fadvise_dontneed", |_| {
-            let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
+            let fd =
+                LogFd(fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?);
             #[cfg(target_os = "linux")]
             unsafe {
                 extern crate libc;
@@ -58,7 +58,7 @@ impl LogFd {
             Ok(fd)
         });
         Ok(LogFd(
-            fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?,
+            fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?,
         ))
     }
 

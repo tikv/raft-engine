@@ -10,7 +10,7 @@ mod obfuscated;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Permission {
     ReadOnly,
     ReadWrite,
@@ -76,4 +76,17 @@ pub trait Handle {
 pub trait WriteExt {
     fn truncate(&mut self, offset: usize) -> Result<()>;
     fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Permission;
+
+    #[test]
+    fn test_copy_permission() {
+        let perm = Permission::ReadWrite;
+        let perm1 = perm;
+        assert_eq!(perm, Permission::ReadWrite);
+        assert_eq!(perm1, Permission::ReadWrite);
+    }
 }
