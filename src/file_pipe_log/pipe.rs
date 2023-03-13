@@ -177,8 +177,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
             } else {
                 self.flush_recycle_metrics(recycle_len);
-                if let Ok(handle) = self.file_system.open(&dst_path) {
-                    return Some(Ok((f.path_id, handle)));
+                match self.file_system.open(&dst_path) {
+                    Ok(handle) => return Some(Ok((f.path_id, handle))),
+                    Err(e) => return Some(Err(Error::Io(e))),
                 }
             }
         }
