@@ -48,6 +48,7 @@ mod event_listener;
 mod file_pipe_log;
 #[cfg(feature = "scripting")]
 mod filter;
+mod fork;
 mod log_batch;
 mod memtable;
 mod metrics;

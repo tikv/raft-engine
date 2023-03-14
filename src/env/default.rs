@@ -14,11 +14,20 @@ use nix::sys::uio::{pread, pwrite};
 use nix::unistd::{close, ftruncate, lseek, Whence};
 use nix::NixPath;
 
-use crate::env::{FileSystem, Handle, WriteExt};
+use crate::env::{FileSystem, Handle, Permission, WriteExt};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();
     std::io::Error::new(kind, custom)
+}
+
+impl From<Permission> for OFlag {
+    fn from(value: Permission) -> OFlag {
+        match value {
+            Permission::ReadOnly => OFlag::O_RDONLY,
+            Permission::ReadWrite => OFlag::O_RDWR,
+        }
+    }
 }
 
 /// A RAII-style low-level file. Errors occurred during automatic resource
@@ -32,15 +41,15 @@ pub struct LogFd(RawFd);
 
 impl LogFd {
     /// Opens a file with the given `path`.
-    pub fn open<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
+    pub fn open<P: ?Sized + NixPath>(path: &P, perm: Permission) -> IoResult<Self> {
         fail_point!("log_fd::open::err", |_| {
             Err(from_nix_error(nix::Error::EINVAL, "fp"))
         });
-        let flags = OFlag::O_RDWR;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         fail_point!("log_fd::open::fadvise_dontneed", |_| {
-            let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
+            let fd =
+                LogFd(fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?);
             #[cfg(target_os = "linux")]
             unsafe {
                 extern crate libc;
@@ -49,7 +58,7 @@ impl LogFd {
             Ok(fd)
         });
         Ok(LogFd(
-            fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?,
+            fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?,
         ))
     }
 
@@ -101,11 +110,15 @@ impl LogFd {
     /// bytes were written.
     pub fn write(&self, mut offset: usize, content: &[u8]) -> IoResult<usize> {
         fail_point!("log_fd::write::zero", |_| { Ok(0) });
+        fail_point!("log_fd::write::no_space_err", |_| {
+            Err(from_nix_error(nix::Error::ENOSPC, "nospace"))
+        });
         let mut written = 0;
         while written < content.len() {
             let bytes = match pwrite(self.0, &content[written..], offset as i64) {
                 Ok(bytes) => bytes,
                 Err(e) if e == Errno::EINTR => continue,
+                Err(e) if e == Errno::ENOSPC => return Err(from_nix_error(e, "nospace")),
                 Err(e) => return Err(from_nix_error(e, "pwrite")),
             };
             if bytes == 0 {
@@ -268,11 +281,12 @@ impl FileSystem for DefaultFileSystem {
         LogFd::create(path.as_ref())
     }
 
-    fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
-        LogFd::open(path.as_ref())
+    fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> IoResult<Self::Handle> {
+        LogFd::open(path.as_ref(), perm)
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
+        fail_point!("default_fs::delete_skipped", |_| { Ok(()) });
         std::fs::remove_file(path)
     }
 

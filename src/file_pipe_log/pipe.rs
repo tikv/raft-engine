@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::File as StdFile;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,7 +11,8 @@ use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
-use crate::env::FileSystem;
+use crate::env::{FileSystem, Permission};
+use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
@@ -19,141 +20,58 @@ use crate::pipe_log::{
 };
 use crate::{perf_context, Error, Result};
 
-use super::format::{FileNameExt, LogFileFormat};
-use super::log_file::{build_file_reader, build_file_writer, LogFileWriter};
+use super::format::{build_recycled_file_name, FileNameExt, LogFileFormat};
+use super::log_file::build_file_reader;
+use super::log_file::{build_file_writer, LogFileWriter};
+
+pub type PathId = usize;
+pub type Paths = Vec<PathBuf>;
+
+/// Main directory path id.
+pub const DEFAULT_PATH_ID: PathId = 0;
+/// FileSeq of logs must start from `1` by default to keep backward
+/// compatibility.
+pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
 
 #[derive(Debug)]
-pub struct FileWithFormat<F: FileSystem> {
+pub struct File<F: FileSystem> {
+    pub seq: FileSeq,
     pub handle: Arc<F::Handle>,
     pub format: LogFileFormat,
+    pub path_id: PathId,
 }
 
-struct FileCollection<F: FileSystem> {
-    /// Sequence number of the first file.
-    first_seq: FileSeq,
-    /// Sequence number of the first file that is in use.
-    first_seq_in_use: FileSeq,
-    fds: VecDeque<FileWithFormat<F>>,
-    /// A hint to control the amount of stale files.
-    /// `fds.len()` should be no larger than `capacity` unless it is full of
-    /// active files.
-    capacity: usize,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-struct FileState {
-    first_seq: FileSeq,
-    first_seq_in_use: FileSeq,
-    total_len: usize,
-}
-
-/// Note: create a method for any mutable operations.
-impl<F: FileSystem> FileCollection<F> {
-    /// Takes a stale file if there is one.
-    #[inline]
-    fn recycle_one_file(&mut self) -> Option<FileSeq> {
-        debug_assert!(self.first_seq <= self.first_seq_in_use);
-        debug_assert!(!self.fds.is_empty());
-        if self.first_seq < self.first_seq_in_use {
-            let seq = self.first_seq;
-            self.fds.pop_front().unwrap();
-            self.first_seq += 1;
-            Some(seq)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn push(&mut self, file: FileWithFormat<F>) -> FileState {
-        self.fds.push_back(file);
-        FileState {
-            first_seq: self.first_seq,
-            first_seq_in_use: self.first_seq_in_use,
-            total_len: self.fds.len(),
-        }
-    }
-
-    #[inline]
-    fn logical_purge(&mut self, file_seq: FileSeq) -> (FileState, FileState) {
-        let prev = FileState {
-            first_seq: self.first_seq,
-            first_seq_in_use: self.first_seq_in_use,
-            total_len: self.fds.len(),
-        };
-        if (self.first_seq_in_use..self.first_seq + self.fds.len() as u64).contains(&file_seq) {
-            // Remove some obsolete files if capacity is exceeded.
-            let obsolete_files = (file_seq - self.first_seq) as usize;
-            // When capacity is zero, always remove logically deleted files.
-            let capacity_exceeded = self.fds.len().saturating_sub(self.capacity);
-            let mut purged = std::cmp::min(capacity_exceeded, obsolete_files);
-            // The files with format_version `V1` cannot be chosen as recycle
-            // candidates. We will simply make sure there's no V1 stale files in the
-            // collection.
-            for i in (purged..obsolete_files).rev() {
-                if !self.fds[i].format.version.has_log_signing() {
-                    purged = i + 1;
-                    break;
-                }
-            }
-            self.first_seq += purged as u64;
-            self.first_seq_in_use = file_seq;
-            self.fds.drain(..purged);
-        }
-        let current = FileState {
-            first_seq: self.first_seq,
-            first_seq_in_use: self.first_seq_in_use,
-            total_len: self.fds.len(),
-        };
-        (prev, current)
-    }
-}
-
-struct ActiveFile<F: FileSystem> {
-    seq: FileSeq,
-    writer: LogFileWriter<F>,
-    format: LogFileFormat,
+struct WritableFile<F: FileSystem> {
+    pub seq: FileSeq,
+    pub writer: LogFileWriter<F>,
+    pub format: LogFileFormat,
 }
 
 /// A file-based log storage that arranges files as one single queue.
 pub(super) struct SinglePipe<F: FileSystem> {
     queue: LogQueue,
-    dir: String,
-    file_format: LogFileFormat,
-    target_file_size: usize,
+    paths: Paths,
     file_system: Arc<F>,
     listeners: Vec<Arc<dyn EventListener>>,
+    default_format: LogFileFormat,
+    target_file_size: usize,
 
-    files: CachePadded<RwLock<FileCollection<F>>>,
+    capacity: usize,
+    active_files: CachePadded<RwLock<VecDeque<File<F>>>>,
+    recycled_files: CachePadded<RwLock<VecDeque<File<F>>>>,
+
     /// The log file opened for write.
     ///
-    /// `active_file` must be locked first to acquire both `files` and
-    /// `active_file`
-    active_file: CachePadded<Mutex<ActiveFile<F>>>,
+    /// `writable_file` must be locked first to acquire both `files` and
+    /// `writable_file`
+    writable_file: CachePadded<Mutex<WritableFile<F>>>,
 }
 
 impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
-        let mut active_file = self.active_file.lock();
-        if let Err(e) = active_file.writer.close() {
+        let mut writable_file = self.writable_file.lock();
+        if let Err(e) = writable_file.writer.close() {
             error!("error while closing the active writer: {}", e);
-        }
-        // Release the unnecessary disk space occupied by stale files. It also reduces
-        // recovery time.
-        let files = self.files.read();
-        for seq in files.first_seq..files.first_seq_in_use {
-            let file_id = FileId {
-                queue: self.queue,
-                seq,
-            };
-            let path = file_id.build_file_path(&self.dir);
-            if let Err(e) = self.file_system.delete(&path) {
-                error!(
-                    "error while deleting stale file: {}, err_msg: {}",
-                    path.display(),
-                    e
-                )
-            }
         }
     }
 }
@@ -162,172 +80,182 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Opens a new [`SinglePipe`].
     pub fn open(
         cfg: &Config,
+        paths: Paths,
         file_system: Arc<F>,
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
-        mut first_seq: FileSeq,
-        mut fds: VecDeque<FileWithFormat<F>>,
-        capacity: usize,
+        mut active_files: Vec<File<F>>,
+        recycled_files: Vec<File<F>>,
     ) -> Result<Self> {
-        #[allow(unused_mut)]
-        let mut alignment = 0;
-        #[cfg(feature = "failpoints")]
-        {
-            let force_set_aligned_layout = || {
-                fail_point!("file_pipe_log::open::force_set_aligned_layout", |_| {
-                    true
-                });
-                false
-            };
-            if force_set_aligned_layout() {
-                alignment = 16;
-            }
-        }
-
-        let create_file = first_seq == 0;
-        let active_seq = if create_file {
-            first_seq = 1;
-            let file_id = FileId {
-                queue,
-                seq: first_seq,
-            };
-            let fd = Arc::new(file_system.create(&file_id.build_file_path(&cfg.dir))?);
-            fds.push_back(FileWithFormat {
-                handle: fd,
-                format: LogFileFormat::new(cfg.format_version, alignment),
-            });
-            first_seq
-        } else {
-            first_seq + fds.len() as u64 - 1
+        let alignment = || {
+            fail_point!("file_pipe_log::open::force_set_alignment", |_| { 16 });
+            0
         };
+        let default_format = LogFileFormat::new(cfg.format_version, alignment());
 
-        for seq in first_seq..=active_seq {
-            for listener in &listeners {
-                listener.post_new_log_file(FileId { queue, seq });
-            }
+        // Open or create active file.
+        let no_active_files = active_files.is_empty();
+        if no_active_files {
+            let path_id = find_available_dir(&paths, cfg.target_file_size.0 as usize);
+            let file_id = FileId::new(queue, DEFAULT_FIRST_FILE_SEQ);
+            let path = file_id.build_file_path(&paths[path_id]);
+            active_files.push(File {
+                seq: file_id.seq,
+                handle: file_system.create(&path)?.into(),
+                format: default_format,
+                path_id,
+            });
         }
-        let active_fd = fds.back().unwrap();
-        let active_file = ActiveFile {
-            seq: active_seq,
+        let f = active_files.last().unwrap();
+        // If starting from active_files.emtpy(), we should reset the first file with
+        // given file format.
+        let writable_file = WritableFile {
+            seq: f.seq,
             writer: build_file_writer(
                 file_system.as_ref(),
-                active_fd.handle.clone(),
-                active_fd.format,
-                false, /* force_reset */
+                f.handle.clone(),
+                f.format,
+                no_active_files, /* force_reset */
             )?,
-            format: active_fd.format,
+            format: f.format,
         };
 
-        let total_files = fds.len();
+        let (len, recycled_len) = (active_files.len(), recycled_files.len());
+        for f in active_files.iter() {
+            for listener in &listeners {
+                listener.post_new_log_file(FileId { queue, seq: f.seq });
+            }
+        }
+
         let pipe = Self {
             queue,
-            dir: cfg.dir.clone(),
-            file_format: LogFileFormat::new(cfg.format_version, alignment),
-            target_file_size: cfg.target_file_size.0 as usize,
+            paths,
             file_system,
             listeners,
-
-            files: CachePadded::new(RwLock::new(FileCollection {
-                first_seq,
-                first_seq_in_use: first_seq,
-                fds,
-                capacity,
-            })),
-            active_file: CachePadded::new(Mutex::new(active_file)),
+            default_format,
+            target_file_size: cfg.target_file_size.0 as usize,
+            capacity: if queue == LogQueue::Append {
+                cfg.recycle_capacity()
+            } else {
+                0
+            },
+            active_files: RwLock::new(active_files.into()).into(),
+            recycled_files: RwLock::new(recycled_files.into()).into(),
+            writable_file: Mutex::new(writable_file).into(),
         };
-        pipe.flush_metrics(total_files);
+        pipe.flush_metrics(len);
+        pipe.flush_recycle_metrics(recycled_len);
         Ok(pipe)
     }
 
     /// Synchronizes all metadatas associated with the working directory to the
     /// filesystem.
-    fn sync_dir(&self) -> Result<()> {
-        let path = PathBuf::from(&self.dir);
-        std::fs::File::open(path).and_then(|d| d.sync_all())?;
+    fn sync_dir(&self, path_id: PathId) -> Result<()> {
+        debug_assert!(!self.paths.is_empty());
+        std::fs::File::open(&PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
         Ok(())
+    }
+
+    /// Recycles one obsolete file from the recycled file list and return its
+    /// [`PathId`] and [`F::Handle`] if success.
+    fn recycle_file(&self, seq: FileSeq) -> Option<Result<(PathId, F::Handle)>> {
+        let new_file_id = FileId {
+            seq,
+            queue: self.queue,
+        };
+        let (recycle_file, recycle_len) = {
+            let mut recycled_files = self.recycled_files.write();
+            (recycled_files.pop_front(), recycled_files.len())
+        };
+        if let Some(f) = recycle_file {
+            let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
+            let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
+            if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
+                error!("error while trying to reuse recycled file, err: {}", e);
+                if let Err(e) = self.file_system.delete(&src_path) {
+                    error!("error while trying to delete recycled file, err: {}", e);
+                }
+            } else {
+                self.flush_recycle_metrics(recycle_len);
+                return match self.file_system.open(&dst_path, Permission::ReadWrite) {
+                    Ok(handle) => Some(Ok((f.path_id, handle))),
+                    Err(e) => Some(Err(e.into())),
+                };
+            }
+        }
+        None
+    }
+
+    /// Creates a new log file according to the given [`FileSeq`].
+    fn new_file(&self, seq: FileSeq) -> Result<(PathId, F::Handle)> {
+        let new_file_id = FileId {
+            seq,
+            queue: self.queue,
+        };
+        let path_id = find_available_dir(&self.paths, self.target_file_size);
+        let path = new_file_id.build_file_path(&self.paths[path_id]);
+        Ok((path_id, self.file_system.create(&path)?))
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
     fn get_fd(&self, file_seq: FileSeq) -> Result<Arc<F::Handle>> {
-        let files = self.files.read();
-        if !(files.first_seq_in_use..files.first_seq_in_use + files.fds.len() as u64)
-            .contains(&file_seq)
-        {
+        let files = self.active_files.read();
+        if !(files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq) {
             return Err(Error::Corruption("file seqno out of range".to_owned()));
         }
-        Ok(files.fds[(file_seq - files.first_seq) as usize]
-            .handle
-            .clone())
+        Ok(files[(file_seq - files[0].seq) as usize].handle.clone())
     }
 
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
-    fn rotate_imp(&self, active_file: &mut MutexGuard<ActiveFile<F>>) -> Result<()> {
+    fn rotate_imp(&self, writable_file: &mut MutexGuard<WritableFile<F>>) -> Result<()> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
             perf_context!(log_rotate_duration),
         ));
-        let seq = active_file.seq + 1;
-        debug_assert!(seq > 1);
+        let new_seq = writable_file.seq + 1;
+        debug_assert!(new_seq > DEFAULT_FIRST_FILE_SEQ);
 
-        active_file.writer.close()?;
+        writable_file.writer.close()?;
 
-        let file_id = FileId {
-            queue: self.queue,
-            seq,
+        let (path_id, handle) = self
+            .recycle_file(new_seq)
+            .unwrap_or_else(|| self.new_file(new_seq))?;
+        let f = File::<F> {
+            seq: new_seq,
+            handle: handle.into(),
+            format: self.default_format,
+            path_id,
         };
-        let path = file_id.build_file_path(&self.dir);
-        let fd = Arc::new(if let Some(seq) = self.files.write().recycle_one_file() {
-            let src_file_id = FileId {
-                queue: self.queue,
-                seq,
-            };
-            let src_path = src_file_id.build_file_path(&self.dir);
-            let dst_path = file_id.build_file_path(&self.dir);
-            if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
-                error!("error while trying to reuse one expired file: {}", e);
-                if let Err(e) = self.file_system.delete(&src_path) {
-                    error!("error while trying to delete one expired file: {}", e);
-                }
-                self.file_system.create(&path)?
-            } else {
-                self.file_system.open(&path)?
-            }
-        } else {
-            self.file_system.create(&path)?
-        });
-        let mut new_file = ActiveFile {
-            seq,
-            // The file might generated from a recycled stale-file, always reset the file
-            // header of it.
+        let mut new_file = WritableFile {
+            seq: new_seq,
             writer: build_file_writer(
                 self.file_system.as_ref(),
-                fd.clone(),
-                self.file_format,
+                f.handle.clone(),
+                f.format,
                 true, /* force_reset */
             )?,
-            format: self.file_format,
+            format: f.format,
         };
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
-        self.sync_dir()?;
-        let version = new_file.format.version;
-        let alignment = new_file.format.alignment;
-        **active_file = new_file;
+        self.sync_dir(path_id)?;
 
-        let state = self.files.write().push(FileWithFormat {
-            handle: fd,
-            format: LogFileFormat::new(version, alignment),
-        });
+        **writable_file = new_file;
+        let len = {
+            let mut files = self.active_files.write();
+            files.push_back(f);
+            files.len()
+        };
+        self.flush_metrics(len);
         for listener in &self.listeners {
             listener.post_new_log_file(FileId {
                 queue: self.queue,
-                seq,
+                seq: new_seq,
             });
         }
-        self.flush_metrics(state.total_len);
         Ok(())
     }
 
@@ -336,6 +264,14 @@ impl<F: FileSystem> SinglePipe<F> {
         match self.queue {
             LogQueue::Append => LOG_FILE_COUNT.append.set(len as i64),
             LogQueue::Rewrite => LOG_FILE_COUNT.rewrite.set(len as i64),
+        }
+    }
+
+    /// Synchronizes current recycled states to related metrics.
+    fn flush_recycle_metrics(&self, len: usize) {
+        match self.queue {
+            LogQueue::Append => RECYCLED_FILE_COUNT.append.set(len as i64),
+            LogQueue::Rewrite => RECYCLED_FILE_COUNT.rewrite.set(len as i64),
         }
     }
 }
@@ -351,23 +287,23 @@ impl<F: FileSystem> SinglePipe<F> {
 
     fn append<T: ReactiveBytes + ?Sized>(&self, bytes: &mut T) -> Result<FileBlockHandle> {
         fail_point!("file_pipe_log::append");
-        let mut active_file = self.active_file.lock();
-        if active_file.writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut active_file) {
+        let mut writable_file = self.writable_file.lock();
+        if writable_file.writer.offset() >= self.target_file_size {
+            if let Err(e) = self.rotate_imp(&mut writable_file) {
                 panic!(
                     "error when rotate [{:?}:{}]: {}",
-                    self.queue, active_file.seq, e
+                    self.queue, writable_file.seq, e
                 );
             }
         }
 
-        let seq = active_file.seq;
-        let format = active_file.format;
+        let seq = writable_file.seq;
+        let format = writable_file.format;
         let ctx = LogFileContext {
             id: FileId::new(self.queue, seq),
             version: format.version,
         };
-        let writer = &mut active_file.writer;
+        let writer = &mut writable_file.writer;
 
         #[cfg(feature = "failpoints")]
         {
@@ -397,7 +333,30 @@ impl<F: FileSystem> SinglePipe<F> {
                     seq, e, te
                 );
             }
-            return Err(e);
+            if is_no_space_err(&e) {
+                // TODO: There exists several corner cases should be tackled if
+                // `bytes.len()` > `target_file_size`. For example,
+                // - [1] main-dir has no recycled logs, and spill-dir have several recycled
+                //   logs.
+                // - [2] main-dir has several recycled logs, and sum(recycled_logs.size()) <
+                //   expected_file_size, but no recycled logs exist in spill-dir.
+                // - [3] Both main-dir and spill-dir have several recycled logs.
+                // But as `bytes.len()` is always smaller than `target_file_size` in common
+                // cases, this issue will be ignored temprorarily.
+                if let Err(e) = self.rotate_imp(&mut writable_file) {
+                    panic!(
+                        "error when rotate [{:?}:{}]: {}",
+                        self.queue, writable_file.seq, e
+                    );
+                }
+                // If there still exists free space for this record, rotate the file
+                // and return a special TryAgain Err (for retry) to the caller.
+                return Err(Error::TryAgain(format!(
+                    "error when append [{:?}:{}]: {}",
+                    self.queue, seq, e
+                )));
+            }
+            return Err(Error::Io(e));
         }
         let handle = FileBlockHandle {
             id: FileId {
@@ -414,9 +373,9 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn sync(&self) -> Result<()> {
-        let mut active_file = self.active_file.lock();
-        let seq = active_file.seq;
-        let writer = &mut active_file.writer;
+        let mut writable_file = self.writable_file.lock();
+        let seq = writable_file.seq;
+        let writer = &mut writable_file.writer;
         {
             let _t = StopWatch::new(perf_context!(log_sync_duration));
             if let Err(e) = writer.sync() {
@@ -428,53 +387,78 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn file_span(&self) -> (FileSeq, FileSeq) {
-        let files = self.files.read();
-        (
-            files.first_seq_in_use,
-            files.first_seq + files.fds.len() as u64 - 1,
-        )
+        let files = self.active_files.read();
+        (files[0].seq, files[files.len() - 1].seq)
     }
 
     fn total_size(&self) -> usize {
-        let files = self.files.read();
-        files.fds.len() * self.target_file_size
+        let (first_seq, last_seq) = self.file_span();
+        (last_seq - first_seq + 1) as usize * self.target_file_size
     }
 
     fn rotate(&self) -> Result<()> {
-        self.rotate_imp(&mut self.active_file.lock())
+        self.rotate_imp(&mut self.writable_file.lock())
     }
 
-    /// Purge obsolete log files to the specific `FileSeq`.
-    ///
-    /// Return the actual removed count of purged files.
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let (prev, current) = self.files.write().logical_purge(file_seq);
-        if file_seq > prev.first_seq + prev.total_len as u64 - 1 {
-            debug_assert_eq!(prev, current);
-            return Err(box_err!("Purge active or newer files"));
-        } else if prev == current {
-            return Ok(0);
-        }
-        for seq in prev.first_seq..current.first_seq {
-            let file_id = FileId {
-                queue: self.queue,
-                seq,
-            };
-            let path = file_id.build_file_path(&self.dir);
-            #[cfg(feature = "failpoints")]
-            {
-                let remove_skipped = || {
-                    fail::fail_point!("file_pipe_log::remove_file_skipped", |_| true);
-                    false
-                };
-                if remove_skipped() {
-                    continue;
-                }
+        let (len, purged_files) = {
+            let mut files = self.active_files.write();
+            if !(files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq) {
+                return Err(box_err!("FileSeq out of range, cannot be purged"));
             }
-            self.file_system.delete(&path)?;
+            let off = (file_seq - files[0].seq) as usize;
+            let mut tail = files.split_off(off);
+            std::mem::swap(&mut tail, &mut files);
+            (files.len(), tail)
+        };
+        let purged_len = purged_files.len();
+        if purged_len > 0 {
+            let remains_capacity = self.capacity.saturating_sub(len);
+            let (recycled_start, mut recycled_len) = {
+                let files = self.recycled_files.read();
+                files
+                    .front()
+                    .map_or_else(|| (DEFAULT_FIRST_FILE_SEQ, 0), |f| (f.seq, files.len()))
+            };
+            let mut new_recycled = VecDeque::new();
+            // The newly purged files from `self.active_files` should be renamed
+            // to recycled files with LOG_APPEND_RESERVED_SUFFIX suffix, to reduce the
+            // unnecessary recovery timecost when restarting.
+            for f in purged_files {
+                let file_id = FileId {
+                    seq: f.seq,
+                    queue: self.queue,
+                };
+                let path = file_id.build_file_path(&self.paths[f.path_id]);
+                // Recycle purged files whose version meets the requirement.
+                if f.format.version.has_log_signing() && recycled_len < remains_capacity {
+                    let recycled_seq = recycled_start + recycled_len as u64;
+                    let dst_path =
+                        self.paths[f.path_id].join(build_recycled_file_name(recycled_seq));
+                    match self.file_system.reuse_and_open(&path, &dst_path) {
+                        Ok(handle) => {
+                            new_recycled.push_back(File {
+                                seq: recycled_seq,
+                                handle: handle.into(),
+                                path_id: f.path_id,
+                                format: f.format,
+                            });
+                            recycled_len += 1;
+                            continue;
+                        }
+                        Err(e) => error!("failed to reuse purged file {:?}", e),
+                    }
+                }
+                // Remove purged files which are out of capacity and files whose version is
+                // marked not recycled.
+                self.file_system.delete(&path)?;
+            }
+            debug_assert!(recycled_len <= remains_capacity);
+            self.recycled_files.write().append(&mut new_recycled);
+            self.flush_recycle_metrics(recycled_len);
         }
-        self.flush_metrics(current.total_len);
-        Ok((current.first_seq_in_use - prev.first_seq_in_use) as usize)
+        self.flush_metrics(len);
+        Ok(purged_len)
     }
 }
 
@@ -482,14 +466,14 @@ impl<F: FileSystem> SinglePipe<F> {
 pub struct DualPipes<F: FileSystem> {
     pipes: [SinglePipe<F>; 2],
 
-    _dir_lock: File,
+    _dir_locks: Vec<StdFile>,
 }
 
 impl<F: FileSystem> DualPipes<F> {
     /// Open a new [`DualPipes`]. Assumes the two [`SinglePipe`]s share the
     /// same directory, and that directory is locked by `dir_lock`.
     pub(super) fn open(
-        dir_lock: File,
+        dir_locks: Vec<StdFile>,
         appender: SinglePipe<F>,
         rewriter: SinglePipe<F>,
     ) -> Result<Self> {
@@ -499,7 +483,7 @@ impl<F: FileSystem> DualPipes<F> {
 
         Ok(Self {
             pipes: [appender, rewriter],
-            _dir_lock: dir_lock,
+            _dir_locks: dir_locks,
         })
     }
 
@@ -550,8 +534,27 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 }
 
+/// Fetch and return a valid `PathId` of the specific directories.
+pub(crate) fn find_available_dir(paths: &Paths, target_size: usize) -> PathId {
+    fail_point!("file_pipe_log::force_choose_dir", |s| s
+        .map_or(DEFAULT_PATH_ID, |n| n.parse::<usize>().unwrap()));
+    // Only if one single dir is set by `Config::dir`, can it skip the check of disk
+    // space usage.
+    if paths.len() > 1 {
+        for (t, p) in paths.iter().enumerate() {
+            if let Ok(disk_stats) = fs2::statvfs(&p) {
+                if target_size <= disk_stats.available_space() as usize {
+                    return t;
+                }
+            }
+        }
+    }
+    DEFAULT_PATH_ID
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use tempfile::Builder;
 
     use super::super::format::LogFileFormat;
@@ -563,28 +566,28 @@ mod tests {
 
     fn new_test_pipe<F: FileSystem>(
         cfg: &Config,
+        paths: Paths,
         queue: LogQueue,
         fs: Arc<F>,
     ) -> Result<SinglePipe<F>> {
-        SinglePipe::open(
-            cfg,
-            fs,
-            Vec::new(),
-            queue,
-            0,
-            VecDeque::new(),
-            match queue {
-                LogQueue::Append => cfg.recycle_capacity(),
-                LogQueue::Rewrite => 0,
-            },
-        )
+        SinglePipe::open(cfg, paths, fs, Vec::new(), queue, Vec::new(), Vec::new())
     }
 
     fn new_test_pipes(cfg: &Config) -> Result<DualPipes<DefaultFileSystem>> {
         DualPipes::open(
-            lock_dir(&cfg.dir)?,
-            new_test_pipe(cfg, LogQueue::Append, Arc::new(DefaultFileSystem))?,
-            new_test_pipe(cfg, LogQueue::Rewrite, Arc::new(DefaultFileSystem))?,
+            vec![lock_dir(&cfg.dir)?],
+            new_test_pipe(
+                cfg,
+                vec![Path::new(&cfg.dir).to_path_buf()],
+                LogQueue::Append,
+                Arc::new(DefaultFileSystem),
+            )?,
+            new_test_pipe(
+                cfg,
+                vec![Path::new(&cfg.dir).to_path_buf()],
+                LogQueue::Rewrite,
+                Arc::new(DefaultFileSystem),
+            )?,
         )
     }
 
@@ -678,80 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn test_file_collection() {
-        fn new_file_handler(
-            path: &str,
-            file_id: FileId,
-            version: Version,
-        ) -> FileWithFormat<DefaultFileSystem> {
-            FileWithFormat {
-                handle: Arc::new(
-                    DefaultFileSystem
-                        .create(&file_id.build_file_path(path))
-                        .unwrap(),
-                ),
-                format: LogFileFormat::new(version, 0 /* alignment */),
-            }
-        }
-        let dir = Builder::new()
-            .prefix("test_file_collection")
-            .tempdir()
-            .unwrap();
-        let path = dir.path().to_str().unwrap();
-        // | 12
-        let mut files = FileCollection {
-            first_seq: 12,
-            first_seq_in_use: 12,
-            capacity: 5,
-            fds: vec![new_file_handler(
-                path,
-                FileId::new(LogQueue::Append, 12),
-                Version::V2,
-            )]
-            .into(),
-        };
-        assert_eq!(files.recycle_one_file(), None);
-        // | 12 13 14
-        files.push(new_file_handler(
-            path,
-            FileId::new(LogQueue::Append, 13),
-            Version::V2,
-        ));
-        files.push(new_file_handler(
-            path,
-            FileId::new(LogQueue::Append, 14),
-            Version::V1,
-        ));
-        // 12 13 | 14
-        files.logical_purge(14);
-        // 13 | 14
-        assert_eq!(files.recycle_one_file().unwrap(), 12);
-        // 13 | 14 15
-        files.push(new_file_handler(
-            path,
-            FileId::new(LogQueue::Append, 15),
-            Version::V2,
-        ));
-        // V1 file will not be kept around.
-        // | 15
-        files.logical_purge(15);
-        assert_eq!(files.recycle_one_file(), None);
-        // | 15 16 17 18 19 20
-        for i in 16..=20 {
-            files.push(new_file_handler(
-                path,
-                FileId::new(LogQueue::Append, i),
-                Version::V2,
-            ));
-        }
-        assert_eq!(files.recycle_one_file(), None);
-        // 16 17 18 | 19 20
-        files.logical_purge(19);
-        // 17 18 | 19 20
-        assert_eq!(files.recycle_one_file().unwrap(), 16);
-    }
-
-    #[test]
     fn test_pipe_log_with_recycle() {
         let dir = Builder::new()
             .prefix("test_pipe_log_with_recycle")
@@ -769,7 +698,8 @@ mod tests {
         };
         let queue = LogQueue::Append;
         let fs = Arc::new(ObfuscatedFileSystem::default());
-        let pipe_log = new_test_pipe(&cfg, queue, fs.clone()).unwrap();
+        let pipe_log =
+            new_test_pipe(&cfg, vec![Path::new(&cfg.dir).to_path_buf()], queue, fs).unwrap();
         assert_eq!(pipe_log.file_span(), (1, 1));
 
         fn content(i: usize) -> Vec<u8> {
@@ -782,19 +712,14 @@ mod tests {
         }
         pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
+        // Cannot purge already expired logs or not existsed logs.
+        assert!(pipe_log.purge_to(first - 1).is_err());
+        assert!(pipe_log.purge_to(last + 1).is_err());
+        // By `purge`, all stale files will be automatically renamed to recycled files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
-        // Try to read stale file.
-        for (i, handle) in handles.into_iter().enumerate() {
+        // Try to read recycled file.
+        for (_, handle) in handles.into_iter().enumerate() {
             assert!(pipe_log.read_bytes(handle).is_err());
-            // Bypass pipe log
-            let mut reader = build_file_reader(
-                fs.as_ref(),
-                Arc::new(fs.open(handle.id.build_file_path(path)).unwrap()),
-            )
-            .unwrap();
-            assert_eq!(reader.read(handle).unwrap(), content(i));
-            // Delete file so that it cannot be reused.
-            fs.delete(handle.id.build_file_path(path)).unwrap();
         }
         // Try to reuse.
         let mut handles = Vec::new();

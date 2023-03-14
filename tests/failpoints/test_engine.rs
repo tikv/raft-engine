@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use fail::FailGuard;
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
 use raft_engine::env::{FileSystem, ObfuscatedFileSystem};
@@ -373,7 +374,7 @@ fn test_incomplete_purge() {
     let engine = Engine::open(cfg.clone()).unwrap();
 
     {
-        let _f = FailGuard::new("file_pipe_log::remove_file_skipped", "return");
+        let _f = FailGuard::new("default_fs::delete_skipped", "return");
         append(&engine, rid, 0, 20, Some(&data));
         let append_first = engine.file_span(LogQueue::Append).0;
         engine.compact_to(rid, 18);
@@ -672,7 +673,7 @@ fn test_build_engine_with_multi_datalayout() {
     }
     drop(engine);
     // File with DataLayout::Alignment
-    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_alignment", "return");
     let cfg_v2 = Config {
         format_version: Version::V2,
         ..cfg
@@ -700,7 +701,7 @@ fn test_build_engine_with_datalayout_abnormal() {
         format_version: Version::V2,
         ..Default::default()
     };
-    let _f = FailGuard::new("file_pipe_log::open::force_set_aligned_layout", "return");
+    let _f = FailGuard::new("file_pipe_log::open::force_set_alignment", "return");
     let engine = Engine::open(cfg.clone()).unwrap();
     // Content durable with DataLayout::Alignment.
     append(&engine, 1, 1, 11, Some(&data));
@@ -732,7 +733,7 @@ fn test_partial_rewrite_rewrite() {
         .prefix("test_partial_rewrite_rewrite")
         .tempdir()
         .unwrap();
-    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         recovery_threads: 1,
@@ -755,7 +756,7 @@ fn test_partial_rewrite_rewrite() {
     }
 
     {
-        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        let _f = FailGuard::new("log_fd::write::err", "10*off->return->off");
         assert!(
             catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
         );
@@ -775,7 +776,7 @@ fn test_partial_rewrite_rewrite_online() {
         .prefix("test_partial_rewrite_rewrite_online")
         .tempdir()
         .unwrap();
-    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         ..Default::default()
@@ -793,7 +794,7 @@ fn test_partial_rewrite_rewrite_online() {
     assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
 
     {
-        let _f = fail::FailGuard::new("log_fd::write::err", "10*off->return->off");
+        let _f = FailGuard::new("log_fd::write::err", "10*off->return->off");
         assert!(
             catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
         );
@@ -819,8 +820,8 @@ fn test_split_rewrite_batch_imp(regions: u64, region_size: u64, split_size: u64,
         .prefix("test_split_rewrite_batch")
         .tempdir()
         .unwrap();
-    let _f1 = fail::FailGuard::new("max_rewrite_batch_bytes", &format!("return({split_size})"));
-    let _f2 = fail::FailGuard::new("force_use_atomic_group", "return");
+    let _f1 = FailGuard::new("max_rewrite_batch_bytes", &format!("return({split_size})"));
+    let _f2 = FailGuard::new("force_use_atomic_group", "return");
 
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
@@ -911,7 +912,7 @@ fn test_split_rewrite_batch_with_only_kvs() {
         .prefix("test_split_rewrite_batch_with_only_kvs")
         .tempdir()
         .unwrap();
-    let _f = fail::FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         ..Default::default()
@@ -943,7 +944,7 @@ fn test_split_rewrite_batch_with_only_kvs() {
         engine.purge_manager().must_rewrite_rewrite_queue();
     }
     {
-        let _f = fail::FailGuard::new("force_use_atomic_group", "return");
+        let _f = FailGuard::new("force_use_atomic_group", "return");
         log_batch.put(rid, key.clone(), Vec::new()).unwrap();
         engine.write(&mut log_batch, false).unwrap();
         engine.purge_manager().must_rewrite_append_queue(None, None);
@@ -968,5 +969,138 @@ fn test_split_rewrite_batch_with_only_kvs() {
     let engine = Engine::open(cfg).unwrap();
     for i in 1..=rid {
         assert_eq!(engine.get(i, &key).unwrap(), value);
+    }
+}
+
+#[test]
+fn test_build_engine_with_recycling_and_multi_dirs() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dirs_main")
+        .tempdir()
+        .unwrap();
+    let spill_dir = tempfile::Builder::new()
+        .prefix("test_build_engine_with_multi_dirs_spill")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        spill_dir: Some(spill_dir.path().to_str().unwrap().to_owned()),
+        target_file_size: ReadableSize::kb(1),
+        purge_threshold: ReadableSize::kb(20),
+        enable_log_recycle: true,
+        prefill_for_recycle: true,
+        ..Default::default()
+    };
+    let data = vec![b'x'; 1024];
+    {
+        // Prerequisite - case 1: all disks are full, Engine can be opened normally.
+        {
+            // Multi directories.
+            let _f = FailGuard::new("file_pipe_log::force_choose_dir", "return");
+            Engine::open(cfg.clone()).unwrap();
+            // Single diretory - spill-dir is None.
+            let cfg_single_dir = Config {
+                spill_dir: None,
+                ..cfg.clone()
+            };
+            Engine::open(cfg_single_dir).unwrap();
+        }
+        // Prerequisite - case 2: all disks are full after writing, and the current
+        // engine should be available for `read`.
+        {
+            let cfg_no_prefill = Config {
+                prefill_for_recycle: false,
+                ..cfg.clone()
+            };
+            let engine = Engine::open(cfg_no_prefill.clone()).unwrap();
+            engine
+                .write(&mut generate_batch(101, 11, 21, Some(&data)), true)
+                .unwrap();
+            drop(engine);
+            let _f1 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
+            let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
+            let engine = Engine::open(cfg_no_prefill).unwrap();
+            assert_eq!(
+                10,
+                engine
+                    .fetch_entries_to::<MessageExtTyped>(101, 11, 21, None, &mut vec![])
+                    .unwrap()
+            );
+        }
+        // Prerequisite - case 3: prefill several recycled logs but no space for
+        // remains, making prefilling progress exit in advance.
+        {
+            let _f1 = FailGuard::new(
+                "file_pipe_log::force_choose_dir",
+                "10*return(0)->5*return(1)",
+            );
+            let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
+            let _ = Engine::open(cfg.clone()).unwrap();
+        }
+        // Clean-up the env for later testing.
+        let cfg_err = Config {
+            enable_log_recycle: false,
+            prefill_for_recycle: false,
+            ..cfg.clone()
+        };
+        let _ = Engine::open(cfg_err).unwrap();
+    }
+    {
+        // Case 1: prefill recycled logs into multi-dirs (when preparing recycled logs,
+        // this circumstance also equals to `main dir is full, but spill-dir
+        // is free`.)
+        let engine = {
+            let _f = FailGuard::new("file_pipe_log::force_choose_dir", "10*return(0)->return(1)");
+            Engine::open(cfg.clone()).unwrap()
+        };
+        for rid in 1..10 {
+            append(&engine, rid, 1, 5, Some(&data));
+        }
+        let append_first = engine.file_span(LogQueue::Append).0;
+        for rid in 1..10 {
+            engine.compact_to(rid, 3);
+        }
+        // Purge do not exceed purge_threshold, and first active file_seq won't change.
+        engine.purge_expired_files().unwrap();
+        assert_eq!(engine.file_span(LogQueue::Append).0, append_first);
+        for rid in 1..20 {
+            append(&engine, rid, 3, 5, Some(&data));
+            engine.compact_to(rid, 4);
+        }
+        // Purge obsolete logs.
+        engine.purge_expired_files().unwrap();
+        assert!(engine.file_span(LogQueue::Append).0 > append_first);
+    }
+    {
+        // Case 2: prefill is on but no spare space for new log files.
+        let _f = FailGuard::new("file_pipe_log::force_choose_dir", "return");
+        let engine = Engine::open(cfg.clone()).unwrap();
+        let append_end = engine.file_span(LogQueue::Append).1;
+        // As there still exists several recycled logs for incoming writes, so the
+        // following writes will success.
+        for rid in 1..10 {
+            append(&engine, rid, 5, 7, Some(&data));
+        }
+        assert!(engine.file_span(LogQueue::Append).1 > append_end);
+    }
+    {
+        // Case 3: no prefill and no spare space for new log files.
+        let cfg_no_prefill = Config {
+            enable_log_recycle: true,
+            prefill_for_recycle: false,
+            ..cfg
+        };
+        let _f1 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
+        let engine = Engine::open(cfg_no_prefill).unwrap();
+        let _f2 = FailGuard::new("log_fd::write::no_space_err", "return");
+        let (append_first, append_end) = engine.file_span(LogQueue::Append);
+        // Cannot append new data into engine as no spare space.
+        for rid in 1..20 {
+            assert!(catch_unwind_silent(|| append(&engine, rid, 8, 9, Some(&data))).is_err());
+        }
+        assert_eq!(
+            engine.file_span(LogQueue::Append),
+            (append_first, append_end)
+        );
     }
 }

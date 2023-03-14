@@ -2,29 +2,38 @@
 
 //! Helper types to recover in-memory states from log files.
 
-use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::cmp;
+use std::fs::{self, File as StdFile};
+use std::io::Write;
 use std::marker::PhantomData;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use fs2::FileExt;
 use log::{error, info, warn};
 use rayon::prelude::*;
 
 use crate::config::{Config, RecoveryMode};
-use crate::env::FileSystem;
+use crate::env::{FileSystem, Handle, Permission};
+use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
 use crate::log_batch::LogItemBatch;
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::util::Factory;
+use crate::util::{Factory, ReadableSize};
 use crate::{Error, Result};
 
-use super::format::{lock_file_path, FileNameExt, LogFileFormat};
+use super::format::{
+    build_recycled_file_name, lock_file_path, parse_recycled_file_name, FileNameExt, LogFileFormat,
+};
 use super::log_file::build_file_reader;
-use super::pipe::{DualPipes, FileWithFormat, SinglePipe};
+use super::pipe::{
+    find_available_dir, DualPipes, File, PathId, Paths, SinglePipe, DEFAULT_FIRST_FILE_SEQ,
+};
 use super::reader::LogItemBatchFileReader;
-use crate::env::Handle;
+
+const PREFILL_BUFFER_SIZE: usize = ReadableSize::mb(16).0 as usize;
+const MAX_PREFILL_SIZE: usize = ReadableSize::gb(12).0 as usize;
 
 /// `ReplayMachine` is a type of deterministic state machine that obeys
 /// associative law.
@@ -63,12 +72,6 @@ pub struct RecoveryConfig {
     pub read_block_size: u64,
 }
 
-struct FileToRecover<F: FileSystem> {
-    seq: FileSeq,
-    handle: Arc<F::Handle>,
-    format: Option<LogFileFormat>,
-}
-
 /// [`DualPipes`] factory that can also recover other customized memory states.
 pub struct DualPipesBuilder<F: FileSystem> {
     cfg: Config,
@@ -76,11 +79,16 @@ pub struct DualPipesBuilder<F: FileSystem> {
     listeners: Vec<Arc<dyn EventListener>>,
 
     /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    dir_lock: Option<File>,
-    /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    append_files: Vec<FileToRecover<F>>,
-    /// Only filled after a successful call of `DualPipesBuilder::scan`.
-    rewrite_files: Vec<FileToRecover<F>>,
+    dirs: Paths,
+    dir_locks: Vec<StdFile>,
+
+    pub(crate) append_file_names: Vec<FileName>,
+    pub(crate) rewrite_file_names: Vec<FileName>,
+    pub(crate) recycled_file_names: Vec<FileName>,
+
+    append_files: Vec<File<F>>,
+    rewrite_files: Vec<File<F>>,
+    recycled_files: Vec<File<F>>,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -90,121 +98,181 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             cfg,
             file_system,
             listeners,
-            dir_lock: None,
+            dirs: Vec::new(),
+            dir_locks: Vec::new(),
+            append_file_names: Vec::new(),
+            rewrite_file_names: Vec::new(),
+            recycled_file_names: Vec::new(),
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
+            recycled_files: Vec::new(),
         }
     }
 
     /// Scans for all log files under the working directory. The directory will
     /// be created if not exists.
     pub fn scan(&mut self) -> Result<()> {
-        let dir = &self.cfg.dir;
-        let path = Path::new(dir);
-        if !path.exists() {
-            info!("Create raft log directory: {}", dir);
-            fs::create_dir(dir)?;
-            self.dir_lock = Some(lock_dir(dir)?);
-            return Ok(());
-        }
-        if !path.is_dir() {
-            return Err(box_err!("Not directory: {}", dir));
-        }
-        self.dir_lock = Some(lock_dir(dir)?);
+        self.scan_and_sort(true)?;
 
-        let (mut min_append_id, mut max_append_id) = (u64::MAX, 0);
-        let (mut min_rewrite_id, mut max_rewrite_id) = (u64::MAX, 0);
-        fs::read_dir(path)?.for_each(|e| {
-            if let Ok(e) = e {
-                let p = e.path();
-                if p.is_file() {
-                    match FileId::parse_file_name(p.file_name().unwrap().to_str().unwrap()) {
-                        Some(FileId {
-                            queue: LogQueue::Append,
-                            seq,
-                        }) => {
-                            min_append_id = std::cmp::min(min_append_id, seq);
-                            max_append_id = std::cmp::max(max_append_id, seq);
-                        }
-                        Some(FileId {
-                            queue: LogQueue::Rewrite,
-                            seq,
-                        }) => {
-                            min_rewrite_id = std::cmp::min(min_rewrite_id, seq);
-                            max_rewrite_id = std::cmp::max(max_rewrite_id, seq);
-                        }
-                        _ => {}
-                    }
+        // Open all files with suitable permissions.
+        self.append_files = Vec::with_capacity(self.append_file_names.len());
+        for (i, file_name) in self.append_file_names.iter().enumerate() {
+            let is_last_one = i == self.append_file_names.len() - 1;
+            self.append_files.push(self.open(file_name, is_last_one)?);
+        }
+        self.rewrite_files = Vec::with_capacity(self.rewrite_file_names.len());
+        for (i, file_name) in self.rewrite_file_names.iter().enumerate() {
+            let is_last_one = i == self.rewrite_file_names.len() - 1;
+            self.rewrite_files.push(self.open(file_name, is_last_one)?);
+        }
+        self.recycled_files = Vec::with_capacity(self.recycled_file_names.len());
+        for (i, file_name) in self.recycled_file_names.iter().enumerate() {
+            let is_last_one = i == self.recycled_file_names.len() - 1;
+            self.recycled_files.push(self.open(file_name, is_last_one)?);
+        }
+
+        // Validate and clear obsolete metadata and log files.
+        for (queue, files, is_recycled_file) in [
+            (LogQueue::Append, &mut self.append_files, false),
+            (LogQueue::Rewrite, &mut self.rewrite_files, false),
+            (LogQueue::Append, &mut self.recycled_files, true),
+        ] {
+            // Check the file_list and remove the hole of files.
+            let mut invalid_idx = 0_usize;
+            for (i, file_pair) in files.windows(2).enumerate() {
+                // If there exists a black hole or duplicate scenario on FileSeq, these
+                // files should be skipped and cleared.
+                if file_pair[1].seq - file_pair[0].seq != 1 {
+                    invalid_idx = i + 1;
                 }
             }
-        });
-
-        for (queue, min_id, max_id, files) in [
-            (
-                LogQueue::Append,
-                min_append_id,
-                max_append_id,
-                &mut self.append_files,
-            ),
-            (
-                LogQueue::Rewrite,
-                min_rewrite_id,
-                max_rewrite_id,
-                &mut self.rewrite_files,
-            ),
-        ] {
-            if max_id > 0 {
-                // Try to cleanup stale metadata left by the previous version.
-                let max_sample = 100;
-                // Find the first obsolete metadata.
-                let mut delete_start = None;
-                for i in 0..max_sample {
-                    let seq = i * min_id / max_sample;
-                    let file_id = FileId { queue, seq };
-                    let path = file_id.build_file_path(dir);
+            files.drain(..invalid_idx);
+            // Try to cleanup stale metadata left by the previous version.
+            if files.is_empty() {
+                continue;
+            }
+            let max_sample = 100;
+            // Find the first obsolete metadata.
+            let mut delete_start = None;
+            for i in 0..max_sample {
+                let seq = i * files[0].seq / max_sample;
+                let file_id = FileId { queue, seq };
+                for dir in self.dirs.iter() {
+                    let path = if is_recycled_file {
+                        dir.join(build_recycled_file_name(file_id.seq))
+                    } else {
+                        file_id.build_file_path(dir)
+                    };
                     if self.file_system.exists_metadata(&path) {
-                        delete_start = Some(i.saturating_sub(1) * min_id / max_sample + 1);
+                        delete_start = Some(i.saturating_sub(1) * files[0].seq / max_sample + 1);
                         break;
                     }
                 }
-                // Delete metadata starting from the oldest. Abort on error.
-                if let Some(start) = delete_start {
-                    let mut success = 0;
-                    for seq in start..min_id {
-                        let file_id = FileId { queue, seq };
-                        let path = file_id.build_file_path(dir);
-                        if let Err(e) = self.file_system.delete_metadata(&path) {
-                            error!("failed to delete metadata of {}: {}.", path.display(), e);
-                            break;
-                        }
-                        success += 1;
-                    }
-                    warn!(
-                        "deleted {} stale files of {:?} in range [{}, {}).",
-                        success, queue, start, min_id,
-                    );
+                if delete_start.is_some() {
+                    break;
                 }
-                for seq in min_id..=max_id {
+            }
+            // Delete metadata starting from the oldest. Abort on error.
+            let mut cleared = 0_u64;
+            if let Some(clear_start) = delete_start {
+                for seq in (clear_start..files[0].seq).rev() {
                     let file_id = FileId { queue, seq };
-                    let path = file_id.build_file_path(dir);
-                    if !path.exists() {
-                        warn!(
-                            "Detected a hole when scanning directory, discarding files before {:?}.",
-                            file_id,
-                        );
-                        files.clear();
-                    } else {
-                        let handle = Arc::new(self.file_system.open(&path)?);
-                        files.push(FileToRecover {
-                            seq,
-                            handle,
-                            format: None,
-                        });
+                    for dir in self.dirs.iter() {
+                        let path = if is_recycled_file {
+                            dir.join(build_recycled_file_name(seq))
+                        } else {
+                            file_id.build_file_path(dir)
+                        };
+                        if self.file_system.exists_metadata(&path) {
+                            if let Err(e) = self.file_system.delete_metadata(&path) {
+                                error!("failed to delete metadata of {}: {}.", path.display(), e);
+                                break;
+                            }
+                            cleared += 1;
+                        }
                     }
                 }
             }
+            if cleared > 0 {
+                warn!(
+                    "clear {} stale files of {:?} in range [{}, {}).",
+                    cleared, queue, 0, files[0].seq,
+                );
+            }
         }
         Ok(())
+    }
+
+    pub(crate) fn scan_and_sort(&mut self, lock: bool) -> Result<()> {
+        let dir = self.cfg.dir.clone();
+        self.scan_dir(&dir, lock)?;
+
+        if let Some(dir) = self.cfg.spill_dir.clone() {
+            self.scan_dir(&dir, lock)?;
+        }
+
+        self.append_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.rewrite_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.recycled_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
+        Ok(())
+    }
+
+    fn scan_dir(&mut self, dir: &str, lock: bool) -> Result<()> {
+        let dir = Path::new(dir);
+        if !dir.exists() {
+            if lock {
+                info!("Create raft log directory: {}", dir.display());
+                fs::create_dir(dir)?;
+                self.dir_locks.push(lock_dir(dir)?);
+            }
+            self.dirs.push(dir.to_path_buf());
+            return Ok(());
+        }
+        if !dir.is_dir() {
+            return Err(box_err!("Not directory: {}", dir.display()));
+        }
+        if lock {
+            self.dir_locks.push(lock_dir(dir)?);
+        }
+        self.dirs.push(dir.to_path_buf());
+        let path_id = self.dirs.len() - 1;
+
+        fs::read_dir(dir)?.try_for_each(|e| -> Result<()> {
+            let dir_entry = e?;
+            let p = dir_entry.path();
+            if !p.is_file() {
+                return Ok(());
+            }
+            let file_name = p.file_name().unwrap().to_str().unwrap();
+            match FileId::parse_file_name(file_name) {
+                Some(FileId {
+                    queue: LogQueue::Append,
+                    seq,
+                }) => self.append_file_names.push(FileName {
+                    seq,
+                    path: p,
+                    path_id,
+                }),
+                Some(FileId {
+                    queue: LogQueue::Rewrite,
+                    seq,
+                }) => self.rewrite_file_names.push(FileName {
+                    seq,
+                    path: p,
+                    path_id,
+                }),
+                _ => {
+                    if let Some(seq) = parse_recycled_file_name(file_name) {
+                        self.recycled_file_names.push(FileName {
+                            seq,
+                            path: p,
+                            path_id,
+                        })
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Reads through log items in all available log files, and replays them to
@@ -246,8 +314,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             concurrency: rewrite_concurrency,
             ..append_recovery_cfg
         };
+
         let append_files = &mut self.append_files;
         let rewrite_files = &mut self.rewrite_files;
+
         let file_system = self.file_system.clone();
         // As the `recover_queue` would update the `LogFileFormat` of each log file
         // in `apend_files` and `rewrite_files`, we re-design the implementation on
@@ -280,11 +350,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     fn recover_queue_imp<M: ReplayMachine, FA: Factory<M>>(
         file_system: Arc<F>,
         recovery_cfg: RecoveryConfig,
-        files: &mut Vec<FileToRecover<F>>,
-        replay_machine_factory: &FA,
+        files: &mut Vec<File<F>>,
+        machine_factory: &FA,
     ) -> Result<M> {
         if recovery_cfg.concurrency == 0 || files.is_empty() {
-            return Ok(replay_machine_factory.new_target());
+            return Ok(machine_factory.new_target());
         }
         let queue = recovery_cfg.queue;
         let concurrency = recovery_cfg.concurrency;
@@ -295,12 +365,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let chunks = files.par_chunks_mut(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);
-        let sequential_replay_machine = chunks
+        let machine = chunks
             .enumerate()
             .map(|(index, chunk)| {
                 let mut reader =
                     LogItemBatchFileReader::new(recovery_read_block_size);
-                let mut sequential_replay_machine = replay_machine_factory.new_target();
+                let mut machine = machine_factory.new_target();
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
@@ -316,7 +386,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(0)?;
-                                f.format = Some(LogFileFormat::default());
+                                f.format = LogFileFormat::default();
                                 continue;
                             } else {
                                 error!(
@@ -327,14 +397,14 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             }
                         },
                         Ok(format) => {
-                            f.format = Some(format);
+                            f.format = format;
                             reader.open(FileId { queue, seq: f.seq }, format, file_reader)?;
                         }
                     }
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
-                                sequential_replay_machine
+                                machine
                                     .replay(item_batch, FileId { queue, seq: f.seq })?;
                             }
                             Ok(None) => break,
@@ -347,6 +417,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
+                                f.handle.sync()?;
                                 break;
                             }
                             Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
@@ -355,6 +426,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     queue, f.seq, e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
+                                f.handle.sync()?;
                                 break;
                             }
                             Err(e) => {
@@ -367,17 +439,17 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         }
                     }
                 }
-                Ok(sequential_replay_machine)
+                Ok(machine)
             })
             .try_reduce(
-                || replay_machine_factory.new_target(),
-                |mut sequential_replay_machine_left, sequential_replay_machine_right| {
-                    sequential_replay_machine_left.merge(sequential_replay_machine_right, queue)?;
-                    Ok(sequential_replay_machine_left)
+                || machine_factory.new_target(),
+                |mut lhs, rhs| {
+                    lhs.merge(rhs, queue)?;
+                    Ok(lhs)
                 },
             )?;
 
-        Ok(sequential_replay_machine)
+        Ok(machine)
     }
 
     /// Manually reads through log items in all available log files of the
@@ -403,45 +475,116 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         )
     }
 
-    /// Builds a new storage for the specified log queue.
-    fn build_pipe(&self, queue: LogQueue) -> Result<SinglePipe<F>> {
-        let files = match queue {
-            LogQueue::Append => &self.append_files,
-            LogQueue::Rewrite => &self.rewrite_files,
+    fn initialize_files(&mut self) -> Result<()> {
+        let target_file_size = self.cfg.target_file_size.0 as usize;
+        let mut target = if self.cfg.prefill_for_recycle {
+            self.cfg
+                .recycle_capacity()
+                .saturating_sub(self.append_files.len())
+        } else {
+            0
         };
-        let first_seq = files.first().map(|f| f.seq).unwrap_or(0);
-        let files: VecDeque<FileWithFormat<F>> = files
-            .iter()
-            .map(|f| FileWithFormat {
-                handle: f.handle.clone(),
-                format: f.format.unwrap(),
-            })
-            .collect();
-        SinglePipe::open(
-            &self.cfg,
-            self.file_system.clone(),
-            self.listeners.clone(),
-            queue,
-            first_seq,
-            files,
-            match queue {
-                LogQueue::Append => self.cfg.recycle_capacity(),
-                LogQueue::Rewrite => 0,
-            },
-        )
+        target = cmp::min(target, MAX_PREFILL_SIZE / target_file_size);
+        let to_create = target.saturating_sub(self.recycled_files.len());
+        if to_create > 0 {
+            let now = Instant::now();
+            for _ in 0..to_create {
+                let seq = self
+                    .recycled_files
+                    .last()
+                    .map(|f| f.seq + 1)
+                    .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
+                let path_id = find_available_dir(&self.dirs, target_file_size);
+                let root_path = &self.dirs[path_id];
+                let path = root_path.join(build_recycled_file_name(seq));
+                let handle = Arc::new(self.file_system.create(&path)?);
+                let mut writer = self.file_system.new_writer(handle.clone())?;
+                let mut written = 0;
+                let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
+                while written < target_file_size {
+                    if let Err(e) = writer.write_all(&buf) {
+                        warn!("failed to build recycled file, err: {}", e);
+                        if is_no_space_err(&e) {
+                            warn!("no enough space for preparing recycled logs");
+                            // Clear partially prepared recycled log list if there has no enough
+                            // space for it.
+                            target = 0;
+                        }
+                        break;
+                    }
+                    written += buf.len();
+                }
+                self.recycled_files.push(File {
+                    seq,
+                    handle,
+                    format: LogFileFormat::default(),
+                    path_id,
+                });
+            }
+            info!(
+                "prefill logs takes {:?}, created {} files",
+                now.elapsed(),
+                to_create
+            );
+        }
+        // If target recycled capacity has been changed when restarting by manually
+        // modifications, such as setting `Config::enable-log-recycle` from TRUE to
+        // FALSE, setting `Config::prefill-for-recycle` from TRUE to FALSE or
+        // changing the recycle capacity, we should remove redundant
+        // recycled files in advance.
+        while self.recycled_files.len() > target {
+            let f = self.recycled_files.pop().unwrap();
+            let root_path = &self.dirs[f.path_id];
+            let path = root_path.join(build_recycled_file_name(f.seq));
+            let _ = self.file_system.delete(&path);
+        }
+        Ok(())
     }
 
     /// Builds a [`DualPipes`] that contains all available log files.
-    pub fn finish(self) -> Result<DualPipes<F>> {
-        let appender = self.build_pipe(LogQueue::Append)?;
-        let rewriter = self.build_pipe(LogQueue::Rewrite)?;
-        DualPipes::open(self.dir_lock.unwrap(), appender, rewriter)
+    pub fn finish(mut self) -> Result<DualPipes<F>> {
+        self.initialize_files()?;
+        let appender = SinglePipe::open(
+            &self.cfg,
+            self.dirs.clone(),
+            self.file_system.clone(),
+            self.listeners.clone(),
+            LogQueue::Append,
+            self.append_files,
+            self.recycled_files,
+        )?;
+        let rewriter = SinglePipe::open(
+            &self.cfg,
+            self.dirs,
+            self.file_system.clone(),
+            self.listeners.clone(),
+            LogQueue::Rewrite,
+            self.rewrite_files,
+            Vec::new(),
+        )?;
+        DualPipes::open(self.dir_locks, appender, rewriter)
+    }
+
+    fn open(&self, file_name: &FileName, is_last_one: bool) -> Result<File<F>> {
+        // For recovery mode TolerateAnyCorruption, all files should be writable.
+        // For other recovery modes, only the last log file needs to be writable.
+        let perm = if self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption || is_last_one {
+            Permission::ReadWrite
+        } else {
+            Permission::ReadOnly
+        };
+        Ok(File {
+            seq: file_name.seq,
+            handle: Arc::new(self.file_system.open(&file_name.path, perm)?),
+            format: LogFileFormat::default(),
+            path_id: file_name.path_id,
+        })
     }
 }
 
 /// Creates and exclusively locks a lock file under the given directory.
-pub(super) fn lock_dir(dir: &str) -> Result<File> {
-    let lock_file = File::create(lock_file_path(dir))?;
+pub(super) fn lock_dir<P: AsRef<Path>>(dir: P) -> Result<StdFile> {
+    let lock_file = StdFile::create(lock_file_path(dir))?;
     lock_file.try_lock_exclusive().map_err(|e| {
         Error::Other(box_err!(
             "Failed to lock file: {}, maybe another instance is using this directory.",
@@ -449,4 +592,10 @@ pub(super) fn lock_dir(dir: &str) -> Result<File> {
         ))
     })?;
     Ok(lock_file)
+}
+
+pub(crate) struct FileName {
+    pub seq: FileSeq,
+    pub path: PathBuf,
+    path_id: PathId,
 }

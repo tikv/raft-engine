@@ -6,10 +6,17 @@
 
 * Disable log recycling by default.
 * `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.
+* Possible to specify a permission in `FileSystem::open`.
 
 ### Bug Fixes
 
 * Fix data loss caused by aborted rewrite operation. Downgrading to an earlier version without the fix may produce phantom Raft Groups or keys, i.e. never written but appear in queries.
+
+### New Features
+
+* Support preparing prefilled logs to enable log recycling when start-up.
+* Add a new configuration `spill-dir` to allow automatic placement of logs into an auxiliary directory when `dir` is full.
+* Add a new method `Engine::fork` to duplicate an `Engine` to a new place, with a few disk file copies.
 
 ## [0.3.0] - 2022-09-14
 
