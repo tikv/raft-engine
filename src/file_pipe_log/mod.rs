@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::FileNameExt;
+pub use format::{parse_recycled_file_name, FileNameExt};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
@@ -23,7 +23,7 @@ pub mod debug {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use crate::env::FileSystem;
+    use crate::env::{FileSystem, Permission};
     use crate::log_batch::LogItem;
     use crate::pipe_log::FileId;
     use crate::{Error, Result};
@@ -44,7 +44,7 @@ pub mod debug {
         let fd = if create {
             file_system.create(path)?
         } else {
-            file_system.open(path)?
+            file_system.open(path, Permission::ReadWrite)?
         };
         let fd = Arc::new(fd);
         super::log_file::build_file_writer(file_system, fd, format, create /* force_reset */)
@@ -55,7 +55,7 @@ pub mod debug {
         file_system: &F,
         path: &Path,
     ) -> Result<LogFileReader<F>> {
-        let fd = Arc::new(file_system.open(path)?);
+        let fd = Arc::new(file_system.open(path, Permission::ReadOnly)?);
         super::log_file::build_file_reader(file_system, fd)
     }
 
@@ -197,11 +197,11 @@ pub mod debug {
                 .add_entries::<Entry>(7, &generate_entries(1, 11, Some(&entry_data)))
                 .unwrap();
             batch.add_command(7, Command::Clean);
-            batch.put(7, b"key".to_vec(), b"value".to_vec());
+            batch.put(7, b"key".to_vec(), b"value".to_vec()).unwrap();
             batch.delete(7, b"key2".to_vec());
             batches.push(vec![batch.clone()]);
             let mut batch2 = LogBatch::default();
-            batch2.put(8, b"key3".to_vec(), b"value".to_vec());
+            batch2.put(8, b"key3".to_vec(), b"value".to_vec()).unwrap();
             batch2
                 .add_entries::<Entry>(8, &generate_entries(5, 15, Some(&entry_data)))
                 .unwrap();

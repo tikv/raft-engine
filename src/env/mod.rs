@@ -10,6 +10,12 @@ mod obfuscated;
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Permission {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// FileSystem
 pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
@@ -18,7 +24,7 @@ pub trait FileSystem: Send + Sync {
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
-    fn open<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
+    fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> Result<Self::Handle>;
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> Result<()>;
 
@@ -28,6 +34,12 @@ pub trait FileSystem: Send + Sync {
     /// implementation simply renames the file.
     fn reuse<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<()> {
         self.rename(src_path, dst_path)
+    }
+
+    #[inline]
+    fn reuse_and_open<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> Result<Self::Handle> {
+        self.reuse(src_path.as_ref(), dst_path.as_ref())?;
+        self.open(dst_path, Permission::ReadWrite)
     }
 
     /// Deletes user implemented metadata associated with `path`. Returns
@@ -64,4 +76,17 @@ pub trait Handle {
 pub trait WriteExt {
     fn truncate(&mut self, offset: usize) -> Result<()>;
     fn allocate(&mut self, offset: usize, size: usize) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Permission;
+
+    #[test]
+    fn test_copy_permission() {
+        let perm = Permission::ReadWrite;
+        let perm1 = perm;
+        assert_eq!(perm, Permission::ReadWrite);
+        assert_eq!(perm1, Permission::ReadWrite);
+    }
 }

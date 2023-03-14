@@ -26,10 +26,19 @@ pub enum RecoveryMode {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
-    /// Directory to store log files. Will create on startup if not exists.
+    /// Main directory to store log files. Will create on startup if not exists.
     ///
     /// Default: ""
     pub dir: String,
+
+    /// Auxiliary directory to store log files. Will create on startup if
+    /// set but not exists.
+    ///
+    /// Newly logs will be put into this dir when the main `dir` is full
+    /// and no spare space for new logs.
+    ///
+    /// Default: None
+    pub spill_dir: Option<String>,
 
     /// How to deal with file corruption during recovery.
     ///
@@ -91,6 +100,14 @@ pub struct Config {
     ///
     /// Default: false
     pub enable_log_recycle: bool,
+
+    /// Whether to prepare log files for recycling when start.
+    /// If `true`, batch empty log files will be prepared for recycling when
+    /// starting engine.
+    /// Only available for `enable-log-reycle` is true.
+    ///
+    /// Default: false
+    pub prefill_for_recycle: bool,
 }
 
 impl Default for Config {
@@ -98,6 +115,7 @@ impl Default for Config {
         #[allow(unused_mut)]
         let mut cfg = Config {
             dir: "".to_owned(),
+            spill_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
@@ -110,6 +128,7 @@ impl Default for Config {
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
             enable_log_recycle: false,
+            prefill_for_recycle: false,
         };
         // Test-specific configurations.
         #[cfg(test)]
@@ -156,6 +175,11 @@ impl Config {
                 self.format_version
             ));
         }
+        if !self.enable_log_recycle && self.prefill_for_recycle {
+            return Err(box_err!(
+                "prefill is not allowed when log recycle is disabled"
+            ));
+        }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is disabled");
@@ -195,21 +219,25 @@ mod tests {
         let dump = toml::to_string_pretty(&value).unwrap();
         let load = toml::from_str(&dump).unwrap();
         assert_eq!(value, load);
+        assert!(load.spill_dir.is_none());
     }
 
     #[test]
     fn test_custom() {
         let custom = r#"
             dir = "custom_dir"
+            spill-dir = "custom_spill_dir"
             recovery-mode = "tolerate-tail-corruption"
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
             purge-threshold = "3MB"
             format-version = 1
             enable-log-recycle = false
+            prefill-for-recycle = false
         "#;
         let mut load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
+        assert_eq!(load.spill_dir, Some("custom_spill_dir".to_owned()));
         assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
         assert_eq!(load.bytes_per_sync, Some(ReadableSize::kb(2)));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
@@ -233,6 +261,7 @@ mod tests {
             target-file-size = "5000MB"
             format-version = 2
             enable-log-recycle = true
+            prefill-for-recycle = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
         let mut soft_sanitized = soft_load;
@@ -251,6 +280,14 @@ mod tests {
             format-version = 1
         "#;
         let mut cfg_load: Config = toml::from_str(recycle_error).unwrap();
+        assert!(cfg_load.sanitize().is_err());
+
+        let prefill_error = r#"
+            enable-log-recycle = false
+            prefill-for-recycle = true
+            format-version = 2
+        "#;
+        let mut cfg_load: Config = toml::from_str(prefill_error).unwrap();
         assert!(cfg_load.sanitize().is_err());
     }
 
