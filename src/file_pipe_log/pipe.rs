@@ -255,11 +255,11 @@ impl<F: FileSystem> SinglePipe<F> {
         reader.read(handle)
     }
 
-    fn async_read(&self, ctx: &mut F::AsyncIoContext, blocks: Vec<FileBlockHandle>) {
+    fn async_read(&self, ctx: &mut F::MultiReadContext, blocks: Vec<FileBlockHandle>) {
         for block in blocks.iter() {
             let fd = self.get_fd(block.id.seq).unwrap();
             self.file_system
-                .async_read(ctx, fd, block)
+                .multi_read(ctx, fd, block)
                 .expect("Async read failed.");
         }
     }

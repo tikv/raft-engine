@@ -273,11 +273,11 @@ impl FileSystem for DefaultFileSystem {
     type Handle = LogFd;
     type Reader = LogFile;
     type Writer = LogFile;
-    type AsyncIoContext = AioContext;
+    type MultiReadContext = AioContext;
 
-    fn async_read(
+    fn multi_read(
         &self,
-        ctx: &mut Self::AsyncIoContext,
+        ctx: &mut Self::MultiReadContext,
         handle: Arc<Self::Handle>,
         block: &FileBlockHandle,
     ) -> IoResult<()> {
@@ -298,7 +298,8 @@ impl FileSystem for DefaultFileSystem {
 
         Ok(())
     }
-    fn async_finish(&self, mut ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+
+    fn async_finish(&self, mut ctx: Self::MultiReadContext) -> IoResult<Vec<Vec<u8>>> {
         for seq in 0..ctx.aio_vec.len() {
             let buf_len = ctx.buf_vec[seq].len();
             aio_suspend(&[&*ctx.aio_vec[seq]], None)?;
@@ -333,7 +334,7 @@ impl FileSystem for DefaultFileSystem {
         Ok(LogFile::new(handle))
     }
 
-    fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
+    fn new_async_io_context(&self) -> IoResult<Self::MultiReadContext> {
         Ok(AioContext::default())
     }
 }

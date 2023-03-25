@@ -90,18 +90,18 @@ impl FileSystem for ObfuscatedFileSystem {
     type Handle = <DefaultFileSystem as FileSystem>::Handle;
     type Reader = ObfuscatedReader;
     type Writer = ObfuscatedWriter;
-    type AsyncIoContext = <DefaultFileSystem as FileSystem>::AsyncIoContext;
+    type MultiReadContext = <DefaultFileSystem as FileSystem>::MultiReadContext;
 
-    fn async_read(
+    fn multi_read(
         &self,
-        ctx: &mut Self::AsyncIoContext,
+        ctx: &mut Self::MultiReadContext,
         handle: Arc<Self::Handle>,
         block: &FileBlockHandle,
     ) -> IoResult<()> {
-        self.inner.async_read(ctx, handle, block)
+        self.inner.multi_read(ctx, handle, block)
     }
 
-    fn async_finish(&self, ctx: Self::AsyncIoContext) -> IoResult<Vec<Vec<u8>>> {
+    fn async_finish(&self, ctx: Self::MultiReadContext) -> IoResult<Vec<Vec<u8>>> {
         let mut base = self.inner.async_finish(ctx).unwrap();
 
         for v in base.iter_mut() {
@@ -151,7 +151,7 @@ impl FileSystem for ObfuscatedFileSystem {
         Ok(ObfuscatedWriter(self.inner.new_writer(handle)?))
     }
 
-    fn new_async_io_context(&self) -> IoResult<Self::AsyncIoContext> {
+    fn new_async_io_context(&self) -> IoResult<Self::MultiReadContext> {
         self.inner.new_async_io_context()
     }
 }

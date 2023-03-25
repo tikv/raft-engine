@@ -16,15 +16,15 @@ pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
-    type AsyncIoContext;
+    type MultiReadContext;
 
-    fn async_read(
+    fn multi_read(
         &self,
-        ctx: &mut Self::AsyncIoContext,
+        ctx: &mut Self::MultiReadContext,
         handle: Arc<Self::Handle>,
         block: &FileBlockHandle,
     ) -> Result<()>;
-    fn async_finish(&self, ctx: Self::AsyncIoContext) -> Result<Vec<Vec<u8>>>;
+    fn async_finish(&self, ctx: Self::MultiReadContext) -> Result<Vec<Vec<u8>>>;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
@@ -66,7 +66,7 @@ pub trait FileSystem: Send + Sync {
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
 
-    fn new_async_io_context(&self) -> Result<Self::AsyncIoContext>;
+    fn new_async_io_context(&self) -> Result<Self::MultiReadContext>;
 }
 
 pub trait Handle {
