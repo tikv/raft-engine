@@ -51,7 +51,7 @@ pub struct Config {
     /// The number of threads used to scan and recovery log files.
     ///
     /// Default: 4. Minimum: 1.
-    pub recovery_threads: usize,
+    pub recovery_threads: Option<usize>,
 
     /// Compress a log batch if its size exceeds this value. Setting it to zero
     /// disables compression.
@@ -78,7 +78,7 @@ pub struct Config {
     /// Purge append log queue if its size exceeds this value.
     ///
     /// Default: "10GB"
-    pub purge_threshold: ReadableSize,
+    pub purge_threshold: Option<ReadableSize>,
     /// Purge rewrite log queue if its size exceeds this value.
     ///
     /// Default: MAX(`purge_threshold` / 10, `target_file_size`)
@@ -118,12 +118,12 @@ impl Default for Config {
             spill_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
-            recovery_threads: 4,
+            recovery_threads: None,
             batch_compression_threshold: ReadableSize::kb(8),
             bytes_per_sync: None,
             format_version: Version::V2,
             target_file_size: ReadableSize::mb(128),
-            purge_threshold: ReadableSize::gb(10),
+            purge_threshold: None,
             purge_rewrite_threshold: None,
             purge_rewrite_garbage_ratio: 0.6,
             memory_limit: None,
@@ -141,13 +141,27 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn recovery_threads(&self) -> usize {
+        if let Some(recovery_threads) = self.recovery_threads {
+            return recovery_threads;
+        }
+        4 // default value;
+    }
+
+    pub fn purge_threshold(&self) -> ReadableSize {
+        if let Some(purge_threshold) = self.purge_threshold {
+            return purge_threshold;
+        }
+        ReadableSize::gb(10) // default value
+    }
+
     pub fn sanitize(&mut self) -> Result<()> {
-        if self.purge_threshold.0 < self.target_file_size.0 {
+        if self.purge_threshold().0 < self.target_file_size.0 {
             return Err(box_err!("purge-threshold < target-file-size"));
         }
         if self.purge_rewrite_threshold.is_none() {
             self.purge_rewrite_threshold = Some(ReadableSize(std::cmp::max(
-                self.purge_threshold.0 / 10,
+                self.purge_threshold().0 / 10,
                 self.target_file_size.0,
             )));
         }
@@ -162,12 +176,13 @@ impl Config {
             );
             self.recovery_read_block_size = min_recovery_read_block_size;
         }
-        if self.recovery_threads < MIN_RECOVERY_THREADS {
+        if self.recovery_threads() < MIN_RECOVERY_THREADS {
             warn!(
                 "recovery-threads ({}) is too small, setting it to {}",
-                self.recovery_threads, MIN_RECOVERY_THREADS
+                self.recovery_threads(),
+                MIN_RECOVERY_THREADS
             );
-            self.recovery_threads = MIN_RECOVERY_THREADS;
+            self.recovery_threads = Some(MIN_RECOVERY_THREADS);
         }
         if self.enable_log_recycle && !self.format_version.has_log_signing() {
             return Err(box_err!(
@@ -195,12 +210,12 @@ impl Config {
         if !self.format_version.has_log_signing() {
             return 0;
         }
-        if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
+        if self.enable_log_recycle && self.purge_threshold().0 >= self.target_file_size.0 {
             // (1) At most u32::MAX so that the file number can be capped into an u32
             // without colliding. (2) Add some more file as an additional buffer to
             // avoid jitters.
             std::cmp::min(
-                (self.purge_threshold.0 / self.target_file_size.0) as usize + 2,
+                (self.purge_threshold().0 / self.target_file_size.0) as usize + 2,
                 u32::MAX as usize,
             )
         } else {
@@ -241,7 +256,7 @@ mod tests {
         assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
         assert_eq!(load.bytes_per_sync, Some(ReadableSize::kb(2)));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
-        assert_eq!(load.purge_threshold, ReadableSize::mb(3));
+        assert_eq!(load.purge_threshold(), ReadableSize::mb(3));
         assert_eq!(load.format_version, Version::V1);
         load.sanitize().unwrap();
     }
@@ -267,7 +282,7 @@ mod tests {
         let mut soft_sanitized = soft_load;
         soft_sanitized.sanitize().unwrap();
         assert!(soft_sanitized.recovery_read_block_size.0 >= MIN_RECOVERY_READ_BLOCK_SIZE as u64);
-        assert!(soft_sanitized.recovery_threads >= MIN_RECOVERY_THREADS);
+        assert!(soft_sanitized.recovery_threads() >= MIN_RECOVERY_THREADS);
         assert_eq!(
             soft_sanitized.purge_rewrite_threshold.unwrap(),
             soft_sanitized.target_file_size

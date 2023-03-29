@@ -449,7 +449,7 @@ fn test_start_with_recycled_file_allocate_error() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(1),
-        purge_threshold: ReadableSize::kb(10), // capacity is 12
+        purge_threshold: Some(ReadableSize::kb(10)), // capacity is 12
         enable_log_recycle: true,
         prefill_for_recycle: true,
         ..Default::default()

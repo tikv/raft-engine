@@ -691,7 +691,7 @@ mod tests {
             dir: path.to_owned(),
             target_file_size: ReadableSize(1),
             // super large capacity for recycling
-            purge_threshold: ReadableSize::mb(100),
+            purge_threshold: Some(ReadableSize::mb(100)),
             enable_log_recycle: true,
             format_version: Version::V2,
             ..Default::default()

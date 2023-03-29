@@ -287,7 +287,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             return Ok((machine_factory.new_target(), machine_factory.new_target()));
         }
         let threads = std::cmp::min(
-            self.cfg.recovery_threads,
+            self.cfg.recovery_threads(),
             self.append_files.len() + self.rewrite_files.len(),
         );
         let pool = rayon::ThreadPoolBuilder::new()

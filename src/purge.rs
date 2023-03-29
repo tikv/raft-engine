@@ -175,7 +175,7 @@ where
 
         let total_size = self.pipe_log.total_size(queue);
         match queue {
-            LogQueue::Append => total_size > self.cfg.purge_threshold.0 as usize,
+            LogQueue::Append => total_size > self.cfg.purge_threshold().0 as usize,
             LogQueue::Rewrite => {
                 let compacted_rewrites_ratio = self.global_stats.deleted_rewrite_entries() as f64
                     / self.global_stats.rewrite_entries() as f64;

@@ -103,7 +103,7 @@ fn test_pipe_log_listeners() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(128),
-        purge_threshold: ReadableSize::kb(512),
+        purge_threshold: Some(ReadableSize::kb(512)),
         batch_compression_threshold: ReadableSize::kb(0),
         ..Default::default()
     };
@@ -365,7 +365,7 @@ fn test_incomplete_purge() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize(1),
-        purge_threshold: ReadableSize(1),
+        purge_threshold: Some(ReadableSize(1)),
         ..Default::default()
     };
     let rid = 1;
@@ -463,7 +463,7 @@ fn test_tail_corruption() {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(1),
+            purge_threshold: Some(ReadableSize(1)),
             ..Default::default()
         };
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
@@ -517,7 +517,7 @@ fn test_tail_corruption() {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(1),
+            purge_threshold: Some(ReadableSize(1)),
             format_version: Version::V2,
             ..Default::default()
         };
@@ -610,7 +610,7 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     let cfg_err = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
-        purge_threshold: ReadableSize::kb(4),
+        purge_threshold: Some(ReadableSize::kb(4)),
         enable_log_recycle: true,
         format_version: Version::V1,
         ..Default::default()
@@ -662,7 +662,7 @@ fn test_build_engine_with_multi_datalayout() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
-        purge_threshold: ReadableSize::kb(4),
+        purge_threshold: Some(ReadableSize::kb(4)),
         recovery_mode: RecoveryMode::AbsoluteConsistency,
         ..Default::default()
     };
@@ -696,7 +696,7 @@ fn test_build_engine_with_datalayout_abnormal() {
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
         target_file_size: ReadableSize::kb(2),
-        purge_threshold: ReadableSize::kb(4),
+        purge_threshold: Some(ReadableSize::kb(4)),
         recovery_mode: RecoveryMode::AbsoluteConsistency,
         format_version: Version::V2,
         ..Default::default()
@@ -736,7 +736,7 @@ fn test_partial_rewrite_rewrite() {
     let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
     let cfg = Config {
         dir: dir.path().to_str().unwrap().to_owned(),
-        recovery_threads: 1,
+        recovery_threads: Some(1),
         ..Default::default()
     };
     let engine = Engine::open(cfg.clone()).unwrap();
@@ -986,7 +986,7 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
         dir: dir.path().to_str().unwrap().to_owned(),
         spill_dir: Some(spill_dir.path().to_str().unwrap().to_owned()),
         target_file_size: ReadableSize::kb(1),
-        purge_threshold: ReadableSize::kb(20),
+        purge_threshold: Some(ReadableSize::kb(20)),
         enable_log_recycle: true,
         prefill_for_recycle: true,
         ..Default::default()

@@ -1192,7 +1192,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
-            purge_threshold: ReadableSize::kb(150),
+            purge_threshold: Some(ReadableSize::kb(150)),
             ..Default::default()
         };
 
@@ -1253,7 +1253,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(1),
-            purge_threshold: ReadableSize::kb(10),
+            purge_threshold: Some(ReadableSize::kb(10)),
             ..Default::default()
         };
 
@@ -1309,7 +1309,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize::kb(5),
-            purge_threshold: ReadableSize::kb(80),
+            purge_threshold: Some(ReadableSize::kb(80)),
             ..Default::default()
         };
         let engine =
@@ -1580,7 +1580,7 @@ pub(crate) mod tests {
             let cfg_v1 = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
-                purge_threshold: ReadableSize(1),
+                purge_threshold: Some(ReadableSize(1)),
                 format_version: Version::V1,
                 enable_log_recycle: false,
                 ..Default::default()
@@ -1589,7 +1589,7 @@ pub(crate) mod tests {
             let cfg_v2 = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
-                purge_threshold: ReadableSize(1),
+                purge_threshold: Some(ReadableSize(1)),
                 format_version: Version::V2,
                 enable_log_recycle: false,
                 ..Default::default()
@@ -1606,7 +1606,7 @@ pub(crate) mod tests {
             let cfg_v1 = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
-                purge_threshold: ReadableSize(1),
+                purge_threshold: Some(ReadableSize(1)),
                 format_version: Version::V1,
                 enable_log_recycle: false,
                 ..Default::default()
@@ -1615,7 +1615,7 @@ pub(crate) mod tests {
             let cfg_v2 = Config {
                 dir: dir.path().to_str().unwrap().to_owned(),
                 target_file_size: ReadableSize(1),
-                purge_threshold: ReadableSize(1),
+                purge_threshold: Some(ReadableSize(1)),
                 format_version: Version::V2,
                 enable_log_recycle: true,
                 prefill_for_recycle: true,
@@ -2098,7 +2098,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(1),
+            purge_threshold: Some(ReadableSize(1)),
             enable_log_recycle: false,
             ..Default::default()
         };
@@ -2153,7 +2153,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(100),
+            purge_threshold: Some(ReadableSize(100)),
             format_version: Version::V2,
             enable_log_recycle: true,
             prefill_for_recycle: true,
@@ -2245,7 +2245,7 @@ pub(crate) mod tests {
         let cfg_v1 = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(1024),
+            purge_threshold: Some(ReadableSize(1024)),
             format_version: Version::V1,
             enable_log_recycle: false,
             ..Default::default()
@@ -2253,7 +2253,7 @@ pub(crate) mod tests {
         let cfg_v2 = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(15),
+            purge_threshold: Some(ReadableSize(15)),
             format_version: Version::V2,
             enable_log_recycle: true,
             ..Default::default()
@@ -2344,7 +2344,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: path.to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(80), // common size of capacity
+            purge_threshold: Some(ReadableSize(80)), // common size of capacity
             enable_log_recycle: true,
             prefill_for_recycle: true,
             ..Default::default()
@@ -2370,7 +2370,7 @@ pub(crate) mod tests {
         // will be cleared.
         let cfg_v2 = Config {
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(50),
+            purge_threshold: Some(ReadableSize(50)),
             ..cfg
         };
         let engine =
@@ -2393,7 +2393,7 @@ pub(crate) mod tests {
         // cleared.
         let cfg_v3 = Config {
             target_file_size: ReadableSize::kb(2),
-            purge_threshold: ReadableSize::kb(100),
+            purge_threshold: Some(ReadableSize::kb(100)),
             enable_log_recycle: false,
             prefill_for_recycle: false,
             ..cfg_v2
@@ -2411,7 +2411,7 @@ pub(crate) mod tests {
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             // Make sure each file gets replayed individually.
-            recovery_threads: 100,
+            recovery_threads: Some(100),
             ..Default::default()
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
@@ -2672,7 +2672,7 @@ pub(crate) mod tests {
         let cfg_2 = Config {
             enable_log_recycle: true,
             prefill_for_recycle: true,
-            purge_threshold: ReadableSize(40),
+            purge_threshold: Some(ReadableSize(40)),
             ..cfg
         };
         let engine =
@@ -2719,7 +2719,7 @@ pub(crate) mod tests {
         let cfg_3 = Config {
             enable_log_recycle: false,
             prefill_for_recycle: false,
-            purge_threshold: ReadableSize(40),
+            purge_threshold: Some(ReadableSize(40)),
             ..cfg_2
         };
         let engine = RaftLogEngine::open_with_file_system(cfg_3, file_system.clone()).unwrap();

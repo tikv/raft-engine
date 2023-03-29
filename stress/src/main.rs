@@ -584,7 +584,7 @@ fn main() {
     // Raft Engine configurations
     config.dir = opts.path;
     config.target_file_size = ReadableSize::from_str(&opts.target_file_size).unwrap();
-    config.purge_threshold = ReadableSize::from_str(&opts.purge_threshold).unwrap();
+    config.purge_threshold = Some(ReadableSize::from_str(&opts.purge_threshold).unwrap());
     config.purge_rewrite_threshold =
         Some(ReadableSize::from_str(&opts.purge_rewrite_threshold).unwrap());
     config.purge_rewrite_garbage_ratio = opts.purge_rewrite_garbage_ratio;
