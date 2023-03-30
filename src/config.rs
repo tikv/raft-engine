@@ -184,6 +184,13 @@ impl Config {
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is disabled");
         }
+        #[cfg(test)]
+        {
+            self.purge_threshold = ReadableSize(std::cmp::min(
+                self.purge_threshold.0,
+                ReadableSize::gb(12).0,
+            ));
+        }
         Ok(())
     }
 
