@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use log::warn;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::pipe_log::Version;
@@ -193,7 +193,7 @@ impl Config {
             self.prefill_limit = None;
         }
         if self.prefill_for_recycle && self.prefill_limit.is_none() {
-            warn!("prefill-limit will be calibrated to purge-threshold");
+            info!("prefill-limit will be calibrated to purge-threshold");
             self.prefill_limit = Some(self.purge_threshold);
         }
         #[cfg(not(feature = "swap"))]
