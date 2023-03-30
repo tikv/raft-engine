@@ -39,6 +39,7 @@ macro_rules! box_err {
     });
 }
 
+mod cache;
 mod codec;
 mod config;
 mod consistency;

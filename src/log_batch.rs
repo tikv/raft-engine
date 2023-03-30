@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::{mem, u64};
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
+use bytes::Bytes;
 use log::error;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
@@ -685,7 +686,7 @@ impl LogBatch {
         &mut self,
         region_id: u64,
         mut entry_indexes: Vec<EntryIndex>,
-        entries: Vec<Vec<u8>>,
+        entries: Vec<Bytes>,
     ) -> Result<()> {
         debug_assert!(entry_indexes.len() == entries.len());
         debug_assert!(self.buf_state == BufState::Open);
@@ -925,19 +926,19 @@ impl LogBatch {
         buf: &[u8],
         handle: FileBlockHandle,
         compression: CompressionType,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         if handle.len > 0 {
             let _ = verify_checksum_with_signature(&buf[0..handle.len], None)?;
             match compression {
-                CompressionType::None => Ok(buf[..handle.len - LOG_BATCH_CHECKSUM_LEN].to_owned()),
+                CompressionType::None => Ok(Bytes::copy_from_slice(&buf[..handle.len - LOG_BATCH_CHECKSUM_LEN])),
                 CompressionType::Lz4 => {
                     let decompressed =
                         lz4::decompress_block(&buf[..handle.len - LOG_BATCH_CHECKSUM_LEN])?;
-                    Ok(decompressed)
+                    Ok(decompressed.into())
                 }
             }
         } else {
-            Ok(Vec::new())
+            Ok(Bytes::new())
         }
     }
 }

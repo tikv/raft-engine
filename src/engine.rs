@@ -1,15 +1,16 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
+use crate::cache::LruCache;
 use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
@@ -19,7 +20,7 @@ use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilde
 use crate::log_batch::{Command, LogBatch, MessageExt};
 use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
+use crate::pipe_log::{FileBlockHandle, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{perf_context, Error, GlobalStats, Result};
@@ -546,33 +547,31 @@ where
             LogItemReader::new_file_reader(file_system, path)
         }
     }
-}
 
-struct BlockCache {
-    key: Cell<FileBlockHandle>,
-    block: RefCell<Vec<u8>>,
-}
-
-impl BlockCache {
-    fn new() -> Self {
-        BlockCache {
-            key: Cell::new(FileBlockHandle {
-                id: FileId::new(LogQueue::Append, 0),
-                offset: 0,
-                len: 0,
-            }),
-            block: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn insert(&self, key: FileBlockHandle, block: Vec<u8>) {
-        self.key.set(key);
-        self.block.replace(block);
+    pub fn resize_internal_cache(&self, new_capacity: usize) {
+        CACHE.lock().unwrap().resize(new_capacity);
     }
 }
 
-thread_local! {
-    static BLOCK_CACHE: BlockCache = BlockCache::new();
+lazy_static::lazy_static! {
+    /// Use 256MiB by default.
+    static ref CACHE: Mutex<LruCache> = Mutex::new(LruCache::with_capacity(256 * 1024 * 1024));
+}
+
+fn load_cache<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Bytes>
+where P: PipeLog {
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(v) = cache.get(&idx.entries.unwrap()) {
+        return Ok(v);
+    }
+    drop(cache);
+    let v = LogBatch::decode_entries_block(
+        &pipe_log.read_bytes(idx.entries.unwrap())?,
+        idx.entries.unwrap(),
+        idx.compression_type,
+    )?;
+    CACHE.lock().unwrap().insert(idx.entries.unwrap(), v.clone());
+    Ok(v)
 }
 
 pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
@@ -580,45 +579,21 @@ where
     M: MessageExt,
     P: PipeLog,
 {
-    BLOCK_CACHE.with(|cache| {
-        if cache.key.get() != idx.entries.unwrap() {
-            cache.insert(
-                idx.entries.unwrap(),
-                LogBatch::decode_entries_block(
-                    &pipe_log.read_bytes(idx.entries.unwrap())?,
-                    idx.entries.unwrap(),
-                    idx.compression_type,
-                )?,
-            );
-        }
-        let e = parse_from_bytes(
-            &cache.block.borrow()
-                [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
-        )?;
-        assert_eq!(M::index(&e), idx.index);
-        Ok(e)
-    })
+    let cache = load_cache(pipe_log, idx)?;
+    let e = parse_from_bytes(
+        &cache
+            [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
+    )?;
+    assert_eq!(M::index(&e), idx.index);
+    Ok(e)
 }
 
-pub(crate) fn read_entry_bytes_from_file<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Vec<u8>>
+pub(crate) fn read_entry_bytes_from_file<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Bytes>
 where
     P: PipeLog,
 {
-    BLOCK_CACHE.with(|cache| {
-        if cache.key.get() != idx.entries.unwrap() {
-            cache.insert(
-                idx.entries.unwrap(),
-                LogBatch::decode_entries_block(
-                    &pipe_log.read_bytes(idx.entries.unwrap())?,
-                    idx.entries.unwrap(),
-                    idx.compression_type,
-                )?,
-            );
-        }
-        Ok(cache.block.borrow()
-            [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize]
-            .to_owned())
-    })
+    let cache = load_cache(pipe_log, idx)?;
+    Ok(cache.slice(idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize))
 }
 
 #[cfg(test)]
@@ -626,6 +601,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::env::{ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
+    use crate::internals::FileId;
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
