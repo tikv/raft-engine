@@ -476,13 +476,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     fn initialize_files(&mut self) -> Result<()> {
         let target_file_size = self.cfg.target_file_size.0 as usize;
-        let mut target = if self.cfg.prefill_for_recycle {
+        let mut target = std::cmp::min(
+            self.cfg.prefill_capacity(),
             self.cfg
                 .recycle_capacity()
-                .saturating_sub(self.append_files.len())
-        } else {
-            0
-        };
+                .saturating_sub(self.append_files.len()),
+        );
         let to_create = target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
             let now = Instant::now();
