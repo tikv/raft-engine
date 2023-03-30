@@ -650,6 +650,7 @@ pub(crate) mod tests {
         }
 
         fn reopen(self) -> Self {
+            super::CACHE.lock().unwrap().clear();
             let cfg: Config = self.cfg.as_ref().clone();
             let file_system = self.pipe_log.file_system();
             let mut listeners = self.listeners.clone();

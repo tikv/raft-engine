@@ -152,15 +152,23 @@ impl LruCache {
         self.free = new_cap - (self.cap - self.free);
         self.cap = new_cap;
     }
-}
 
-impl Drop for LruCache {
-    fn drop(&mut self) {
+    #[inline]
+    pub fn clear(&mut self) {
         for (_, node) in self.cache.drain() {
             unsafe {
                 drop(Box::from_raw(node.as_ptr()));
             }
         }
+        self.head = std::ptr::null_mut();
+        self.tail = std::ptr::null_mut();
+        self.free = self.cap;
+    }
+}
+
+impl Drop for LruCache {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -286,6 +294,25 @@ mod tests {
         assert_eq!(cache.free, entry_len - 1);
         key.offset = offset;
         assert_eq!(cache.get(&key).as_deref(), None);
+
+        cache.resize(1024);
+        cache.clear();
+        for offset in 0..100 {
+            key.offset = offset;
+            cache.insert(key, vec![offset as u8; 10].into());
+        }
+        for offset in 0..(100 - entries_fit) {
+            key.offset = offset;
+            assert_eq!(cache.get(&key).as_deref(), None, "{offset}");
+        }
+        for offset in (100 - entries_fit)..100 {
+            key.offset = offset;
+            assert_eq!(
+                cache.get(&key).as_deref(),
+                Some(&[offset as u8; 10] as &[u8]),
+                "{offset}"
+            );
+        }
 
         drop(cache);
         // If there is leak or double free, the count will unlikely to be 1.
