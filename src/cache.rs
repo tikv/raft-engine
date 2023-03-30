@@ -1,6 +1,6 @@
 // Copyright 2023 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{collections::HashMap, ptr::NonNull, mem};
+use std::{collections::HashMap, mem, ptr::NonNull};
 
 use bytes::Bytes;
 
@@ -83,7 +83,7 @@ impl LruCache {
                     promote(*node, &mut self.head, &mut self.tail);
                     return Some(data);
                 }
-            },
+            }
         }
         let need_size = need_size(&data);
         if need_size > self.cap {
@@ -112,7 +112,8 @@ impl LruCache {
             }
         }
         self.free -= need_size;
-        self.cache.insert(key, unsafe { NonNull::new_unchecked(node) });
+        self.cache
+            .insert(key, unsafe { NonNull::new_unchecked(node) });
         None
     }
 
@@ -168,7 +169,10 @@ unsafe impl Send for LruCache {}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::{AtomicIsize, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicIsize, Ordering},
+        Arc,
+    };
 
     use crate::internals::LogQueue;
 
@@ -224,13 +228,21 @@ mod tests {
         }
         for offset in (100 - entries_fit)..100 {
             key.offset = offset;
-            assert_eq!(cache.get(&key).as_deref(), Some(&[offset as u8; 10] as &[u8]), "{offset}");
+            assert_eq!(
+                cache.get(&key).as_deref(),
+                Some(&[offset as u8; 10] as &[u8]),
+                "{offset}"
+            );
         }
 
         let offset = 100 - entries_fit;
         key.offset = offset;
         // Get will promote the entry and it will be the last to be removed.
-        assert_eq!(cache.get(&key).as_deref(), Some(&[offset as u8; 10] as &[u8]), "{offset}");
+        assert_eq!(
+            cache.get(&key).as_deref(),
+            Some(&[offset as u8; 10] as &[u8]),
+            "{offset}"
+        );
         for i in 1..entries_fit {
             key.offset = 200 + i;
             cache.insert(key, vec![key.offset as u8; 10].into());
@@ -238,15 +250,25 @@ mod tests {
             assert_eq!(cache.get(&key).as_deref(), None, "{i}");
         }
         key.offset = offset;
-        assert_eq!(cache.get(&key).as_deref(), Some(&[offset as u8; 10] as &[u8]), "{offset}");
+        assert_eq!(
+            cache.get(&key).as_deref(),
+            Some(&[offset as u8; 10] as &[u8]),
+            "{offset}"
+        );
 
         cache.resize(2048);
         assert_eq!(cache.cap, 2048);
         assert_eq!(cache.free, 2048 - (entries_fit as usize * entry_len));
         key.offset = 201;
-        assert_eq!(cache.get(&key).as_deref(), Some(&[key.offset as u8; 10] as &[u8]));
+        assert_eq!(
+            cache.get(&key).as_deref(),
+            Some(&[key.offset as u8; 10] as &[u8])
+        );
         key.offset = offset;
-        assert_eq!(cache.get(&key).as_deref(), Some(&[offset as u8; 10] as &[u8]));
+        assert_eq!(
+            cache.get(&key).as_deref(),
+            Some(&[offset as u8; 10] as &[u8])
+        );
 
         cache.resize(entry_len);
         assert_eq!(cache.cap, entry_len);
@@ -254,7 +276,10 @@ mod tests {
         key.offset = 201;
         assert_eq!(cache.get(&key).as_deref(), None);
         key.offset = offset;
-        assert_eq!(cache.get(&key).as_deref(), Some(&[offset as u8; 10] as &[u8]));
+        assert_eq!(
+            cache.get(&key).as_deref(),
+            Some(&[offset as u8; 10] as &[u8])
+        );
 
         cache.resize(entry_len - 1);
         assert_eq!(cache.cap, entry_len - 1);

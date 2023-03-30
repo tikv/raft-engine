@@ -293,11 +293,10 @@ impl RhaiFilterMachine {
                                     ei.compression_type,
                                 )?;
                                 // Not using slice to avoid consuming too many memory.
-                                entries.push(
-                                    Bytes::copy_from_slice(&block[ei.entry_offset as usize
-                                        ..(ei.entry_offset + ei.entry_len) as usize]
-                                    ),
-                                );
+                                entries.push(Bytes::copy_from_slice(
+                                    &block[ei.entry_offset as usize
+                                        ..(ei.entry_offset + ei.entry_len) as usize],
+                                ));
                             }
                             log_batch.add_raw_entries(item.raft_group_id, eis, entries)?;
                         }

@@ -930,7 +930,9 @@ impl LogBatch {
         if handle.len > 0 {
             let _ = verify_checksum_with_signature(&buf[0..handle.len], None)?;
             match compression {
-                CompressionType::None => Ok(Bytes::copy_from_slice(&buf[..handle.len - LOG_BATCH_CHECKSUM_LEN])),
+                CompressionType::None => Ok(Bytes::copy_from_slice(
+                    &buf[..handle.len - LOG_BATCH_CHECKSUM_LEN],
+                )),
                 CompressionType::Lz4 => {
                     let decompressed =
                         lz4::decompress_block(&buf[..handle.len - LOG_BATCH_CHECKSUM_LEN])?;

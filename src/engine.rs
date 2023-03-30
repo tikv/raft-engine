@@ -559,7 +559,9 @@ lazy_static::lazy_static! {
 }
 
 fn load_cache<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Bytes>
-where P: PipeLog {
+where
+    P: PipeLog,
+{
     let mut cache = CACHE.lock().unwrap();
     if let Some(v) = cache.get(&idx.entries.unwrap()) {
         return Ok(v);
@@ -570,7 +572,10 @@ where P: PipeLog {
         idx.entries.unwrap(),
         idx.compression_type,
     )?;
-    CACHE.lock().unwrap().insert(idx.entries.unwrap(), v.clone());
+    CACHE
+        .lock()
+        .unwrap()
+        .insert(idx.entries.unwrap(), v.clone());
     Ok(v)
 }
 
@@ -581,8 +586,7 @@ where
 {
     let cache = load_cache(pipe_log, idx)?;
     let e = parse_from_bytes(
-        &cache
-            [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
+        &cache[idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
     )?;
     assert_eq!(M::index(&e), idx.index);
     Ok(e)
