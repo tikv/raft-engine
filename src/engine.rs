@@ -2,12 +2,13 @@
 
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use log::{error, info};
+use parking_lot::Mutex;
 use protobuf::{parse_from_bytes, Message};
 
 use crate::cache::LruCache;
@@ -98,6 +99,7 @@ where
             cfg.clone(),
             memtables.clone(),
             pipe_log.clone(),
+            Mutex::new(LruCache::with_capacity(cfg.cache_capacity.0 as usize)),
             stats.clone(),
             listeners.clone(),
         );
@@ -307,6 +309,7 @@ where
                 ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(1.0);
                 return Ok(Some(read_entry_from_file::<M, _>(
                     self.pipe_log.as_ref(),
+                    &self.purge_manager.cache,
                     &idx,
                 )?));
             }
@@ -336,7 +339,11 @@ where
                 .read()
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
             for i in ents_idx.iter() {
-                vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?);
+                vec.push(read_entry_from_file::<M, _>(
+                    self.pipe_log.as_ref(),
+                    &self.purge_manager.cache,
+                    i,
+                )?);
             }
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
             return Ok(ents_idx.len());
@@ -415,7 +422,7 @@ where
     P: PipeLog,
 {
     fn drop(&mut self) {
-        self.tx.lock().unwrap().send(()).unwrap();
+        self.tx.lock().send(()).unwrap();
         if let Some(t) = self.metrics_flusher.take() {
             t.join().unwrap();
         }
@@ -549,42 +556,39 @@ where
     }
 
     pub fn resize_internal_cache(&self, new_capacity: usize) {
-        CACHE.lock().unwrap().resize(new_capacity);
+        self.purge_manager.cache.lock().resize(new_capacity);
     }
 }
 
-lazy_static::lazy_static! {
-    /// Use 256MiB by default.
-    static ref CACHE: Mutex<LruCache> = Mutex::new(LruCache::with_capacity(256 * 1024 * 1024));
-}
-
-fn load_cache<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Bytes>
+#[inline]
+fn load_cache<P>(pipe_log: &P, cache: &Mutex<LruCache>, idx: &EntryIndex) -> Result<Bytes>
 where
     P: PipeLog,
 {
-    let mut cache = CACHE.lock().unwrap();
-    if let Some(v) = cache.get(&idx.entries.unwrap()) {
+    let mut guard = cache.lock();
+    if let Some(v) = guard.get(&idx.entries.unwrap()) {
         return Ok(v);
     }
-    drop(cache);
+    drop(guard);
     let v = LogBatch::decode_entries_block(
         &pipe_log.read_bytes(idx.entries.unwrap())?,
         idx.entries.unwrap(),
         idx.compression_type,
     )?;
-    CACHE
-        .lock()
-        .unwrap()
-        .insert(idx.entries.unwrap(), v.clone());
+    cache.lock().insert(idx.entries.unwrap(), v.clone());
     Ok(v)
 }
 
-pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
+pub(crate) fn read_entry_from_file<M, P>(
+    pipe_log: &P,
+    cache: &Mutex<LruCache>,
+    idx: &EntryIndex,
+) -> Result<M::Entry>
 where
     M: MessageExt,
     P: PipeLog,
 {
-    let cache = load_cache(pipe_log, idx)?;
+    let cache = load_cache(pipe_log, cache, idx)?;
     let e = parse_from_bytes(
         &cache[idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
     )?;
@@ -592,11 +596,15 @@ where
     Ok(e)
 }
 
-pub(crate) fn read_entry_bytes_from_file<P>(pipe_log: &P, idx: &EntryIndex) -> Result<Bytes>
+pub(crate) fn read_entry_bytes_from_file<P>(
+    pipe_log: &P,
+    cache: &Mutex<LruCache>,
+    idx: &EntryIndex,
+) -> Result<Bytes>
 where
     P: PipeLog,
 {
-    let cache = load_cache(pipe_log, idx)?;
+    let cache = load_cache(pipe_log, cache, idx)?;
     Ok(cache.slice(idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize))
 }
 
@@ -650,7 +658,6 @@ pub(crate) mod tests {
         }
 
         fn reopen(self) -> Self {
-            super::CACHE.lock().unwrap().clear();
             let cfg: Config = self.cfg.as_ref().clone();
             let file_system = self.pipe_log.file_system();
             let mut listeners = self.listeners.clone();
@@ -1984,16 +1991,16 @@ pub(crate) mod tests {
             match (parse_append, parse_recycled) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     if delete {
-                        self.append_metadata.lock().unwrap().remove(&id.seq)
+                        self.append_metadata.lock().remove(&id.seq)
                     } else {
-                        self.append_metadata.lock().unwrap().insert(id.seq)
+                        self.append_metadata.lock().insert(id.seq)
                     }
                 }
                 (None, Some(seq)) => {
                     if delete {
-                        self.recycled_metadata.lock().unwrap().remove(&seq)
+                        self.recycled_metadata.lock().remove(&seq)
                     } else {
-                        self.recycled_metadata.lock().unwrap().insert(seq)
+                        self.recycled_metadata.lock().insert(seq)
                     }
                 }
                 _ => false,
@@ -2053,9 +2060,9 @@ pub(crate) mod tests {
             let parse_recycled = parse_recycled_file_name(path);
             match (parse_append, parse_recycled) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
-                    self.append_metadata.lock().unwrap().contains(&id.seq)
+                    self.append_metadata.lock().contains(&id.seq)
                 }
-                (None, Some(seq)) => self.recycled_metadata.lock().unwrap().contains(&seq),
+                (None, Some(seq)) => self.recycled_metadata.lock().contains(&seq),
                 _ => false,
             }
         }
@@ -2099,29 +2106,20 @@ pub(crate) mod tests {
         assert_eq!(engine.file_count(None), fs.inner.file_count());
         let start = engine.file_span(LogQueue::Append).0;
         // metadata have been deleted.
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
+        assert_eq!(fs.append_metadata.lock().iter().next().unwrap(), &start);
 
         let engine = engine.reopen();
         assert_eq!(engine.file_count(None), fs.inner.file_count());
         let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
+        assert_eq!(fs.append_metadata.lock().iter().next().unwrap(), &start);
 
         // Simulate recycled metadata.
         for i in start / 2..start {
-            fs.append_metadata.lock().unwrap().insert(i);
+            fs.append_metadata.lock().insert(i);
         }
         let engine = engine.reopen();
         let (start, _) = engine.file_span(LogQueue::Append);
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &start
-        );
+        assert_eq!(fs.append_metadata.lock().iter().next().unwrap(), &start);
     }
 
     #[test]
@@ -2142,7 +2140,7 @@ pub(crate) mod tests {
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
-        let recycled_start = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let recycled_start = *fs.recycled_metadata.lock().iter().next().unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -2159,18 +2157,18 @@ pub(crate) mod tests {
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
         // Recycled files have been reused.
         assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
+            fs.append_metadata.lock().iter().next().unwrap(),
             &(start + 20)
         );
-        let recycled_start_1 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let recycled_start_1 = *fs.recycled_metadata.lock().iter().next().unwrap();
         assert!(recycled_start < recycled_start_1);
         // Reuse these files.
         for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
-        let start_1 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
+        let start_1 = *fs.append_metadata.lock().iter().next().unwrap();
         assert!(start <= start_1);
-        let recycled_start_2 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let recycled_start_2 = *fs.recycled_metadata.lock().iter().next().unwrap();
         assert!(recycled_start_1 < recycled_start_2);
 
         // Reopen the engine and validate the recycled files are reserved
@@ -2178,9 +2176,9 @@ pub(crate) mod tests {
         let engine = engine.reopen();
         assert_eq!(file_count, fs.inner.file_count());
         assert!(file_count > engine.file_count(None));
-        let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
+        let start_2 = *fs.append_metadata.lock().iter().next().unwrap();
         assert_eq!(start_1, start_2);
-        let recycled_start_3 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let recycled_start_3 = *fs.recycled_metadata.lock().iter().next().unwrap();
         assert_eq!(recycled_start_2, recycled_start_3);
     }
 

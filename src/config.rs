@@ -108,6 +108,9 @@ pub struct Config {
     ///
     /// Default: false
     pub prefill_for_recycle: bool,
+
+    /// Initial cache capacity for entries.
+    pub cache_capacity: ReadableSize,
 }
 
 impl Default for Config {
@@ -129,6 +132,7 @@ impl Default for Config {
             memory_limit: None,
             enable_log_recycle: false,
             prefill_for_recycle: false,
+            cache_capacity: ReadableSize::mb(256),
         };
         // Test-specific configurations.
         #[cfg(test)]

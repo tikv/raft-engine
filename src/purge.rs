@@ -10,6 +10,7 @@ use fail::fail_point;
 use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
+use crate::cache::LruCache;
 use crate::config::Config;
 use crate::engine::read_entry_bytes_from_file;
 use crate::event_listener::EventListener;
@@ -42,6 +43,7 @@ where
     cfg: Arc<Config>,
     memtables: MemTables,
     pipe_log: Arc<P>,
+    pub(crate) cache: Mutex<LruCache>,
     global_stats: Arc<GlobalStats>,
     listeners: Vec<Arc<dyn EventListener>>,
 
@@ -60,6 +62,7 @@ where
         cfg: Arc<Config>,
         memtables: MemTables,
         pipe_log: Arc<P>,
+        cache: Mutex<LruCache>,
         global_stats: Arc<GlobalStats>,
         listeners: Vec<Arc<dyn EventListener>>,
     ) -> PurgeManager<P> {
@@ -67,6 +70,7 @@ where
             cfg,
             memtables,
             pipe_log,
+            cache,
             global_stats,
             listeners,
             force_rewrite_candidates: Arc::new(Mutex::new(HashMap::default())),
@@ -342,7 +346,7 @@ where
             // compression overhead is not too high.
             let mut entry_indexes = entry_indexes.into_iter().peekable();
             while let Some(ei) = entry_indexes.next() {
-                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), &ei)?;
+                let entry = read_entry_bytes_from_file(self.pipe_log.as_ref(), &self.cache, &ei)?;
                 current_size += entry.len();
                 current_entries.push(entry);
                 current_entry_indexes.push(ei);
