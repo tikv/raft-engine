@@ -2,7 +2,6 @@
 
 //! Helper types to recover in-memory states from log files.
 
-use std::cmp;
 use std::fs::{self, File as StdFile};
 use std::io::Write;
 use std::marker::PhantomData;
@@ -32,8 +31,8 @@ use super::pipe::{
 };
 use super::reader::LogItemBatchFileReader;
 
+/// Maximum size for the buffer for prefilling.
 const PREFILL_BUFFER_SIZE: usize = ReadableSize::mb(16).0 as usize;
-const MAX_PREFILL_SIZE: usize = ReadableSize::gb(12).0 as usize;
 
 /// `ReplayMachine` is a type of deterministic state machine that obeys
 /// associative law.
@@ -477,14 +476,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     fn initialize_files(&mut self) -> Result<()> {
         let target_file_size = self.cfg.target_file_size.0 as usize;
-        let mut target = if self.cfg.prefill_for_recycle {
+        let mut target = std::cmp::min(
+            self.cfg.prefill_capacity(),
             self.cfg
                 .recycle_capacity()
-                .saturating_sub(self.append_files.len())
-        } else {
-            0
-        };
-        target = cmp::min(target, MAX_PREFILL_SIZE / target_file_size);
+                .saturating_sub(self.append_files.len()),
+        );
         let to_create = target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
             let now = Instant::now();

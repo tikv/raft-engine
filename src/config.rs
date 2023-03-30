@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use log::warn;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::pipe_log::Version;
@@ -109,6 +109,13 @@ pub struct Config {
     /// Default: false
     pub prefill_for_recycle: bool,
 
+    /// Maximum capacity for preparing log files for recycling when start.
+    /// If not `None`, its size is equal to `purge-threshold`.
+    /// Only available for `prefill-for-recycle` is true.
+    ///
+    /// Default: None
+    pub prefill_limit: Option<ReadableSize>,
+
     /// Initial cache capacity for entries.
     pub cache_capacity: ReadableSize,
 }
@@ -133,6 +140,7 @@ impl Default for Config {
             enable_log_recycle: false,
             prefill_for_recycle: false,
             cache_capacity: ReadableSize::mb(256),
+            prefill_limit: None,
         };
         // Test-specific configurations.
         #[cfg(test)]
@@ -184,6 +192,14 @@ impl Config {
                 "prefill is not allowed when log recycle is disabled"
             ));
         }
+        if !self.prefill_for_recycle && self.prefill_limit.is_some() {
+            warn!("prefill-limit will be ignored when prefill is disabled");
+            self.prefill_limit = None;
+        }
+        if self.prefill_for_recycle && self.prefill_limit.is_none() {
+            info!("prefill-limit will be calibrated to purge-threshold");
+            self.prefill_limit = Some(self.purge_threshold);
+        }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is disabled");
@@ -205,6 +221,25 @@ impl Config {
             // avoid jitters.
             std::cmp::min(
                 (self.purge_threshold.0 / self.target_file_size.0) as usize + 2,
+                u32::MAX as usize,
+            )
+        } else {
+            0
+        }
+    }
+
+    /// Returns the capacity for preparing log files for recycling when start.
+    pub(crate) fn prefill_capacity(&self) -> usize {
+        // Attention please, log files with Version::V1 could not be recycled, so it's
+        // useless for prefill.
+        if !self.enable_log_recycle || !self.format_version.has_log_signing() {
+            return 0;
+        }
+        let prefill_limit = self.prefill_limit.unwrap_or(ReadableSize(0)).0;
+        if self.prefill_for_recycle && prefill_limit >= self.target_file_size.0 {
+            // Keep same with the maximum setting of `recycle_capacity`.
+            std::cmp::min(
+                (prefill_limit / self.target_file_size.0) as usize + 2,
                 u32::MAX as usize,
             )
         } else {
@@ -307,5 +342,25 @@ mod tests {
         assert!(toml::to_string(&load)
             .unwrap()
             .contains("tolerate-corrupted-tail-records"));
+    }
+
+    #[test]
+    fn test_prefill_for_recycle() {
+        let default_prefill_v1 = r#"
+            enable-log-recycle = true
+            prefill-for-recycle = true
+        "#;
+        let mut cfg_load: Config = toml::from_str(default_prefill_v1).unwrap();
+        assert!(cfg_load.sanitize().is_ok());
+        assert_eq!(cfg_load.prefill_limit.unwrap(), cfg_load.purge_threshold);
+
+        let default_prefill_v2 = r#"
+            enable-log-recycle = true
+            prefill-for-recycle = false
+            prefill-limit = "20GB"
+        "#;
+        let mut cfg_load: Config = toml::from_str(default_prefill_v2).unwrap();
+        assert!(cfg_load.sanitize().is_ok());
+        assert!(cfg_load.prefill_limit.is_none());
     }
 }
