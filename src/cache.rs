@@ -4,7 +4,7 @@ use std::{collections::HashMap, mem, ptr::NonNull};
 
 use bytes::Bytes;
 
-use crate::internals::FileBlockHandle;
+use crate::pipe_log::FileBlockHandle;
 
 struct CacheEntry {
     key: FileBlockHandle,
