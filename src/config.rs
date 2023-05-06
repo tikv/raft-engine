@@ -58,6 +58,7 @@ pub struct Config {
     ///
     /// Default: "8KB"
     pub batch_compression_threshold: ReadableSize,
+    pub compression_level: Option<usize>,
     /// Deprecated.
     /// Incrementally sync log files after specified bytes have been written.
     /// Setting it to zero disables incremental sync.
@@ -127,6 +128,7 @@ impl Default for Config {
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
+            compression_level: None,
             bytes_per_sync: None,
             format_version: Version::V2,
             target_file_size: ReadableSize::mb(128),

@@ -407,7 +407,10 @@ where
             debug_assert!(sync);
             return self.pipe_log.sync(LogQueue::Rewrite);
         }
-        log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
+        log_batch.finish_populate(
+            self.cfg.batch_compression_threshold.0 as usize,
+            self.cfg.compression_level,
+        )?;
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         if sync {
             self.pipe_log.sync(LogQueue::Rewrite)?

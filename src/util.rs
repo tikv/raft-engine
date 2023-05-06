@@ -237,7 +237,7 @@ pub mod lz4 {
     use std::{i32, ptr};
 
     /// Compress content in `buf[skip..]`, and append output to `buf`.
-    pub fn append_compress_block(buf: &mut Vec<u8>, skip: usize) -> Result<()> {
+    pub fn append_compress_block(buf: &mut Vec<u8>, skip: usize, level: usize) -> Result<()> {
         let buf_len = buf.len();
         let content_len = buf_len - skip;
         if content_len > 0 {
@@ -258,11 +258,12 @@ pub mod lz4 {
                 let le_len = content_len.to_le_bytes();
                 ptr::copy_nonoverlapping(le_len.as_ptr(), buf_ptr.add(buf_len), 4);
 
-                let compressed = lz4_sys::LZ4_compress_default(
+                let compressed = lz4_sys::LZ4_compress_fast(
                     buf_ptr.add(skip) as _,
                     buf_ptr.add(buf_len + 4) as _,
                     content_len as i32,
                     bound,
+                    level as i32,
                 );
                 if compressed == 0 {
                     return Err(Error::Other(box_err!("Compression failed")));
@@ -313,7 +314,7 @@ pub mod lz4 {
             let vecs: Vec<Vec<u8>> = vec![b"".to_vec(), b"123".to_vec(), b"12345678910".to_vec()];
             for mut vec in vecs.into_iter() {
                 let uncompressed_len = vec.len();
-                super::append_compress_block(&mut vec, 0).unwrap();
+                super::append_compress_block(&mut vec, 0, 1).unwrap();
                 let res = super::decompress_block(&vec[uncompressed_len..]).unwrap();
                 assert_eq!(res, vec[..uncompressed_len].to_owned());
             }
