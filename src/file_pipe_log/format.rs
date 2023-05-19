@@ -70,19 +70,10 @@ impl FileNameExt for FileId {
     }
 
     fn build_file_name(&self) -> String {
+        let width = LOG_SEQ_WIDTH;
         match self.queue {
-            LogQueue::Append => format!(
-                "{:0width$}{}",
-                self.seq,
-                LOG_APPEND_SUFFIX,
-                width = LOG_SEQ_WIDTH
-            ),
-            LogQueue::Rewrite => format!(
-                "{:0width$}{}",
-                self.seq,
-                LOG_REWRITE_SUFFIX,
-                width = LOG_SEQ_WIDTH
-            ),
+            LogQueue::Append => format!("{:0width$}{LOG_APPEND_SUFFIX}", self.seq,),
+            LogQueue::Rewrite => format!("{:0width$}{LOG_REWRITE_SUFFIX}", self.seq,),
         }
     }
 }
@@ -101,12 +92,8 @@ pub fn parse_recycled_file_name(file_name: &str) -> Option<FileSeq> {
 }
 
 pub fn build_recycled_file_name(seq: FileSeq) -> String {
-    format!(
-        "{:0width$}{}",
-        seq,
-        LOG_APPEND_RESERVED_SUFFIX,
-        width = LOG_SEQ_WIDTH
-    )
+    let width = LOG_SEQ_WIDTH;
+    format!("{seq:0width$}{LOG_APPEND_RESERVED_SUFFIX}",)
 }
 
 /// Path to the lock file under `dir`.
@@ -165,8 +152,7 @@ impl LogFileFormat {
             format.version = version;
         } else {
             return Err(Error::Corruption(format!(
-                "unrecognized log file version: {}",
-                version_u64
+                "unrecognized log file version: {version_u64}",
             )));
         }
 

@@ -1309,8 +1309,8 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
                         if is_group.is_none() {
                             is_group = Some(g);
                         } else {
-                            let msg = format!("skipped an atomic group: {:?}", g);
-                            error!("{}", msg);
+                            let msg = format!("skipped an atomic group: {g:?}");
+                            error!("{msg}");
                             debug_assert!(false, "{}", msg);
                         }
                         return false;
@@ -1820,10 +1820,10 @@ mod tests {
     #[test]
     fn test_memtable_kv_operations() {
         fn key(i: u64) -> Vec<u8> {
-            format!("k{}", i).as_bytes().to_vec()
+            format!("k{i}").as_bytes().to_vec()
         }
         fn value(i: u64) -> Vec<u8> {
-            format!("v{}", i).as_bytes().to_vec()
+            format!("v{i}").as_bytes().to_vec()
         }
 
         let region_id = 8;

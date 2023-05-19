@@ -44,11 +44,10 @@ pub struct SwappyAllocator<A: Allocator>(Arc<SwappyAllocatorCore<A>>);
 impl<A: Allocator> SwappyAllocator<A> {
     pub fn new_over(path: &Path, budget: usize, alloc: A) -> SwappyAllocator<A> {
         if path.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&path) {
+            if let Err(e) = std::fs::remove_dir_all(path) {
                 error!(
-                    "Failed to clean up old swap directory: {}. \
+                    "Failed to clean up old swap directory: {e}. \
                     There might be obsolete swap files left in {}.",
-                    e,
                     path.display()
                 );
             }
@@ -280,8 +279,8 @@ impl Page {
         fail::fail_point!("swappy::page::new_failure", |_| None);
         if !root.exists() {
             // Create directory only when it's needed.
-            std::fs::create_dir_all(&root)
-                .map_err(|e| error!("Failed to create swap directory: {}.", e))
+            std::fs::create_dir_all(root)
+                .map_err(|e| error!("Failed to create swap directory: {e}."))
                 .ok()?;
         }
         let path = root.join(Self::page_file_name(seq));
@@ -289,15 +288,15 @@ impl Page {
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)
-            .map_err(|e| error!("Failed to open swap file: {}", e))
+            .open(path)
+            .map_err(|e| error!("Failed to open swap file: {e}"))
             .ok()?;
         f.set_len(size as u64)
-            .map_err(|e| error!("Failed to extend swap file: {}", e))
+            .map_err(|e| error!("Failed to extend swap file: {e}"))
             .ok()?;
         let mmap = unsafe {
             MmapMut::map_mut(&f)
-                .map_err(|e| error!("Failed to mmap swap file: {}", e))
+                .map_err(|e| error!("Failed to mmap swap file: {e}"))
                 .ok()?
         };
         SWAP_FILE_COUNT.inc();
@@ -344,8 +343,8 @@ impl Page {
     fn release(self, root: &Path) {
         debug_assert_eq!(self.ref_counter, 0);
         let path = root.join(Self::page_file_name(self.seq));
-        if let Err(e) = std::fs::remove_file(&path) {
-            warn!("Failed to delete swap file: {}", e);
+        if let Err(e) = std::fs::remove_file(path) {
+            warn!("Failed to delete swap file: {e}");
         }
         SWAP_FILE_COUNT.dec();
     }

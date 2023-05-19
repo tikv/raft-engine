@@ -88,8 +88,7 @@ pub mod debug {
             let file_id = FileId::parse_file_name(file_name);
             if file_id.is_none() {
                 return Err(Error::InvalidArgument(format!(
-                    "Invalid log file name: {}",
-                    file_name
+                    "Invalid log file name: {file_name}"
                 )));
             }
             Ok(Self {
@@ -321,8 +320,7 @@ pub mod debug {
                             continue;
                         }
                         let _guard = PanicGuard::with_prompt(format!(
-                            "case: [{:?}, {:?}, {:?}]",
-                            from, to, shorter
+                            "case: [{from:?}, {to:?}, {shorter:?}]",
                         ));
                         let mut writer = build_file_writer(
                             file_system.as_ref(),

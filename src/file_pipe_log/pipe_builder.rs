@@ -184,7 +184,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         };
                         if self.file_system.exists_metadata(&path) {
                             if let Err(e) = self.file_system.delete_metadata(&path) {
-                                error!("failed to delete metadata of {}: {}.", path.display(), e);
+                                error!("failed to delete metadata of {}: {e}.", path.display());
                                 break;
                             }
                             cleared += 1;
@@ -194,8 +194,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             if cleared > 0 {
                 warn!(
-                    "clear {} stale files of {:?} in range [{}, {}).",
-                    cleared, queue, 0, files[0].seq,
+                    "clear {cleared} stale files of {queue:?} in range [0, {}).",
+                    files[0].seq,
                 );
             }
         }
@@ -381,16 +381,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
                                 && is_last_file {
                                 warn!(
-                                    "File header is corrupted but ignored: {:?}:{}, {}",
-                                    queue, f.seq, e
+                                    "File header is corrupted but ignored: {queue:?}:{}, {e}",
+                                    f.seq,
                                 );
                                 f.handle.truncate(0)?;
                                 f.format = LogFileFormat::default();
                                 continue;
                             } else {
                                 error!(
-                                    "Failed to open log file due to broken header: {:?}:{}",
-                                    queue, f.seq
+                                    "Failed to open log file due to broken header: {queue:?}:{}, {e}",
+                                    f.seq
                                 );
                                 return Err(e);
                             }
@@ -412,8 +412,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                     && is_last_file =>
                             {
                                 warn!(
-                                    "The last log file is corrupted but ignored: {:?}:{}, {}",
-                                    queue, f.seq, e
+                                    "The last log file is corrupted but ignored: {queue:?}:{}, {e}",
+                                    f.seq
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
                                 f.handle.sync()?;
@@ -421,8 +421,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             }
                             Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
                                 warn!(
-                                    "File is corrupted but ignored: {:?}:{}, {}",
-                                    queue, f.seq, e
+                                    "File is corrupted but ignored: {queue:?}:{}, {e}",
+                                    f.seq,
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
                                 f.handle.sync()?;
@@ -430,8 +430,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             }
                             Err(e) => {
                                 error!(
-                                    "Failed to open log file due to broken entry: {:?}:{} offset={}",
-                                    queue, f.seq, reader.valid_offset()
+                                    "Failed to open log file due to broken entry: {queue:?}:{} offset={}, {e}",
+                                    f.seq, reader.valid_offset()
                                 );
                                 return Err(e);
                             }
@@ -500,7 +500,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
                 while written < target_file_size {
                     if let Err(e) = writer.write_all(&buf) {
-                        warn!("failed to build recycled file, err: {}", e);
+                        warn!("failed to build recycled file, err: {e}");
                         if is_no_space_err(&e) {
                             warn!("no enough space for preparing recycled logs");
                             // Clear partially prepared recycled log list if there has no enough
@@ -519,9 +519,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 });
             }
             info!(
-                "prefill logs takes {:?}, created {} files",
+                "prefill logs takes {:?}, created {to_create} files",
                 now.elapsed(),
-                to_create
             );
         }
         // If target recycled capacity has been changed when restarting by manually
