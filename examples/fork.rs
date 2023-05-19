@@ -22,6 +22,6 @@ fn main() {
         ..Default::default()
     };
     let fs = Arc::new(DefaultFileSystem);
-    Engine::<_, _>::fork(&cfg, fs, &target).unwrap();
+    Engine::<_, _>::fork(&cfg, fs, target).unwrap();
     println!("success!");
 }

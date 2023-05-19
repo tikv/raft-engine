@@ -651,15 +651,12 @@ mod tests {
 
         let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         assert_eq!(file_handle.id.seq, 3);
-        assert_eq!(
-            file_handle.offset,
-            header_size as u64 + s_content.len() as u64
-        );
+        assert_eq!(file_handle.offset, header_size + s_content.len() as u64);
 
         let content_readed = pipe_log
             .read_bytes(FileBlockHandle {
                 id: FileId { queue, seq: 3 },
-                offset: header_size as u64,
+                offset: header_size,
                 len: s_content.len(),
             })
             .unwrap();
@@ -667,7 +664,7 @@ mod tests {
         // try to fetch abnormal entry
         let abnormal_content_readed = pipe_log.read_bytes(FileBlockHandle {
             id: FileId { queue, seq: 12 }, // abnormal seq
-            offset: header_size as u64,
+            offset: header_size,
             len: s_content.len(),
         });
         assert!(abnormal_content_readed.is_err());

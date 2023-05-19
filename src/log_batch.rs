@@ -1387,7 +1387,7 @@ mod tests {
             assert_eq!(decoded_item_batch, item_batch);
             assert!(decoded_item_batch.approximate_size() >= len - offset);
 
-            let entries = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
+            let entries = &encoded[LOG_BATCH_HEADER_LEN..offset];
             for item in decoded_item_batch.items.iter() {
                 if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
                     if !entry_indexes.0.is_empty() {
@@ -1493,7 +1493,7 @@ mod tests {
         .unwrap();
 
         // decode and assert entries
-        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
+        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset];
         for item in decoded_item_batch.items.iter() {
             match &item.content {
                 LogItemContent::EntryIndexes(entry_indexes) => {

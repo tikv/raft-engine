@@ -824,7 +824,7 @@ mod tests {
             // test_eq_after_rotation
             // test that two deques are equal even if elements are laid out differently
             let len = 28;
-            let mut ring: VecDeque<i32> = collect(0..len as i32, allocator.clone());
+            let mut ring: VecDeque<i32> = collect(0..len, allocator.clone());
             let mut shifted = ring.clone();
             for _ in 0..10 {
                 // shift values 1 step to the right by pop, sub one, push

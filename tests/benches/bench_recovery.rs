@@ -107,7 +107,7 @@ fn dir_size(path: &str) -> ReadableSize {
     ReadableSize(
         std::fs::read_dir(PathBuf::from(path))
             .unwrap()
-            .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len() as u64)
+            .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len())
             .sum(),
     )
 }
@@ -151,7 +151,7 @@ fn bench_recovery(c: &mut Criterion) {
     ];
 
     for (i, (name, cfg)) in cfgs.iter().enumerate() {
-        println!("config-{}: [{}] {}", i, name, cfg);
+        println!("config-{i}: [{name}] {cfg}");
     }
 
     fail::cfg("log_fd::open::fadvise_dontneed", "return").unwrap();

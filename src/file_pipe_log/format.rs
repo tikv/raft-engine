@@ -315,7 +315,7 @@ mod tests {
         file_context.id.seq = 10;
         file_context.version = Version::V2;
         assert_eq!(file_context.get_signature().unwrap(), 10);
-        let abnormal_seq = (file_context.id.seq << 32) as u64 + 100_u64;
+        let abnormal_seq = (file_context.id.seq << 32) + 100_u64;
         file_context.id.seq = abnormal_seq;
         assert_ne!(file_context.get_signature().unwrap() as u64, abnormal_seq);
         assert_eq!(file_context.get_signature().unwrap(), 100);
