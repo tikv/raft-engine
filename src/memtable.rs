@@ -1237,12 +1237,20 @@ impl<A: AllocatorTrait> MemTableRecoverContext<A> {
                 }
                 // (begin, begin), (middle, begin)
                 (_, AtomicGroupStatus::Begin) => {
-                    warn!("discard atomic group: {group:?}");
+                    warn!(
+                        "discard old atomic group, status: {:?}, raft_group_id: {:?}",
+                        group.status,
+                        group.items.first().map(|item| item.raft_group_id)
+                    );
                     *group = new_group;
                 }
                 // (end, middle), (end, end)
                 (AtomicGroupStatus::End, _) => {
-                    warn!("discard atomic group: {new_group:?}");
+                    warn!(
+                        "discard new atomic group, status: {:?}, raft_group_id: {:?}",
+                        new_group.status,
+                        new_group.items.first().map(|item| item.raft_group_id)
+                    );
                 }
                 (AtomicGroupStatus::Begin, AtomicGroupStatus::Middle)
                 | (AtomicGroupStatus::Middle, AtomicGroupStatus::Middle) => {
