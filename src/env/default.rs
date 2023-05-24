@@ -202,7 +202,7 @@ impl Handle for LogFd {
 impl Drop for LogFd {
     fn drop(&mut self) {
         if let Err(e) = self.close() {
-            error!("error while closing file: {}", e);
+            error!("error while closing file: {e}");
         }
     }
 }

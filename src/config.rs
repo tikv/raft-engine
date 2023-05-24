@@ -165,15 +165,15 @@ impl Config {
         let min_recovery_read_block_size = ReadableSize(MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         if self.recovery_read_block_size < min_recovery_read_block_size {
             warn!(
-                "recovery-read-block-size ({}) is too small, setting it to {}",
-                self.recovery_read_block_size, min_recovery_read_block_size
+                "recovery-read-block-size ({}) is too small, setting it to {min_recovery_read_block_size}",
+                self.recovery_read_block_size
             );
             self.recovery_read_block_size = min_recovery_read_block_size;
         }
         if self.recovery_threads < MIN_RECOVERY_THREADS {
             warn!(
-                "recovery-threads ({}) is too small, setting it to {}",
-                self.recovery_threads, MIN_RECOVERY_THREADS
+                "recovery-threads ({}) is too small, setting it to {MIN_RECOVERY_THREADS}",
+                self.recovery_threads
             );
             self.recovery_threads = MIN_RECOVERY_THREADS;
         }

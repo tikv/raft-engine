@@ -12,7 +12,7 @@ fn main() {
         .file_name()
         .and_then(|x| x.to_str())
         .unwrap();
-    println!("usage: {} {{source}} {{target}}", prog);
+    println!("usage: {prog} {{source}} {{target}}");
 
     let source = args.next().unwrap();
     let target = args.next().unwrap();
@@ -22,6 +22,6 @@ fn main() {
         ..Default::default()
     };
     let fs = Arc::new(DefaultFileSystem);
-    Engine::<_, _>::fork(&cfg, fs, &target).unwrap();
+    Engine::<_, _>::fork(&cfg, fs, target).unwrap();
     println!("success!");
 }

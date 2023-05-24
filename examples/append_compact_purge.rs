@@ -70,7 +70,7 @@ fn main() {
                 if state.last_index > rand_compact_offset {
                     let compact_to = state.last_index - rand_compact_offset;
                     engine.compact_to(region, compact_to);
-                    println!("[EXAMPLE] compact {} to {}", region, compact_to);
+                    println!("[EXAMPLE] compact {region} to {compact_to}");
                 }
             }
         }
@@ -81,8 +81,7 @@ fn main() {
                 .unwrap();
             engine.compact_to(region, state.last_index - 7);
             println!(
-                "[EXAMPLE] force compact {} to {}",
-                region,
+                "[EXAMPLE] force compact {region} to {}",
                 state.last_index - 7
             );
         }

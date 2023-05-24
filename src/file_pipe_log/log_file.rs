@@ -103,7 +103,7 @@ impl<F: FileSystem> LogFileWriter<F> {
                 ),
             );
             if let Err(e) = self.writer.allocate(self.capacity, alloc) {
-                warn!("log file allocation failed: {}", e);
+                warn!("log file allocation failed: {e}");
             }
             self.capacity += alloc;
         }
@@ -172,7 +172,7 @@ impl<F: FileSystem> LogFileReader<F> {
     }
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        let mut buf = vec![0; handle.len as usize];
+        let mut buf = vec![0; handle.len];
         let size = self.read_to(handle.offset, &mut buf)?;
         buf.truncate(size);
         Ok(buf)

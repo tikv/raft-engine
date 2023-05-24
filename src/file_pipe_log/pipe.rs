@@ -71,7 +71,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut writable_file = self.writable_file.lock();
         if let Err(e) = writable_file.writer.close() {
-            error!("error while closing the active writer: {}", e);
+            error!("error while closing the active writer: {e}");
         }
     }
 }
@@ -152,7 +152,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// filesystem.
     fn sync_dir(&self, path_id: PathId) -> Result<()> {
         debug_assert!(!self.paths.is_empty());
-        std::fs::File::open(&PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
+        std::fs::File::open(PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
         Ok(())
     }
 
@@ -171,9 +171,9 @@ impl<F: FileSystem> SinglePipe<F> {
             let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
-                error!("error while trying to reuse recycled file, err: {}", e);
+                error!("error while trying to reuse recycled file, err: {e}");
                 if let Err(e) = self.file_system.delete(&src_path) {
-                    error!("error while trying to delete recycled file, err: {}", e);
+                    error!("error while trying to delete recycled file, err: {e}");
                 }
             } else {
                 self.flush_recycle_metrics(recycle_len);
@@ -194,7 +194,7 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         let path_id = find_available_dir(&self.paths, self.target_file_size);
         let path = new_file_id.build_file_path(&self.paths[path_id]);
-        Ok((path_id, self.file_system.create(&path)?))
+        Ok((path_id, self.file_system.create(path)?))
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -291,8 +291,8 @@ impl<F: FileSystem> SinglePipe<F> {
         if writable_file.writer.offset() >= self.target_file_size {
             if let Err(e) = self.rotate_imp(&mut writable_file) {
                 panic!(
-                    "error when rotate [{:?}:{}]: {}",
-                    self.queue, writable_file.seq, e
+                    "error when rotate [{:?}:{}]: {e}",
+                    self.queue, writable_file.seq,
                 );
             }
         }
@@ -328,10 +328,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let start_offset = writer.offset();
         if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
             if let Err(te) = writer.truncate() {
-                panic!(
-                    "error when truncate {} after error: {}, get: {}",
-                    seq, e, te
-                );
+                panic!("error when truncate {seq} after error: {e}, get: {}", te);
             }
             if is_no_space_err(&e) {
                 // TODO: There exists several corner cases should be tackled if
@@ -345,15 +342,15 @@ impl<F: FileSystem> SinglePipe<F> {
                 // cases, this issue will be ignored temprorarily.
                 if let Err(e) = self.rotate_imp(&mut writable_file) {
                     panic!(
-                        "error when rotate [{:?}:{}]: {}",
-                        self.queue, writable_file.seq, e
+                        "error when rotate [{:?}:{}]: {e}",
+                        self.queue, writable_file.seq
                     );
                 }
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.
                 return Err(Error::TryAgain(format!(
-                    "error when append [{:?}:{}]: {}",
-                    self.queue, seq, e
+                    "error when append [{:?}:{seq}]: {e}",
+                    self.queue,
                 )));
             }
             return Err(Error::Io(e));
@@ -379,7 +376,7 @@ impl<F: FileSystem> SinglePipe<F> {
         {
             let _t = StopWatch::new(perf_context!(log_sync_duration));
             if let Err(e) = writer.sync() {
-                panic!("error when sync [{:?}:{}]: {}", self.queue, seq, e,);
+                panic!("error when sync [{:?}:{seq}]: {e}", self.queue);
             }
         }
 
@@ -446,7 +443,7 @@ impl<F: FileSystem> SinglePipe<F> {
                             recycled_len += 1;
                             continue;
                         }
-                        Err(e) => error!("failed to reuse purged file {:?}", e),
+                        Err(e) => error!("failed to reuse purged file {e:?}"),
                     }
                 }
                 // Remove purged files which are out of capacity and files whose version is
@@ -542,7 +539,7 @@ pub(crate) fn find_available_dir(paths: &Paths, target_size: usize) -> PathId {
     // space usage.
     if paths.len() > 1 {
         for (t, p) in paths.iter().enumerate() {
-            if let Ok(disk_stats) = fs2::statvfs(&p) {
+            if let Ok(disk_stats) = fs2::statvfs(p) {
                 if target_size <= disk_stats.available_space() as usize {
                     return t;
                 }
@@ -654,15 +651,12 @@ mod tests {
 
         let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         assert_eq!(file_handle.id.seq, 3);
-        assert_eq!(
-            file_handle.offset,
-            header_size as u64 + s_content.len() as u64
-        );
+        assert_eq!(file_handle.offset, header_size + s_content.len() as u64);
 
         let content_readed = pipe_log
             .read_bytes(FileBlockHandle {
                 id: FileId { queue, seq: 3 },
-                offset: header_size as u64,
+                offset: header_size,
                 len: s_content.len(),
             })
             .unwrap();
@@ -670,7 +664,7 @@ mod tests {
         // try to fetch abnormal entry
         let abnormal_content_readed = pipe_log.read_bytes(FileBlockHandle {
             id: FileId { queue, seq: 12 }, // abnormal seq
-            offset: header_size as u64,
+            offset: header_size,
             len: s_content.len(),
         });
         assert!(abnormal_content_readed.is_err());

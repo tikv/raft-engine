@@ -69,23 +69,8 @@ impl Serialize for ReadableSize {
     where
         S: Serializer,
     {
-        let size = self.0;
         let mut buffer = String::new();
-        if size == 0 {
-            write!(buffer, "{}KiB", size).unwrap();
-        } else if size % PIB == 0 {
-            write!(buffer, "{}PiB", size / PIB).unwrap();
-        } else if size % TIB == 0 {
-            write!(buffer, "{}TiB", size / TIB).unwrap();
-        } else if size % GIB as u64 == 0 {
-            write!(buffer, "{}GiB", size / GIB).unwrap();
-        } else if size % MIB as u64 == 0 {
-            write!(buffer, "{}MiB", size / MIB).unwrap();
-        } else if size % KIB as u64 == 0 {
-            write!(buffer, "{}KiB", size / KIB).unwrap();
-        } else {
-            return serializer.serialize_u64(size);
-        }
+        write!(buffer, "{self}").unwrap();
         serializer.serialize_str(&buffer)
     }
 }
@@ -97,11 +82,11 @@ impl FromStr for ReadableSize {
     fn from_str(s: &str) -> Result<ReadableSize, String> {
         let size_str = s.trim();
         if size_str.is_empty() {
-            return Err(format!("{:?} is not a valid size.", s));
+            return Err(format!("{s:?} is not a valid size."));
         }
 
         if !size_str.is_ascii() {
-            return Err(format!("ASCII string is expected, but got {:?}", s));
+            return Err(format!("ASCII string is expected, but got {s:?}"));
         }
 
         // size: digits and '.' as decimal separator
@@ -123,33 +108,35 @@ impl FromStr for ReadableSize {
             "B" | "" => B,
             _ => {
                 return Err(format!(
-                    "only B, KB, KiB, MB, MiB, GB, GiB, TB, TiB, PB, and PiB are supported: {:?}",
-                    s
+                    "only B, KB, KiB, MB, MiB, GB, GiB, TB, TiB, PB, and PiB are supported: {s:?}"
                 ));
             }
         };
 
         match size.parse::<f64>() {
             Ok(n) => Ok(ReadableSize((n * unit as f64) as u64)),
-            Err(_) => Err(format!("invalid size string: {:?}", s)),
+            Err(_) => Err(format!("invalid size string: {s:?}")),
         }
     }
 }
 
 impl Display for ReadableSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 >= PIB {
-            write!(f, "{:.1}PiB", self.0 as f64 / PIB as f64)
-        } else if self.0 >= TIB {
-            write!(f, "{:.1}TiB", self.0 as f64 / TIB as f64)
-        } else if self.0 >= GIB {
-            write!(f, "{:.1}GiB", self.0 as f64 / GIB as f64)
-        } else if self.0 >= MIB {
-            write!(f, "{:.1}MiB", self.0 as f64 / MIB as f64)
-        } else if self.0 >= KIB {
-            write!(f, "{:.1}KiB", self.0 as f64 / KIB as f64)
+        let size = self.0;
+        if size == 0 {
+            write!(f, "{size}KiB")
+        } else if size % PIB == 0 {
+            write!(f, "{}PiB", size / PIB)
+        } else if size % TIB == 0 {
+            write!(f, "{}TiB", size / TIB)
+        } else if size % GIB == 0 {
+            write!(f, "{}GiB", size / GIB)
+        } else if size % MIB == 0 {
+            write!(f, "{}MiB", size / MIB)
+        } else if size % KIB == 0 {
+            write!(f, "{}KiB", size / KIB)
         } else {
-            write!(f, "{}B", self.0)
+            write!(f, "{size}B")
         }
     }
 }
@@ -243,8 +230,7 @@ pub mod lz4 {
         if content_len > 0 {
             if content_len > i32::MAX as usize {
                 return Err(Error::InvalidArgument(format!(
-                    "Content too long {}",
-                    content_len
+                    "Content too long {content_len}"
                 )));
             }
             unsafe {
@@ -288,11 +274,10 @@ pub mod lz4 {
                     dst.set_len(l as usize);
                     Ok(dst)
                 } else if l < 0 {
-                    Err(Error::Other(box_err!("Decompression failed {}", l)))
+                    Err(Error::Other(box_err!("Decompression failed {l}")))
                 } else {
                     Err(Error::Corruption(format!(
-                        "Decompressed content length mismatch {} != {}",
-                        l, len
+                        "Decompressed content length mismatch {l} != {len}"
                     )))
                 }
             }
@@ -393,7 +378,7 @@ mod tests {
                 s: ReadableSize(size),
             };
             let res_str = toml::to_string(&c).unwrap();
-            let exp_str = format!("s = {:?}\n", exp);
+            let exp_str = format!("s = {exp:?}\n");
             assert_eq!(res_str, exp_str);
             let res_size: SizeHolder = toml::from_str(&exp_str).unwrap();
             assert_eq!(res_size.s.0, size);
@@ -403,7 +388,7 @@ mod tests {
             s: ReadableSize(512),
         };
         let res_str = toml::to_string(&c).unwrap();
-        assert_eq!(res_str, "s = 512\n");
+        assert_eq!(res_str, "s = \"512B\"\n");
         let res_size: SizeHolder = toml::from_str(&res_str).unwrap();
         assert_eq!(res_size.s.0, c.s.0);
 
@@ -443,7 +428,7 @@ mod tests {
             ("0e+10MB", 0),
         ];
         for (src, exp) in decode_cases {
-            let src = format!("s = {:?}", src);
+            let src = format!("s = {src:?}");
             let res: SizeHolder = toml::from_str(&src).unwrap();
             assert_eq!(res.s.0, exp);
         }
@@ -453,7 +438,7 @@ mod tests {
             "4B7", "5M_",
         ];
         for src in illegal_cases {
-            let src_str = format!("s = {:?}", src);
+            let src_str = format!("s = {src:?}");
             assert!(toml::from_str::<SizeHolder>(&src_str).is_err(), "{}", src);
         }
     }
