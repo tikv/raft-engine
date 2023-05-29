@@ -78,7 +78,7 @@ impl FileNameExt for FileId {
     }
 }
 
-pub fn parse_recycled_file_name(file_name: &str) -> Option<FileSeq> {
+pub fn parse_reserved_file_name(file_name: &str) -> Option<FileSeq> {
     if file_name.len() > LOG_SEQ_WIDTH {
         if let Ok(seq) = file_name[..LOG_SEQ_WIDTH].parse::<u64>() {
             if file_name.ends_with(LOG_APPEND_RESERVED_SUFFIX) {
@@ -91,7 +91,7 @@ pub fn parse_recycled_file_name(file_name: &str) -> Option<FileSeq> {
     None
 }
 
-pub fn build_recycled_file_name(seq: FileSeq) -> String {
+pub fn build_reserved_file_name(seq: FileSeq) -> String {
     let width = LOG_SEQ_WIDTH;
     format!("{seq:0width$}{LOG_APPEND_RESERVED_SUFFIX}",)
 }

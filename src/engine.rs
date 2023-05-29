@@ -624,7 +624,7 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::env::{ObfuscatedFileSystem, Permission};
-    use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
+    use crate::file_pipe_log::{parse_reserved_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
@@ -1982,7 +1982,7 @@ pub(crate) mod tests {
     pub struct DeleteMonitoredFileSystem {
         inner: ObfuscatedFileSystem,
         append_metadata: Mutex<BTreeSet<u64>>,
-        recycled_metadata: Mutex<BTreeSet<u64>>,
+        reserved_metadata: Mutex<BTreeSet<u64>>,
     }
 
     impl DeleteMonitoredFileSystem {
@@ -1990,15 +1990,15 @@ pub(crate) mod tests {
             Self {
                 inner: ObfuscatedFileSystem::default(),
                 append_metadata: Mutex::new(BTreeSet::new()),
-                recycled_metadata: Mutex::new(BTreeSet::new()),
+                reserved_metadata: Mutex::new(BTreeSet::new()),
             }
         }
 
         fn update_metadata(&self, path: &Path, delete: bool) -> bool {
             let path = path.file_name().unwrap().to_str().unwrap();
             let parse_append = FileId::parse_file_name(path);
-            let parse_recycled = parse_recycled_file_name(path);
-            match (parse_append, parse_recycled) {
+            let parse_reserved = parse_reserved_file_name(path);
+            match (parse_append, parse_reserved) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     if delete {
                         self.append_metadata.lock().unwrap().remove(&id.seq)
@@ -2008,9 +2008,9 @@ pub(crate) mod tests {
                 }
                 (None, Some(seq)) => {
                     if delete {
-                        self.recycled_metadata.lock().unwrap().remove(&seq)
+                        self.reserved_metadata.lock().unwrap().remove(&seq)
                     } else {
-                        self.recycled_metadata.lock().unwrap().insert(seq)
+                        self.reserved_metadata.lock().unwrap().insert(seq)
                     }
                 }
                 _ => false,
@@ -2067,12 +2067,12 @@ pub(crate) mod tests {
             }
             let path = path.as_ref().file_name().unwrap().to_str().unwrap();
             let parse_append = FileId::parse_file_name(path);
-            let parse_recycled = parse_recycled_file_name(path);
-            match (parse_append, parse_recycled) {
+            let parse_reserved = parse_reserved_file_name(path);
+            match (parse_append, parse_reserved) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     self.append_metadata.lock().unwrap().contains(&id.seq)
                 }
-                (None, Some(seq)) => self.recycled_metadata.lock().unwrap().contains(&seq),
+                (None, Some(seq)) => self.reserved_metadata.lock().unwrap().contains(&seq),
                 _ => false,
             }
         }
@@ -2159,7 +2159,7 @@ pub(crate) mod tests {
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
-        let recycled_start = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let reserved_start = *fs.reserved_metadata.lock().unwrap().iter().next().unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -2168,37 +2168,42 @@ pub(crate) mod tests {
         }
 
         let (start, end) = engine.file_span(LogQueue::Append);
+        // Reserved files have been reused.
+        assert_eq!(
+            fs.reserved_metadata.lock().unwrap().iter().next().unwrap(),
+            &(start + 20)
+        );
         // Purge all files.
         engine
             .purge_manager
             .must_rewrite_append_queue(Some(end - 1), None);
         assert!(start < engine.file_span(LogQueue::Append).0);
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
-        // Recycled files have been reused.
+        // Range [2, 20] files have been cached in the recycle list without RENAME.
         assert_eq!(
             fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &(start + 20)
+            &(start + 1)
         );
-        let recycled_start_1 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
-        assert!(recycled_start < recycled_start_1);
+        let reserved_start_1 = *fs.reserved_metadata.lock().unwrap().iter().next().unwrap();
+        assert!(reserved_start < reserved_start_1);
         // Reuse these files.
         for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         let start_1 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
         assert!(start <= start_1);
-        let recycled_start_2 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
-        assert!(recycled_start_1 < recycled_start_2);
+        let reserved_start_2 = *fs.reserved_metadata.lock().unwrap().iter().next().unwrap();
+        assert!(reserved_start_1 < reserved_start_2);
 
-        // Reopen the engine and validate the recycled files are reserved
+        // Reopen the engine and validate the stale files are cleared.
         let file_count = fs.inner.file_count();
         let engine = engine.reopen();
         assert_eq!(file_count, fs.inner.file_count());
         assert!(file_count > engine.file_count(None));
         let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
-        assert_eq!(start_1, start_2);
-        let recycled_start_3 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
-        assert_eq!(recycled_start_2, recycled_start_3);
+        assert!(start_1 < start_2);
+        let reserved_start_3 = *fs.reserved_metadata.lock().unwrap().iter().next().unwrap();
+        assert_eq!(reserved_start_2, reserved_start_3);
     }
 
     #[test]
@@ -2734,7 +2739,7 @@ pub(crate) mod tests {
         {
             // Prerequisite: choose several files and duplicate them to main dir.
             let mut file_count = 0;
-            std::fs::read_dir(paths[1]).unwrap().for_each(|e| {
+            std::fs::read_dir(paths[0]).unwrap().for_each(|e| {
                 let p = e.unwrap().path();
                 let file_name = p.file_name().unwrap().to_str().unwrap();
                 if let Some(FileId {
@@ -2742,7 +2747,7 @@ pub(crate) mod tests {
                     seq: _,
                 }) = FileId::parse_file_name(file_name)
                 {
-                    let mut dst_path = PathBuf::from(&paths[0]);
+                    let mut dst_path = PathBuf::from(&paths[1]);
                     dst_path.push(file_name);
                     if file_count % 2 == 0 {
                         std::fs::copy(p, dst_path).unwrap();

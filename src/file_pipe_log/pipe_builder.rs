@@ -23,7 +23,7 @@ use crate::util::{Factory, ReadableSize};
 use crate::{Error, Result};
 
 use super::format::{
-    build_recycled_file_name, lock_file_path, parse_recycled_file_name, FileNameExt, LogFileFormat,
+    build_reserved_file_name, lock_file_path, parse_reserved_file_name, FileNameExt, LogFileFormat,
 };
 use super::log_file::build_file_reader;
 use super::pipe::{
@@ -83,11 +83,11 @@ pub struct DualPipesBuilder<F: FileSystem> {
 
     pub(crate) append_file_names: Vec<FileName>,
     pub(crate) rewrite_file_names: Vec<FileName>,
-    pub(crate) recycled_file_names: Vec<FileName>,
+    pub(crate) reserved_file_names: Vec<FileName>,
 
     append_files: Vec<File<F>>,
     rewrite_files: Vec<File<F>>,
-    recycled_files: Vec<File<F>>,
+    reserved_files: Vec<File<F>>,
 }
 
 impl<F: FileSystem> DualPipesBuilder<F> {
@@ -101,10 +101,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             dir_locks: Vec::new(),
             append_file_names: Vec::new(),
             rewrite_file_names: Vec::new(),
-            recycled_file_names: Vec::new(),
+            reserved_file_names: Vec::new(),
             append_files: Vec::new(),
             rewrite_files: Vec::new(),
-            recycled_files: Vec::new(),
+            reserved_files: Vec::new(),
         }
     }
 
@@ -117,24 +117,30 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         self.append_files = Vec::with_capacity(self.append_file_names.len());
         for (i, file_name) in self.append_file_names.iter().enumerate() {
             let is_last_one = i == self.append_file_names.len() - 1;
-            self.append_files.push(self.open(file_name, is_last_one)?);
+            self.append_files
+                .push(self.open(file_name, false, is_last_one)?);
         }
         self.rewrite_files = Vec::with_capacity(self.rewrite_file_names.len());
         for (i, file_name) in self.rewrite_file_names.iter().enumerate() {
             let is_last_one = i == self.rewrite_file_names.len() - 1;
-            self.rewrite_files.push(self.open(file_name, is_last_one)?);
+            self.rewrite_files
+                .push(self.open(file_name, false, is_last_one)?);
         }
-        self.recycled_files = Vec::with_capacity(self.recycled_file_names.len());
-        for (i, file_name) in self.recycled_file_names.iter().enumerate() {
-            let is_last_one = i == self.recycled_file_names.len() - 1;
-            self.recycled_files.push(self.open(file_name, is_last_one)?);
+        self.reserved_files = Vec::with_capacity(self.reserved_file_names.len());
+        for (i, file_name) in self.reserved_file_names.iter().enumerate() {
+            let is_last_one = i == self.reserved_file_names.len() - 1;
+            self.reserved_files.push(self.open(
+                file_name,
+                true, /* is_reserved */
+                is_last_one,
+            )?);
         }
 
         // Validate and clear obsolete metadata and log files.
-        for (queue, files, is_recycled_file) in [
+        for (queue, files, is_reserved_file) in [
             (LogQueue::Append, &mut self.append_files, false),
             (LogQueue::Rewrite, &mut self.rewrite_files, false),
-            (LogQueue::Append, &mut self.recycled_files, true),
+            (LogQueue::Append, &mut self.reserved_files, true),
         ] {
             // Check the file_list and remove the hole of files.
             let mut invalid_idx = 0_usize;
@@ -157,8 +163,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let seq = i * files[0].seq / max_sample;
                 let file_id = FileId { queue, seq };
                 for dir in self.dirs.iter() {
-                    let path = if is_recycled_file {
-                        dir.join(build_recycled_file_name(file_id.seq))
+                    let path = if is_reserved_file {
+                        dir.join(build_reserved_file_name(file_id.seq))
                     } else {
                         file_id.build_file_path(dir)
                     };
@@ -177,8 +183,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 for seq in (clear_start..files[0].seq).rev() {
                     let file_id = FileId { queue, seq };
                     for dir in self.dirs.iter() {
-                        let path = if is_recycled_file {
-                            dir.join(build_recycled_file_name(seq))
+                        let path = if is_reserved_file {
+                            dir.join(build_reserved_file_name(seq))
                         } else {
                             file_id.build_file_path(dir)
                         };
@@ -212,7 +218,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
         self.append_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
         self.rewrite_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
-        self.recycled_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.reserved_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
         Ok(())
     }
 
@@ -261,8 +267,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     path_id,
                 }),
                 _ => {
-                    if let Some(seq) = parse_recycled_file_name(file_name) {
-                        self.recycled_file_names.push(FileName {
+                    if let Some(seq) = parse_reserved_file_name(file_name) {
+                        self.reserved_file_names.push(FileName {
                             seq,
                             path: p,
                             path_id,
@@ -482,28 +488,28 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 .recycle_capacity()
                 .saturating_sub(self.append_files.len()),
         );
-        let to_create = target.saturating_sub(self.recycled_files.len());
+        let to_create = target.saturating_sub(self.reserved_files.len());
         if to_create > 0 {
             let now = Instant::now();
             for _ in 0..to_create {
                 let seq = self
-                    .recycled_files
+                    .reserved_files
                     .last()
                     .map(|f| f.seq + 1)
                     .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
                 let path_id = find_available_dir(&self.dirs, target_file_size);
                 let root_path = &self.dirs[path_id];
-                let path = root_path.join(build_recycled_file_name(seq));
+                let path = root_path.join(build_reserved_file_name(seq));
                 let handle = Arc::new(self.file_system.create(&path)?);
                 let mut writer = self.file_system.new_writer(handle.clone())?;
                 let mut written = 0;
                 let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
                 while written < target_file_size {
                     if let Err(e) = writer.write_all(&buf) {
-                        warn!("failed to build recycled file, err: {e}");
+                        warn!("failed to build reserved file for reuse, err: {e}");
                         if is_no_space_err(&e) {
-                            warn!("no enough space for preparing recycled logs");
-                            // Clear partially prepared recycled log list if there has no enough
+                            warn!("no enough space for preparing reserved logs");
+                            // Clear partially prepared reserved log list if there has no enough
                             // space for it.
                             target = 0;
                         }
@@ -511,11 +517,12 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     }
                     written += buf.len();
                 }
-                self.recycled_files.push(File {
+                self.reserved_files.push(File {
                     seq,
                     handle,
                     format: LogFileFormat::default(),
                     path_id,
+                    reserved: true,
                 });
             }
             info!(
@@ -527,11 +534,11 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // modifications, such as setting `Config::enable-log-recycle` from TRUE to
         // FALSE, setting `Config::prefill-for-recycle` from TRUE to FALSE or
         // changing the recycle capacity, we should remove redundant
-        // recycled files in advance.
-        while self.recycled_files.len() > target {
-            let f = self.recycled_files.pop().unwrap();
+        // reserved files in advance.
+        while self.reserved_files.len() > target {
+            let f = self.reserved_files.pop().unwrap();
             let root_path = &self.dirs[f.path_id];
-            let path = root_path.join(build_recycled_file_name(f.seq));
+            let path = root_path.join(build_reserved_file_name(f.seq));
             let _ = self.file_system.delete(&path);
         }
         Ok(())
@@ -547,7 +554,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.listeners.clone(),
             LogQueue::Append,
             self.append_files,
-            self.recycled_files,
+            self.reserved_files,
         )?;
         let rewriter = SinglePipe::open(
             &self.cfg,
@@ -561,7 +568,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         DualPipes::open(self.dir_locks, appender, rewriter)
     }
 
-    fn open(&self, file_name: &FileName, is_last_one: bool) -> Result<File<F>> {
+    fn open(&self, file_name: &FileName, is_reserved: bool, is_last_one: bool) -> Result<File<F>> {
         // For recovery mode TolerateAnyCorruption, all files should be writable.
         // For other recovery modes, only the last log file needs to be writable.
         let perm = if self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption || is_last_one {
@@ -574,6 +581,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             handle: Arc::new(self.file_system.open(&file_name.path, perm)?),
             format: LogFileFormat::default(),
             path_id: file_name.path_id,
+            reserved: is_reserved,
         })
     }
 }

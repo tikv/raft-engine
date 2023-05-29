@@ -20,7 +20,7 @@ use crate::pipe_log::{
 };
 use crate::{perf_context, Error, Result};
 
-use super::format::{build_recycled_file_name, FileNameExt, LogFileFormat};
+use super::format::{build_reserved_file_name, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
 use super::log_file::{build_file_writer, LogFileWriter};
 
@@ -39,12 +39,53 @@ pub struct File<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub format: LogFileFormat,
     pub path_id: PathId,
+    /// Flag remarking whether it is a reserved file or not.
+    pub reserved: bool,
 }
 
 struct WritableFile<F: FileSystem> {
     pub seq: FileSeq,
     pub writer: LogFileWriter<F>,
     pub format: LogFileFormat,
+}
+
+/// Collection of recycled files, consists of two parts:
+/// - reserved files when enabling `prefill-for-recycle`.
+/// - stale files when purging obsolete files.
+struct RecycledFilesCollection<F: FileSystem> {
+    /// Reserved files if enable `prefill-for-recycle`.
+    reserved_files: VecDeque<File<F>>,
+    /// Stale files which could be recycled.
+    stale_files: VecDeque<File<F>>,
+}
+
+impl<F: FileSystem> RecycledFilesCollection<F> {
+    fn new(reserved_files: Vec<File<F>>) -> Self {
+        Self {
+            reserved_files: reserved_files.into(),
+            stale_files: VecDeque::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.reserved_files.len() + self.stale_files.len()
+    }
+
+    /// Return the droppable files (`stale_files`).
+    fn droppable_files(&self) -> &VecDeque<File<F>> {
+        &self.stale_files
+    }
+
+    fn pop_front(&mut self) -> Option<File<F>> {
+        if !self.reserved_files.is_empty() {
+            return self.reserved_files.pop_front();
+        }
+        self.stale_files.pop_front()
+    }
+
+    fn append(&mut self, files: &mut VecDeque<File<F>>) {
+        self.stale_files.append(files);
+    }
 }
 
 /// A file-based log storage that arranges files as one single queue.
@@ -58,7 +99,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
 
     capacity: usize,
     active_files: CachePadded<RwLock<VecDeque<File<F>>>>,
-    recycled_files: CachePadded<RwLock<VecDeque<File<F>>>>,
+    recycled_files: CachePadded<RwLock<RecycledFilesCollection<F>>>,
 
     /// The log file opened for write.
     ///
@@ -73,6 +114,19 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = writable_file.writer.close() {
             error!("error while closing the active writer: {e}");
         }
+        // Release the unnecessary disk space occupied by stale files. It also reduces
+        // recovery time.
+        let files = self.recycled_files.read();
+        for f in files.droppable_files() {
+            let file_id = FileId {
+                queue: self.queue,
+                seq: f.seq,
+            };
+            let path = file_id.build_file_path(&self.paths[f.path_id]);
+            if let Err(e) = self.file_system.delete(&path) {
+                error!("error while deleting stale file: {path:?}, err_msg: {e}");
+            }
+        }
     }
 }
 
@@ -85,7 +139,7 @@ impl<F: FileSystem> SinglePipe<F> {
         listeners: Vec<Arc<dyn EventListener>>,
         queue: LogQueue,
         mut active_files: Vec<File<F>>,
-        recycled_files: Vec<File<F>>,
+        reserved_files: Vec<File<F>>,
     ) -> Result<Self> {
         let alignment = || {
             fail_point!("file_pipe_log::open::force_set_alignment", |_| { 16 });
@@ -104,6 +158,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 handle: file_system.create(&path)?.into(),
                 format: default_format,
                 path_id,
+                reserved: false,
             });
         }
         let f = active_files.last().unwrap();
@@ -120,7 +175,7 @@ impl<F: FileSystem> SinglePipe<F> {
             format: f.format,
         };
 
-        let (len, recycled_len) = (active_files.len(), recycled_files.len());
+        let (len, recycled_len) = (active_files.len(), reserved_files.len());
         for f in active_files.iter() {
             for listener in &listeners {
                 listener.post_new_log_file(FileId { queue, seq: f.seq });
@@ -140,7 +195,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 0
             },
             active_files: RwLock::new(active_files.into()).into(),
-            recycled_files: RwLock::new(recycled_files.into()).into(),
+            recycled_files: RwLock::new(RecycledFilesCollection::new(reserved_files)).into(),
             writable_file: Mutex::new(writable_file).into(),
         };
         pipe.flush_metrics(len);
@@ -168,7 +223,15 @@ impl<F: FileSystem> SinglePipe<F> {
             (recycled_files.pop_front(), recycled_files.len())
         };
         if let Some(f) = recycle_file {
-            let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
+            let src_path = if f.reserved {
+                self.paths[f.path_id].join(build_reserved_file_name(f.seq))
+            } else {
+                let stale_file_id = FileId {
+                    seq: f.seq,
+                    queue: self.queue,
+                };
+                stale_file_id.build_file_path(&self.paths[f.path_id])
+            };
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
                 error!("error while trying to reuse recycled file, err: {e}");
@@ -227,6 +290,7 @@ impl<F: FileSystem> SinglePipe<F> {
             handle: handle.into(),
             format: self.default_format,
             path_id,
+            reserved: false,
         };
         let mut new_file = WritableFile {
             seq: new_seq,
@@ -398,7 +462,7 @@ impl<F: FileSystem> SinglePipe<F> {
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
-        let (len, purged_files) = {
+        let (len, mut purged_files) = {
             let mut files = self.active_files.write();
             if !(files[0].seq..files[0].seq + files.len() as u64).contains(&file_seq) {
                 return Err(box_err!("FileSeq out of range, cannot be purged"));
@@ -411,47 +475,35 @@ impl<F: FileSystem> SinglePipe<F> {
         let purged_len = purged_files.len();
         if purged_len > 0 {
             let remains_capacity = self.capacity.saturating_sub(len);
-            let (recycled_start, mut recycled_len) = {
-                let files = self.recycled_files.read();
-                files
-                    .front()
-                    .map_or_else(|| (DEFAULT_FIRST_FILE_SEQ, 0), |f| (f.seq, files.len()))
-            };
-            let mut new_recycled = VecDeque::new();
-            // The newly purged files from `self.active_files` should be renamed
-            // to recycled files with LOG_APPEND_RESERVED_SUFFIX suffix, to reduce the
-            // unnecessary recovery timecost when restarting.
-            for f in purged_files {
+            let mut recycled_len = self.recycled_files.read().len();
+            let mut final_purged_idx = 0_usize;
+            for (i, f) in purged_files.iter().rev().enumerate() {
+                // Recycle purged files whose version meets the requirement.
+                // - [1] The files with format_version `V1` cannot be chosen as recycle
+                // candidates.
+                // - [2] Capacity of recycled files should be under the limit.
+                if !f.format.version.has_log_signing() || recycled_len >= remains_capacity {
+                    final_purged_idx = purged_len - i;
+                    break;
+                }
+                recycled_len += 1;
+            }
+            // Remove purged files which are out of capacity and files whose version is
+            // marked not recycled.
+            for f in purged_files
+                .drain(..final_purged_idx)
+                .collect::<VecDeque<File<F>>>()
+            {
                 let file_id = FileId {
                     seq: f.seq,
                     queue: self.queue,
                 };
                 let path = file_id.build_file_path(&self.paths[f.path_id]);
-                // Recycle purged files whose version meets the requirement.
-                if f.format.version.has_log_signing() && recycled_len < remains_capacity {
-                    let recycled_seq = recycled_start + recycled_len as u64;
-                    let dst_path =
-                        self.paths[f.path_id].join(build_recycled_file_name(recycled_seq));
-                    match self.file_system.reuse_and_open(&path, &dst_path) {
-                        Ok(handle) => {
-                            new_recycled.push_back(File {
-                                seq: recycled_seq,
-                                handle: handle.into(),
-                                path_id: f.path_id,
-                                format: f.format,
-                            });
-                            recycled_len += 1;
-                            continue;
-                        }
-                        Err(e) => error!("failed to reuse purged file {e:?}"),
-                    }
-                }
-                // Remove purged files which are out of capacity and files whose version is
-                // marked not recycled.
+
                 self.file_system.delete(&path)?;
             }
             debug_assert!(recycled_len <= remains_capacity);
-            self.recycled_files.write().append(&mut new_recycled);
+            self.recycled_files.write().append(&mut purged_files);
             self.flush_recycle_metrics(recycled_len);
         }
         self.flush_metrics(len);
