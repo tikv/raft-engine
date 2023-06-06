@@ -358,7 +358,7 @@ impl Summary {
 
     fn print(&self, name: &str) {
         if !self.thread_qps.is_empty() {
-            println!("[{}]", name);
+            println!("[{name}]");
             println!(
                 "Throughput(QPS) = {:.02}",
                 self.thread_qps.iter().fold(0.0, |sum, qps| { sum + qps })
@@ -380,8 +380,8 @@ impl Summary {
                 let stddev = statistical::standard_deviation(&self.thread_qps, None);
                 stddev / median
             } else {
-                let first = *self.thread_qps.first().unwrap() as f64;
-                let last = *self.thread_qps.last().unwrap() as f64;
+                let first = *self.thread_qps.first().unwrap();
+                let last = *self.thread_qps.last().unwrap();
                 f64::abs(first - last) / (first + last)
             };
             println!("Fairness = {:.01}%", 100.0 - fairness * 100.0);
@@ -396,7 +396,7 @@ fn spawn_write(
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<ThreadSummary> {
     ThreadBuilder::new()
-        .name(format!("stress-write-thread-{}", index))
+        .name(format!("stress-write-thread-{index}"))
         .spawn(move || {
             let mut summary = ThreadSummary::new();
             let mut log_batch = WriteBatch::with_capacity(4 * 1024);
@@ -444,7 +444,7 @@ fn spawn_write(
                     wait_til(&mut start, last + i);
                 }
                 if let Err(e) = engine.write(&mut log_batch, !args.write_without_sync) {
-                    println!("write error {:?} in thread {}", e, index);
+                    println!("write error {e:?} in thread {index}");
                 }
                 let end = Instant::now();
                 summary.record(start, end);
@@ -461,7 +461,7 @@ fn spawn_read(
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<ThreadSummary> {
     ThreadBuilder::new()
-        .name(format!("stress-read-thread-{}", index))
+        .name(format!("stress-read-thread-{index}"))
         .spawn(move || {
             let mut summary = ThreadSummary::new();
             let min_interval = if args.read_ops_per_thread > 0 {
@@ -482,7 +482,7 @@ fn spawn_read(
                 // Read newest entry to avoid conflicting with compact
                 if let Some(last) = engine.last_index(rid) {
                     if let Err(e) = engine.get_entry::<MessageExtTyped>(rid, last) {
-                        println!("read error {:?} in thread {}", e, index);
+                        println!("read error {e:?} in thread {index}");
                     }
                     let end = Instant::now();
                     summary.record(start, end);
@@ -500,7 +500,7 @@ fn spawn_purge(
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     ThreadBuilder::new()
-        .name(format!("stress-purge-thread-{}", index))
+        .name(format!("stress-purge-thread-{index}"))
         .spawn(move || {
             while !shutdown.load(Ordering::Relaxed) {
                 sleep(args.purge_interval);
@@ -515,7 +515,7 @@ fn spawn_purge(
                             engine.compact_to(region, compact_to);
                         }
                     }
-                    Err(e) => println!("purge error {:?} in thread {}", e, index),
+                    Err(e) => println!("purge error {e:?} in thread {index}"),
                 }
             }
         })

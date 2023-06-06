@@ -25,6 +25,8 @@ use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{perf_context, Error, GlobalStats, Result};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
+/// Max times for `write`.
+const MAX_WRITE_ATTEMPT: u64 = 2;
 
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
@@ -142,7 +144,14 @@ where
         let start = Instant::now();
         let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         debug_assert!(len > 0);
-        let block_handle = {
+
+        let mut attempt_count = 0_u64;
+        let block_handle = loop {
+            // Max retry count is limited to `WRITE_MAX_RETRY_TIMES`, that is, 2.
+            // If the first `append` retry because of NOSPC error, the next `append`
+            // should success, unless there exists several abnormal cases in the IO device.
+            // In that case, `Engine::write` must return `Err`.
+            attempt_count += 1;
             let mut writer = Writer::new(log_batch, sync);
             // Snapshot and clear the current perf context temporarily, so the write group
             // leader will collect the perf context diff later.
@@ -171,14 +180,34 @@ where
                 }
             }
             let entered_time = writer.entered_time.unwrap();
-            ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
-                .observe(entered_time.saturating_duration_since(start).as_secs_f64());
             perf_context.write_wait_duration +=
                 entered_time.saturating_duration_since(before_enter);
             debug_assert_eq!(writer.perf_context_diff.write_wait_duration, Duration::ZERO);
             perf_context += &writer.perf_context_diff;
             set_perf_context(perf_context);
-            writer.finish()?
+            // Retry if `writer.finish()` returns a special 'Error::TryAgain', remarking
+            // that there still exists free space for this `LogBatch`.
+            match writer.finish() {
+                Ok(handle) => {
+                    ENGINE_WRITE_PREPROCESS_DURATION_HISTOGRAM
+                        .observe(entered_time.saturating_duration_since(start).as_secs_f64());
+                    break handle;
+                }
+                Err(Error::TryAgain(e)) => {
+                    if attempt_count >= MAX_WRITE_ATTEMPT {
+                        // A special err, we will retry this LogBatch `append` by appending
+                        // this writer to the next write group, and the current write leader
+                        // will not hang on this write and will return timely.
+                        return Err(Error::TryAgain(format!(
+                            "Failed to write logbatch, exceed MAX_WRITE_ATTEMPT: ({MAX_WRITE_ATTEMPT}), err: {e}",
+                        )));
+                    }
+                    info!("got err: {e}, try to write this LogBatch again");
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         };
         let mut now = Instant::now();
         log_batch.finish_write(block_handle);
@@ -338,7 +367,7 @@ where
         let mut log_batch = LogBatch::default();
         log_batch.add_command(region_id, Command::Compact { index });
         if let Err(e) = self.write(&mut log_batch, false) {
-            error!("Failed to write Compact command: {}", e);
+            error!("Failed to write Compact command: {e}");
         }
 
         self.first_index(region_id).unwrap_or(index) - first_index
@@ -592,9 +621,9 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::env::ObfuscatedFileSystem;
+    use crate::env::{ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
@@ -606,7 +635,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::path::PathBuf;
 
-    type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
+    pub(crate) type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
     impl<F: FileSystem> RaftLogEngine<F> {
         fn append(&self, rid: u64, start_index: u64, end_index: u64, data: Option<&[u8]>) {
             let entries = generate_entries(start_index, end_index, data);
@@ -664,7 +693,7 @@ mod tests {
                 &mut entries,
             )
             .unwrap();
-            assert_eq!(entries.first().unwrap().index, start, "{}", rid);
+            assert_eq!(entries.first().unwrap().index, start, "{rid}");
             assert_eq!(entries.last().unwrap().index + 1, end);
             assert_eq!(
                 entries.last().unwrap().index,
@@ -768,8 +797,7 @@ mod tests {
             for rewrite_step in 1..=steps.len() {
                 for exit_purge in [None, Some(1), Some(2)] {
                     let _guard = PanicGuard::with_prompt(format!(
-                        "case: [{:?}, {}, {:?}]",
-                        steps, rewrite_step, exit_purge
+                        "case: [{steps:?}, {rewrite_step}, {exit_purge:?}]",
                     ));
                     let dir = tempfile::Builder::new()
                         .prefix("test_clean_raft_group")
@@ -831,10 +859,10 @@ mod tests {
     #[test]
     fn test_key_value_scan() {
         fn key(i: u64) -> Vec<u8> {
-            format!("k{}", i).as_bytes().to_vec()
+            format!("k{i}").as_bytes().to_vec()
         }
         fn value(i: u64) -> Vec<u8> {
-            format!("v{}", i).as_bytes().to_vec()
+            format!("v{i}").as_bytes().to_vec()
         }
         fn rich_value(i: u64) -> RaftLocalState {
             RaftLocalState {
@@ -2001,8 +2029,8 @@ mod tests {
             Ok(handle)
         }
 
-        fn open<P: AsRef<Path>>(&self, path: P) -> std::io::Result<Self::Handle> {
-            let handle = self.inner.open(&path)?;
+        fn open<P: AsRef<Path>>(&self, path: P, perm: Permission) -> std::io::Result<Self::Handle> {
+            let handle = self.inner.open(&path, perm)?;
             self.update_metadata(path.as_ref(), false);
             Ok(handle)
         }
@@ -2119,11 +2147,11 @@ mod tests {
             .prefix("test_managed_file_reuse")
             .tempdir()
             .unwrap();
-        let entry_data = vec![b'x'; 128];
+        let entry_data = vec![b'x'; 16];
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
-            purge_threshold: ReadableSize(100),
+            purge_threshold: ReadableSize(50),
             format_version: Version::V2,
             enable_log_recycle: true,
             prefill_for_recycle: true,
@@ -2145,7 +2173,7 @@ mod tests {
         // Recycled files have been reused.
         let recycled_start_1 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
         assert!(recycled_start < recycled_start_1);
-        // Reuse these files.
+        // Reuse more.
         for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -2154,7 +2182,7 @@ mod tests {
 
         let file_count = fs.inner.file_count();
         let start_1 = *fs.append_metadata.lock().unwrap().first().unwrap();
-        let _engine = engine.reopen();
+        let engine = engine.reopen();
         // Recycled files are reserved, but stale append files are deleted. After
         // prefill, the count should stay the same.
         assert_eq!(file_count, fs.inner.file_count());
@@ -2162,6 +2190,21 @@ mod tests {
         assert!(start_1 < start_2);
         let recycled_start_3 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
         assert_eq!(recycled_start_2, recycled_start_3);
+
+        // Reuse all of recycled files.
+        for rid in 1..=50 {
+            engine.append(rid, 1, 11, Some(&entry_data));
+        }
+        assert!(fs.recycled_metadata.lock().unwrap().is_empty());
+        for rid in 1..=50 {
+            engine.clean(rid);
+        }
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        // Then reuse a retired append file.
+        engine.append(1, 1, 11, Some(&entry_data));
+        assert_eq!(engine.file_count(Some(LogQueue::Append)), 2);
+        let start_3 = *fs.append_metadata.lock().unwrap().first().unwrap();
+        assert!(start_2 < start_3);
     }
 
     #[test]
@@ -2550,5 +2593,135 @@ mod tests {
         let engine = engine.reopen();
         // Replay of rewrite filtered.
         assert!(engine.raft_groups().is_empty());
+    }
+
+    #[test]
+    fn test_start_engine_with_multi_dirs() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_default")
+            .tempdir()
+            .unwrap();
+        let spill_dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_multi_dirs_spill")
+            .tempdir()
+            .unwrap();
+        fn number_of_files(p: &Path) -> usize {
+            let mut r = 0;
+            std::fs::read_dir(p).unwrap().for_each(|e| {
+                let fname = e.unwrap().path().file_name().unwrap();
+                if fname.to_str().unwrap().starts_with("000") {
+                    r += 1;
+                }
+            });
+            r
+        }
+        let file_system = Arc::new(DeleteMonitoredFileSystem::new());
+        let entry_data = vec![b'x'; 512];
+
+        // Preparations for multi-dirs.
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            spill_dir: Some(spill_dir.path().to_str().unwrap().to_owned()),
+            enable_log_recycle: false,
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        {
+            // Step 1: write data into the main directory.
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            for rid in 1..=10 {
+                engine.append(rid, 1, 10, Some(&entry_data));
+            }
+            drop(engine);
+
+            // Step 2: select several log files and move them into the `spill_dir`
+            // directory.
+            let mut moved = 0;
+            for e in std::fs::read_dir(dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    file_system
+                        .rename(&p, &spill_dir.path().join(file_name))
+                        .unwrap();
+                    moved += 1;
+                    if moved == 4 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Restart the engine with recycle and prefill. Test reusing files from both
+        // dirs.
+        let cfg_2 = Config {
+            enable_log_recycle: true,
+            prefill_for_recycle: true,
+            purge_threshold: ReadableSize(40),
+            ..cfg.clone()
+        };
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg_2.clone(), file_system.clone()).unwrap();
+        assert!(number_of_files(spill_dir.path()) > 0);
+        for rid in 1..=10 {
+            assert_eq!(engine.first_index(rid).unwrap(), 1);
+            engine.clean(rid);
+        }
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        let file_count = file_system.inner.file_count();
+        assert_eq!(
+            number_of_files(spill_dir.path()) + number_of_files(dir.path()),
+            file_count
+        );
+        assert!(file_count > engine.file_count(None));
+        // Append data, recycled files are reused.
+        for rid in 1..=30 {
+            engine.append(rid, 20, 30, Some(&entry_data));
+        }
+        // No new file is created.
+        assert_eq!(file_count, file_system.inner.file_count());
+        assert!(number_of_files(spill_dir.path()) > 0);
+
+        let cfg_3 = Config {
+            enable_log_recycle: false,
+            purge_threshold: ReadableSize(40),
+            ..cfg
+        };
+        drop(engine);
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg_3.clone(), file_system.clone()).unwrap();
+        assert!(number_of_files(spill_dir.path()) > 0);
+        for rid in 1..=10 {
+            assert_eq!(engine.first_index(rid).unwrap(), 20);
+        }
+
+        // abnormal case - duplicate FileSeq among different dirs.
+        {
+            // Prerequisite: choose several files and duplicate them to main dir.
+            let mut file_count = 0;
+            for e in std::fs::read_dir(spill_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    if file_count % 2 == 0 {
+                        std::fs::copy(&p, dir.path().join(file_name)).unwrap();
+                    }
+                    file_count += 1;
+                }
+            }
+        }
+        let start = engine.file_span(LogQueue::Append).0;
+        let engine = engine.reopen();
+        // Duplicate log files will be skipped and cleared.
+        assert!(engine.file_span(LogQueue::Append).0 > start);
     }
 }

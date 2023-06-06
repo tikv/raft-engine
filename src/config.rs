@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use log::warn;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::pipe_log::Version;
@@ -26,10 +26,19 @@ pub enum RecoveryMode {
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
-    /// Directory to store log files. Will create on startup if not exists.
+    /// Main directory to store log files. Will create on startup if not exists.
     ///
     /// Default: ""
     pub dir: String,
+
+    /// Auxiliary directory to store log files. Will create on startup if
+    /// set but not exists.
+    ///
+    /// Newly logs will be put into this dir when the main `dir` is full
+    /// and no spare space for new logs.
+    ///
+    /// Default: None
+    pub spill_dir: Option<String>,
 
     /// How to deal with file corruption during recovery.
     ///
@@ -99,6 +108,13 @@ pub struct Config {
     ///
     /// Default: false
     pub prefill_for_recycle: bool,
+
+    /// Maximum capacity for preparing log files for recycling when start.
+    /// If not `None`, its size is equal to `purge-threshold`.
+    /// Only available for `prefill-for-recycle` is true.
+    ///
+    /// Default: None
+    pub prefill_limit: Option<ReadableSize>,
 }
 
 impl Default for Config {
@@ -106,6 +122,7 @@ impl Default for Config {
         #[allow(unused_mut)]
         let mut cfg = Config {
             dir: "".to_owned(),
+            spill_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
@@ -119,6 +136,7 @@ impl Default for Config {
             memory_limit: None,
             enable_log_recycle: false,
             prefill_for_recycle: false,
+            prefill_limit: None,
         };
         // Test-specific configurations.
         #[cfg(test)]
@@ -147,15 +165,15 @@ impl Config {
         let min_recovery_read_block_size = ReadableSize(MIN_RECOVERY_READ_BLOCK_SIZE as u64);
         if self.recovery_read_block_size < min_recovery_read_block_size {
             warn!(
-                "recovery-read-block-size ({}) is too small, setting it to {}",
-                self.recovery_read_block_size, min_recovery_read_block_size
+                "recovery-read-block-size ({}) is too small, setting it to {min_recovery_read_block_size}",
+                self.recovery_read_block_size
             );
             self.recovery_read_block_size = min_recovery_read_block_size;
         }
         if self.recovery_threads < MIN_RECOVERY_THREADS {
             warn!(
-                "recovery-threads ({}) is too small, setting it to {}",
-                self.recovery_threads, MIN_RECOVERY_THREADS
+                "recovery-threads ({}) is too small, setting it to {MIN_RECOVERY_THREADS}",
+                self.recovery_threads
             );
             self.recovery_threads = MIN_RECOVERY_THREADS;
         }
@@ -169,6 +187,14 @@ impl Config {
             return Err(box_err!(
                 "prefill is not allowed when log recycle is disabled"
             ));
+        }
+        if !self.prefill_for_recycle && self.prefill_limit.is_some() {
+            warn!("prefill-limit will be ignored when prefill is disabled");
+            self.prefill_limit = None;
+        }
+        if self.prefill_for_recycle && self.prefill_limit.is_none() {
+            info!("prefill-limit will be calibrated to purge-threshold");
+            self.prefill_limit = Some(self.purge_threshold);
         }
         #[cfg(not(feature = "swap"))]
         if self.memory_limit.is_some() {
@@ -197,6 +223,25 @@ impl Config {
             0
         }
     }
+
+    /// Returns the capacity for preparing log files for recycling when start.
+    pub(crate) fn prefill_capacity(&self) -> usize {
+        // Attention please, log files with Version::V1 could not be recycled, so it's
+        // useless for prefill.
+        if !self.enable_log_recycle || !self.format_version.has_log_signing() {
+            return 0;
+        }
+        let prefill_limit = self.prefill_limit.unwrap_or(ReadableSize(0)).0;
+        if self.prefill_for_recycle && prefill_limit >= self.target_file_size.0 {
+            // Keep same with the maximum setting of `recycle_capacity`.
+            std::cmp::min(
+                (prefill_limit / self.target_file_size.0) as usize + 2,
+                u32::MAX as usize,
+            )
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,12 +254,14 @@ mod tests {
         let dump = toml::to_string_pretty(&value).unwrap();
         let load = toml::from_str(&dump).unwrap();
         assert_eq!(value, load);
+        assert!(load.spill_dir.is_none());
     }
 
     #[test]
     fn test_custom() {
         let custom = r#"
             dir = "custom_dir"
+            spill-dir = "custom_spill_dir"
             recovery-mode = "tolerate-tail-corruption"
             bytes-per-sync = "2KB"
             target-file-size = "1MB"
@@ -225,6 +272,7 @@ mod tests {
         "#;
         let mut load: Config = toml::from_str(custom).unwrap();
         assert_eq!(load.dir, "custom_dir");
+        assert_eq!(load.spill_dir, Some("custom_spill_dir".to_owned()));
         assert_eq!(load.recovery_mode, RecoveryMode::TolerateTailCorruption);
         assert_eq!(load.bytes_per_sync, Some(ReadableSize::kb(2)));
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
@@ -290,5 +338,25 @@ mod tests {
         assert!(toml::to_string(&load)
             .unwrap()
             .contains("tolerate-corrupted-tail-records"));
+    }
+
+    #[test]
+    fn test_prefill_for_recycle() {
+        let default_prefill_v1 = r#"
+            enable-log-recycle = true
+            prefill-for-recycle = true
+        "#;
+        let mut cfg_load: Config = toml::from_str(default_prefill_v1).unwrap();
+        assert!(cfg_load.sanitize().is_ok());
+        assert_eq!(cfg_load.prefill_limit.unwrap(), cfg_load.purge_threshold);
+
+        let default_prefill_v2 = r#"
+            enable-log-recycle = true
+            prefill-for-recycle = false
+            prefill-limit = "20GB"
+        "#;
+        let mut cfg_load: Config = toml::from_str(default_prefill_v2).unwrap();
+        assert!(cfg_load.sanitize().is_ok());
+        assert!(cfg_load.prefill_limit.is_none());
     }
 }

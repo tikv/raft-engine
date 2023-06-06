@@ -19,6 +19,8 @@ pub enum Error {
     Codec(#[from] CodecError),
     #[error("Protobuf Error: {0}")]
     Protobuf(#[from] protobuf::ProtobufError),
+    #[error("TryAgain Error: {0}")]
+    TryAgain(String),
     #[error("Entry Compacted")]
     EntryCompacted,
     #[error("Entry Not Found")]
@@ -30,3 +32,10 @@ pub enum Error {
 }
 
 pub type Result<T> = ::std::result::Result<T, Error>;
+
+/// Check whether the given error is a nospace error.
+pub(crate) fn is_no_space_err(e: &IoError) -> bool {
+    // TODO: make the following judgement more elegant when the error type
+    // `ErrorKind::StorageFull` is stable.
+    format!("{e}").contains("nospace")
+}

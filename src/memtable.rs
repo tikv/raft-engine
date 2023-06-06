@@ -1237,12 +1237,20 @@ impl<A: AllocatorTrait> MemTableRecoverContext<A> {
                 }
                 // (begin, begin), (middle, begin)
                 (_, AtomicGroupStatus::Begin) => {
-                    warn!("discard atomic group: {group:?}");
+                    warn!(
+                        "discard old atomic group, status: {:?}, raft_group_id: {:?}",
+                        group.status,
+                        group.items.first().map(|item| item.raft_group_id)
+                    );
                     *group = new_group;
                 }
                 // (end, middle), (end, end)
                 (AtomicGroupStatus::End, _) => {
-                    warn!("discard atomic group: {new_group:?}");
+                    warn!(
+                        "discard new atomic group, status: {:?}, raft_group_id: {:?}",
+                        new_group.status,
+                        new_group.items.first().map(|item| item.raft_group_id)
+                    );
                 }
                 (AtomicGroupStatus::Begin, AtomicGroupStatus::Middle)
                 | (AtomicGroupStatus::Middle, AtomicGroupStatus::Middle) => {
@@ -1301,8 +1309,8 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
                         if is_group.is_none() {
                             is_group = Some(g);
                         } else {
-                            let msg = format!("skipped an atomic group: {:?}", g);
-                            error!("{}", msg);
+                            let msg = format!("skipped an atomic group: {g:?}");
+                            error!("{msg}");
                             debug_assert!(false, "{}", msg);
                         }
                         return false;
@@ -1812,10 +1820,10 @@ mod tests {
     #[test]
     fn test_memtable_kv_operations() {
         fn key(i: u64) -> Vec<u8> {
-            format!("k{}", i).as_bytes().to_vec()
+            format!("k{i}").as_bytes().to_vec()
         }
         fn value(i: u64) -> Vec<u8> {
-            format!("v{}", i).as_bytes().to_vec()
+            format!("v{i}").as_bytes().to_vec()
         }
 
         let region_id = 8;

@@ -107,11 +107,11 @@ impl ControlOpt {
                 for item in it {
                     if let Ok(v) = item {
                         if raft_groups.is_empty() || raft_groups.contains(&v.raft_group_id) {
-                            println!("{:?}", v)
+                            println!("{v:?}")
                         }
                     } else {
                         // output error message
-                        println!("{:?}", item)
+                        println!("{item:?}")
                     }
                 }
             }
@@ -134,7 +134,7 @@ impl ControlOpt {
                     println!("All data is Ok")
                 } else {
                     println!("Corrupted info are as follows:\nraft_group_id, last_intact_index\n");
-                    r.iter().for_each(|(x, y)| println!("{:?}, {:?}", x, y))
+                    r.iter().for_each(|(x, y)| println!("{x:?}, {y:?}"))
                 }
             }
             Cmd::TryPurge { path } => {
@@ -159,6 +159,6 @@ pub fn run_command<F: FileSystem>(mut args: Vec<String>, fs: Arc<F>) {
     args.insert(0, "ctl".to_owned());
     let opts = ControlOpt::parse_from(args);
     if let Err(e) = opts.validate_and_execute_with_file_system(fs) {
-        println!("{:?}", e);
+        println!("{e:?}");
     }
 }
