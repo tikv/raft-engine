@@ -2608,8 +2608,14 @@ pub(crate) mod tests {
         fn number_of_files(p: &Path) -> usize {
             let mut r = 0;
             std::fs::read_dir(p).unwrap().for_each(|e| {
-                let fname = e.unwrap().path().file_name().unwrap();
-                if fname.to_str().unwrap().starts_with("000") {
+                if e.unwrap()
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("000")
+                {
                     r += 1;
                 }
             });
@@ -2665,8 +2671,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(40),
             ..cfg.clone()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg_2.clone(), file_system.clone()).unwrap();
+        let engine = RaftLogEngine::open_with_file_system(cfg_2, file_system.clone()).unwrap();
         assert!(number_of_files(spill_dir.path()) > 0);
         for rid in 1..=10 {
             assert_eq!(engine.first_index(rid).unwrap(), 1);
@@ -2693,8 +2698,7 @@ pub(crate) mod tests {
             ..cfg
         };
         drop(engine);
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg_3.clone(), file_system.clone()).unwrap();
+        let engine = RaftLogEngine::open_with_file_system(cfg_3, file_system).unwrap();
         assert!(number_of_files(spill_dir.path()) > 0);
         for rid in 1..=10 {
             assert_eq!(engine.first_index(rid).unwrap(), 20);
