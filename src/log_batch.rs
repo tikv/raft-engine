@@ -891,10 +891,9 @@ impl LogBatch {
             )));
         }
 
-        let len_and_type = codec::decode_u64(buf)? as usize;
-        let compression_type = CompressionType::from_u8(len_and_type as u8)?;
-        let len = len_and_type >> 8;
+        let len = codec::decode_u64(buf)? as usize;
         let offset = codec::decode_u64(buf)? as usize;
+        let compression_type = CompressionType::from_u8(len as u8)?;
         if offset > len {
             return Err(Error::Corruption(
                 "Log item offset exceeds log batch length".to_owned(),
@@ -904,7 +903,7 @@ impl LogBatch {
                 "Log item offset is smaller than log batch header length".to_owned(),
             ));
         }
-        Ok((offset, compression_type, len))
+        Ok((offset, compression_type, len >> 8))
     }
 
     /// Unfolds bytes of multiple user entries from an encoded block.
