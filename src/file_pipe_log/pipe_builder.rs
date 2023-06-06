@@ -229,6 +229,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             handle,
                             format: LogFileFormat::default(),
                             path_id: DEFAULT_PATH_ID,
+                            recycled: is_recycled_file,
                         });
                     }
                 }
@@ -471,6 +472,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     handle,
                     format: LogFileFormat::default(),
                     path_id: DEFAULT_PATH_ID,
+                    recycled: true,
                 });
             }
             info!(

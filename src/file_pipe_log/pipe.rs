@@ -37,6 +37,7 @@ pub struct File<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub format: LogFileFormat,
     pub path_id: PathId,
+    pub recycled: bool,
 }
 
 struct WritableFile<F: FileSystem> {
@@ -56,6 +57,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
 
     capacity: usize,
     active_files: CachePadded<RwLock<VecDeque<File<F>>>>,
+    /// This contains both recycled files and files retired from `active_files`.
     recycled_files: CachePadded<RwLock<VecDeque<File<F>>>>,
 
     /// The log file opened for write.
@@ -70,6 +72,16 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         let mut writable_file = self.writable_file.lock();
         if let Err(e) = writable_file.writer.close() {
             error!("error while closing the active writer: {}", e);
+        }
+        while let Some(f) = self.recycled_files.write().pop_back() {
+            if f.recycled {
+                break;
+            }
+            let file_id = FileId::new(self.queue, f.seq);
+            let path = file_id.build_file_path(&self.paths[f.path_id]);
+            if let Err(e) = self.file_system.delete(&path) {
+                error!("error while deleting recycled file before shutdown: {}", e);
+            }
         }
     }
 }
@@ -102,6 +114,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 handle: file_system.create(&path)?.into(),
                 format: default_format,
                 path_id,
+                recycled: false,
             });
         }
         let f = active_files.last().unwrap();
@@ -160,7 +173,12 @@ impl<F: FileSystem> SinglePipe<F> {
             queue: self.queue,
         };
         if let Some(f) = self.recycled_files.write().pop_front() {
-            let src_path = self.paths[f.path_id].join(build_recycled_file_name(f.seq));
+            let fname = if f.recycled {
+                build_recycled_file_name(f.seq)
+            } else {
+                FileId::new(self.queue, f.seq).build_file_name()
+            };
+            let src_path = self.paths[f.path_id].join(fname);
             let dst_path = new_file_id.build_file_path(&self.paths[f.path_id]);
             if let Err(e) = self.file_system.reuse(&src_path, &dst_path) {
                 error!("error while trying to reuse recycled file, err: {}", e);
@@ -204,6 +222,7 @@ impl<F: FileSystem> SinglePipe<F> {
             handle: handle.into(),
             format: self.default_format,
             path_id,
+            recycled: false,
         };
         let mut new_file = WritableFile {
             seq: new_seq,
@@ -360,7 +379,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let purged_len = purged_files.len();
         if purged_len > 0 {
             let remains_capacity = self.capacity.saturating_sub(len);
-            let (recycled_start, mut recycled_len) = {
+            let (_, mut recycled_len) = {
                 let files = self.recycled_files.read();
                 files
                     .front()
@@ -378,22 +397,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 let path = file_id.build_file_path(&self.paths[f.path_id]);
                 // Recycle purged files whose version meets the requirement.
                 if f.format.version.has_log_signing() && recycled_len < remains_capacity {
-                    let recycled_seq = recycled_start + recycled_len as u64;
-                    let dst_path =
-                        self.paths[f.path_id].join(build_recycled_file_name(recycled_seq));
-                    match self.file_system.reuse_and_open(&path, &dst_path) {
-                        Ok(handle) => {
-                            new_recycled.push_back(File {
-                                seq: recycled_seq,
-                                handle: handle.into(),
-                                path_id: f.path_id,
-                                format: f.format,
-                            });
-                            recycled_len += 1;
-                            continue;
-                        }
-                        Err(e) => error!("failed to reuse purged file {:?}", e),
-                    }
+                    new_recycled.push_back(f);
+                    recycled_len += 1;
+                    continue;
                 }
                 // Remove purged files which are out of capacity and files whose version is
                 // marked not recycled.

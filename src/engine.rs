@@ -2131,45 +2131,36 @@ mod tests {
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
-        let recycled_start = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+
+        let recycled_start = *fs.recycled_metadata.lock().unwrap().first().unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         for rid in 1..=10 {
             engine.clean(rid);
         }
-
-        let (start, end) = engine.file_span(LogQueue::Append);
         // Purge all files.
-        engine
-            .purge_manager
-            .must_rewrite_append_queue(Some(end - 1), None);
-        assert!(start < engine.file_span(LogQueue::Append).0);
+        engine.purge_manager.must_rewrite_append_queue(None, None);
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
         // Recycled files have been reused.
-        assert_eq!(
-            fs.append_metadata.lock().unwrap().iter().next().unwrap(),
-            &(start + 20)
-        );
-        let recycled_start_1 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let recycled_start_1 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
         assert!(recycled_start < recycled_start_1);
         // Reuse these files.
         for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
-        let start_1 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
-        assert!(start <= start_1);
-        let recycled_start_2 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let recycled_start_2 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
         assert!(recycled_start_1 < recycled_start_2);
 
-        // Reopen the engine and validate the recycled files are reserved
         let file_count = fs.inner.file_count();
-        let engine = engine.reopen();
+        let start_1 = *fs.append_metadata.lock().unwrap().first().unwrap();
+        let _engine = engine.reopen();
+        // Recycled files are reserved, but stale append files are deleted. After
+        // prefill, the count should stay the same.
         assert_eq!(file_count, fs.inner.file_count());
-        assert!(file_count > engine.file_count(None));
-        let start_2 = *fs.append_metadata.lock().unwrap().iter().next().unwrap();
-        assert_eq!(start_1, start_2);
-        let recycled_start_3 = *fs.recycled_metadata.lock().unwrap().iter().next().unwrap();
+        let start_2 = *fs.append_metadata.lock().unwrap().first().unwrap();
+        assert!(start_1 < start_2);
+        let recycled_start_3 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
         assert_eq!(recycled_start_2, recycled_start_3);
     }
 
