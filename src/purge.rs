@@ -295,7 +295,7 @@ where
             seq: min_seq,
         })?;
         if purged > 0 {
-            info!("purged {} expired log files for queue {:?}", purged, queue);
+            info!("purged {purged} expired log files for queue {queue:?}");
             for listener in &self.listeners {
                 listener.post_purge(FileId {
                     queue,

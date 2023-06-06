@@ -61,15 +61,15 @@ where
 
     let mut cfg = cfg.clone();
     cfg.sanitize()
-        .map_err(|e| format!("sanitize config: {}", e))?;
+        .map_err(|e| format!("sanitize config: {e}"))?;
 
     create_dir_all(&target)
-        .map_err(|e| format!("create_dir_all({}): {}", target.as_ref().display(), e))?;
+        .map_err(|e| format!("create_dir_all({}): {e}", target.as_ref().display()))?;
 
     let mut builder = FilePipeLogBuilder::new(cfg.clone(), fs, vec![]);
     builder
         .scan_and_sort(false)
-        .map_err(|e| format!("scan files: {}", e))?;
+        .map_err(|e| format!("scan files: {e}"))?;
 
     // Iterate all log files and rewrite files.
     let mut details = CopyDetails::default();
@@ -83,13 +83,13 @@ where
             let dst = FileId::new(queue, f.seq).build_file_path(&target);
             if i < count - 1 {
                 symlink(src, &dst)
-                    .map_err(|e| format!("symlink({}, {}): {}", src.display(), dst.display(), e))?;
+                    .map_err(|e| format!("symlink({}, {}): {e}", src.display(), dst.display()))?;
                 let path = dst.canonicalize().unwrap().to_str().unwrap().to_owned();
                 details.symlinked.push(path);
             } else {
                 copy(src, &dst)
                     .map(|_| ())
-                    .map_err(|e| format!("copy({}, {}): {}", src.display(), dst.display(), e))?;
+                    .map_err(|e| format!("copy({}, {}): {e}", src.display(), dst.display()))?;
                 let path = dst.canonicalize().unwrap().to_str().unwrap().to_owned();
                 details.copied.push(path);
             };

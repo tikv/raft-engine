@@ -8,6 +8,6 @@ fn main() {
     let opts: ControlOpt = ControlOpt::parse();
 
     if let Err(e) = opts.validate_and_execute() {
-        println!("{:?}", e);
+        println!("{e:?}");
     }
 }

@@ -264,10 +264,9 @@ impl RhaiFilterMachine {
                         if bak.exists() {
                             system.rename(&bak, &original).unwrap_or_else(|e| {
                                 panic!(
-                                    "Failed to recover original log file {} ({}),
+                                    "Failed to recover original log file {} ({e}),
                                 you should manually replace it with {}.bak.",
                                     f.build_file_name(),
-                                    e,
                                     f.build_file_name(),
                                 )
                             });
@@ -416,7 +415,7 @@ pub struct RhaiFilterMachineFactory {
 impl RhaiFilterMachineFactory {
     pub fn from_script(script: String) -> Self {
         let engine = Engine::new();
-        let ast = engine.compile(&script).unwrap();
+        let ast = engine.compile(script).unwrap();
         engine.run_ast_with_scope(&mut Scope::new(), &ast).unwrap();
         Self {
             engine: Arc::new(engine),

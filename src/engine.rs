@@ -202,11 +202,10 @@ where
                         // this writer to the next write group, and the current write leader
                         // will not hang on this write and will return timely.
                         return Err(Error::TryAgain(format!(
-                            "Failed to write logbatch, exceed MAX_WRITE_ATTEMPT: ({}), err: {}",
-                            MAX_WRITE_ATTEMPT, e
+                            "Failed to write logbatch, exceed MAX_WRITE_ATTEMPT: ({MAX_WRITE_ATTEMPT}), err: {e}",
                         )));
                     }
-                    info!("got err: {}, try to write this LogBatch again", e);
+                    info!("got err: {e}, try to write this LogBatch again");
                 }
                 Err(e) => {
                     return Err(e);
@@ -371,7 +370,7 @@ where
         let mut log_batch = LogBatch::default();
         log_batch.add_command(region_id, Command::Compact { index });
         if let Err(e) = self.write(&mut log_batch, false) {
-            error!("Failed to write Compact command: {}", e);
+            error!("Failed to write Compact command: {e}");
         }
 
         self.first_index(region_id).unwrap_or(index) - first_index
@@ -697,7 +696,7 @@ pub(crate) mod tests {
                 &mut entries,
             )
             .unwrap();
-            assert_eq!(entries.first().unwrap().index, start, "{}", rid);
+            assert_eq!(entries.first().unwrap().index, start, "{rid}");
             assert_eq!(entries.last().unwrap().index + 1, end);
             assert_eq!(
                 entries.last().unwrap().index,
@@ -801,8 +800,7 @@ pub(crate) mod tests {
             for rewrite_step in 1..=steps.len() {
                 for exit_purge in [None, Some(1), Some(2)] {
                     let _guard = PanicGuard::with_prompt(format!(
-                        "case: [{:?}, {}, {:?}]",
-                        steps, rewrite_step, exit_purge
+                        "case: [{steps:?}, {rewrite_step}, {exit_purge:?}]",
                     ));
                     let dir = tempfile::Builder::new()
                         .prefix("test_clean_raft_group")
@@ -864,10 +862,10 @@ pub(crate) mod tests {
     #[test]
     fn test_key_value_scan() {
         fn key(i: u64) -> Vec<u8> {
-            format!("k{}", i).as_bytes().to_vec()
+            format!("k{i}").as_bytes().to_vec()
         }
         fn value(i: u64) -> Vec<u8> {
-            format!("v{}", i).as_bytes().to_vec()
+            format!("v{i}").as_bytes().to_vec()
         }
         fn rich_value(i: u64) -> RaftLocalState {
             RaftLocalState {

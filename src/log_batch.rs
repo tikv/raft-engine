@@ -56,8 +56,7 @@ impl CompressionType {
             Ok(unsafe { mem::transmute(t) })
         } else {
             Err(Error::Corruption(format!(
-                "Unrecognized compression type: {}",
-                t
+                "Unrecognized compression type: {t}"
             )))
         }
     }
@@ -87,7 +86,7 @@ impl EntryIndexes {
             let entry_len = (t as u32) - *entries_size;
             let entry_index = EntryIndex {
                 index,
-                entry_offset: *entries_size as u32,
+                entry_offset: *entries_size,
                 entry_len,
                 ..Default::default()
             };
@@ -146,8 +145,7 @@ impl Command {
                 Ok(Command::Compact { index })
             }
             _ => Err(Error::Corruption(format!(
-                "Unrecognized command type: {}",
-                command_type
+                "Unrecognized command type: {command_type}"
             ))),
         }
     }
@@ -172,7 +170,7 @@ impl OpType {
         if t <= OpType::Del as u8 {
             Ok(unsafe { mem::transmute(t) })
         } else {
-            Err(Error::Corruption(format!("Unrecognized op type: {}", t)))
+            Err(Error::Corruption(format!("Unrecognized op type: {t}")))
         }
     }
 
@@ -319,8 +317,7 @@ impl LogItem {
             }
             _ => {
                 return Err(Error::Corruption(format!(
-                    "Unrecognized log item type: {}",
-                    item_type
+                    "Unrecognized log item type: {item_type}"
                 )));
             }
         };
@@ -858,7 +855,7 @@ impl LogBatch {
             handle.offset += LOG_BATCH_HEADER_LEN as u64;
             match self.buf_state {
                 BufState::Sealed(_, entries_len) => {
-                    debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
+                    debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len);
                     handle.len = entries_len;
                 }
                 _ => unreachable!(),
@@ -890,7 +887,7 @@ impl LogBatch {
                 BufState::Encoded(header_offset, _) => self.buf.len() - header_offset,
                 BufState::Sealed(header_offset, _) => self.buf.len() - header_offset,
                 s => {
-                    error!("querying incomplete log batch with state {:?}", s);
+                    error!("querying incomplete log batch with state {s:?}");
                     0
                 }
             }
@@ -975,8 +972,7 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
     }
     if actual != expected {
         return Err(Error::Corruption(format!(
-            "Checksum expected {} but got {}",
-            expected, actual
+            "Checksum expected {expected} but got {actual}"
         )));
     }
     Ok(actual)
@@ -1179,7 +1175,7 @@ mod tests {
             assert_eq!(cmd, decoded_cmd);
 
             encoded[0] = invalid_command_type;
-            let expected = format!("Unrecognized command type: {}", invalid_command_type);
+            let expected = format!("Unrecognized command type: {invalid_command_type}");
             assert!(matches!(
                 Command::decode(&mut encoded.as_slice()),
                 Err(Error::Corruption(m)) if m == expected
@@ -1204,7 +1200,7 @@ mod tests {
             assert_eq!(kv, decoded_kv);
 
             encoded[0] = invalid_op_type;
-            let expected = format!("Unrecognized op type: {}", invalid_op_type);
+            let expected = format!("Unrecognized op type: {invalid_op_type}");
             assert!(matches!(
                 KeyValue::decode(&mut encoded.as_slice()),
                 Err(Error::Corruption(m)) if m == expected
@@ -1252,7 +1248,7 @@ mod tests {
             codec::decode_var_u64(&mut bytes_slice).unwrap();
             let next_u8 = encoded.len() - bytes_slice.len();
             encoded[next_u8] = invalid_log_item_type;
-            let expected = format!("Unrecognized log item type: {}", invalid_log_item_type);
+            let expected = format!("Unrecognized log item type: {invalid_log_item_type}");
             assert!(matches!(
                 LogItem::decode(&mut encoded.as_slice(), &mut decoded_entries_size),
                 Err(Error::Corruption(m)) if m == expected
@@ -1401,7 +1397,7 @@ mod tests {
             assert_eq!(decoded_item_batch, item_batch);
             assert!(decoded_item_batch.approximate_size() >= len - offset);
 
-            let entries = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
+            let entries = &encoded[LOG_BATCH_HEADER_LEN..offset];
             for item in decoded_item_batch.items.iter() {
                 if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
                     if !entry_indexes.0.is_empty() {
@@ -1465,10 +1461,7 @@ mod tests {
             .add_entries::<Entry>(region_id, entries.last().unwrap())
             .unwrap();
         for i in 0..=2 {
-            let (k, v) = (
-                format!("k{}", i).into_bytes(),
-                format!("v{}", i).into_bytes(),
-            );
+            let (k, v) = (format!("k{i}").into_bytes(), format!("v{i}").into_bytes());
             batch1.put(region_id, k.clone(), v.clone()).unwrap();
             kvs.push((k, v));
         }
@@ -1481,10 +1474,7 @@ mod tests {
             .add_entries::<Entry>(region_id, entries.last().unwrap())
             .unwrap();
         for i in 3..=5 {
-            let (k, v) = (
-                format!("k{}", i).into_bytes(),
-                format!("v{}", i).into_bytes(),
-            );
+            let (k, v) = (format!("k{i}").into_bytes(), format!("v{i}").into_bytes());
             batch2.put(region_id, k.clone(), v.clone()).unwrap();
             kvs.push((k, v));
         }
@@ -1513,7 +1503,7 @@ mod tests {
         .unwrap();
 
         // decode and assert entries
-        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
+        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset];
         for item in decoded_item_batch.items.iter() {
             match &item.content {
                 LogItemContent::EntryIndexes(entry_indexes) => {

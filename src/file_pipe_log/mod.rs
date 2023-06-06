@@ -88,8 +88,7 @@ pub mod debug {
             let file_id = FileId::parse_file_name(file_name);
             if file_id.is_none() {
                 return Err(Error::InvalidArgument(format!(
-                    "Invalid log file name: {}",
-                    file_name
+                    "Invalid log file name: {file_name}"
                 )));
             }
             Ok(Self {
@@ -266,13 +265,13 @@ pub mod debug {
             let file_system = Arc::new(DefaultFileSystem);
             // An unrelated sub-directory.
             let unrelated_dir = dir.path().join(Path::new("random_dir"));
-            std::fs::create_dir(&unrelated_dir).unwrap();
+            std::fs::create_dir(unrelated_dir).unwrap();
             // An unrelated file.
             let unrelated_file_path = dir.path().join(Path::new("random_file"));
             let _unrelated_file = std::fs::File::create(&unrelated_file_path).unwrap();
             // A corrupted log file.
             let corrupted_file_path = FileId::dummy(LogQueue::Append).build_file_path(dir.path());
-            let _corrupted_file = std::fs::File::create(&corrupted_file_path).unwrap();
+            let _corrupted_file = std::fs::File::create(corrupted_file_path).unwrap();
             // An empty log file.
             let empty_file_path = FileId::dummy(LogQueue::Rewrite).build_file_path(dir.path());
             let mut writer = build_file_writer(
@@ -321,8 +320,7 @@ pub mod debug {
                             continue;
                         }
                         let _guard = PanicGuard::with_prompt(format!(
-                            "case: [{:?}, {:?}, {:?}]",
-                            from, to, shorter
+                            "case: [{from:?}, {to:?}, {shorter:?}]",
                         ));
                         let mut writer = build_file_writer(
                             file_system.as_ref(),
