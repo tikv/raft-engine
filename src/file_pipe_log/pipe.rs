@@ -81,7 +81,7 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
             }
             let file_id = FileId::new(self.queue, f.seq);
             let path = file_id.build_file_path(&self.paths[f.path_id]);
-            if let Err(e) = self.file_system.delete(&path) {
+            if let Err(e) = self.file_system.delete(path) {
                 error!("error while deleting recycled file before shutdown: {}", e);
             }
         }
@@ -113,7 +113,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
                 seq: file_id.seq,
-                handle: file_system.create(&path)?.into(),
+                handle: file_system.create(path)?.into(),
                 format: default_format,
                 path_id,
                 recycled: false,
@@ -454,7 +454,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 }
                 // Remove purged files which are out of capacity and files whose version is
                 // marked not recycled.
-                self.file_system.delete(&path)?;
+                self.file_system.delete(path)?;
             }
             debug_assert!(recycled_len <= remains_capacity);
             self.recycled_files.write().append(&mut new_recycled);

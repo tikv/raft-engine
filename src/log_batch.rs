@@ -1307,7 +1307,7 @@ mod tests {
                 offset: 0,
             };
             let old_approximate_size = batch.approximate_size();
-            let len = batch.finish_populate(if compress { 1 } else { 0 }).unwrap();
+            let len = batch.finish_populate(usize::from(compress)).unwrap();
             assert!(old_approximate_size >= len);
             assert_eq!(batch.approximate_size(), len);
             let mut batch_handle = mocked_file_block_handle;
