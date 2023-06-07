@@ -430,12 +430,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let purged_len = purged_files.len();
         if purged_len > 0 {
             let remains_capacity = self.capacity.saturating_sub(len);
-            let (_, mut recycled_len) = {
-                let files = self.recycled_files.read();
-                files
-                    .front()
-                    .map_or_else(|| (DEFAULT_FIRST_FILE_SEQ, 0), |f| (f.seq, files.len()))
-            };
+            let mut recycled_len = self.recycled_files.read().len();
             let mut new_recycled = VecDeque::new();
             // The newly purged files from `self.active_files` should be renamed
             // to recycled files with LOG_APPEND_RESERVED_SUFFIX suffix, to reduce the
