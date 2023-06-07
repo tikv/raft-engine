@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use hashbrown::HashMap;
 use rhai::{Engine, Scope, AST};
 use scopeguard::{guard, ScopeGuard};
@@ -290,11 +291,11 @@ impl RhaiFilterMachine {
                                     ei.entries.unwrap(),
                                     ei.compression_type,
                                 )?;
-                                entries.push(
-                                    block[ei.entry_offset as usize
-                                        ..(ei.entry_offset + ei.entry_len) as usize]
-                                        .to_owned(),
-                                );
+                                // Not using slice to avoid consuming too many memory.
+                                entries.push(Bytes::copy_from_slice(
+                                    &block[ei.entry_offset as usize
+                                        ..(ei.entry_offset + ei.entry_len) as usize],
+                                ));
                             }
                             log_batch.add_raw_entries(item.raft_group_id, eis, entries)?;
                         }
