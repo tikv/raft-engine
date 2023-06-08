@@ -95,13 +95,11 @@ impl<F: FileSystem> LogFileWriter<F> {
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
             let _t = StopWatch::new(&*LOG_ALLOCATE_DURATION_HISTOGRAM);
-            let alloc = std::cmp::max(
-                new_written - self.capacity,
-                std::cmp::min(
-                    FILE_ALLOCATE_SIZE,
-                    target_size_hint.saturating_sub(self.capacity),
-                ),
+            let alloc = std::cmp::min(
+                FILE_ALLOCATE_SIZE,
+                target_size_hint.saturating_sub(self.capacity),
             );
+            let alloc = std::cmp::max(new_written - self.capacity, alloc);
             if let Err(e) = self.writer.allocate(self.capacity, alloc) {
                 warn!("log file allocation failed: {e}");
             }

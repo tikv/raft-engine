@@ -23,7 +23,7 @@ use crate::util::{Factory, ReadableSize};
 use crate::{Error, Result};
 
 use super::format::{
-    build_recycled_file_name, lock_file_path, parse_recycled_file_name, FileNameExt, LogFileFormat,
+    build_reserved_file_name, lock_file_path, parse_reserved_file_name, FileNameExt, LogFileFormat,
 };
 use super::log_file::build_file_reader;
 use super::pipe::{
@@ -116,18 +116,50 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // Open all files with suitable permissions.
         self.append_files = Vec::with_capacity(self.append_file_names.len());
         for (i, file_name) in self.append_file_names.iter().enumerate() {
-            let is_last_one = i == self.append_file_names.len() - 1;
-            self.append_files.push(self.open(file_name, is_last_one)?);
+            let perm = if i == self.append_file_names.len() - 1
+                || self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption
+            {
+                Permission::ReadWrite
+            } else {
+                Permission::ReadOnly
+            };
+            self.append_files.push(File {
+                seq: file_name.seq,
+                handle: Arc::new(self.file_system.open(&file_name.path, perm)?),
+                format: LogFileFormat::default(),
+                path_id: file_name.path_id,
+                reserved: false,
+            });
         }
         self.rewrite_files = Vec::with_capacity(self.rewrite_file_names.len());
         for (i, file_name) in self.rewrite_file_names.iter().enumerate() {
-            let is_last_one = i == self.rewrite_file_names.len() - 1;
-            self.rewrite_files.push(self.open(file_name, is_last_one)?);
+            let perm = if i == self.rewrite_file_names.len() - 1
+                || self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption
+            {
+                Permission::ReadWrite
+            } else {
+                Permission::ReadOnly
+            };
+            self.rewrite_files.push(File {
+                seq: file_name.seq,
+                handle: Arc::new(self.file_system.open(&file_name.path, perm)?),
+                format: LogFileFormat::default(),
+                path_id: file_name.path_id,
+                reserved: false,
+            });
         }
         self.recycled_files = Vec::with_capacity(self.recycled_file_names.len());
-        for (i, file_name) in self.recycled_file_names.iter().enumerate() {
-            let is_last_one = i == self.recycled_file_names.len() - 1;
-            self.recycled_files.push(self.open(file_name, is_last_one)?);
+        for file_name in &self.recycled_file_names {
+            self.recycled_files.push(File {
+                seq: file_name.seq,
+                handle: Arc::new(
+                    self.file_system
+                        .open(&file_name.path, Permission::ReadOnly)?,
+                ),
+                format: LogFileFormat::default(),
+                path_id: file_name.path_id,
+                reserved: true,
+            });
         }
 
         // Validate and clear obsolete metadata and log files.
@@ -147,7 +179,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             files.drain(..invalid_idx);
             // Try to cleanup stale metadata left by the previous version.
-            if files.is_empty() {
+            if files.is_empty() || is_recycled_file {
                 continue;
             }
             let max_sample = 100;
@@ -157,12 +189,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let seq = i * files[0].seq / max_sample;
                 let file_id = FileId { queue, seq };
                 for dir in self.dirs.iter() {
-                    let path = if is_recycled_file {
-                        dir.join(build_recycled_file_name(file_id.seq))
-                    } else {
-                        file_id.build_file_path(dir)
-                    };
-                    if self.file_system.exists_metadata(&path) {
+                    if self
+                        .file_system
+                        .exists_metadata(file_id.build_file_path(dir))
+                    {
                         delete_start = Some(i.saturating_sub(1) * files[0].seq / max_sample + 1);
                         break;
                     }
@@ -178,7 +208,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     let file_id = FileId { queue, seq };
                     for dir in self.dirs.iter() {
                         let path = if is_recycled_file {
-                            dir.join(build_recycled_file_name(seq))
+                            dir.join(build_reserved_file_name(seq))
                         } else {
                             file_id.build_file_path(dir)
                         };
@@ -194,7 +224,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             if cleared > 0 {
                 warn!(
-                    "clear {cleared} stale files of {queue:?} in range [0, {}).",
+                    "clear {cleared} stale metadata of {queue:?} in range [0, {}).",
                     files[0].seq,
                 );
             }
@@ -261,7 +291,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     path_id,
                 }),
                 _ => {
-                    if let Some(seq) = parse_recycled_file_name(file_name) {
+                    if let Some(seq) = parse_reserved_file_name(file_name) {
                         self.recycled_file_names.push(FileName {
                             seq,
                             path: p,
@@ -493,16 +523,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     .unwrap_or_else(|| DEFAULT_FIRST_FILE_SEQ);
                 let path_id = find_available_dir(&self.dirs, target_file_size);
                 let root_path = &self.dirs[path_id];
-                let path = root_path.join(build_recycled_file_name(seq));
-                let handle = Arc::new(self.file_system.create(&path)?);
+                let path = root_path.join(build_reserved_file_name(seq));
+                let handle = Arc::new(self.file_system.create(path)?);
                 let mut writer = self.file_system.new_writer(handle.clone())?;
                 let mut written = 0;
                 let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
                 while written < target_file_size {
                     if let Err(e) = writer.write_all(&buf) {
-                        warn!("failed to build recycled file, err: {e}");
+                        warn!("failed to build reserved file, err: {e}");
                         if is_no_space_err(&e) {
-                            warn!("no enough space for preparing recycled logs");
+                            warn!("no enough space for preparing reserved logs");
                             // Clear partially prepared recycled log list if there has no enough
                             // space for it.
                             target = 0;
@@ -516,6 +546,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     handle,
                     format: LogFileFormat::default(),
                     path_id,
+                    reserved: true,
                 });
             }
             info!(
@@ -531,8 +562,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         while self.recycled_files.len() > target {
             let f = self.recycled_files.pop().unwrap();
             let root_path = &self.dirs[f.path_id];
-            let path = root_path.join(build_recycled_file_name(f.seq));
-            let _ = self.file_system.delete(&path);
+            let path = root_path.join(build_reserved_file_name(f.seq));
+            let _ = self.file_system.delete(path);
         }
         Ok(())
     }
@@ -559,22 +590,6 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             Vec::new(),
         )?;
         DualPipes::open(self.dir_locks, appender, rewriter)
-    }
-
-    fn open(&self, file_name: &FileName, is_last_one: bool) -> Result<File<F>> {
-        // For recovery mode TolerateAnyCorruption, all files should be writable.
-        // For other recovery modes, only the last log file needs to be writable.
-        let perm = if self.cfg.recovery_mode == RecoveryMode::TolerateAnyCorruption || is_last_one {
-            Permission::ReadWrite
-        } else {
-            Permission::ReadOnly
-        };
-        Ok(File {
-            seq: file_name.seq,
-            handle: Arc::new(self.file_system.open(&file_name.path, perm)?),
-            format: LogFileFormat::default(),
-            path_id: file_name.path_id,
-        })
     }
 }
 
