@@ -624,7 +624,7 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::env::{ObfuscatedFileSystem, Permission};
-    use crate::file_pipe_log::{parse_recycled_file_name, FileNameExt};
+    use crate::file_pipe_log::{parse_reserved_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
@@ -1982,7 +1982,7 @@ pub(crate) mod tests {
     pub struct DeleteMonitoredFileSystem {
         inner: ObfuscatedFileSystem,
         append_metadata: Mutex<BTreeSet<u64>>,
-        recycled_metadata: Mutex<BTreeSet<u64>>,
+        reserved_metadata: Mutex<BTreeSet<u64>>,
     }
 
     impl DeleteMonitoredFileSystem {
@@ -1990,15 +1990,15 @@ pub(crate) mod tests {
             Self {
                 inner: ObfuscatedFileSystem::default(),
                 append_metadata: Mutex::new(BTreeSet::new()),
-                recycled_metadata: Mutex::new(BTreeSet::new()),
+                reserved_metadata: Mutex::new(BTreeSet::new()),
             }
         }
 
         fn update_metadata(&self, path: &Path, delete: bool) -> bool {
             let path = path.file_name().unwrap().to_str().unwrap();
             let parse_append = FileId::parse_file_name(path);
-            let parse_recycled = parse_recycled_file_name(path);
-            match (parse_append, parse_recycled) {
+            let parse_reserved = parse_reserved_file_name(path);
+            match (parse_append, parse_reserved) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     if delete {
                         self.append_metadata.lock().unwrap().remove(&id.seq)
@@ -2008,9 +2008,9 @@ pub(crate) mod tests {
                 }
                 (None, Some(seq)) => {
                     if delete {
-                        self.recycled_metadata.lock().unwrap().remove(&seq)
+                        self.reserved_metadata.lock().unwrap().remove(&seq)
                     } else {
-                        self.recycled_metadata.lock().unwrap().insert(seq)
+                        self.reserved_metadata.lock().unwrap().insert(seq)
                     }
                 }
                 _ => false,
@@ -2067,12 +2067,12 @@ pub(crate) mod tests {
             }
             let path = path.as_ref().file_name().unwrap().to_str().unwrap();
             let parse_append = FileId::parse_file_name(path);
-            let parse_recycled = parse_recycled_file_name(path);
-            match (parse_append, parse_recycled) {
+            let parse_reserved = parse_reserved_file_name(path);
+            match (parse_append, parse_reserved) {
                 (Some(id), None) if id.queue == LogQueue::Append => {
                     self.append_metadata.lock().unwrap().contains(&id.seq)
                 }
-                (None, Some(seq)) => self.recycled_metadata.lock().unwrap().contains(&seq),
+                (None, Some(seq)) => self.reserved_metadata.lock().unwrap().contains(&seq),
                 _ => false,
             }
         }
@@ -2129,7 +2129,7 @@ pub(crate) mod tests {
             &start
         );
 
-        // Simulate recycled metadata.
+        // Simulate stale metadata.
         for i in start / 2..start {
             fs.append_metadata.lock().unwrap().insert(i);
         }
@@ -2160,7 +2160,7 @@ pub(crate) mod tests {
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
 
-        let recycled_start = *fs.recycled_metadata.lock().unwrap().first().unwrap();
+        let reserved_start = *fs.reserved_metadata.lock().unwrap().first().unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -2170,15 +2170,15 @@ pub(crate) mod tests {
         // Purge all files.
         engine.purge_manager.must_rewrite_append_queue(None, None);
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
-        // Recycled files have been reused.
-        let recycled_start_1 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
-        assert!(recycled_start < recycled_start_1);
+        // Reserved files have been reused.
+        let reserved_start_1 = *fs.reserved_metadata.lock().unwrap().first().unwrap();
+        assert!(reserved_start < reserved_start_1);
         // Reuse more.
         for rid in 1..=5 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
-        let recycled_start_2 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
-        assert!(recycled_start_1 < recycled_start_2);
+        let reserved_start_2 = *fs.reserved_metadata.lock().unwrap().first().unwrap();
+        assert!(reserved_start_1 < reserved_start_2);
 
         let file_count = fs.inner.file_count();
         let start_1 = *fs.append_metadata.lock().unwrap().first().unwrap();
@@ -2188,19 +2188,19 @@ pub(crate) mod tests {
         assert_eq!(file_count, fs.inner.file_count());
         let start_2 = *fs.append_metadata.lock().unwrap().first().unwrap();
         assert!(start_1 < start_2);
-        let recycled_start_3 = *fs.recycled_metadata.lock().unwrap().first().unwrap();
-        assert_eq!(recycled_start_2, recycled_start_3);
+        let reserved_start_3 = *fs.reserved_metadata.lock().unwrap().first().unwrap();
+        assert_eq!(reserved_start_2, reserved_start_3);
 
-        // Reuse all of recycled files.
+        // Reuse all of reserved files.
         for rid in 1..=50 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
-        assert!(fs.recycled_metadata.lock().unwrap().is_empty());
+        assert!(fs.reserved_metadata.lock().unwrap().is_empty());
         for rid in 1..=50 {
             engine.clean(rid);
         }
         engine.purge_manager.must_rewrite_append_queue(None, None);
-        // Then reuse a retired append file.
+        // Then reuse a recycled append file.
         engine.append(1, 1, 11, Some(&entry_data));
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 2);
         let start_3 = *fs.append_metadata.lock().unwrap().first().unwrap();
@@ -2260,6 +2260,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(15),
             format_version: Version::V2,
             enable_log_recycle: true,
+            prefill_for_recycle: false,
             ..Default::default()
         };
         assert!(cfg_v2.recycle_capacity() > 0);

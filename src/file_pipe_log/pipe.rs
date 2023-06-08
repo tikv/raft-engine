@@ -20,7 +20,7 @@ use crate::pipe_log::{
 };
 use crate::{perf_context, Error, Result};
 
-use super::format::{build_recycled_file_name, FileNameExt, LogFileFormat};
+use super::format::{build_reserved_file_name, FileNameExt, LogFileFormat};
 use super::log_file::build_file_reader;
 use super::log_file::{build_file_writer, LogFileWriter};
 
@@ -39,7 +39,7 @@ pub struct File<F: FileSystem> {
     pub handle: Arc<F::Handle>,
     pub format: LogFileFormat,
     pub path_id: PathId,
-    pub recycled: bool,
+    pub reserved: bool,
 }
 
 struct WritableFile<F: FileSystem> {
@@ -59,7 +59,8 @@ pub(super) struct SinglePipe<F: FileSystem> {
 
     capacity: usize,
     active_files: CachePadded<RwLock<VecDeque<File<F>>>>,
-    /// This contains both recycled files and files retired from `active_files`.
+    /// This contains both reserved files and files recycled from
+    /// `active_files`.
     recycled_files: CachePadded<RwLock<VecDeque<File<F>>>>,
 
     /// The log file opened for write.
@@ -75,8 +76,9 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = writable_file.writer.close() {
             error!("error while closing the active writer: {e}");
         }
+        // Delete the newest first to create a hole.
         while let Some(f) = self.recycled_files.write().pop_back() {
-            if f.recycled {
+            if f.reserved {
                 break;
             }
             let file_id = FileId::new(self.queue, f.seq);
@@ -116,7 +118,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 handle: file_system.create(path)?.into(),
                 format: default_format,
                 path_id,
-                recycled: false,
+                reserved: false,
             });
         }
         let f = active_files.last().unwrap();
@@ -181,8 +183,8 @@ impl<F: FileSystem> SinglePipe<F> {
             (recycled_files.pop_front(), recycled_files.len())
         };
         if let Some(f) = recycle_file {
-            let fname = if f.recycled {
-                build_recycled_file_name(f.seq)
+            let fname = if f.reserved {
+                build_reserved_file_name(f.seq)
             } else {
                 FileId::new(self.queue, f.seq).build_file_name()
             };
@@ -245,7 +247,7 @@ impl<F: FileSystem> SinglePipe<F> {
             handle: handle.into(),
             format: self.default_format,
             path_id,
-            recycled: false,
+            reserved: false,
         };
         let mut new_file = WritableFile {
             seq: new_seq,
@@ -432,9 +434,9 @@ impl<F: FileSystem> SinglePipe<F> {
             let remains_capacity = self.capacity.saturating_sub(len);
             let mut recycled_len = self.recycled_files.read().len();
             let mut new_recycled = VecDeque::new();
-            // The newly purged files from `self.active_files` should be renamed
-            // to recycled files with LOG_APPEND_RESERVED_SUFFIX suffix, to reduce the
-            // unnecessary recovery timecost when restarting.
+            // We don't rename the append file because on some platform it could cause I/O
+            // jitters. Instead we best-effort delete them during shutdown to reduce
+            // recovery time.
             for f in purged_files {
                 let file_id = FileId {
                     seq: f.seq,
@@ -710,7 +712,7 @@ mod tests {
         // Cannot purge already expired logs or not existsed logs.
         assert!(pipe_log.purge_to(first - 1).is_err());
         assert!(pipe_log.purge_to(last + 1).is_err());
-        // By `purge`, all stale files will be automatically renamed to recycled files.
+        // Retire files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read recycled file.
         for (_, handle) in handles.into_iter().enumerate() {
