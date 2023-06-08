@@ -179,7 +179,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             files.drain(..invalid_idx);
             // Try to cleanup stale metadata left by the previous version.
-            if files.is_empty() {
+            if files.is_empty() || is_recycled_file {
                 continue;
             }
             let max_sample = 100;
@@ -189,12 +189,10 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let seq = i * files[0].seq / max_sample;
                 let file_id = FileId { queue, seq };
                 for dir in self.dirs.iter() {
-                    let path = if is_recycled_file {
-                        dir.join(build_reserved_file_name(file_id.seq))
-                    } else {
-                        file_id.build_file_path(dir)
-                    };
-                    if self.file_system.exists_metadata(path) {
+                    if self
+                        .file_system
+                        .exists_metadata(file_id.build_file_path(dir))
+                    {
                         delete_start = Some(i.saturating_sub(1) * files[0].seq / max_sample + 1);
                         break;
                     }
@@ -226,7 +224,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             }
             if cleared > 0 {
                 warn!(
-                    "clear {cleared} stale files of {queue:?} in range [0, {}).",
+                    "clear {cleared} stale metadata of {queue:?} in range [0, {}).",
                     files[0].seq,
                 );
             }
