@@ -76,14 +76,23 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = writable_file.writer.close() {
             error!("error while closing the active writer: {e}");
         }
-        while let Some(f) = self.recycled_files.write().pop_back() {
+        let mut recycled_files = self.recycled_files.write();
+        let mut next_reserved_seq = recycled_files
+            .iter()
+            .rev()
+            .find_map(|f| if f.reserved { Some(f.seq + 1) } else { None })
+            .unwrap_or(DEFAULT_FIRST_FILE_SEQ);
+        while let Some(f) = recycled_files.pop_back() {
             if f.reserved {
                 break;
             }
             let file_id = FileId::new(self.queue, f.seq);
             let path = file_id.build_file_path(&self.paths[f.path_id]);
-            if let Err(e) = self.file_system.delete(path) {
-                error!("error while deleting recycled file before shutdown: {}", e);
+            let dst = self.paths[0].join(build_reserved_file_name(next_reserved_seq));
+            if let Err(e) = self.file_system.reuse(path, dst) {
+                error!("error while renaming recycled file during shutdown: {}", e);
+            } else {
+                next_reserved_seq += 1;
             }
         }
     }
@@ -434,7 +443,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let mut recycled_len = self.recycled_files.read().len();
             let mut new_recycled = VecDeque::new();
             // We don't rename the append file because on some platform it could cause I/O
-            // jitters. Instead we best-effort delete them during shutdown to reduce
+            // jitters. Instead we best-effort rename them during shutdown to reduce
             // recovery time.
             for f in purged_files {
                 let file_id = FileId {
