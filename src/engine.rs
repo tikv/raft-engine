@@ -2148,7 +2148,7 @@ pub(crate) mod tests {
             .tempdir()
             .unwrap();
         let entry_data = vec![b'x'; 16];
-        let mut cfg = Config {
+        let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(50),
@@ -2158,7 +2158,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        let engine = RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
 
         let reserved_start = *fs.reserved_metadata.lock().unwrap().first().unwrap();
         for rid in 1..=10 {
