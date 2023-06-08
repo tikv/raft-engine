@@ -2148,7 +2148,7 @@ pub(crate) mod tests {
             .tempdir()
             .unwrap();
         let entry_data = vec![b'x'; 16];
-        let cfg = Config {
+        let mut cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
             target_file_size: ReadableSize(1),
             purge_threshold: ReadableSize(50),
@@ -2158,7 +2158,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        let engine = RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
 
         let reserved_start = *fs.reserved_metadata.lock().unwrap().first().unwrap();
         for rid in 1..=10 {
@@ -2183,8 +2183,8 @@ pub(crate) mod tests {
         let file_count = fs.inner.file_count();
         let start_1 = *fs.append_metadata.lock().unwrap().first().unwrap();
         let engine = engine.reopen();
-        // Recycled files are reserved, but stale append files are deleted. After
-        // prefill, the count should stay the same.
+        // Recycled files are reserved, but stale append files are renamed. The total
+        // count should stay unchanged.
         assert_eq!(file_count, fs.inner.file_count());
         let start_2 = *fs.append_metadata.lock().unwrap().first().unwrap();
         assert!(start_1 < start_2);
