@@ -76,7 +76,6 @@ impl<F: FileSystem> Drop for SinglePipe<F> {
         if let Err(e) = writable_file.writer.close() {
             error!("error while closing the active writer: {e}");
         }
-        // Delete the newest first to create a hole.
         while let Some(f) = self.recycled_files.write().pop_back() {
             if f.reserved {
                 break;
