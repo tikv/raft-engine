@@ -167,6 +167,22 @@ where
         .unwrap();
     }
 
+    pub fn must_purge_all_stale(&self) {
+        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
+        self.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        self.rescan_memtables_and_purge_stale_files(
+            LogQueue::Rewrite,
+            self.pipe_log.file_span(LogQueue::Rewrite).1,
+        )
+        .unwrap();
+        self.pipe_log.rotate(LogQueue::Append).unwrap();
+        self.rescan_memtables_and_purge_stale_files(
+            LogQueue::Append,
+            self.pipe_log.file_span(LogQueue::Append).1,
+        )
+        .unwrap();
+    }
+
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
         let (first_file, active_file) = self.pipe_log.file_span(queue);
         if active_file == first_file {
