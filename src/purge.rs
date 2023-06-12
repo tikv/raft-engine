@@ -281,7 +281,8 @@ where
             &mut log_batch,
             None, /* rewrite_watermark */
             true, /* sync */
-        )
+        )?;
+        Ok(())
     }
 
     // Exclusive.
@@ -335,6 +336,7 @@ where
 
             let mut previous_size = log_batch.approximate_size();
             let mut atomic_group = None;
+            let mut atomic_group_start = None;
             let mut current_entry_indexes = Vec::new();
             let mut current_entries = Vec::new();
             let mut current_size = 0;
@@ -380,7 +382,10 @@ where
                     )?;
                     current_size = 0;
                     previous_size = 0;
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                    let handle = self.rewrite_impl(&mut log_batch, rewrite, false)?.unwrap();
+                    if needs_atomicity && atomic_group_start.is_none() {
+                        atomic_group_start = Some(handle.id.seq);
+                    }
                 }
             }
             log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
@@ -389,12 +394,18 @@ where
             }
             if let Some(g) = atomic_group.as_mut() {
                 g.end(&mut log_batch);
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                let handle = self.rewrite_impl(&mut log_batch, rewrite, false)?.unwrap();
+                self.memtables.apply_rewrite_atomic_group(
+                    region_id,
+                    atomic_group_start.unwrap(),
+                    handle.id.seq,
+                );
             } else if log_batch.approximate_size() > max_batch_bytes() {
                 self.rewrite_impl(&mut log_batch, rewrite, false)?;
             }
         }
-        self.rewrite_impl(&mut log_batch, rewrite, true)
+        self.rewrite_impl(&mut log_batch, rewrite, true)?;
+        Ok(())
     }
 
     fn rewrite_impl(
@@ -402,10 +413,11 @@ where
         log_batch: &mut LogBatch,
         rewrite_watermark: Option<FileSeq>,
         sync: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<FileBlockHandle>> {
         if log_batch.is_empty() {
             debug_assert!(sync);
-            return self.pipe_log.sync(LogQueue::Rewrite);
+            self.pipe_log.sync(LogQueue::Rewrite)?;
+            return Ok(None);
         }
         log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
@@ -430,7 +442,7 @@ where
                 .append
                 .observe(file_handle.len as f64);
         }
-        Ok(())
+        Ok(Some(file_handle))
     }
 }
 
