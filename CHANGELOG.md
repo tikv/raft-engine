@@ -4,7 +4,6 @@
 
 ### Behavior Changes
 
-* Disable log recycling by default.
 * `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.
 * Possible to specify a permission in `FileSystem::open`.
 
