@@ -4,7 +4,6 @@
 
 ### Behavior Changes
 
-* Disable log recycling by default.
 * `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.
 * Possible to specify a permission in `FileSystem::open`.
 * Prometheus counter `raft_engine_log_file_count` no longer includes retired log files that are stashed for recycling. Those files are now tracked by a new counter `raft_engine_recycled_file_count`.
