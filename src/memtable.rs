@@ -155,6 +155,16 @@ pub struct MemTable<A: AllocatorTrait> {
     /// A map of active key value pairs.
     kvs: BTreeMap<Vec<u8>, (Vec<u8>, FileId)>,
 
+    /// (start_seq, end_seq).
+    /// If there's an active entry stored before end_seq, it possibly belongs to
+    /// an atomic group. In order to not lose this entry, We cannot delete any
+    /// other entries in that group.
+    /// Only applies to Rewrite queue. Each Raft Group has at most one atomic
+    /// group at a time, because we only use atomic group for rewrite-rewrite
+    /// operation, a group always contains all the Rewrite entries in a Raft
+    /// Group.
+    atomic_group: Option<(FileSeq, FileSeq)>,
+
     /// Shared statistics.
     global_stats: Arc<GlobalStats>,
 
@@ -183,6 +193,7 @@ impl<A: AllocatorTrait> MemTable<A> {
             first_index: 0,
             rewrite_count: 0,
             kvs: BTreeMap::default(),
+            atomic_group: None,
             global_stats,
             _phantom: PhantomData,
         }
@@ -214,6 +225,11 @@ impl<A: AllocatorTrait> MemTable<A> {
 
         for (key, (value, file_id)) in rhs.kvs.iter() {
             self.put(key.clone(), value.clone(), *file_id);
+        }
+
+        if let Some(g) = rhs.atomic_group.take() {
+            assert!(self.atomic_group.map_or(true, |(_, end)| end <= g.0));
+            self.atomic_group = Some(g);
         }
 
         let deleted = rhs.global_stats.deleted_rewrite_entries();
@@ -250,6 +266,8 @@ impl<A: AllocatorTrait> MemTable<A> {
         for (key, (value, file_id)) in rhs.kvs.iter() {
             self.put(key.clone(), value.clone(), *file_id);
         }
+
+        assert!(rhs.atomic_group.is_none());
 
         let deleted = rhs.global_stats.deleted_rewrite_entries();
         self.global_stats.add(LogQueue::Rewrite, deleted);
@@ -526,6 +544,11 @@ impl<A: AllocatorTrait> MemTable<A> {
         count as u64
     }
 
+    pub fn apply_rewrite_atomic_group(&mut self, start: FileSeq, end: FileSeq) {
+        assert!(self.atomic_group.map_or(true, |(_, b)| b <= start));
+        self.atomic_group = Some((start, end));
+    }
+
     /// Removes all entry indexes with index greater than or equal to `index`.
     /// Assumes `index` <= `last`.
     ///
@@ -719,12 +742,20 @@ impl<A: AllocatorTrait> MemTable<A> {
                     Some(v.1.seq)
                 }
             });
-        match (ents_min, kvs_min) {
-            (Some(ents_min), Some(kvs_min)) => Some(std::cmp::min(kvs_min, ents_min)),
-            (Some(ents_min), None) => Some(ents_min),
-            (None, Some(kvs_min)) => Some(kvs_min),
-            (None, None) => None,
+        let res = match (ents_min, kvs_min) {
+            (Some(ents_min), Some(kvs_min)) => std::cmp::min(kvs_min, ents_min),
+            (Some(ents_min), None) => ents_min,
+            (None, Some(kvs_min)) => kvs_min,
+            (None, None) => return None,
+        };
+        if queue == LogQueue::Rewrite {
+            if let Some((start, end)) = self.atomic_group {
+                if res <= end {
+                    return Some(std::cmp::min(start, res));
+                }
+            }
         }
+        Some(res)
     }
 
     #[inline]
@@ -1154,6 +1185,11 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
         }
     }
 
+    pub fn apply_rewrite_atomic_group(&self, raft: u64, start: FileSeq, end: FileSeq) {
+        let memtable = self.get_or_insert(raft);
+        memtable.write().apply_rewrite_atomic_group(start, end);
+    }
+
     #[inline]
     fn slot_index(id: u64) -> usize {
         debug_assert!(MEMTABLE_SLOT_COUNT.is_power_of_two());
@@ -1171,6 +1207,8 @@ struct PendingAtomicGroup {
     status: AtomicGroupStatus,
     items: Vec<LogItem>,
     tombstone_items: Vec<LogItem>,
+    start: FileSeq,
+    end: FileSeq,
 }
 
 pub struct MemTableRecoverContext<A: AllocatorTrait> {
@@ -1256,20 +1294,39 @@ impl<A: AllocatorTrait> MemTableRecoverContext<A> {
                 | (AtomicGroupStatus::Middle, AtomicGroupStatus::Middle) => {
                     group.items.append(&mut new_group.items);
                     group.tombstone_items.append(&mut new_group.tombstone_items);
+                    assert!(group.end <= new_group.start);
+                    group.end = new_group.end;
                 }
                 (AtomicGroupStatus::Middle, AtomicGroupStatus::End) => {
                     group.items.append(&mut new_group.items);
                     group.tombstone_items.append(&mut new_group.tombstone_items);
                     group.status = new_group.status;
+                    assert!(group.end <= new_group.start);
+                    group.end = new_group.end;
                 }
                 (AtomicGroupStatus::Begin, AtomicGroupStatus::End) => {
                     let mut group = groups.pop().unwrap();
+                    let mut rids = HashSet::with_capacity(1);
+                    for item in group
+                        .items
+                        .iter()
+                        .chain(group.tombstone_items.iter())
+                        .chain(new_group.items.iter())
+                        .chain(new_group.tombstone_items.iter())
+                    {
+                        rids.insert(item.raft_group_id);
+                    }
                     self.tombstone_items.append(&mut group.tombstone_items);
                     self.tombstone_items.append(&mut new_group.tombstone_items);
                     self.memtables
                         .replay_rewrite_writes(group.items.into_iter());
                     self.memtables
                         .replay_rewrite_writes(new_group.items.into_iter());
+                    assert!(group.end <= new_group.start);
+                    for rid in rids {
+                        self.memtables
+                            .apply_rewrite_atomic_group(rid, group.start, new_group.end);
+                    }
                 }
             }
             if groups.is_empty() {
@@ -1329,6 +1386,8 @@ impl<A: AllocatorTrait> ReplayMachine for MemTableRecoverContext<A> {
                         status,
                         items,
                         tombstone_items: new_tombstones,
+                        start: file_id.seq,
+                        end: file_id.seq,
                     },
                 );
             } else {

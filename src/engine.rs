@@ -2417,6 +2417,7 @@ pub(crate) mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             // Make sure each file gets replayed individually.
             recovery_threads: 100,
+            target_file_size: ReadableSize(1),
             ..Default::default()
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
@@ -2550,7 +2551,7 @@ pub(crate) mod tests {
             assert!(data.remove(&rid), "{}", rid);
             assert_eq!(engine.get(rid, &key).unwrap(), value);
         }
-        assert!(data.is_empty());
+        assert!(data.is_empty(), "data loss {:?}", data);
     }
 
     #[test]

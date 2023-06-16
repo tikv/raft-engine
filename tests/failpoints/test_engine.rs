@@ -886,7 +886,7 @@ fn test_split_rewrite_batch_imp(regions: u64, region_size: u64, split_size: u64,
         })
         .unwrap();
         let r = catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue());
-        fail::remove("atomic_group::begin");
+        fail::remove("atomic_group::add");
         fail::remove("log_fd::write::err");
         if r.is_ok() {
             break;
@@ -970,6 +970,52 @@ fn test_split_rewrite_batch_with_only_kvs() {
     for i in 1..=rid {
         assert_eq!(engine.get(i, &key).unwrap(), value);
     }
+}
+
+// issue-315
+#[test]
+fn test_split_rewrite_batch_then_delete_some() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_split_rewrite_batch_then_delete_some")
+        .tempdir()
+        .unwrap();
+    let _f = FailGuard::new("max_rewrite_batch_bytes", "return(1)");
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        target_file_size: ReadableSize(1),
+        ..Default::default()
+    };
+    let mut log_batch = LogBatch::default();
+    let value = vec![b'y'; 8];
+
+    let rid = 1;
+    let engine = Engine::open(cfg.clone()).unwrap();
+    for i in 0..=5 {
+        append(&engine, rid, i * 2, i * 2 + 2, Some(&value));
+        engine.purge_manager().must_rewrite_append_queue(None, None);
+    }
+    engine.purge_manager().must_rewrite_rewrite_queue();
+    log_batch.add_command(rid, Command::Compact { index: 7 });
+    log_batch.delete(rid, b"last_index".to_vec());
+    engine.write(&mut log_batch, true).unwrap();
+    engine.purge_manager().must_purge_all_stale();
+
+    drop(engine);
+    let engine = Engine::open(cfg.clone()).unwrap();
+    // The Compact mark is dropped during `must_purge_all_stale`.
+    assert_eq!(engine.first_index(rid).unwrap(), 0);
+    assert_eq!(engine.last_index(rid).unwrap(), 11);
+
+    // Removes all rewrite entries.
+    log_batch.add_command(rid, Command::Compact { index: 100 });
+    engine.write(&mut log_batch, false).unwrap();
+    append(&engine, rid, 5, 11, Some(&value));
+    engine.purge_manager().must_rewrite_append_queue(None, None);
+    engine.purge_manager().must_purge_all_stale();
+    drop(engine);
+    let engine = Engine::open(cfg).unwrap();
+    assert_eq!(engine.first_index(rid).unwrap(), 5);
+    assert_eq!(engine.last_index(rid).unwrap(), 10);
 }
 
 #[test]
