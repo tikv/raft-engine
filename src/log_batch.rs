@@ -327,13 +327,6 @@ impl LogItem {
         })
     }
 
-    pub fn entry_index(&self) -> Option<EntryIndex> {
-        match &self.content {
-            LogItemContent::EntryIndexes(entry_indexes) => entry_indexes.0.first().cloned(),
-            _ => None,
-        }
-    }
-
     fn approximate_size(&self) -> usize {
         match &self.content {
             LogItemContent::EntryIndexes(entry_indexes) => {
@@ -550,6 +543,16 @@ impl LogItemBatch {
 
     pub fn approximate_size(&self) -> usize {
         8 /*count*/ + self.item_size + LOG_BATCH_CHECKSUM_LEN
+    }
+
+    /// Returns the first [`EntryIndex`] appeared in this batch.
+    pub fn entry_index(&self) -> Option<EntryIndex> {
+        for item in &self.items {
+            if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
+                return entry_indexes.0.first().cloned();
+            }
+        }
+        None
     }
 }
 

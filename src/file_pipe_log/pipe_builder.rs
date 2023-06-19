@@ -17,7 +17,7 @@ use crate::config::{Config, RecoveryMode};
 use crate::env::{FileSystem, Handle, Permission};
 use crate::errors::is_no_space_err;
 use crate::event_listener::EventListener;
-use crate::log_batch::LogItemBatch;
+use crate::log_batch::{LogItemBatch, LOG_BATCH_HEADER_LEN};
 use crate::pipe_log::{FileId, FileSeq, LogQueue};
 use crate::util::{Factory, ReadableSize};
 use crate::{Error, Result};
@@ -412,16 +412,16 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                               || recovery_mode == RecoveryMode::TolerateTailCorruption
                                 && is_last_file {
                                 warn!(
-                                    "File header is corrupted but ignored: {queue:?}:{}, {e}",
-                                    f.seq,
+                                    "Truncating log file due to broken header (queue={:?},seq={}): {}",
+                                    queue, f.seq, e
                                 );
                                 f.handle.truncate(0)?;
                                 f.format = LogFileFormat::default();
                                 continue;
                             } else {
                                 error!(
-                                    "Failed to open log file due to broken header: {queue:?}:{}, {e}",
-                                    f.seq
+                                    "Failed to open log file due to broken header (queue={:?},seq={}): {}",
+                                    queue, f.seq, e
                                 );
                                 return Err(e);
                             }
@@ -438,7 +438,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                 // This is the last item. Check entries block.
                                 if_chain::if_chain! {
                                     if matches!(next_item, Err(_) | Ok(None));
-                                    if let Some(ei) = item_batch.iter().find_map(|item| item.entry_index());
+                                    if let Some(ei) = item_batch.entry_index();
                                     let handle = ei.entries.unwrap();
                                     if let Err(e) = crate::LogBatch::decode_entries_block(
                                         &reader.reader.as_mut().unwrap().read(handle)?,
@@ -446,44 +446,35 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                                         ei.compression_type,
                                     );
                                     then {
+                                        let offset = handle.offset as usize - LOG_BATCH_HEADER_LEN;
                                         if recovery_mode == RecoveryMode::AbsoluteConsistency {
                                             error!(
-                                                "Failed to open log file due to broken entry: {queue:?}:{} offset={}, {e}",
-                                                f.seq, reader.valid_offset()
+                                                "Failed to open log file due to broken entry (queue={:?},seq={},offset={}): {}",
+                                                queue, f.seq, offset, e
                                             );
                                             return Err(e);
                                         } else {
                                             warn!(
-                                                "The last log file is corrupted but ignored: {queue:?}:{}, {e}",
-                                                f.seq
+                                                "Truncating log file due to broken entries block (queue={:?},seq={},offset={}): {}",
+                                                queue, f.seq, offset, e
                                             );
-                                            f.handle.truncate(handle.offset as usize - crate::log_batch::LOG_BATCH_HEADER_LEN)?;
+                                            f.handle.truncate(offset)?;
                                             f.handle.sync()?;
                                             break;
                                         }
                                     }
                                 }
                                 pending_item = Some(next_item);
-                                machine
-                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
+                                machine.replay(item_batch, FileId { queue, seq: f.seq })?;
                             }
                             Ok(None) => break,
                             Err(e)
                                 if recovery_mode == RecoveryMode::TolerateTailCorruption
-                                    && is_last_file =>
+                                    && is_last_file || recovery_mode == RecoveryMode::TolerateAnyCorruption =>
                             {
                                 warn!(
-                                    "The last log file is corrupted but ignored: {queue:?}:{}, {e}",
-                                    f.seq
-                                );
-                                f.handle.truncate(reader.valid_offset())?;
-                                f.handle.sync()?;
-                                break;
-                            }
-                            Err(e) if recovery_mode == RecoveryMode::TolerateAnyCorruption => {
-                                warn!(
-                                    "File is corrupted but ignored: {queue:?}:{}, {e}",
-                                    f.seq,
+                                    "Truncating log file due to broken batch (queue={:?},seq={},offset={}): {}",
+                                    queue, f.seq, reader.valid_offset(), e
                                 );
                                 f.handle.truncate(reader.valid_offset())?;
                                 f.handle.sync()?;
@@ -491,8 +482,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             }
                             Err(e) => {
                                 error!(
-                                    "Failed to open log file due to broken entry: {queue:?}:{} offset={}, {e}",
-                                    f.seq, reader.valid_offset()
+                                    "Failed to open log file due to broken batch (queue={:?},seq={},offset={}): {}",
+                                    queue, f.seq, reader.valid_offset(), e
                                 );
                                 return Err(e);
                             }
