@@ -327,6 +327,13 @@ impl LogItem {
         })
     }
 
+    pub fn entry_index(&self) -> Option<EntryIndex> {
+        match &self.content {
+            LogItemContent::EntryIndexes(entry_indexes) => entry_indexes.0.first().cloned(),
+            _ => None,
+        }
+    }
+
     fn approximate_size(&self) -> usize {
         match &self.content {
             LogItemContent::EntryIndexes(entry_indexes) => {

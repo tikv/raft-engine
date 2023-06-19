@@ -13,7 +13,7 @@ use super::log_file::LogFileReader;
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {
     file_id: Option<FileId>,
     format: Option<LogFileFormat>,
-    reader: Option<LogFileReader<F>>,
+    pub(crate) reader: Option<LogFileReader<F>>,
     size: usize,
 
     buffer: Vec<u8>,

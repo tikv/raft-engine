@@ -430,13 +430,31 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             reader.open(FileId { queue, seq: f.seq }, format, file_reader)?;
                         }
                     }
+                    let mut last_item_batch = None;
                     loop {
                         match reader.next() {
                             Ok(Some(item_batch)) => {
+                                if is_last_file {
+                                    last_item_batch = Some(item_batch.clone());
+                                }
                                 machine
                                     .replay(item_batch, FileId { queue, seq: f.seq })?;
                             }
-                            Ok(None) => break,
+                            Ok(None) => {
+                                if is_last_file {
+                                    // Find the last entries block and verify its checksum.
+                                    if let Some(batch) = last_item_batch {
+                                        if let Some(ei) = batch.iter().find_map(|item| item.entry_index()) {
+                                            crate::LogBatch::decode_entries_block(
+                                                &reader.reader.as_mut().unwrap().read(ei.entries.unwrap())?,
+                                                ei.entries.unwrap(),
+                                                ei.compression_type,
+                                            )?;
+                                        }
+                                    }
+                                }
+                                break;
+                            },
                             Err(e)
                                 if recovery_mode == RecoveryMode::TolerateTailCorruption
                                     && is_last_file =>
