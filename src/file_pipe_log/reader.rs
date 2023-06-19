@@ -44,12 +44,8 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
     }
 
     /// Opens a file that can be accessed through the given reader.
-    pub fn open(
-        &mut self,
-        file_id: FileId,
-        format: LogFileFormat,
-        reader: LogFileReader<F>,
-    ) -> Result<()> {
+    pub fn open(&mut self, file_id: FileId, mut reader: LogFileReader<F>) -> Result<LogFileFormat> {
+        let format = reader.parse_format()?;
         self.valid_offset = LogFileFormat::encoded_len(format.version);
         self.file_id = Some(file_id);
         self.format = Some(format);
@@ -57,7 +53,7 @@ impl<F: FileSystem> LogItemBatchFileReader<F> {
         self.reader = Some(reader);
         self.buffer.clear();
         self.buffer_offset = 0;
-        Ok(())
+        Ok(format)
     }
 
     /// Closes any ongoing file access.

@@ -422,6 +422,24 @@ fn test_tail_corruption() {
         let engine = Engine::open_with_file_system(cfg, fs.clone()).unwrap();
         assert_eq!(engine.first_index(rid), None);
     }
+    // Tail entries block is corrupted.
+    {
+        let dir = tempfile::Builder::new()
+            .prefix("test_tail_corruption_1_1")
+            .tempdir()
+            .unwrap();
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            format_version: Version::V2,
+            ..Default::default()
+        };
+        let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let _f = FailGuard::new("log_batch::corrupted_entries", "return");
+        append(&engine, rid, 1, 5, Some(&data));
+        drop(engine);
+        let engine = Engine::open_with_file_system(cfg, fs.clone()).unwrap();
+        assert_eq!(engine.first_index(rid), None);
+    }
     // Header is corrupted.
     {
         let _f = FailGuard::new("log_file_header::corrupted", "return");

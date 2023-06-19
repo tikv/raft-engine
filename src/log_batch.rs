@@ -813,6 +813,14 @@ impl LogBatch {
             if corrupted_items() {
                 self.buf[footer_roffset] += 1;
             }
+            let corrupted_entries = || {
+                fail::fail_point!("log_batch::corrupted_entries", |_| true);
+                false
+            };
+            if corrupted_entries() {
+                assert!(footer_roffset > LOG_BATCH_HEADER_LEN);
+                self.buf[footer_roffset - 1] += 1;
+            }
         }
 
         self.buf_state = BufState::Encoded(header_offset, footer_roffset - LOG_BATCH_HEADER_LEN);

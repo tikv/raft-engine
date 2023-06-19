@@ -403,8 +403,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let file_count = chunk.len();
                 for (i, f) in chunk.iter_mut().enumerate() {
                     let is_last_file = index == chunk_count - 1 && i == file_count - 1;
-                    let mut file_reader = build_file_reader(file_system.as_ref(), f.handle.clone())?;
-                    match file_reader.parse_format() {
+                    let file_reader = build_file_reader(file_system.as_ref(), f.handle.clone())?;
+                    match reader.open(FileId { queue, seq: f.seq }, file_reader) {
+                        Err(e) if matches!(e, Error::Io(_)) => return Err(e),
                         Err(e) => {
                             // TODO: More reliable tail detection.
                             if recovery_mode == RecoveryMode::TolerateAnyCorruption
@@ -427,34 +428,46 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                         },
                         Ok(format) => {
                             f.format = format;
-                            reader.open(FileId { queue, seq: f.seq }, format, file_reader)?;
                         }
                     }
-                    let mut last_item_batch = None;
+                    let mut pending_item = None;
                     loop {
-                        match reader.next() {
+                        match pending_item.unwrap_or_else(|| reader.next()) {
                             Ok(Some(item_batch)) => {
-                                if is_last_file {
-                                    last_item_batch = Some(item_batch.clone());
-                                }
-                                machine
-                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
-                            }
-                            Ok(None) => {
-                                if is_last_file {
-                                    // Find the last entries block and verify its checksum.
-                                    if let Some(batch) = last_item_batch {
-                                        if let Some(ei) = batch.iter().find_map(|item| item.entry_index()) {
-                                            crate::LogBatch::decode_entries_block(
-                                                &reader.reader.as_mut().unwrap().read(ei.entries.unwrap())?,
-                                                ei.entries.unwrap(),
-                                                ei.compression_type,
-                                            )?;
+                                let next_item = reader.next();
+                                // This is the last item. Check entries block.
+                                if_chain::if_chain! {
+                                    if matches!(next_item, Err(_) | Ok(None));
+                                    if let Some(ei) = item_batch.iter().find_map(|item| item.entry_index());
+                                    let handle = ei.entries.unwrap();
+                                    if let Err(e) = crate::LogBatch::decode_entries_block(
+                                        &reader.reader.as_mut().unwrap().read(handle)?,
+                                        handle,
+                                        ei.compression_type,
+                                    );
+                                    then {
+                                        if recovery_mode == RecoveryMode::AbsoluteConsistency {
+                                            error!(
+                                                "Failed to open log file due to broken entry: {queue:?}:{} offset={}, {e}",
+                                                f.seq, reader.valid_offset()
+                                            );
+                                            return Err(e);
+                                        } else {
+                                            warn!(
+                                                "The last log file is corrupted but ignored: {queue:?}:{}, {e}",
+                                                f.seq
+                                            );
+                                            f.handle.truncate(handle.offset as usize - crate::log_batch::LOG_BATCH_HEADER_LEN)?;
+                                            f.handle.sync()?;
+                                            break;
                                         }
                                     }
                                 }
-                                break;
-                            },
+                                pending_item = Some(next_item);
+                                machine
+                                    .replay(item_batch, FileId { queue, seq: f.seq })?;
+                            }
+                            Ok(None) => break,
                             Err(e)
                                 if recovery_mode == RecoveryMode::TolerateTailCorruption
                                     && is_last_file =>
