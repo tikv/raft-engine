@@ -201,7 +201,7 @@ pub trait PipeLog: Sized {
     ///
     /// Implementation should be atomic under error conditions but not
     /// necessarily panic-safe.
-    fn rotate(&self, queue: LogQueue) -> Result<()>;
+    fn rotate(&self, queue: LogQueue, switch_disk: bool) -> Result<()>;
 
     /// Deletes all log files smaller than the specified file ID. The scope is
     /// limited to the log queue of `file_id`.
