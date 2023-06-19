@@ -11,6 +11,11 @@ use fail::FailGuard;
 use raft_engine::*;
 use util::*;
 
+#[ctor::ctor]
+fn init() {
+    env_logger::init();
+}
+
 #[test]
 fn test_log_batch_full() {
     let _f = FailGuard::new("log_batch::1kb_entries_size_per_batch", "return");
