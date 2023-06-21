@@ -11,6 +11,7 @@
 ### Bug Fixes
 
 * Fix data loss caused by aborted rewrite operation. Downgrading to an earlier version without the fix may produce phantom Raft Groups or keys, i.e. never written but appear in queries.
+* Fix a potential bug that an un-persisted log batch is mistakenly recovered and causes checksum mismatch error when being read later.
 
 ### New Features
 

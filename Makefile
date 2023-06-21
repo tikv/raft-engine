@@ -26,6 +26,7 @@ endif
 
 BIN_PATH = $(CURDIR)/bin
 CARGO_TARGET_DIR ?= $(CURDIR)/target/
+export RUST_LOG=info
 
 .PHONY: clean format clippy test
 .PHONY: ctl

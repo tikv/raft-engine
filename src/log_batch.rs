@@ -544,6 +544,16 @@ impl LogItemBatch {
     pub fn approximate_size(&self) -> usize {
         8 /*count*/ + self.item_size + LOG_BATCH_CHECKSUM_LEN
     }
+
+    /// Returns the first [`EntryIndex`] appeared in this batch.
+    pub fn entry_index(&self) -> Option<EntryIndex> {
+        for item in &self.items {
+            if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
+                return entry_indexes.0.first().cloned();
+            }
+        }
+        None
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -805,6 +815,14 @@ impl LogBatch {
             };
             if corrupted_items() {
                 self.buf[footer_roffset] += 1;
+            }
+            let corrupted_entries = || {
+                fail::fail_point!("log_batch::corrupted_entries", |_| true);
+                false
+            };
+            if corrupted_entries() {
+                assert!(footer_roffset > LOG_BATCH_HEADER_LEN);
+                self.buf[footer_roffset - 1] += 1;
             }
         }
 

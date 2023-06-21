@@ -156,9 +156,8 @@ pub mod debug {
 
         fn find_next_readable_file(&mut self) -> Result<()> {
             while let Some((file_id, path)) = self.files.pop_front() {
-                let mut reader = build_file_reader(self.system.as_ref(), &path)?;
-                let format = reader.parse_format()?;
-                self.batch_reader.open(file_id, format, reader)?;
+                let reader = build_file_reader(self.system.as_ref(), &path)?;
+                self.batch_reader.open(file_id, reader)?;
                 if let Some(b) = self.batch_reader.next()? {
                     self.items.extend(b.into_items());
                     break;
