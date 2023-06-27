@@ -338,7 +338,7 @@ impl RhaiFilterMachine {
         }
         // Delete backup file and defuse the guard.
         for (bak, guard) in guards.into_iter() {
-            let _ = std::fs::remove_file(&bak);
+            let _ = std::fs::remove_file(bak);
             let _ = ScopeGuard::into_inner(guard);
         }
         Ok(())

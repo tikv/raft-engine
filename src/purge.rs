@@ -167,6 +167,22 @@ where
         .unwrap();
     }
 
+    pub fn must_purge_all_stale(&self) {
+        let _lk = self.force_rewrite_candidates.try_lock().unwrap();
+        self.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        self.rescan_memtables_and_purge_stale_files(
+            LogQueue::Rewrite,
+            self.pipe_log.file_span(LogQueue::Rewrite).1,
+        )
+        .unwrap();
+        self.pipe_log.rotate(LogQueue::Append).unwrap();
+        self.rescan_memtables_and_purge_stale_files(
+            LogQueue::Append,
+            self.pipe_log.file_span(LogQueue::Append).1,
+        )
+        .unwrap();
+    }
+
     pub(crate) fn needs_rewrite_log_files(&self, queue: LogQueue) -> bool {
         let (first_file, active_file) = self.pipe_log.file_span(queue);
         if active_file == first_file {
@@ -281,7 +297,8 @@ where
             &mut log_batch,
             None, /* rewrite_watermark */
             true, /* sync */
-        )
+        )?;
+        Ok(())
     }
 
     // Exclusive.
@@ -335,6 +352,7 @@ where
 
             let mut previous_size = log_batch.approximate_size();
             let mut atomic_group = None;
+            let mut atomic_group_start = None;
             let mut current_entry_indexes = Vec::new();
             let mut current_entries = Vec::new();
             let mut current_size = 0;
@@ -380,7 +398,10 @@ where
                     )?;
                     current_size = 0;
                     previous_size = 0;
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                    let handle = self.rewrite_impl(&mut log_batch, rewrite, false)?.unwrap();
+                    if needs_atomicity && atomic_group_start.is_none() {
+                        atomic_group_start = Some(handle.id.seq);
+                    }
                 }
             }
             log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
@@ -389,12 +410,18 @@ where
             }
             if let Some(g) = atomic_group.as_mut() {
                 g.end(&mut log_batch);
-                self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                let handle = self.rewrite_impl(&mut log_batch, rewrite, false)?.unwrap();
+                self.memtables.apply_rewrite_atomic_group(
+                    region_id,
+                    atomic_group_start.unwrap(),
+                    handle.id.seq,
+                );
             } else if log_batch.approximate_size() > max_batch_bytes() {
                 self.rewrite_impl(&mut log_batch, rewrite, false)?;
             }
         }
-        self.rewrite_impl(&mut log_batch, rewrite, true)
+        self.rewrite_impl(&mut log_batch, rewrite, true)?;
+        Ok(())
     }
 
     fn rewrite_impl(
@@ -402,10 +429,11 @@ where
         log_batch: &mut LogBatch,
         rewrite_watermark: Option<FileSeq>,
         sync: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<FileBlockHandle>> {
         if log_batch.is_empty() {
             debug_assert!(sync);
-            return self.pipe_log.sync(LogQueue::Rewrite);
+            self.pipe_log.sync(LogQueue::Rewrite)?;
+            return Ok(None);
         }
         log_batch.finish_populate(
             self.cfg.batch_compression_threshold.0 as usize,
@@ -433,7 +461,7 @@ where
                 .append
                 .observe(file_handle.len as f64);
         }
-        Ok(())
+        Ok(Some(file_handle))
     }
 }
 

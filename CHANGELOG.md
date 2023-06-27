@@ -4,17 +4,18 @@
 
 ### Behavior Changes
 
-* Disable log recycling by default.
 * `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.
 * Possible to specify a permission in `FileSystem::open`.
+* Prometheus counter `raft_engine_log_file_count` no longer includes retired log files that are stashed for recycling. Those files are now tracked by a new counter `raft_engine_recycled_file_count`.
 
 ### Bug Fixes
 
 * Fix data loss caused by aborted rewrite operation. Downgrading to an earlier version without the fix may produce phantom Raft Groups or keys, i.e. never written but appear in queries.
+* Fix a potential bug that an un-persisted log batch is mistakenly recovered and causes checksum mismatch error when being read later.
 
 ### New Features
 
-* Support preparing prefilled logs to enable log recycling when start-up.
+* Support preparing prefilled logs to enable log recycling when start-up. The amount of logs to prepare is controlled by `Config::prefill_limit`.
 * Add a new configuration `spill-dir` to allow automatic placement of logs into an auxiliary directory when `dir` is full.
 * Add a new method `Engine::fork` to duplicate an `Engine` to a new place, with a few disk file copies.
 
