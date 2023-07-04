@@ -35,8 +35,11 @@ required-features = ["failpoints"]
 byteorder = "1.2"
 crc32fast = "1.2"
 crossbeam = "0.8"
+crossbeam-channel = "0.5.8"
+either = "1.8.1"
 fail = "0.5"
 fs2 = "0.4"
+futures = "0.3.28"
 hashbrown = "0.14"
 hex = "0.4"
 if_chain = "1.0"
@@ -73,19 +76,10 @@ toml = "0.7"
 
 [features]
 internals = []
-nightly = [
-  "prometheus/nightly",
-]
-failpoints = [
-  "fail/failpoints",
-]
-scripting = [
-  "rhai",
-]
-swap = [
-  "nightly",
-  "memmap2",
-]
+nightly = ["prometheus/nightly"]
+failpoints = ["fail/failpoints"]
+scripting = ["rhai"]
+swap = ["nightly", "memmap2"]
 
 # Shortcuts
 all_except_failpoints = ["internals", "scripting", "nightly", "swap"]

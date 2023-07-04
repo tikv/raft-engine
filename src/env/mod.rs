@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod default;
+mod double_write;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;
