@@ -10,6 +10,7 @@ mod obfuscated;
 
 pub use default::DefaultFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
+pub use double_write::DoubleWriteFileSystem;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Permission {

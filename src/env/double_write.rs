@@ -1,12 +1,21 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use crate::file_pipe_log::FileNameExt;
+use crate::internals::parse_reserved_file_name;
+use crate::internals::FileId;
+use crate::internals::FileSeq;
+use crate::internals::LogQueue;
 use crossbeam::channel::unbounded;
 use crossbeam::channel::Sender;
-use log::{warn, Log};
+use log::{info, warn};
+use std::fs;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::thread;
 
 use crate::env::default::LogFd;
@@ -46,7 +55,11 @@ pub struct DoubleWriteFileSystem {
 }
 
 impl DoubleWriteFileSystem {
-    fn new(path1: PathBuf, path2: PathBuf) -> Self {
+    pub fn new(path1: PathBuf, path2: PathBuf) -> Self {
+        // TODO: check sync
+        // assume they are synced now.
+        Self::check_sync(&path1, &path2);
+
         let (tx1, rx1) = unbounded::<(Task, Callback<LogFd>)>();
         let (tx2, rx2) = unbounded::<(Task, Callback<LogFd>)>();
         let handle1 = thread::spawn(|| {
@@ -79,11 +92,88 @@ impl DoubleWriteFileSystem {
         }
     }
 
+    fn check_sync(path1: &PathBuf, path2: &PathBuf) {
+        let check = |path: &PathBuf| -> (Vec<FileSeq>, Vec<FileSeq>, Vec<FileSeq>) {
+            let mut append_file_names = vec![];
+            let mut rewrite_file_names = vec![];
+            let mut recycled_file_names = vec![];
+            if !path.exists() {
+                info!("Create raft log directory: {}", path.display());
+                fs::create_dir(path).unwrap();
+            }
+
+            fs::read_dir(path)
+                .unwrap()
+                .try_for_each(|e| -> IoResult<()> {
+                    let dir_entry = e?;
+                    let p = dir_entry.path();
+                    if !p.is_file() {
+                        return Ok(());
+                    }
+                    let file_name = p.file_name().unwrap().to_str().unwrap();
+                    match FileId::parse_file_name(file_name) {
+                        Some(FileId {
+                            queue: LogQueue::Append,
+                            seq,
+                        }) => append_file_names.push(seq),
+                        Some(FileId {
+                            queue: LogQueue::Rewrite,
+                            seq,
+                        }) => rewrite_file_names.push(seq),
+                        _ => {
+                            if let Some(seq) = parse_reserved_file_name(file_name) {
+                                recycled_file_names.push(seq);
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            append_file_names.sort();
+            rewrite_file_names.sort();
+            recycled_file_names.sort();
+            (append_file_names, rewrite_file_names, recycled_file_names)
+        };
+
+        let (append1, rewrite1, recycle1) = check(path1);
+        let (append2, rewrite2, recycle2) = check(path2);
+        if append1.first() != append2.first() {
+            panic!("Append file seq not match: {:?} vs {:?}", append1, append2);
+        }
+        if append1.last() != append2.last() {
+            panic!("Append file seq not match: {:?} vs {:?}", append1, append2);
+        }
+        if rewrite1.first() != rewrite2.first() {
+            panic!(
+                "Rewrite file seq not match: {:?} vs {:?}",
+                rewrite1, rewrite2
+            );
+        }
+        if rewrite1.last() != rewrite2.last() {
+            panic!(
+                "Rewrite file seq not match: {:?} vs {:?}",
+                rewrite1, rewrite2
+            );
+        }
+        if recycle1.first() != recycle2.first() {
+            panic!(
+                "Recycle file seq not match: {:?} vs {:?}",
+                recycle1, recycle2
+            );
+        }
+        if recycle1.last() != recycle2.last() {
+            panic!(
+                "Recycle file seq not match: {:?} vs {:?}",
+                recycle1, recycle2
+            );
+        }
+    }
+
     async fn wait_handle(&self, task1: Task, task2: Task) -> IoResult<DoubleWriteHandle> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.disk1.send((task1, cb1));
-        self.disk2.send((task2, cb2));
+        self.disk1.send((task1, cb1)).unwrap();
+        self.disk2.send((task2, cb2)).unwrap();
 
         select! {
             res1 = f1 => res1.unwrap().map(|h| DoubleWriteHandle::new(
@@ -96,8 +186,8 @@ impl DoubleWriteFileSystem {
     async fn wait_one(&self, task1: Task, task2: Task) -> IoResult<()> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.disk1.send((task1, cb1));
-        self.disk2.send((task2, cb2));
+        self.disk1.send((task1, cb1)).unwrap();
+        self.disk2.send((task2, cb2)).unwrap();
 
         select! {
             res1 = f1 => res1.unwrap().map(|_| ()),
@@ -203,6 +293,10 @@ enum FileTask {
 pub struct DoubleWriteHandle {
     disk1: Sender<(FileTask, Callback<usize>)>,
     disk2: Sender<(FileTask, Callback<usize>)>,
+    counter1: Arc<AtomicU64>,
+    counter2: Arc<AtomicU64>,
+    fd1: Arc<RwLock<Option<Arc<LogFd>>>>,
+    fd2: Arc<RwLock<Option<Arc<LogFd>>>>,
 
     handle1: Option<thread::JoinHandle<()>>,
     handle2: Option<thread::JoinHandle<()>>,
@@ -215,29 +309,50 @@ impl DoubleWriteHandle {
     ) -> Self {
         let (tx1, rx1) = unbounded::<(FileTask, Callback<usize>)>();
         let (tx2, rx2) = unbounded::<(FileTask, Callback<usize>)>();
-        let handle1 = thread::spawn(|| {
-            let fd = Self::resolve(file1);
-            for (task, cb) in rx1 {
-                if task == FileTask::Stop {
-                    break;
+        let counter1 = Arc::new(AtomicU64::new(0));
+        let counter2 = Arc::new(AtomicU64::new(0));
+        let fd1 = Arc::new(RwLock::new(None));
+        let fd2 = Arc::new(RwLock::new(None));
+
+        let handle1 = {
+            let fd1 = fd1.clone();
+            let counter1 = counter1.clone();
+            thread::spawn(move || {
+                let fd = Arc::new(Self::resolve(file1));
+                fd1.write().unwrap().replace(fd.clone());
+                for (task, cb) in rx1 {
+                    if task == FileTask::Stop {
+                        break;
+                    }
+                    let res = Self::handle(&fd, task);
+                    counter1.fetch_add(1, Ordering::Relaxed);
+                    cb(res);
                 }
-                let res = Self::handle(&fd, task);
-                cb(res);
-            }
-        });
-        let handle2 = thread::spawn(|| {
-            let fd = Self::resolve(file2);
-            for (task, cb) in rx2 {
-                if task == FileTask::Stop {
-                    break;
+            })
+        };
+        let handle2 = {
+            let fd2 = fd2.clone();
+            let counter2 = counter2.clone();
+            thread::spawn(move || {
+                let fd = Arc::new(Self::resolve(file2));
+                fd2.write().unwrap().replace(fd.clone());
+                for (task, cb) in rx2 {
+                    if task == FileTask::Stop {
+                        break;
+                    }
+                    let res = Self::handle(&fd, task);
+                    counter2.fetch_add(1, Ordering::Relaxed);
+                    cb(res);
                 }
-                let res = Self::handle(&fd, task);
-                cb(res);
-            }
-        });
+            })
+        };
         Self {
             disk1: tx1,
             disk2: tx2,
+            counter1,
+            counter2,
+            fd1,
+            fd2,
             handle1: Some(handle1),
             handle2: Some(handle2),
         }
@@ -265,8 +380,13 @@ impl DoubleWriteHandle {
     }
 
     fn read(&self, offset: usize, buf: &mut [u8]) -> IoResult<usize> {
-        // TODO:
-        unimplemented!()
+        // TODO: read simultaneously from both disks
+        // choose latest to perform read
+        if self.counter1.load(Ordering::Relaxed) >= self.counter2.load(Ordering::Relaxed) {
+            self.fd1.read().unwrap().as_ref().unwrap().read(offset, buf)
+        } else {
+            self.fd2.read().unwrap().as_ref().unwrap().read(offset, buf)
+        }
     }
 
     fn write(&self, offset: usize, content: &[u8]) -> IoResult<usize> {
@@ -291,6 +411,15 @@ impl DoubleWriteHandle {
             res1 = f1 => res1.unwrap(),
             res2 = f2 => res2.unwrap(),
         }
+    }
+}
+
+impl Drop for DoubleWriteHandle {
+    fn drop(&mut self) {
+        self.disk1.send((FileTask::Stop, Box::new(|_| {}))).unwrap();
+        self.disk2.send((FileTask::Stop, Box::new(|_| {}))).unwrap();
+        self.handle1.take().unwrap().join().unwrap();
+        self.handle2.take().unwrap().join().unwrap();
     }
 }
 
@@ -384,7 +513,7 @@ impl Seek for DoubleWriteReader {
 
 impl Read for DoubleWriteReader {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
-        let len = self.inner.read_impl(self.offset, buf)?;
+        let len = self.inner.read(self.offset, buf)?;
         self.offset += len;
         Ok(len)
     }
