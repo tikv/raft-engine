@@ -11,7 +11,6 @@ use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
 use crate::config::{Config, RecoveryMode};
-use crate::env::DoubleWriteFileSystem;
 use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
@@ -2624,7 +2623,10 @@ pub(crate) mod tests {
             });
             r
         }
-        let file_system = Arc::new(DoubleWriteFileSystem::new(dir.path().to_path_buf(), sec_dir.path().to_path_buf()));
+        let file_system = Arc::new(DoubleWriteFileSystem::new(
+            dir.path().to_path_buf(),
+            sec_dir.path().to_path_buf(),
+        ));
         let entry_data = vec![b'x'; 512];
 
         // Preparations for multi-dirs.
@@ -2658,7 +2660,7 @@ pub(crate) mod tests {
             engine.clean(rid);
         }
         engine.purge_manager.must_rewrite_append_queue(None, None);
-        let file_count =  number_of_files(dir.path());
+        let file_count = number_of_files(dir.path());
         assert_eq!(number_of_files(sec_dir.path()), file_count);
         assert!(file_count > engine.file_count(None));
         // Append data, recycled files are reused.
@@ -2669,42 +2671,6 @@ pub(crate) mod tests {
         let file_count1 = number_of_files(dir.path());
         assert_eq!(file_count, file_count1);
         assert_eq!(number_of_files(sec_dir.path()), file_count1);
-
-        // let cfg_3 = Config {
-        //     enable_log_recycle: false,
-        //     purge_threshold: ReadableSize(40),
-        //     ..cfg
-        // };
-        // drop(engine);
-        // let engine = RaftLogEngine::open_with_file_system(cfg_3, file_system).unwrap();
-        // assert!(number_of_files(spill_dir.path()) > 0);
-        // for rid in 1..=10 {
-        //     assert_eq!(engine.first_index(rid).unwrap(), 20);
-        // }
-
-        // // abnormal case - duplicate FileSeq among different dirs.
-        // {
-        //     // Prerequisite: choose several files and duplicate them to main dir.
-        //     let mut file_count = 0;
-        //     for e in std::fs::read_dir(spill_dir.path()).unwrap() {
-        //         let p = e.unwrap().path();
-        //         let file_name = p.file_name().unwrap().to_str().unwrap();
-        //         if let Some(FileId {
-        //             queue: LogQueue::Append,
-        //             seq: _,
-        //         }) = FileId::parse_file_name(file_name)
-        //         {
-        //             if file_count % 2 == 0 {
-        //                 std::fs::copy(&p, dir.path().join(file_name)).unwrap();
-        //             }
-        //             file_count += 1;
-        //         }
-        //     }
-        // }
-        // let start = engine.file_span(LogQueue::Append).0;
-        // let engine = engine.reopen();
-        // // Duplicate log files will be skipped and cleared.
-        // assert!(engine.file_span(LogQueue::Append).0 > start);
     }
 
     #[test]

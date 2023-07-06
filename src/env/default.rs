@@ -37,6 +37,7 @@ impl From<Permission> for OFlag {
 /// supported on *Unix*, and primarily optimized for *Linux*.
 ///
 /// All [`LogFd`] instances are opened with read and write permission.
+#[derive(Debug)]
 pub struct LogFd(RawFd);
 
 impl LogFd {

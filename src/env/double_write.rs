@@ -7,6 +7,7 @@ use crate::internals::FileSeq;
 use crate::internals::LogQueue;
 use crossbeam::channel::unbounded;
 use crossbeam::channel::Sender;
+use fail::fail_point;
 use log::{info, warn};
 use std::fs;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
@@ -56,7 +57,7 @@ pub struct DoubleWriteFileSystem {
 
 impl DoubleWriteFileSystem {
     pub fn new(path1: PathBuf, path2: PathBuf) -> Self {
-        // TODO: check sync
+        // TODO: fix unsynced files
         // assume they are synced now.
         Self::check_sync(&path1, &path2);
 
@@ -68,6 +69,7 @@ impl DoubleWriteFileSystem {
                 if task == Task::Stop {
                     break;
                 }
+                fail_point!("double_write::thread1");
                 let res = Self::handle(&fs, task);
                 cb(res);
             }
@@ -382,7 +384,17 @@ impl DoubleWriteHandle {
     fn read(&self, offset: usize, buf: &mut [u8]) -> IoResult<usize> {
         // TODO: read simultaneously from both disks
         // choose latest to perform read
-        if self.counter1.load(Ordering::Relaxed) >= self.counter2.load(Ordering::Relaxed) {
+        let count1 = self.counter1.load(Ordering::Relaxed);
+        let count2 = self.counter2.load(Ordering::Relaxed);
+        if count1 == count2 {
+            if let Some(fd) = self.fd1.read().unwrap().as_ref() {
+                fd.read(offset, buf)
+            } else if let Some(fd) = self.fd2.read().unwrap().as_ref() {
+                fd.read(offset, buf)
+            } else {
+                panic!("Both fd1 and fd2 are None");
+            }
+        } else if count1 > count2 {
             self.fd1.read().unwrap().as_ref().unwrap().read(offset, buf)
         } else {
             self.fd2.read().unwrap().as_ref().unwrap().read(offset, buf)
