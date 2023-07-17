@@ -72,6 +72,7 @@ tempfile = "3.1"
 toml = "0.7"
 
 [features]
+default = ["internals", "scripting"]
 internals = []
 nightly = [
   "prometheus/nightly",
@@ -87,10 +88,7 @@ swap = [
   "memmap2",
 ]
 
-# Shortcuts
-all_except_failpoints = ["internals", "scripting", "nightly", "swap"]
-all_stable = ["internals", "scripting", "failpoints"]
-all_stable_except_failpoints = ["internals", "scripting"]
+nightly_group = ["nightly", "swap"]
 
 [patch.crates-io]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
