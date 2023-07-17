@@ -4,7 +4,7 @@
 EXTRA_CARGO_ARGS ?=
 ## How to test stable toolchain.
 ## - auto: use current default toolchain, disable nightly features.
-## - force: always use stable toolchain, disable nightly features.
+## - force: explicitly use stable toolchain, disable nightly features.
 WITH_STABLE_TOOLCHAIN ?=
 
 WITH_NIGHTLY_FEATURES =

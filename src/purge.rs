@@ -103,12 +103,10 @@ where
                     });
 
                 // Ordering
-                // 1. Must rewrite tombstones AFTER acquiring
-                //    `append_queue_barrier`, or deletion marks might be lost
-                //    after restart.
-                // 2. Must rewrite tombstones BEFORE rewrite entries, or
-                //    entries from recreated region might be lost after
-                //    restart.
+                // 1. Must rewrite tombstones AFTER acquiring `append_queue_barrier`, or
+                //    deletion marks might be lost after restart.
+                // 2. Must rewrite tombstones BEFORE rewrite entries, or entries from recreated
+                //    region might be lost after restart.
                 self.rewrite_append_queue_tombstones()?;
                 should_compact.extend(self.rewrite_or_compact_append_queue(
                     rewrite_watermark,
