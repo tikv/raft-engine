@@ -61,9 +61,11 @@ endif
 
 ## Run tests with various features for maximum code coverage.
 ifndef WITH_NIGHTLY_FEATURES
-test_matrix: $(error Must run test matrix with nightly features. Please reset WITH_STABLE_TOOLCHAIN.)
-endif
+test_matrix:
+	$(error Must run test matrix with nightly features. Please reset WITH_STABLE_TOOLCHAIN.)
+else
 test_matrix: test
+endif
 
 ## Build raft-engine-ctl.
 ctl:
