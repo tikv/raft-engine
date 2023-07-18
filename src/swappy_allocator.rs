@@ -617,7 +617,6 @@ mod tests {
         assert_eq!(global.stats(), (2, 1, 0, 0));
         // Deallocate all pages, calls <allocate and deallocate> when memory use is low.
         disk_vec.truncate(1);
-        // disk_vec.clear();
         disk_vec.shrink_to_fit();
         assert_eq!(allocator.memory_usage(), 16 + 1);
         assert_eq!(global.stats(), (3, 1, 0, 0));

@@ -65,6 +65,8 @@ test_matrix:
 	$(error Must run test matrix with nightly features. Please reset WITH_STABLE_TOOLCHAIN.)
 else
 test_matrix: test
+	cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
 
 ## Build raft-engine-ctl.
