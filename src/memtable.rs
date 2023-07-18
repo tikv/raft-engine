@@ -2256,6 +2256,7 @@ mod tests {
                             7,
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
+                        memtable.replay_rewrite(Vec::new());
                     }
                 }
                 memtable
