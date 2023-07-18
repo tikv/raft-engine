@@ -46,7 +46,7 @@ log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug
 lz4-sys = "1.9"
 memmap2 = { version = "0.7", optional = true }
 nix = "0.26"
-num-derive = "0.3"
+num-derive = "0.4"
 num-traits = "0.2"
 parking_lot = "0.12"
 prometheus = { version = "0.13" }
