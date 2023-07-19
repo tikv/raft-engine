@@ -2623,7 +2623,7 @@ pub(crate) mod tests {
             });
             r
         }
-        let file_system = Arc::new(DoubleWriteFileSystem::new(
+        let file_system = Arc::new(HedgedFileSystem::new(
             dir.path().to_path_buf(),
             sec_dir.path().to_path_buf(),
         ));

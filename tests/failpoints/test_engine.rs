@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use raft_engine::env::DoubleWriteFileSystem;
+use raft_engine::env::HedgedFileSystem;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -1216,7 +1216,7 @@ fn test_start_engine_with_slow_second_disk() {
         r
     }
     fail::cfg("double_write::thread1", "pause").unwrap();
-    let file_system = Arc::new(DoubleWriteFileSystem::new(
+    let file_system = Arc::new(HedgedFileSystem::new(
         dir.path().to_path_buf(),
         sec_dir.path().to_path_buf(),
     ));

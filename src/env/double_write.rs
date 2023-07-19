@@ -45,7 +45,7 @@ enum Task {
     Stop,
 }
 
-pub struct DoubleWriteFileSystem {
+pub struct HedgedFileSystem {
     path1: PathBuf,
     path2: PathBuf,
     disk1: Sender<(Task, Callback<LogFd>)>,
@@ -55,7 +55,7 @@ pub struct DoubleWriteFileSystem {
     handle2: Option<thread::JoinHandle<()>>,
 }
 
-impl DoubleWriteFileSystem {
+impl HedgedFileSystem {
     pub fn new(path1: PathBuf, path2: PathBuf) -> Self {
         // TODO: fix unsynced files
         // assume they are synced now.
@@ -171,16 +171,16 @@ impl DoubleWriteFileSystem {
         }
     }
 
-    async fn wait_handle(&self, task1: Task, task2: Task) -> IoResult<DoubleWriteHandle> {
+    async fn wait_handle(&self, task1: Task, task2: Task) -> IoResult<HedgedHandle> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
         self.disk1.send((task1, cb1)).unwrap();
         self.disk2.send((task2, cb2)).unwrap();
 
         select! {
-            res1 = f1 => res1.unwrap().map(|h| DoubleWriteHandle::new(
+            res1 = f1 => res1.unwrap().map(|h| HedgedHandle::new(
                 Either::Right(h.unwrap()), Either::Left(f2) )),
-            res2 = f2 => res2.unwrap().map(|h| DoubleWriteHandle::new(
+            res2 = f2 => res2.unwrap().map(|h| HedgedHandle::new(
                 Either::Left(f1), Either::Right(h.unwrap()) )),
         }
     }
@@ -219,7 +219,7 @@ impl DoubleWriteFileSystem {
     }
 }
 
-impl Drop for DoubleWriteFileSystem {
+impl Drop for HedgedFileSystem {
     fn drop(&mut self) {
         self.disk1.send((Task::Stop, Box::new(|_| {}))).unwrap();
         self.disk2.send((Task::Stop, Box::new(|_| {}))).unwrap();
@@ -228,10 +228,10 @@ impl Drop for DoubleWriteFileSystem {
     }
 }
 
-impl FileSystem for DoubleWriteFileSystem {
-    type Handle = DoubleWriteHandle;
-    type Reader = DoubleWriteReader;
-    type Writer = DoubleWriteWriter;
+impl FileSystem for HedgedFileSystem {
+    type Handle = HedgedHandle;
+    type Reader = HedgedReader;
+    type Writer = HedgedWriter;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         block_on(self.wait_handle(
@@ -274,11 +274,11 @@ impl FileSystem for DoubleWriteFileSystem {
     }
 
     fn new_reader(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Reader> {
-        Ok(DoubleWriteReader::new(handle))
+        Ok(HedgedReader::new(handle))
     }
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> IoResult<Self::Writer> {
-        Ok(DoubleWriteWriter::new(handle))
+        Ok(HedgedWriter::new(handle))
     }
 }
 
@@ -292,7 +292,7 @@ enum FileTask {
     Stop,
 }
 
-pub struct DoubleWriteHandle {
+pub struct HedgedHandle {
     disk1: Sender<(FileTask, Callback<usize>)>,
     disk2: Sender<(FileTask, Callback<usize>)>,
     counter1: Arc<AtomicU64>,
@@ -304,7 +304,7 @@ pub struct DoubleWriteHandle {
     handle2: Option<thread::JoinHandle<()>>,
 }
 
-impl DoubleWriteHandle {
+impl HedgedHandle {
     pub fn new(
         file1: Either<oneshot::Receiver<IoResult<Option<LogFd>>>, LogFd>,
         file2: Either<oneshot::Receiver<IoResult<Option<LogFd>>>, LogFd>,
@@ -426,7 +426,7 @@ impl DoubleWriteHandle {
     }
 }
 
-impl Drop for DoubleWriteHandle {
+impl Drop for HedgedHandle {
     fn drop(&mut self) {
         self.disk1.send((FileTask::Stop, Box::new(|_| {}))).unwrap();
         self.disk2.send((FileTask::Stop, Box::new(|_| {}))).unwrap();
@@ -435,7 +435,7 @@ impl Drop for DoubleWriteHandle {
     }
 }
 
-impl Handle for DoubleWriteHandle {
+impl Handle for HedgedHandle {
     fn truncate(&self, offset: usize) -> IoResult<()> {
         block_on(self.wait_one(FileTask::Truncate(offset))).map(|_| ())
     }
@@ -449,13 +449,13 @@ impl Handle for DoubleWriteHandle {
     }
 }
 
-pub struct DoubleWriteWriter {
-    inner: Arc<DoubleWriteHandle>,
+pub struct HedgedWriter {
+    inner: Arc<HedgedHandle>,
     offset: usize,
 }
 
-impl DoubleWriteWriter {
-    pub fn new(handle: Arc<DoubleWriteHandle>) -> Self {
+impl HedgedWriter {
+    pub fn new(handle: Arc<HedgedHandle>) -> Self {
         Self {
             inner: handle,
             offset: 0,
@@ -463,7 +463,7 @@ impl DoubleWriteWriter {
     }
 }
 
-impl Write for DoubleWriteWriter {
+impl Write for HedgedWriter {
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         let len = self.inner.write(self.offset, buf)?;
         self.offset += len;
@@ -475,7 +475,7 @@ impl Write for DoubleWriteWriter {
     }
 }
 
-impl WriteExt for DoubleWriteWriter {
+impl WriteExt for HedgedWriter {
     fn truncate(&mut self, offset: usize) -> IoResult<()> {
         self.inner.truncate(offset)?;
         self.offset = offset;
@@ -487,7 +487,7 @@ impl WriteExt for DoubleWriteWriter {
     }
 }
 
-impl Seek for DoubleWriteWriter {
+impl Seek for HedgedWriter {
     fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
         match pos {
             SeekFrom::Start(offset) => self.offset = offset as usize,
@@ -498,13 +498,13 @@ impl Seek for DoubleWriteWriter {
     }
 }
 
-pub struct DoubleWriteReader {
-    inner: Arc<DoubleWriteHandle>,
+pub struct HedgedReader {
+    inner: Arc<HedgedHandle>,
     offset: usize,
 }
 
-impl DoubleWriteReader {
-    pub fn new(handle: Arc<DoubleWriteHandle>) -> Self {
+impl HedgedReader {
+    pub fn new(handle: Arc<HedgedHandle>) -> Self {
         Self {
             inner: handle,
             offset: 0,
@@ -512,7 +512,7 @@ impl DoubleWriteReader {
     }
 }
 
-impl Seek for DoubleWriteReader {
+impl Seek for HedgedReader {
     fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
         match pos {
             SeekFrom::Start(offset) => self.offset = offset as usize,
@@ -523,7 +523,7 @@ impl Seek for DoubleWriteReader {
     }
 }
 
-impl Read for DoubleWriteReader {
+impl Read for HedgedReader {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
         let len = self.inner.read(self.offset, buf)?;
         self.offset += len;
@@ -531,8 +531,7 @@ impl Read for DoubleWriteReader {
     }
 }
 
-pub fn paired_future_callback<T: Send + 'static>(
-) -> (Callback<T>, oneshot::Receiver<IoResult<Option<T>>>) {
+pub fn paired_future_callback<T: Send + 'static>() -> (Callback<T>, oneshot::Receiver<IoResult<Option<T>>>) {
     let (tx, future) = oneshot::channel();
     let callback = Box::new(move |result| {
         let r = tx.send(result);
