@@ -670,6 +670,7 @@ mod tests {
             decode_var_u64(&mut buf.as_slice()),
             ErrorKind::UnexpectedEof
         );
+        check_error!(decode_var_u64(&mut [].as_slice()), ErrorKind::UnexpectedEof);
 
         buf.push(0);
         assert_eq!(0, decode_var_u64(&mut buf.as_slice()).unwrap());
