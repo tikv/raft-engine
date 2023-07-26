@@ -342,6 +342,13 @@ impl Page {
     #[inline]
     fn release(self, root: &Path) {
         debug_assert_eq!(self.ref_counter, 0);
+
+        // Somehow in Windows, we have to drop the mmap file handle first, otherwise
+        // the following file removal will return "Access Denied (OS Error 5)".
+        // Not using `#[cfg(windows)]` here is because it might do no harm in other
+        // operating systems - the mmap file handle is dropped anyhow.
+        drop(self.mmap);
+
         let path = root.join(Self::page_file_name(self.seq));
         if let Err(e) = std::fs::remove_file(path) {
             warn!("Failed to delete swap file: {e}");

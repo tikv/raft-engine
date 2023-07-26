@@ -68,7 +68,7 @@ kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = f
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 rand = "0.8"
 rand_distr = "0.4"
-tempfile = "3.1"
+tempfile = "3.6"
 toml = "0.7"
 
 [features]
@@ -87,6 +87,7 @@ swap = [
   "nightly",
   "memmap2",
 ]
+std_fs = []
 
 nightly_group = ["nightly", "swap"]
 
@@ -94,6 +95,8 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+# TODO: Use official grpc-rs once https://github.com/tikv/grpc-rs/pull/622 is merged.
+grpcio = { git = "https://github.com/tabokie/grpc-rs", branch = "v0.10.x-win" }
 
 [workspace]
 members = ["stress", "ctl"]
