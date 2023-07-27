@@ -175,6 +175,10 @@ impl<F: FileSystem> SinglePipe<F> {
     /// filesystem.
     fn sync_dir(&self, path_id: PathId) -> Result<()> {
         debug_assert!(!self.paths.is_empty());
+
+        // Skip syncing directory in Windows. Refer to badger's discussion for more
+        // detail: https://github.com/dgraph-io/badger/issues/699
+        #[cfg(not(windows))]
         std::fs::File::open(PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
         Ok(())
     }

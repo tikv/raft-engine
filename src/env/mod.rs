@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod default;
+mod log_fd;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;
