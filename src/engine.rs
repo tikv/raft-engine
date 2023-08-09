@@ -315,7 +315,10 @@ where
     /// Purges expired logs files and returns a set of Raft group ids that need
     /// to be compacted.
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
-        self.purge_manager.purge_expired_files()
+        let purged = self.purge_manager.purge_expired_files();
+        // Update storage size after purge.
+        STORAGE_USAGE.set(self.get_used_size() as i64);
+        purged
     }
 
     /// Returns count of fetched entries.
