@@ -40,6 +40,8 @@ pub struct Config {
     /// Default: None
     pub spill_dir: Option<String>,
 
+    pub second_dir: Option<String>,
+
     /// How to deal with file corruption during recovery.
     ///
     /// Default: "tolerate-tail-corruption".
@@ -104,7 +106,7 @@ pub struct Config {
     /// Whether to prepare log files for recycling when start.
     /// If `true`, batch empty log files will be prepared for recycling when
     /// starting engine.
-    /// Only available for `enable-log-reycle` is true.
+    /// Only available for `enable-log-recycle` is true.
     ///
     /// Default: false
     pub prefill_for_recycle: bool,
@@ -123,6 +125,7 @@ impl Default for Config {
         let mut cfg = Config {
             dir: "".to_owned(),
             spill_dir: None,
+            second_dir: None,
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,

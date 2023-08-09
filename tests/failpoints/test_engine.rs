@@ -1189,6 +1189,23 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
     }
 }
 
+fn number_of_files(p: &Path) -> usize {
+    let mut r = 0;
+    std::fs::read_dir(p).unwrap().for_each(|e| {
+        if e.unwrap()
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("000")
+        {
+            r += 1;
+        }
+    });
+    r
+}
+
 #[test]
 fn test_start_engine_with_slow_second_disk() {
     let dir = tempfile::Builder::new()
@@ -1199,22 +1216,7 @@ fn test_start_engine_with_slow_second_disk() {
         .prefix("test_start_engine_with_slow_second_disk_second")
         .tempdir()
         .unwrap();
-    fn number_of_files(p: &Path) -> usize {
-        let mut r = 0;
-        std::fs::read_dir(p).unwrap().for_each(|e| {
-            if e.unwrap()
-                .path()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("000")
-            {
-                r += 1;
-            }
-        });
-        r
-    }
+
     fail::cfg("double_write::thread1", "pause").unwrap();
     let file_system = Arc::new(HedgedFileSystem::new(
         dir.path().to_path_buf(),
@@ -1249,9 +1251,9 @@ fn test_start_engine_with_slow_second_disk() {
         enable_log_recycle: true,
         prefill_for_recycle: true,
         purge_threshold: ReadableSize(40),
-        ..cfg.clone()
+        ..cfg
     };
-    let engine = Engine::open_with_file_system(cfg_2, file_system.clone()).unwrap();
+    let engine = Engine::open_with_file_system(cfg_2, file_system).unwrap();
     assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
     for rid in 1..=10 {
         assert_eq!(engine.first_index(rid).unwrap(), 1);

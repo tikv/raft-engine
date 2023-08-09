@@ -5,10 +5,10 @@
 //! [`PipeLog`]: crate::pipe_log::PipeLog
 
 mod format;
-mod log_file;
-mod pipe;
-mod pipe_builder;
-mod reader;
+pub mod log_file;
+pub mod pipe;
+pub mod pipe_builder;
+pub mod reader;
 
 pub use format::{parse_reserved_file_name, FileNameExt};
 pub use pipe::DualPipes as FilePipeLog;

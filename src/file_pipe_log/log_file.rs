@@ -130,7 +130,7 @@ impl<F: FileSystem> LogFileWriter<F> {
 }
 
 /// Build a file reader.
-pub(super) fn build_file_reader<F: FileSystem>(
+pub(crate) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
 ) -> Result<LogFileReader<F>> {

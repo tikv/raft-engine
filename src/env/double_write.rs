@@ -1,14 +1,18 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use crate::file_pipe_log::log_file::build_file_reader;
+use crate::file_pipe_log::pipe::File;
+use crate::file_pipe_log::pipe_builder::FileName;
+use crate::file_pipe_log::reader::LogItemBatchFileReader;
 use crate::file_pipe_log::FileNameExt;
 use crate::internals::parse_reserved_file_name;
 use crate::internals::FileId;
-use crate::internals::FileSeq;
 use crate::internals::LogQueue;
+use crate::{Error, Result};
 use crossbeam::channel::unbounded;
 use crossbeam::channel::Sender;
 use fail::fail_point;
-use log::{info, warn};
+use log::{info, warn, Log};
 use std::fs;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -45,7 +49,25 @@ enum Task {
     Stop,
 }
 
-pub struct HedgedFileSystem {
+#[derive(Default)]
+struct Files {
+    prefix: PathBuf,
+    append_file: Vec<FileName>,
+    rewrite_file: Vec<FileName>,
+    recycled_file: Vec<FileName>,
+}
+
+fn replace_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
+    if let Ok(file) = path.strip_prefix(from) {
+        to.to_path_buf().join(file)
+    } else {
+        panic!("Invalid path: {:?}", path);
+    }
+}
+
+pub struct HedgedFileSystem<F: FileSystem> {
+    inner: Arc<F>,
+
     path1: PathBuf,
     path2: PathBuf,
     disk1: Sender<(Task, Callback<LogFd>)>,
@@ -55,36 +77,37 @@ pub struct HedgedFileSystem {
     handle2: Option<thread::JoinHandle<()>>,
 }
 
-impl HedgedFileSystem {
-    pub fn new(path1: PathBuf, path2: PathBuf) -> Self {
-        // TODO: fix unsynced files
-        // assume they are synced now.
-        Self::check_sync(&path1, &path2);
+// TODO: read both dir at recovery, maybe no need? cause operations are to both
+// disks TODO: consider encryption
 
+impl<F: FileSystem> HedgedFileSystem<F> {
+    pub fn new(inner: Arc<F>, path1: PathBuf, path2: PathBuf) -> Self {
         let (tx1, rx1) = unbounded::<(Task, Callback<LogFd>)>();
         let (tx2, rx2) = unbounded::<(Task, Callback<LogFd>)>();
+        let fs1 = inner.clone();
         let handle1 = thread::spawn(|| {
-            let fs = DefaultFileSystem {};
             for (task, cb) in rx1 {
                 if task == Task::Stop {
                     break;
                 }
                 fail_point!("double_write::thread1");
-                let res = Self::handle(&fs, task);
+                let res = Self::handle(&fs1, task);
                 cb(res);
             }
         });
+        let fs2 = inner.clone();
         let handle2 = thread::spawn(|| {
             let fs = DefaultFileSystem {};
             for (task, cb) in rx2 {
                 if task == Task::Stop {
                     break;
                 }
-                let res = Self::handle(&fs, task);
+                let res = Self::handle(&fs2, task);
                 cb(res);
             }
         });
         Self {
+            inner,
             path1,
             path2,
             disk1: tx1,
@@ -94,81 +117,207 @@ impl HedgedFileSystem {
         }
     }
 
-    fn check_sync(path1: &PathBuf, path2: &PathBuf) {
-        let check = |path: &PathBuf| -> (Vec<FileSeq>, Vec<FileSeq>, Vec<FileSeq>) {
-            let mut append_file_names = vec![];
-            let mut rewrite_file_names = vec![];
-            let mut recycled_file_names = vec![];
-            if !path.exists() {
-                info!("Create raft log directory: {}", path.display());
-                fs::create_dir(path).unwrap();
-            }
+    pub fn bootstrap(&self) -> Result<()> {
+        // catch up diff
+        let files1 = self.get_files(&self.path1)?;
+        let files2 = self.get_files(&self.path2)?;
 
-            fs::read_dir(path)
-                .unwrap()
-                .try_for_each(|e| -> IoResult<()> {
-                    let dir_entry = e?;
-                    let p = dir_entry.path();
-                    if !p.is_file() {
-                        return Ok(());
+        let count1 = self.get_latest_valid_seq(&files1)?;
+        let count2 = self.get_latest_valid_seq(&files2)?;
+
+        match count1.cmp(&count2) {
+            std::cmp::Ordering::Equal => {
+                // TODO: still need to catch up
+                return Ok(());
+            }
+            std::cmp::Ordering::Less => {
+                self.catch_up_diff(files2, files1)?;
+            }
+            std::cmp::Ordering::Greater => {
+                self.catch_up_diff(files1, files2)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn catch_up_diff(&self, fromFiles: Files, toFiles: Files) -> Result<()> {
+        let check_files = |from: &Vec<FileName>, to: &Vec<FileName>| -> IoResult<()> {
+            let mut iter1 = from.iter().peekable();
+            let mut iter2 = to.iter().peekable();
+            // compare files of from and to, if the file in from is not in to, copy it to
+            // to, and if the file in to is not in from, delete it
+            loop {
+                match (iter1.peek(), iter2.peek()) {
+                    (None, None) => break,
+                    (Some(f1), None) => {
+                        let to = replace_path(
+                            f1.path.as_ref(),
+                            fromFiles.prefix.as_ref(),
+                            toFiles.prefix.as_ref(),
+                        );
+                        fs::copy(&f1.path, to)?;
+                        iter1.next();
                     }
-                    let file_name = p.file_name().unwrap().to_str().unwrap();
-                    match FileId::parse_file_name(file_name) {
-                        Some(FileId {
-                            queue: LogQueue::Append,
-                            seq,
-                        }) => append_file_names.push(seq),
-                        Some(FileId {
-                            queue: LogQueue::Rewrite,
-                            seq,
-                        }) => rewrite_file_names.push(seq),
-                        _ => {
-                            if let Some(seq) = parse_reserved_file_name(file_name) {
-                                recycled_file_names.push(seq);
+                    (None, Some(f2)) => {
+                        fs::remove_file(&f2.path)?;
+                        iter2.next();
+                    }
+                    (Some(f1), Some(f2)) => {
+                        match f1.seq.cmp(&f2.seq) {
+                            std::cmp::Ordering::Equal => {
+                                // TODO: do we need to check file size?
+                                // if f1.handle.file_size() != f2.handle.file_size() {
+                                //     let to = replace_path(f1.path.as_ref(),
+                                // fromFiles.prefix.as_ref(), toFiles.prefix.as_ref());
+                                //     fs::copy(&f1.path, &to)?;
+                                // }
+                                iter1.next();
+                                iter2.next();
+                            }
+                            std::cmp::Ordering::Less => {
+                                let to = replace_path(
+                                    f1.path.as_ref(),
+                                    fromFiles.prefix.as_ref(),
+                                    toFiles.prefix.as_ref(),
+                                );
+                                fs::copy(&f1.path, to)?;
+                                iter1.next();
+                            }
+                            std::cmp::Ordering::Greater => {
+                                fs::remove_file(&f2.path)?;
+                                iter2.next();
                             }
                         }
                     }
-                    Ok(())
-                })
-                .unwrap();
-            append_file_names.sort();
-            rewrite_file_names.sort();
-            recycled_file_names.sort();
-            (append_file_names, rewrite_file_names, recycled_file_names)
+                }
+            }
+            Ok(())
         };
 
-        let (append1, rewrite1, recycle1) = check(path1);
-        let (append2, rewrite2, recycle2) = check(path2);
-        if append1.first() != append2.first() {
-            panic!("Append file seq not match: {:?} vs {:?}", append1, append2);
-        }
-        if append1.last() != append2.last() {
-            panic!("Append file seq not match: {:?} vs {:?}", append1, append2);
-        }
-        if rewrite1.first() != rewrite2.first() {
-            panic!(
-                "Rewrite file seq not match: {:?} vs {:?}",
-                rewrite1, rewrite2
+        check_files(&fromFiles.append_file, &toFiles.append_file)?;
+        check_files(&fromFiles.rewrite_file, &toFiles.rewrite_file)?;
+        check_files(&fromFiles.recycled_file, &toFiles.recycled_file)?;
+
+        // check file size is not enough, treat the last files differently considering
+        // the recycle, always copy the last file
+        if let Some(last_file) = fromFiles.append_file.last() {
+            let to = replace_path(
+                last_file.path.as_ref(),
+                fromFiles.prefix.as_ref(),
+                toFiles.prefix.as_ref(),
             );
+            fs::copy(&last_file.path, to)?;
         }
-        if rewrite1.last() != rewrite2.last() {
-            panic!(
-                "Rewrite file seq not match: {:?} vs {:?}",
-                rewrite1, rewrite2
+        if let Some(last_file) = fromFiles.rewrite_file.last() {
+            let to = replace_path(
+                last_file.path.as_ref(),
+                fromFiles.prefix.as_ref(),
+                toFiles.prefix.as_ref(),
             );
+            fs::copy(&last_file.path, to)?;
         }
-        if recycle1.first() != recycle2.first() {
-            panic!(
-                "Recycle file seq not match: {:?} vs {:?}",
-                recycle1, recycle2
+        if let Some(last_file) = fromFiles.recycled_file.last() {
+            let to = replace_path(
+                last_file.path.as_ref(),
+                fromFiles.prefix.as_ref(),
+                toFiles.prefix.as_ref(),
             );
+            fs::copy(&last_file.path, to)?;
         }
-        if recycle1.last() != recycle2.last() {
-            panic!(
-                "Recycle file seq not match: {:?} vs {:?}",
-                recycle1, recycle2
-            );
+
+        Ok(())
+    }
+
+    fn get_files(&self, path: &PathBuf) -> IoResult<Files> {
+        let mut files = Files {
+            prefix: path.clone(),
+            ..Default::default()
+        };
+        if !path.exists() {
+            info!("Create raft log directory: {}", path.display());
+            fs::create_dir(path).unwrap();
         }
+
+        fs::read_dir(path)
+            .unwrap()
+            .try_for_each(|e| -> IoResult<()> {
+                let dir_entry = e?;
+                let p = dir_entry.path();
+                if !p.is_file() {
+                    return Ok(());
+                }
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                match FileId::parse_file_name(file_name) {
+                    Some(FileId {
+                        queue: LogQueue::Append,
+                        seq,
+                    }) => files.append_file.push(FileName {
+                        seq,
+                        path: p,
+                        path_id: 0,
+                    }),
+                    Some(FileId {
+                        queue: LogQueue::Rewrite,
+                        seq,
+                    }) => files.rewrite_file.push(FileName {
+                        seq,
+                        path: p,
+                        path_id: 0,
+                    }),
+                    _ => {
+                        if let Some(seq) = parse_reserved_file_name(file_name) {
+                            files.recycled_file.push(FileName {
+                                seq,
+                                path: p,
+                                path_id: 0,
+                            })
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        files.append_file.sort_by(|a, b| a.seq.cmp(&b.seq));
+        files.rewrite_file.sort_by(|a, b| a.seq.cmp(&b.seq));
+        files.recycled_file.sort_by(|a, b| a.seq.cmp(&b.seq));
+        Ok(files)
+    }
+
+    fn get_latest_valid_seq(&self, files: &Files) -> Result<usize> {
+        let mut count = 0;
+        if let Some(f) = files.append_file.last() {
+            let recovery_read_block_size = 1024;
+            let mut reader = LogItemBatchFileReader::new(recovery_read_block_size);
+            // TODO: change file system
+            let handle = Arc::new(DefaultFileSystem {}.open(&f.path, Permission::ReadOnly)?);
+            let file_reader = build_file_reader(&DefaultFileSystem {}, handle)?;
+            match reader.open(
+                FileId {
+                    queue: LogQueue::Append,
+                    seq: f.seq,
+                },
+                file_reader,
+            ) {
+                Err(e) if matches!(e, Error::Io(_)) => return Err(e),
+                Err(e) => {
+                    return Ok(0);
+                }
+                Ok(format) => {
+                    // Do nothing
+                }
+            }
+            loop {
+                match reader.next() {
+                    Ok(Some(item_batch)) => {
+                        count += 1;
+                    }
+                    Ok(None) => break,
+                    Err(e) => break,
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     async fn wait_handle(&self, task1: Task, task2: Task) -> IoResult<HedgedHandle> {
@@ -197,19 +346,11 @@ impl HedgedFileSystem {
         }
     }
 
-    fn replace_path(&self, path: &Path) -> PathBuf {
-        if let Ok(file) = path.strip_prefix(&self.path1) {
-            self.path2.clone().join(file)
-        } else {
-            panic!("Invalid path: {:?}", path);
-        }
-    }
-
     #[inline]
-    fn handle(file_system: &DefaultFileSystem, task: Task) -> IoResult<Option<LogFd>> {
+    fn handle(file_system: &F, task: Task) -> IoResult<Option<LogFd>> {
         match task {
-            Task::Create(path) => file_system.create(path).map(|h| Some(h)),
-            Task::Open { path, perm } => file_system.open(path, perm).map(|h| Some(h)),
+            Task::Create(path) => file_system.create(path).map(Some),
+            Task::Open { path, perm } => file_system.open(path, perm).map(Some),
             Task::Delete(path) => file_system.delete(path).map(|_| None),
             Task::Rename { src_path, dst_path } => {
                 file_system.rename(src_path, dst_path).map(|_| None)
@@ -219,7 +360,7 @@ impl HedgedFileSystem {
     }
 }
 
-impl Drop for HedgedFileSystem {
+impl<F: FileSystem> Drop for HedgedFileSystem<F> {
     fn drop(&mut self) {
         self.disk1.send((Task::Stop, Box::new(|_| {}))).unwrap();
         self.disk2.send((Task::Stop, Box::new(|_| {}))).unwrap();
@@ -228,7 +369,7 @@ impl Drop for HedgedFileSystem {
     }
 }
 
-impl FileSystem for HedgedFileSystem {
+impl<F: FileSystem> FileSystem for HedgedFileSystem<F> {
     type Handle = HedgedHandle;
     type Reader = HedgedReader;
     type Writer = HedgedWriter;
@@ -236,7 +377,11 @@ impl FileSystem for HedgedFileSystem {
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         block_on(self.wait_handle(
             Task::Create(path.as_ref().to_path_buf()),
-            Task::Create(self.replace_path(path.as_ref())),
+            Task::Create(replace_path(
+                path.as_ref(),
+                self.path1.as_ref(),
+                self.path2.as_ref(),
+            )),
         ))
     }
 
@@ -247,7 +392,7 @@ impl FileSystem for HedgedFileSystem {
                 perm,
             },
             Task::Open {
-                path: self.replace_path(path.as_ref()),
+                path: replace_path(path.as_ref(), self.path1.as_ref(), self.path2.as_ref()),
                 perm,
             },
         ))
@@ -256,7 +401,11 @@ impl FileSystem for HedgedFileSystem {
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
         block_on(self.wait_one(
             Task::Delete(path.as_ref().to_path_buf()),
-            Task::Delete(self.replace_path(path.as_ref())),
+            Task::Delete(replace_path(
+                path.as_ref(),
+                self.path1.as_ref(),
+                self.path2.as_ref(),
+            )),
         ))
     }
 
@@ -267,8 +416,8 @@ impl FileSystem for HedgedFileSystem {
                 dst_path: dst_path.as_ref().to_path_buf(),
             },
             Task::Rename {
-                src_path: self.replace_path(src_path.as_ref()),
-                dst_path: self.replace_path(dst_path.as_ref()),
+                src_path: replace_path(src_path.as_ref(), self.path1.as_ref(), self.path2.as_ref()),
+                dst_path: replace_path(dst_path.as_ref(), self.path1.as_ref(), self.path2.as_ref()),
             },
         ))
     }
@@ -373,9 +522,9 @@ impl HedgedHandle {
     fn handle(fd: &LogFd, task: FileTask) -> IoResult<Option<usize>> {
         match task {
             FileTask::Truncate(offset) => fd.truncate(offset).map(|_| None),
-            FileTask::FileSize => fd.file_size().map(|x| Some(x)),
+            FileTask::FileSize => fd.file_size().map(Some),
             FileTask::Sync => fd.sync().map(|_| None),
-            FileTask::Write { offset, bytes } => fd.write(offset, &bytes).map(|x| Some(x)),
+            FileTask::Write { offset, bytes } => fd.write(offset, &bytes).map(Some),
             FileTask::Allocate { offset, size } => fd.allocate(offset, size).map(|_| None),
             FileTask::Stop => unreachable!(),
         }
@@ -386,18 +535,22 @@ impl HedgedHandle {
         // choose latest to perform read
         let count1 = self.counter1.load(Ordering::Relaxed);
         let count2 = self.counter2.load(Ordering::Relaxed);
-        if count1 == count2 {
-            if let Some(fd) = self.fd1.read().unwrap().as_ref() {
-                fd.read(offset, buf)
-            } else if let Some(fd) = self.fd2.read().unwrap().as_ref() {
-                fd.read(offset, buf)
-            } else {
-                panic!("Both fd1 and fd2 are None");
+        match count1.cmp(&count2) {
+            std::cmp::Ordering::Equal => {
+                if let Some(fd) = self.fd1.read().unwrap().as_ref() {
+                    fd.read(offset, buf)
+                } else if let Some(fd) = self.fd2.read().unwrap().as_ref() {
+                    fd.read(offset, buf)
+                } else {
+                    panic!("Both fd1 and fd2 are None");
+                }
             }
-        } else if count1 > count2 {
-            self.fd1.read().unwrap().as_ref().unwrap().read(offset, buf)
-        } else {
-            self.fd2.read().unwrap().as_ref().unwrap().read(offset, buf)
+            std::cmp::Ordering::Greater => {
+                self.fd1.read().unwrap().as_ref().unwrap().read(offset, buf)
+            }
+            std::cmp::Ordering::Less => {
+                self.fd2.read().unwrap().as_ref().unwrap().read(offset, buf)
+            }
         }
     }
 
@@ -531,7 +684,8 @@ impl Read for HedgedReader {
     }
 }
 
-pub fn paired_future_callback<T: Send + 'static>() -> (Callback<T>, oneshot::Receiver<IoResult<Option<T>>>) {
+pub fn paired_future_callback<T: Send + 'static>(
+) -> (Callback<T>, oneshot::Receiver<IoResult<Option<T>>>) {
     let (tx, future) = oneshot::channel();
     let callback = Box::new(move |result| {
         let r = tx.send(result);
