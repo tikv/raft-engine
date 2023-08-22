@@ -31,6 +31,30 @@ const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 /// Max times for `write`.
 const MAX_WRITE_ATTEMPT: u64 = 2;
 
+// pub struct HedgedEngine<F = DefaultFileSystem, P = FilePipeLog<F>>
+// where
+//     F: FileSystem,
+//     P: PipeLog,
+// {
+//     inner: Engine<HedgedFileSystem<F>, P>,
+//     fs: Arc<HedgedFileSystem<F>>,
+// }
+
+// impl<F> HedgedEngine<F,FilePipeLog<F>>
+// where
+//     F: FileSystem,
+// {
+
+// }
+
+// impl<F: FileSystem> Deref for HedgedEngine<F, FilePipeLog<F>> {
+//    type Target = Engine<F, FilePipeLog<F>>;
+
+//    fn deref(&self) -> &Self::Target {
+//         &self.inner
+//    }
+// }
+
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
     F: FileSystem,
@@ -66,23 +90,36 @@ impl Engine<DefaultFileSystem, FilePipeLog<DefaultFileSystem>> {
     }
 }
 
+pub fn open_with_hedged_file_system<F: FileSystem>(
+    cfg: Config,
+    file_system: Arc<F>,
+) -> Result<Engine<HedgedFileSystem, FilePipeLog<HedgedFileSystem>>> {
+    let file_system = if let Some(ref sec_dir) = cfg.second_dir {
+        let fs = Arc::new(HedgedFileSystem::new(
+            file_system,
+            cfg.dir.clone().into(),
+            sec_dir.clone().into(),
+        ));
+        fs.bootstrap()?;
+        fs
+    } else {
+        panic!()
+    };
+    Engine::open_with(cfg, file_system, vec![])
+}
+
+pub fn open_with_file_system<F: FileSystem>(
+    cfg: Config,
+    file_system: Arc<F>,
+) -> Result<Engine<F, FilePipeLog<F>>> {
+    Engine::open_with(cfg, file_system, vec![])
+}
+
 impl<F> Engine<F, FilePipeLog<F>>
 where
     F: FileSystem,
 {
-    pub fn open_with_file_system(
-        cfg: Config,
-        mut file_system: Arc<F>,
-    ) -> Result<Engine<F, FilePipeLog<F>>> {
-        file_system = if let Some(sec_dir) = cfg.second_dir {
-            let fs = Arc::new(HedgedFileSystem::new(file_system, cfg.dir.into(), sec_dir.into()));
-            fs.bootstrap()?;
-            fs
-        };
-        Self::open_with(cfg, file_system, vec![])
-    }
-
-    pub fn open_with(
+    fn open_with(
         mut cfg: Config,
         file_system: Arc<F>,
         mut listeners: Vec<Arc<dyn EventListener>>,
@@ -108,6 +145,9 @@ where
             stats.clone(),
             listeners.clone(),
         );
+        // HedgingManager::new(
+        //     pipe_log.clone(),
+        // )
 
         let (tx, rx) = mpsc::channel();
         let stats_clone = stats.clone();
@@ -743,8 +783,7 @@ pub(crate) mod tests {
             dir: sub_dir.to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-            .unwrap();
+        open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
     }
 
     #[test]
@@ -762,11 +801,9 @@ pub(crate) mod tests {
                 ..Default::default()
             };
 
-            let engine = RaftLogEngine::open_with_file_system(
-                cfg.clone(),
-                Arc::new(ObfuscatedFileSystem::default()),
-            )
-            .unwrap();
+            let engine =
+                open_with_file_system(cfg.clone(), Arc::new(ObfuscatedFileSystem::default()))
+                    .unwrap();
             assert_eq!(engine.path(), dir.path().to_str().unwrap());
             let data = vec![b'x'; entry_size];
             for i in 10..20 {
@@ -816,7 +853,7 @@ pub(crate) mod tests {
                         target_file_size: ReadableSize(1),
                         ..Default::default()
                     };
-                    let engine = RaftLogEngine::open_with_file_system(
+                    let engine = open_with_file_system(
                         cfg.clone(),
                         Arc::new(ObfuscatedFileSystem::default()),
                     )
@@ -889,9 +926,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let rid = 1;
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
 
         engine
             .scan_messages::<RaftLocalState, _>(rid, None, None, false, |_, _| {
@@ -978,9 +1013,7 @@ pub(crate) mod tests {
         let mut delete_batch = LogBatch::default();
         delete_batch.delete(rid, key.clone());
 
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         assert_eq!(
             engine.get_message::<RaftLocalState>(rid, &key).unwrap(),
             None
@@ -1089,9 +1122,7 @@ pub(crate) mod tests {
             target_file_size: ReadableSize(1),
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 1024];
 
         // rewrite:[1  ..10]
@@ -1202,9 +1233,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 1024];
         for index in 0..100 {
             engine.append(1, index, index + 1, Some(&data));
@@ -1263,9 +1292,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 1024];
         // write 50 small entries into region 1~3, it should trigger force compact.
         for rid in 1..=3 {
@@ -1318,9 +1345,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize::kb(80),
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 1024];
 
         // Put 100 entries into 10 regions.
@@ -1382,9 +1407,7 @@ pub(crate) mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
 
         let mut log_batch = LogBatch::default();
         let empty_entry = Entry::new();
@@ -1442,9 +1465,7 @@ pub(crate) mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 16];
         let cases = [[false, false], [false, true], [true, true]];
         for (i, writes) in cases.iter().enumerate() {
@@ -1470,9 +1491,7 @@ pub(crate) mod tests {
             dir: dir.path().to_str().unwrap().to_owned(),
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 1024];
 
         for rid in 1..21 {
@@ -1503,9 +1522,7 @@ pub(crate) mod tests {
             target_file_size: ReadableSize(1),
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default()))
-                .unwrap();
+        let engine = open_with_file_system(cfg, Arc::new(ObfuscatedFileSystem::default())).unwrap();
         let data = vec![b'x'; 2 * 1024 * 1024];
 
         for rid in 1..=3 {
@@ -1663,7 +1680,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg, fs.clone()).unwrap();
         for bs in batches.iter_mut() {
             for batch in bs.iter_mut() {
                 engine.write(batch, false).unwrap();
@@ -1724,7 +1741,7 @@ pub(crate) mod tests {
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
 
-        let engine = RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         for rid in 1..=50 {
             engine.append(rid, 1, 6, Some(&entry_data));
         }
@@ -1761,7 +1778,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let engine = open_with_file_system(cfg, fs).unwrap();
         for rid in 1..25 {
             engine.scan_entries(rid, 1, 6, |_, _, d| {
                 assert_eq!(d, &entry_data);
@@ -1789,7 +1806,7 @@ pub(crate) mod tests {
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
 
-        let engine = RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         for rid in 1..=50 {
             engine.append(rid, 1, 6, Some(&entry_data));
         }
@@ -1823,7 +1840,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let engine = open_with_file_system(cfg, fs).unwrap();
         for rid in 1..25 {
             if existing_emptied.contains(&rid) || incoming_emptied.contains(&rid) {
                 continue;
@@ -1870,7 +1887,7 @@ pub(crate) mod tests {
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
 
-        let engine = RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         for rid in 1..=50 {
             engine.append(rid, 1, 6, Some(&entry_data));
         }
@@ -1891,11 +1908,11 @@ pub(crate) mod tests {
 
         // Corrupt a log batch.
         f.set_len(f.metadata().unwrap().len() - 1).unwrap();
-        RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        open_with_file_system(cfg.clone(), fs.clone()).unwrap();
 
         // Corrupt the file header.
         f.set_len(1).unwrap();
-        RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        open_with_file_system(cfg, fs).unwrap();
     }
 
     #[test]
@@ -1912,7 +1929,7 @@ pub(crate) mod tests {
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
 
-        let engine = RaftLogEngine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -1920,7 +1937,7 @@ pub(crate) mod tests {
 
         assert!(RaftLogEngine::open(cfg.clone()).is_err());
 
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let engine = open_with_file_system(cfg, fs).unwrap();
         for rid in 1..10 {
             engine.scan_entries(rid, 1, 11, |_, _, d| {
                 assert_eq!(d, &entry_data);
@@ -1972,7 +1989,7 @@ pub(crate) mod tests {
         let fs = Arc::new(ObfuscatedFileSystem::default());
         let rid = 1;
 
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let engine = open_with_file_system(cfg, fs).unwrap();
         assert!(engine.is_empty());
         engine.append(rid, 1, 11, Some(&entry_data));
         assert!(!engine.is_empty());
@@ -2109,7 +2126,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg, fs.clone()).unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
@@ -2166,7 +2183,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        let engine = open_with_file_system(cfg, fs.clone()).unwrap();
 
         let reserved_start = *fs.reserved_metadata.lock().unwrap().first().unwrap();
         for rid in 1..=10 {
@@ -2274,14 +2291,14 @@ pub(crate) mod tests {
         assert!(cfg_v2.recycle_capacity() > 0);
         // Prepare files with format_version V1
         {
-            let engine = RaftLogEngine::open_with_file_system(cfg_v1.clone(), fs.clone()).unwrap();
+            let engine = open_with_file_system(cfg_v1.clone(), fs.clone()).unwrap();
             for rid in 1..=10 {
                 engine.append(rid, 1, 11, Some(&entry_data));
             }
         }
         // Reopen the Engine with V2 and purge
         {
-            let engine = RaftLogEngine::open_with_file_system(cfg_v2.clone(), fs.clone()).unwrap();
+            let engine = open_with_file_system(cfg_v2.clone(), fs.clone()).unwrap();
             let (start, _) = engine.file_span(LogQueue::Append);
             for rid in 6..=10 {
                 engine.append(rid, 11, 20, Some(&entry_data));
@@ -2295,7 +2312,7 @@ pub(crate) mod tests {
         }
         // Reopen the Engine with V1 -> V2 and purge
         {
-            let engine = RaftLogEngine::open_with_file_system(cfg_v1, fs.clone()).unwrap();
+            let engine = open_with_file_system(cfg_v1, fs.clone()).unwrap();
             let (start, _) = engine.file_span(LogQueue::Append);
             for rid in 6..=10 {
                 engine.append(rid, 20, 30, Some(&entry_data));
@@ -2309,7 +2326,7 @@ pub(crate) mod tests {
             assert_eq!(engine.file_span(LogQueue::Append).0, start);
             let file_count = engine.file_count(Some(LogQueue::Append));
             drop(engine);
-            let engine = RaftLogEngine::open_with_file_system(cfg_v2, fs).unwrap();
+            let engine = open_with_file_system(cfg_v2, fs).unwrap();
             assert_eq!(engine.file_span(LogQueue::Append).0, start);
             assert_eq!(engine.file_count(Some(LogQueue::Append)), file_count);
             // Mark all regions obsolete.
@@ -2340,7 +2357,7 @@ pub(crate) mod tests {
             enable_log_recycle: false,
             ..Default::default()
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg, file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg, file_system.clone()).unwrap();
         let (start, _) = engine.file_span(LogQueue::Append);
         // Only one valid file left, the last one => active_file.
         assert_eq!(engine.file_count(Some(LogQueue::Append)), 1);
@@ -2362,8 +2379,7 @@ pub(crate) mod tests {
             prefill_for_recycle: true,
             ..Default::default()
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
         let (start, end) = engine.file_span(LogQueue::Append);
         // Only one valid file left, the last one => active_file.
         assert_eq!(start, end);
@@ -2386,8 +2402,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(50),
             ..cfg
         };
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg_v2.clone(), file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg_v2.clone(), file_system.clone()).unwrap();
         assert_eq!(engine.file_span(LogQueue::Append), (start, end));
         assert!(recycled_count > file_system.inner.file_count() - engine.file_count(None));
         // Recycled files have filled the LogQueue::Append, purge_expired_files won't
@@ -2411,7 +2426,7 @@ pub(crate) mod tests {
             prefill_for_recycle: false,
             ..cfg_v2
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg_v3, file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg_v3, file_system.clone()).unwrap();
         assert_eq!(file_system.inner.file_count(), engine.file_count(None));
     }
 
@@ -2432,7 +2447,7 @@ pub(crate) mod tests {
         let key = vec![b'x'; 2];
         let value = vec![b'y'; 8];
 
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let engine = open_with_file_system(cfg, fs).unwrap();
         let mut data = HashSet::new();
         let mut rid = 1;
         // Directly write to pipe log.
@@ -2573,7 +2588,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let fs = Arc::new(ObfuscatedFileSystem::default());
-        let engine = RaftLogEngine::open_with_file_system(cfg, fs).unwrap();
+        let engine = open_with_file_system(cfg, fs).unwrap();
         let value = vec![b'y'; 8];
         let mut log_batch = LogBatch::default();
         log_batch.put_unchecked(1, crate::make_internal_key(&[1]), value.clone());
@@ -2649,8 +2664,7 @@ pub(crate) mod tests {
         };
 
         // Step 1: write data into the main directory.
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 10, Some(&entry_data));
         }
@@ -2664,7 +2678,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(40),
             ..cfg
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg_2, file_system).unwrap();
+        let engine = open_with_file_system(cfg_2, file_system).unwrap();
         assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
         for rid in 1..=10 {
             assert_eq!(engine.first_index(rid).unwrap(), 1);
@@ -2713,8 +2727,7 @@ pub(crate) mod tests {
         };
 
         // Step 1: write data into the main directory.
-        let engine =
-            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
         for rid in 1..=10 {
             engine.append(rid, 1, 10, Some(&entry_data));
         }
@@ -2740,8 +2753,7 @@ pub(crate) mod tests {
         // abnormal case - Empty second dir
         {
             std::fs::remove_dir_all(sec_dir.path()).unwrap();
-            let engine =
-                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            let engine = open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
             assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
         }
         // abnormal case - Missing some append files in second dir
@@ -2762,7 +2774,7 @@ pub(crate) mod tests {
                     file_count += 1;
                 }
             }
-            let engine = RaftLogEngine::open_with_file_system(cfg, file_system).unwrap();
+            let engine = open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
             assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
         }
         // abnormal case - Missing some rewrite files in second dir
@@ -2783,7 +2795,7 @@ pub(crate) mod tests {
                     file_count += 1;
                 }
             }
-            let engine = RaftLogEngine::open_with_file_system(cfg, file_system).unwrap();
+            let engine = open_with_file_system(cfg, file_system).unwrap();
             assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
         }
         // abnormal case - Missing some reserve files in second dir
@@ -2815,8 +2827,7 @@ pub(crate) mod tests {
         };
         {
             // Step 1: write data into the main directory.
-            let engine =
-                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            let engine = open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
             for rid in 1..=10 {
                 engine.append(rid, 1, 10, Some(&entry_data));
             }
@@ -2852,7 +2863,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(40),
             ..cfg.clone()
         };
-        let engine = RaftLogEngine::open_with_file_system(cfg_2, file_system.clone()).unwrap();
+        let engine = open_with_file_system(cfg_2, file_system.clone()).unwrap();
         assert!(number_of_files(spill_dir.path()) > 0);
         for rid in 1..=10 {
             assert_eq!(engine.first_index(rid).unwrap(), 1);
@@ -2879,7 +2890,7 @@ pub(crate) mod tests {
             ..cfg
         };
         drop(engine);
-        let engine = RaftLogEngine::open_with_file_system(cfg_3, file_system).unwrap();
+        let engine = open_with_file_system(cfg_3, file_system).unwrap();
         assert!(number_of_files(spill_dir.path()) > 0);
         for rid in 1..=10 {
             assert_eq!(engine.first_index(rid).unwrap(), 20);

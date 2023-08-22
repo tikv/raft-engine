@@ -1,7 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use crate::file_pipe_log::log_file::build_file_reader;
-use crate::file_pipe_log::pipe::File;
 use crate::file_pipe_log::pipe_builder::FileName;
 use crate::file_pipe_log::reader::LogItemBatchFileReader;
 use crate::file_pipe_log::FileNameExt;
@@ -12,7 +11,9 @@ use crate::{Error, Result};
 use crossbeam::channel::unbounded;
 use crossbeam::channel::Sender;
 use fail::fail_point;
-use log::{info, warn, Log};
+use log::{info, warn};
+use prometheus::core::Atomic;
+use std::cell::Cell;
 use std::fs;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -20,19 +21,20 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::thread;
 
 use crate::env::default::LogFd;
 use crate::env::DefaultFileSystem;
 use crate::env::{FileSystem, Handle, Permission, WriteExt};
-use futures::channel::oneshot;
 use futures::executor::block_on;
 use futures::select;
+use futures::{channel::oneshot, Future};
 
 use either::Either;
 
-type Callback<T> = Box<dyn FnOnce(IoResult<Option<T>>) + Send>;
+type Callback<T> = Box<dyn FnOnce(IoResult<T>) + Send>;
 
 #[derive(PartialEq)]
 enum Task {
@@ -47,6 +49,39 @@ enum Task {
         dst_path: PathBuf,
     },
     Stop,
+} 
+
+enum TaskRes {
+    Create(LogFd),
+    Open(LogFd),
+    Delete,
+    Rename,
+}
+
+#[derive(PartialEq, Clone)]
+enum HandleTask { 
+    Truncate {
+        offset: usize,
+    },
+    FileSize,
+    Sync,
+    Write {
+        offset: usize,
+        bytes: Vec<u8>,
+    },
+    Allocate {
+        offset: usize,
+        size: usize,
+    },
+    Stop,
+}
+
+enum HandleTaskRes {
+    Truncate,
+    FileSize(usize),
+    Sync,
+    Write(usize),
+    Allocate,
 }
 
 #[derive(Default)]
@@ -65,13 +100,16 @@ fn replace_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
     }
 }
 
-pub struct HedgedFileSystem<F: FileSystem> {
-    inner: Arc<F>,
+pub struct HedgedFileSystem {
+    base: DefaultFileSystem,
 
     path1: PathBuf,
     path2: PathBuf,
-    disk1: Sender<(Task, Callback<LogFd>)>,
-    disk2: Sender<(Task, Callback<LogFd>)>,
+    disk1: Sender<(Task, Callback<TaskRes>)>,
+    disk2: Sender<(Task, Callback<TaskRes>)>,
+
+    counter1: Arc<AtomicU64>,
+    counter2: Arc<AtomicU64>,
 
     handle1: Option<thread::JoinHandle<()>>,
     handle2: Option<thread::JoinHandle<()>>,
@@ -80,38 +118,45 @@ pub struct HedgedFileSystem<F: FileSystem> {
 // TODO: read both dir at recovery, maybe no need? cause operations are to both
 // disks TODO: consider encryption
 
-impl<F: FileSystem> HedgedFileSystem<F> {
-    pub fn new(inner: Arc<F>, path1: PathBuf, path2: PathBuf) -> Self {
-        let (tx1, rx1) = unbounded::<(Task, Callback<LogFd>)>();
-        let (tx2, rx2) = unbounded::<(Task, Callback<LogFd>)>();
-        let fs1 = inner.clone();
-        let handle1 = thread::spawn(|| {
+impl HedgedFileSystem {
+    pub fn new(base: DefaultFileSystem, path1: PathBuf, path2: PathBuf) -> Self {
+        let (tx1, rx1) = unbounded::<(Task, Callback<TaskRes>)>();
+        let (tx2, rx2) = unbounded::<(Task, Callback<TaskRes>)>();
+        let counter1 = Arc::new(AtomicU64::new(0));
+        let counter2 = Arc::new(AtomicU64::new(0));
+        let counter1_clone = counter1.clone();
+        let fs1 = base.clone();
+        let handle1 = thread::spawn(move || {
             for (task, cb) in rx1 {
-                if task == Task::Stop {
+                if let Task::Stop = task {
                     break;
                 }
                 fail_point!("double_write::thread1");
-                let res = Self::handle(&fs1, task);
+                let res = Self::process(&fs1, task);
                 cb(res);
+                counter1_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
-        let fs2 = inner.clone();
-        let handle2 = thread::spawn(|| {
-            let fs = DefaultFileSystem {};
+        let counter2_clone = counter2.clone();
+        let fs2 = base.clone();
+        let handle2 = thread::spawn(move || {
             for (task, cb) in rx2 {
-                if task == Task::Stop {
+                if let Task::Stop = task {
                     break;
                 }
-                let res = Self::handle(&fs2, task);
+                let res = Self::process(&fs2, task);
                 cb(res);
+                counter2_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
         Self {
-            inner,
+            base,
             path1,
             path2,
             disk1: tx1,
             disk2: tx2,
+            counter1,
+            counter2,
             handle1: Some(handle1),
             handle2: Some(handle2),
         }
@@ -127,7 +172,8 @@ impl<F: FileSystem> HedgedFileSystem<F> {
 
         match count1.cmp(&count2) {
             std::cmp::Ordering::Equal => {
-                // TODO: still need to catch up
+                // still need to catch up
+                self.catch_up_diff(files1, files2);
                 return Ok(());
             }
             std::cmp::Ordering::Less => {
@@ -200,6 +246,7 @@ impl<F: FileSystem> HedgedFileSystem<F> {
 
         // check file size is not enough, treat the last files differently considering
         // the recycle, always copy the last file
+        // TODO: only copy diff part
         if let Some(last_file) = fromFiles.append_file.last() {
             let to = replace_path(
                 last_file.path.as_ref(),
@@ -288,9 +335,8 @@ impl<F: FileSystem> HedgedFileSystem<F> {
         if let Some(f) = files.append_file.last() {
             let recovery_read_block_size = 1024;
             let mut reader = LogItemBatchFileReader::new(recovery_read_block_size);
-            // TODO: change file system
-            let handle = Arc::new(DefaultFileSystem {}.open(&f.path, Permission::ReadOnly)?);
-            let file_reader = build_file_reader(&DefaultFileSystem {}, handle)?;
+            let handle = Arc::new(self.base.open(&f.path, Permission::ReadOnly)?);
+            let file_reader = build_file_reader(&self.base, handle)?;
             match reader.open(
                 FileId {
                     queue: LogQueue::Append,
@@ -326,11 +372,18 @@ impl<F: FileSystem> HedgedFileSystem<F> {
         self.disk1.send((task1, cb1)).unwrap();
         self.disk2.send((task2, cb2)).unwrap();
 
+        let resolve = |res: TaskRes| -> LogFd {
+            match res {
+                TaskRes::Create(h) => h,
+                TaskRes::Open(h) => h,
+                _ => unreachable!(),
+            }
+        };
         select! {
-            res1 = f1 => res1.unwrap().map(|h| HedgedHandle::new(
-                Either::Right(h.unwrap()), Either::Left(f2) )),
-            res2 = f2 => res2.unwrap().map(|h| HedgedHandle::new(
-                Either::Left(f1), Either::Right(h.unwrap()) )),
+            res1 = f1 => res1.unwrap().map(|res| HedgedHandle::new(
+                FutureHandle::new_owned(resolve(res)), FutureHandle::new(f2) , self.counter1.clone(), self.counter2.clone())),
+            res2 = f2 => res2.unwrap().map(|res| HedgedHandle::new(
+                FutureHandle::new(f1), FutureHandle::new_owned(resolve(res)) , self.counter1.clone(), self.counter2.clone())),
         }
     }
 
@@ -347,20 +400,20 @@ impl<F: FileSystem> HedgedFileSystem<F> {
     }
 
     #[inline]
-    fn handle(file_system: &F, task: Task) -> IoResult<Option<LogFd>> {
+    fn process(file_system: &DefaultFileSystem, task: Task) -> IoResult<TaskRes> {
         match task {
-            Task::Create(path) => file_system.create(path).map(Some),
-            Task::Open { path, perm } => file_system.open(path, perm).map(Some),
-            Task::Delete(path) => file_system.delete(path).map(|_| None),
-            Task::Rename { src_path, dst_path } => {
-                file_system.rename(src_path, dst_path).map(|_| None)
-            }
+            Task::Create(path) => file_system.create(path).map(|h| TaskRes::Create(h)),
+            Task::Open { path, perm } => file_system.open(path, perm).map(|h| TaskRes::Open(h)),
+            Task::Delete(path) => file_system.delete(path).map(|_| TaskRes::Delete),
+            Task::Rename { src_path, dst_path } => file_system
+                .rename(src_path, dst_path)
+                .map(|_| TaskRes::Rename),
             Task::Stop => unreachable!(),
         }
     }
 }
 
-impl<F: FileSystem> Drop for HedgedFileSystem<F> {
+impl Drop for HedgedFileSystem {
     fn drop(&mut self) {
         self.disk1.send((Task::Stop, Box::new(|_| {}))).unwrap();
         self.disk2.send((Task::Stop, Box::new(|_| {}))).unwrap();
@@ -369,7 +422,7 @@ impl<F: FileSystem> Drop for HedgedFileSystem<F> {
     }
 }
 
-impl<F: FileSystem> FileSystem for HedgedFileSystem<F> {
+impl FileSystem for HedgedFileSystem {
     type Handle = HedgedHandle;
     type Reader = HedgedReader;
     type Writer = HedgedWriter;
@@ -431,48 +484,89 @@ impl<F: FileSystem> FileSystem for HedgedFileSystem<F> {
     }
 }
 
-#[derive(Clone, PartialEq)]
-enum FileTask {
-    Truncate(usize),
-    FileSize,
-    Sync,
-    Write { offset: usize, bytes: Vec<u8> },
-    Allocate { offset: usize, size: usize },
-    Stop,
+pub struct FutureHandle {
+    inner: Either<oneshot::Receiver<IoResult<TaskRes>>, Arc<LogFd>>,
+}
+
+impl FutureHandle {
+    fn new(rx: oneshot::Receiver<IoResult<TaskRes>>) -> Self {
+        Self {
+            inner: Either::Left(rx),
+        }
+    }
+    fn new_owned(h: LogFd) -> Self {
+        Self {
+            inner: Either::Right(Arc::new(h)),
+        }
+    }
+
+    fn get(self) -> Arc<LogFd> {
+        let fd = match self.inner {
+            Either::Left(rx) => {
+                // TODO: should we handle the second disk io error
+                match block_on(rx).unwrap().unwrap() {
+                    TaskRes::Open(fd) => Arc::new(fd),
+                    TaskRes::Create(fd) => Arc::new(fd),
+                    _ => unreachable!(),
+                }
+            }
+            Either::Right(w) => w,
+        };
+        fd
+    }
+
+    // fn try_get(&self) -> Option<Arc<LogFd>> {
+    //     let mut set = false;
+    //     let fd = match self.inner {
+    //         Either::Left(rx) => {
+    //             set = true;
+    //             // TODO: should we handle the second disk io error
+    //             match rx.try_recv().unwrap() {
+    //                 None => return None,
+    //                 Some(Err(_)) => panic!(),
+    //                 Some(Ok(TaskRes::Open(fd))) => Arc::new(fd),
+    //                 Some(Ok(TaskRes::Create(fd))) => Arc::new(fd),
+    //                 _ => unreachable!(),
+    //             }
+    //         }
+    //         Either::Right(w) => w.clone(),
+    //     };
+    //     if set {
+    //         self.inner = Either::Right(fd.clone());
+    //     }
+    //     Some(fd)
+    // }
 }
 
 pub struct HedgedHandle {
-    disk1: Sender<(FileTask, Callback<usize>)>,
-    disk2: Sender<(FileTask, Callback<usize>)>,
+    disk1: Sender<(HandleTask, Callback<HandleTaskRes>)>,
+    disk2: Sender<(HandleTask, Callback<HandleTaskRes>)>,
     counter1: Arc<AtomicU64>,
     counter2: Arc<AtomicU64>,
     fd1: Arc<RwLock<Option<Arc<LogFd>>>>,
     fd2: Arc<RwLock<Option<Arc<LogFd>>>>,
 
-    handle1: Option<thread::JoinHandle<()>>,
-    handle2: Option<thread::JoinHandle<()>>,
+    t1: Option<thread::JoinHandle<()>>,
+    t2: Option<thread::JoinHandle<()>>,
 }
 
 impl HedgedHandle {
-    pub fn new(
-        file1: Either<oneshot::Receiver<IoResult<Option<LogFd>>>, LogFd>,
-        file2: Either<oneshot::Receiver<IoResult<Option<LogFd>>>, LogFd>,
-    ) -> Self {
-        let (tx1, rx1) = unbounded::<(FileTask, Callback<usize>)>();
-        let (tx2, rx2) = unbounded::<(FileTask, Callback<usize>)>();
+    pub fn new(handle1: FutureHandle, handle2: FutureHandle, counter1: Arc<AtomicU64>, counter2: Arc<AtomicU64> ) -> Self {
+        let (tx1, rx1) = unbounded::<(HandleTask, Callback<HandleTaskRes>)>();
+        let (tx2, rx2) = unbounded::<(HandleTask, Callback<HandleTaskRes>)>();
         let counter1 = Arc::new(AtomicU64::new(0));
         let counter2 = Arc::new(AtomicU64::new(0));
         let fd1 = Arc::new(RwLock::new(None));
         let fd2 = Arc::new(RwLock::new(None));
 
-        let handle1 = {
+        let t1 = {
             let fd1 = fd1.clone();
             let counter1 = counter1.clone();
             thread::spawn(move || {
-                let fd = Arc::new(Self::resolve(file1));
+                let fd = handle1.get();
                 fd1.write().unwrap().replace(fd.clone());
                 for (task, cb) in rx1 {
-                    if task == FileTask::Stop {
+                    if task == HandleTask::Stop {
                         break;
                     }
                     let res = Self::handle(&fd, task);
@@ -481,14 +575,14 @@ impl HedgedHandle {
                 }
             })
         };
-        let handle2 = {
+        let t2 = {
             let fd2 = fd2.clone();
             let counter2 = counter2.clone();
             thread::spawn(move || {
-                let fd = Arc::new(Self::resolve(file2));
+                let fd = handle2.get();
                 fd2.write().unwrap().replace(fd.clone());
                 for (task, cb) in rx2 {
-                    if task == FileTask::Stop {
+                    if task == HandleTask::Stop {
                         break;
                     }
                     let res = Self::handle(&fd, task);
@@ -504,29 +598,19 @@ impl HedgedHandle {
             counter2,
             fd1,
             fd2,
-            handle1: Some(handle1),
-            handle2: Some(handle2),
+            t1: Some(t1), 
+            t2: Some(t2),
         }
     }
 
-    fn resolve(file: Either<oneshot::Receiver<IoResult<Option<LogFd>>>, LogFd>) -> LogFd {
-        match file {
-            Either::Left(f) => {
-                // TODO: should we handle the second disk io error
-                block_on(f).unwrap().unwrap().unwrap()
-            }
-            Either::Right(fd) => fd,
-        }
-    }
-
-    fn handle(fd: &LogFd, task: FileTask) -> IoResult<Option<usize>> {
+    fn handle(fd: &LogFd, task: HandleTask) -> IoResult<HandleTaskRes> {
         match task {
-            FileTask::Truncate(offset) => fd.truncate(offset).map(|_| None),
-            FileTask::FileSize => fd.file_size().map(Some),
-            FileTask::Sync => fd.sync().map(|_| None),
-            FileTask::Write { offset, bytes } => fd.write(offset, &bytes).map(Some),
-            FileTask::Allocate { offset, size } => fd.allocate(offset, size).map(|_| None),
-            FileTask::Stop => unreachable!(),
+            HandleTask::Truncate{offset} => fd.truncate(offset).map(|_| HandleTaskRes::Truncate),
+            HandleTask::FileSize => fd.file_size().map(|s| HandleTaskRes::FileSize(s)),
+            HandleTask::Sync => fd.sync().map(|_| HandleTaskRes::Sync),
+            HandleTask::Write { offset, bytes } => fd.write(offset, &bytes).map(|s| HandleTaskRes::Write(s)),
+            HandleTask::Allocate { offset, size } => fd.allocate(offset, size).map(|_| HandleTaskRes::Allocate),
+            HandleTask::Stop => unreachable!(),
         }
     }
 
@@ -555,18 +639,19 @@ impl HedgedHandle {
     }
 
     fn write(&self, offset: usize, content: &[u8]) -> IoResult<usize> {
-        block_on(self.wait_one(FileTask::Write {
+        block_on(self.wait_one(HandleTask::Write {
             offset,
             bytes: content.to_vec(),
         }))
-        .map(|x| x.unwrap())
+        .map(|res| if let HandleTaskRes::Write(size) = res { size } else { unreachable!() })
     }
 
     fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
-        block_on(self.wait_one(FileTask::Allocate { offset, size })).map(|_| ())
+        block_on(self.wait_one(HandleTask::Allocate { offset, size }))
+        .map(|_| ())
     }
 
-    async fn wait_one(&self, task: FileTask) -> IoResult<Option<usize>> {
+    async fn wait_one(&self, task: HandleTask) -> IoResult<HandleTaskRes> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
         self.disk1.send((task.clone(), cb1)).unwrap();
@@ -581,24 +666,24 @@ impl HedgedHandle {
 
 impl Drop for HedgedHandle {
     fn drop(&mut self) {
-        self.disk1.send((FileTask::Stop, Box::new(|_| {}))).unwrap();
-        self.disk2.send((FileTask::Stop, Box::new(|_| {}))).unwrap();
-        self.handle1.take().unwrap().join().unwrap();
-        self.handle2.take().unwrap().join().unwrap();
+        self.disk1.send((HandleTask::Stop, Box::new(|_| {}))).unwrap();
+        self.disk2.send((HandleTask::Stop, Box::new(|_| {}))).unwrap();
+        self.t1.take().unwrap().join().unwrap();
+        self.t2.take().unwrap().join().unwrap();
     }
 }
 
 impl Handle for HedgedHandle {
     fn truncate(&self, offset: usize) -> IoResult<()> {
-        block_on(self.wait_one(FileTask::Truncate(offset))).map(|_| ())
+        block_on(self.wait_one(HandleTask::Truncate{offset})).map(|_| ())
     }
 
     fn file_size(&self) -> IoResult<usize> {
-        block_on(self.wait_one(FileTask::FileSize)).map(|x| x.unwrap())
+        block_on(self.wait_one(HandleTask::FileSize)).map(|res| if let HandleTaskRes::FileSize(size) = res { size } else { unreachable!() })
     }
 
     fn sync(&self) -> IoResult<()> {
-        block_on(self.wait_one(FileTask::Sync)).map(|_| ())
+        block_on(self.wait_one(HandleTask::Sync)).map(|_| ())
     }
 }
 
@@ -684,8 +769,8 @@ impl Read for HedgedReader {
     }
 }
 
-pub fn paired_future_callback<T: Send + 'static>(
-) -> (Callback<T>, oneshot::Receiver<IoResult<Option<T>>>) {
+pub fn paired_future_callback<T: Send + 'static>() -> (Callback<T>, oneshot::Receiver<IoResult<T>>)
+{
     let (tx, future) = oneshot::channel();
     let callback = Box::new(move |result| {
         let r = tx.send(result);

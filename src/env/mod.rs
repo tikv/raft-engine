@@ -19,7 +19,7 @@ pub enum Permission {
 }
 
 /// FileSystem
-pub trait FileSystem: Send + Sync {
+pub trait FileSystem: Send + Sync + 'static {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
