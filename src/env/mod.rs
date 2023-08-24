@@ -19,7 +19,7 @@ pub enum Permission {
 }
 
 /// FileSystem
-pub trait FileSystem: Send + Sync + 'static {
+pub trait FileSystem: Send + Sync + 'static + RecoverExt {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
@@ -63,6 +63,24 @@ pub trait FileSystem: Send + Sync + 'static {
     fn new_reader(&self, handle: Arc<Self::Handle>) -> Result<Self::Reader>;
 
     fn new_writer(&self, handle: Arc<Self::Handle>) -> Result<Self::Writer>;
+}
+
+pub trait RecoverExt {
+    fn bootstrap() -> Result<()> {
+        Ok(())
+    }
+
+    fn need_recover(&self) -> bool {
+        false
+    }
+
+    fn is_in_recover(&self) -> bool {
+        false
+    }
+
+    fn trigger_recover(&self)  {
+        ()
+    }
 }
 
 pub trait Handle {

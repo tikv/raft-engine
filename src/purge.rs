@@ -75,6 +75,10 @@ where
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_PURGE_DURATION_HISTOGRAM);
+        if self.file_system().is_in_recover() {
+            info!("skip purge due to in recover");
+            return Ok(vec![]);
+        }
         let guard = self.force_rewrite_candidates.try_lock();
         if guard.is_none() {
             warn!("Unable to purge expired files: locked");

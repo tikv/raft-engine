@@ -125,6 +125,7 @@ where
         mut listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<F, FilePipeLog<F>>> {
         cfg.sanitize()?;
+        file_system.bootstrap()?;
         listeners.push(Arc::new(PurgeHook::default()) as Arc<dyn EventListener>);
 
         let start = Instant::now();

@@ -162,30 +162,6 @@ impl HedgedFileSystem {
         }
     }
 
-    pub fn bootstrap(&self) -> Result<()> {
-        // catch up diff
-        let files1 = self.get_files(&self.path1)?;
-        let files2 = self.get_files(&self.path2)?;
-
-        let count1 = self.get_latest_valid_seq(&files1)?;
-        let count2 = self.get_latest_valid_seq(&files2)?;
-
-        match count1.cmp(&count2) {
-            std::cmp::Ordering::Equal => {
-                // still need to catch up
-                self.catch_up_diff(files1, files2);
-                return Ok(());
-            }
-            std::cmp::Ordering::Less => {
-                self.catch_up_diff(files2, files1)?;
-            }
-            std::cmp::Ordering::Greater => {
-                self.catch_up_diff(files1, files2)?;
-            }
-        }
-        Ok(())
-    }
-
     fn catch_up_diff(&self, fromFiles: Files, toFiles: Files) -> Result<()> {
         let check_files = |from: &Vec<FileName>, to: &Vec<FileName>| -> IoResult<()> {
             let mut iter1 = from.iter().peekable();
@@ -419,6 +395,43 @@ impl Drop for HedgedFileSystem {
         self.disk2.send((Task::Stop, Box::new(|_| {}))).unwrap();
         self.handle1.take().unwrap().join().unwrap();
         self.handle2.take().unwrap().join().unwrap();
+    }
+}
+
+impl RecoverExt for HedgedFileSystem {
+    fn bootstrap(&self) -> Result<()> {
+        // catch up diff
+        let files1 = self.get_files(&self.path1)?;
+        let files2 = self.get_files(&self.path2)?;
+
+        let count1 = self.get_latest_valid_seq(&files1)?;
+        let count2 = self.get_latest_valid_seq(&files2)?;
+
+        match count1.cmp(&count2) {
+            std::cmp::Ordering::Equal => {
+                // still need to catch up, but only diff
+                self.catch_up_diff(files1, files2);
+                return Ok(());
+            }
+            std::cmp::Ordering::Less => {
+                self.catch_up_diff(files2, files1)?;
+            }
+            std::cmp::Ordering::Greater => {
+                self.catch_up_diff(files1, files2)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn need_recover(&self) -> bool {
+    }
+
+    fn is_in_recover(&self) -> bool {
+        false
+    }
+
+    fn trigger_recover(&self)  {
+        ()
     }
 }
 
