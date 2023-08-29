@@ -215,7 +215,7 @@ impl Config {
             // without colliding. (2) Add some more file as an additional buffer to
             // avoid jitters.
             std::cmp::min(
-                (self.purge_threshold.0 / self.target_file_size.0) as usize + 2,
+                (self.purge_threshold.0 / self.target_file_size.0) as usize * 3 / 2,
                 u32::MAX as usize,
             )
         } else {
