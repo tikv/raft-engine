@@ -283,7 +283,7 @@ pub mod lz4 {
             }
         } else if !src.is_empty() {
             Err(Error::Corruption(format!(
-                "Content to compress to short {}",
+                "Content to compress too short {}",
                 src.len()
             )))
         } else {
