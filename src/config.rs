@@ -58,6 +58,11 @@ pub struct Config {
     ///
     /// Default: "8KB"
     pub batch_compression_threshold: ReadableSize,
+    /// Acceleration factor for LZ4 compression. It can be fine tuned, with each
+    /// successive value providing roughly +~3% to speed. The value will be
+    /// capped within [1, 65537] by LZ4.
+    ///
+    /// Default: 1.
     pub compression_level: Option<usize>,
     /// Deprecated.
     /// Incrementally sync log files after specified bytes have been written.
