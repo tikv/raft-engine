@@ -8,14 +8,14 @@ use crate::file_pipe_log::FileNameExt;
 use crate::internals::parse_reserved_file_name;
 use crate::internals::FileId;
 use crate::internals::LogQueue;
-use crate::{Error, Result};
+use crate::Error;
 use crossbeam::channel::unbounded;
 use crossbeam::channel::Sender;
 use fail::fail_point;
 use log::{info, warn};
 use std::cell::UnsafeCell;
 use std::fs;
-use std::io::{Error as IoError, Read, Result as IoResult, Seek, SeekFrom, Write};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -112,7 +112,7 @@ impl HedgedSender {
     }
 
     fn send(&self, task1: Task, task2: Task, cb1: Callback<TaskRes>, cb2: Callback<TaskRes>) {
-        let mut inner = self.0.lock().unwrap();
+        let inner = self.0.lock().unwrap();
         inner.disk1.send((task1, cb1)).unwrap();
         inner.disk2.send((task2, cb2)).unwrap();
     }
@@ -180,7 +180,7 @@ impl HedgedFileSystem {
         }
     }
 
-    fn catch_up_diff(&self, fromFiles: Files, toFiles: Files) -> IoResult<()> {
+    fn catch_up_diff(&self, from_files: Files, to_files: Files) -> IoResult<()> {
         let check_files = |from: &Vec<FileName>, to: &Vec<FileName>| -> IoResult<()> {
             let mut iter1 = from.iter().peekable();
             let mut iter2 = to.iter().peekable();
@@ -192,8 +192,8 @@ impl HedgedFileSystem {
                     (Some(f1), None) => {
                         let to = replace_path(
                             f1.path.as_ref(),
-                            fromFiles.prefix.as_ref(),
-                            toFiles.prefix.as_ref(),
+                            from_files.prefix.as_ref(),
+                            to_files.prefix.as_ref(),
                         );
                         fs::copy(&f1.path, to)?;
                         iter1.next();
@@ -208,7 +208,7 @@ impl HedgedFileSystem {
                                 // TODO: do we need to check file size?
                                 // if f1.handle.file_size() != f2.handle.file_size() {
                                 //     let to = replace_path(f1.path.as_ref(),
-                                // fromFiles.prefix.as_ref(), toFiles.prefix.as_ref());
+                                // from_files.prefix.as_ref(), to_files.prefix.as_ref());
                                 //     fs::copy(&f1.path, &to)?;
                                 // }
                                 iter1.next();
@@ -217,8 +217,8 @@ impl HedgedFileSystem {
                             std::cmp::Ordering::Less => {
                                 let to = replace_path(
                                     f1.path.as_ref(),
-                                    fromFiles.prefix.as_ref(),
-                                    toFiles.prefix.as_ref(),
+                                    from_files.prefix.as_ref(),
+                                    to_files.prefix.as_ref(),
                                 );
                                 fs::copy(&f1.path, to)?;
                                 iter1.next();
@@ -234,34 +234,34 @@ impl HedgedFileSystem {
             Ok(())
         };
 
-        check_files(&fromFiles.append_file, &toFiles.append_file)?;
-        check_files(&fromFiles.rewrite_file, &toFiles.rewrite_file)?;
-        check_files(&fromFiles.recycled_file, &toFiles.recycled_file)?;
+        check_files(&from_files.append_file, &to_files.append_file)?;
+        check_files(&from_files.rewrite_file, &to_files.rewrite_file)?;
+        check_files(&from_files.recycled_file, &to_files.recycled_file)?;
 
         // check file size is not enough, treat the last files differently considering
         // the recycle, always copy the last file
         // TODO: only copy diff part
-        if let Some(last_file) = fromFiles.append_file.last() {
+        if let Some(last_file) = from_files.append_file.last() {
             let to = replace_path(
                 last_file.path.as_ref(),
-                fromFiles.prefix.as_ref(),
-                toFiles.prefix.as_ref(),
+                from_files.prefix.as_ref(),
+                to_files.prefix.as_ref(),
             );
             fs::copy(&last_file.path, to)?;
         }
-        if let Some(last_file) = fromFiles.rewrite_file.last() {
+        if let Some(last_file) = from_files.rewrite_file.last() {
             let to = replace_path(
                 last_file.path.as_ref(),
-                fromFiles.prefix.as_ref(),
-                toFiles.prefix.as_ref(),
+                from_files.prefix.as_ref(),
+                to_files.prefix.as_ref(),
             );
             fs::copy(&last_file.path, to)?;
         }
-        if let Some(last_file) = fromFiles.recycled_file.last() {
+        if let Some(last_file) = from_files.recycled_file.last() {
             let to = replace_path(
                 last_file.path.as_ref(),
-                fromFiles.prefix.as_ref(),
-                toFiles.prefix.as_ref(),
+                from_files.prefix.as_ref(),
+                to_files.prefix.as_ref(),
             );
             fs::copy(&last_file.path, to)?;
         }
@@ -342,17 +342,17 @@ impl HedgedFileSystem {
                     Error::Io(err) => return Err(err),
                     _ => return Ok(0),
                 },
-                Ok(format) => {
+                Ok(_) => {
                     // Do nothing
                 }
             }
             loop {
                 match reader.next() {
-                    Ok(Some(item_batch)) => {
+                    Ok(Some(_)) => {
                         count += 1;
                     }
                     Ok(None) => break,
-                    Err(e) => break,
+                    Err(_) => break,
                 }
             }
         }
@@ -447,7 +447,7 @@ impl RecoverExt for HedgedFileSystem {
         match count1.cmp(&count2) {
             std::cmp::Ordering::Equal => {
                 // still need to catch up, but only diff
-                self.catch_up_diff(files1, files2);
+                self.catch_up_diff(files1, files2)?;
                 return Ok(());
             }
             std::cmp::Ordering::Less => {
