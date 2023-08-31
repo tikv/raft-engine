@@ -66,7 +66,7 @@ pub trait FileSystem: Send + Sync + 'static + RecoverExt {
 }
 
 pub trait RecoverExt {
-    fn bootstrap() -> Result<()> {
+    fn bootstrap(&self) -> Result<()> {
         Ok(())
     }
 
@@ -78,7 +78,7 @@ pub trait RecoverExt {
         false
     }
 
-    fn trigger_recover(&self)  {
+    fn trigger_recover(&self) {
         ()
     }
 }

@@ -30,7 +30,7 @@ pub(super) fn build_file_writer<F: FileSystem>(
     handle: Arc<F::Handle>,
     format: LogFileFormat,
     force_reset: bool,
-) -> Result<LogFileWriter<F>> {
+) -> IoResult<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
     LogFileWriter::open(handle, writer, format, force_reset)
 }
@@ -49,7 +49,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         writer: F::Writer,
         format: LogFileFormat,
         force_reset: bool,
-    ) -> Result<Self> {
+    ) -> IoResult<Self> {
         let file_size = handle.file_size()?;
         let mut f = Self {
             handle,
@@ -133,7 +133,7 @@ impl<F: FileSystem> LogFileWriter<F> {
 pub(crate) fn build_file_reader<F: FileSystem>(
     system: &F,
     handle: Arc<F::Handle>,
-) -> Result<LogFileReader<F>> {
+) -> IoResult<LogFileReader<F>> {
     let reader = system.new_reader(handle.clone())?;
     Ok(LogFileReader::open(handle, reader))
 }

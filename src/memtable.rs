@@ -1060,7 +1060,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
                 raft == 3,
                 |_| {}
             );
-            match item.content
+            match item.content {
                 LogItemContent::EntryIndexes(entries_to_add) => {
                     memtable.write().append(entries_to_add.0);
                 }

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::env::RecoverExt;
 use crate::env::{DefaultFileSystem, FileSystem, Permission, WriteExt};
 
 pub struct ObfuscatedReader(<DefaultFileSystem as FileSystem>::Reader);
@@ -84,6 +85,8 @@ impl ObfuscatedFileSystem {
         self.files.load(Ordering::Relaxed)
     }
 }
+
+impl RecoverExt for ObfuscatedFileSystem {}
 
 impl FileSystem for ObfuscatedFileSystem {
     type Handle = <DefaultFileSystem as FileSystem>::Handle;
