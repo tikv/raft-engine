@@ -23,11 +23,11 @@ fn test_file_open_error() {
     let fs = Arc::new(ObfuscatedFileSystem::default());
 
     {
-        let _f = FailGuard::new("log_fd::create::err", "return");
+        let _f = FailGuard::new("default_fs::create::err", "return");
         assert!(Engine::open_with_file_system(cfg.clone(), fs.clone()).is_err());
     }
     {
-        let _f = FailGuard::new("log_fd::open::err", "return");
+        let _f = FailGuard::new("default_fs::open::err", "return");
         let _ = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         assert!(Engine::open_with_file_system(cfg, fs).is_err());
     }
@@ -66,7 +66,7 @@ fn test_file_read_error() {
     engine.write(&mut kv_batch, true).unwrap();
 
     let mut entries = Vec::new();
-    let _f = FailGuard::new("log_fd::read::err", "return");
+    let _f = FailGuard::new("log_file::read::err", "return");
     engine
         .fetch_entries_to::<MessageExtTyped>(1, 0, 1, None, &mut entries)
         .unwrap();
@@ -95,7 +95,7 @@ fn test_file_write_error() {
         .write(&mut generate_batch(1, 1, 2, Some(&entry)), false)
         .unwrap();
     {
-        let _f = FailGuard::new("log_fd::write::err", "return");
+        let _f = FailGuard::new("log_file::write::err", "return");
         engine
             .write(&mut generate_batch(1, 2, 3, Some(&entry)), false)
             .unwrap_err();
@@ -164,7 +164,7 @@ fn test_file_rotate_error() {
     }
     {
         // Fail to create new log file.
-        let _f = FailGuard::new("log_fd::create::err", "return");
+        let _f = FailGuard::new("default_fs::create::err", "return");
         assert!(catch_unwind_silent(|| {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
@@ -173,7 +173,7 @@ fn test_file_rotate_error() {
     }
     {
         // Fail to write header of new log file.
-        let _f = FailGuard::new("log_fd::write::err", "1*off->return");
+        let _f = FailGuard::new("log_file::write::err", "1*off->return");
         assert!(catch_unwind_silent(|| {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
@@ -220,7 +220,7 @@ fn test_concurrent_write_error() {
     let mut ctx = ConcurrentWriteContext::new(engine.clone());
 
     // The second of three writes will fail.
-    fail::cfg("log_fd::write::err", "1*off->1*return->off").unwrap();
+    fail::cfg("log_file::write::err", "1*off->1*return->off").unwrap();
     let entry_clone = entry.clone();
     ctx.write_ext(move |e| {
         e.write(&mut generate_batch(1, 1, 11, Some(&entry_clone)), false)
@@ -258,8 +258,8 @@ fn test_concurrent_write_error() {
     );
 
     {
-        let _f1 = FailGuard::new("log_fd::write::err", "return");
-        let _f2 = FailGuard::new("log_fd::truncate::err", "return");
+        let _f1 = FailGuard::new("log_file::write::err", "return");
+        let _f2 = FailGuard::new("log_file::truncate::err", "return");
         let entry_clone = entry.clone();
         ctx.write_ext(move |e| {
             catch_unwind_silent(|| {
@@ -305,7 +305,7 @@ fn test_non_atomic_write_error() {
     {
         // Write partially succeeds. We can reopen.
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
-        let _f1 = FailGuard::new("log_fd::write::err", "return");
+        let _f1 = FailGuard::new("log_file::write::err", "return");
         engine
             .write(&mut generate_batch(rid, 0, 1, Some(&entry)), true)
             .unwrap_err();
@@ -317,7 +317,7 @@ fn test_non_atomic_write_error() {
     {
         // Write partially succeeds. We can overwrite.
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
-        let _f1 = FailGuard::new("log_fd::write::err", "1*off->1*return->off");
+        let _f1 = FailGuard::new("log_file::write::err", "1*off->1*return->off");
         engine
             .write(&mut generate_batch(rid, 0, 1, Some(&entry)), true)
             .unwrap_err();
@@ -333,7 +333,7 @@ fn test_non_atomic_write_error() {
     {
         // Write partially succeeds and can't be reverted. We panic.
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
-        let _f1 = FailGuard::new("log_fd::write::err", "return");
+        let _f1 = FailGuard::new("log_file::write::err", "return");
         let _f2 = FailGuard::new("log_file::seek::err", "return");
         assert!(catch_unwind_silent(|| {
             engine
@@ -378,7 +378,7 @@ fn test_error_during_repair() {
     "
     .to_owned();
     {
-        let _f = FailGuard::new("log_fd::write::err", "return");
+        let _f = FailGuard::new("log_file::write::err", "return");
         assert!(
             Engine::unsafe_repair_with_file_system(dir.path(), None, script, fs.clone()).is_err()
         );
@@ -429,7 +429,7 @@ fn test_file_allocate_error() {
     let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
     {
-        let _f = FailGuard::new("log_fd::allocate::err", "return");
+        let _f = FailGuard::new("log_file::allocate::err", "return");
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         engine
             .write(&mut generate_batch(1, 1, 5, Some(&entry)), true)
@@ -458,7 +458,7 @@ fn test_start_with_recycled_file_allocate_error() {
     // Mock that the engine starts with the circumstance where
     // the pref-reserved file with seqno[5] failed to be generated.
     {
-        let _f = FailGuard::new("log_fd::write::zero", "4*off->1*return->off");
+        let _f = FailGuard::new("log_file::write::zero", "4*off->1*return->off");
         Engine::open(cfg.clone()).unwrap();
     }
     // Extra recycled files have been supplemented.

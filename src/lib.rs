@@ -16,6 +16,8 @@
 #![cfg_attr(feature = "nightly", feature(test))]
 #![cfg_attr(feature = "swap", feature(allocator_api))]
 #![cfg_attr(feature = "swap", feature(slice_ptr_get))]
+// Though the new nightly rust stablized this feature, keep it anyway
+// because some other project (like TiKV) is still using the old.
 #![cfg_attr(feature = "swap", feature(nonnull_slice_from_raw_parts))]
 #![cfg_attr(feature = "swap", feature(slice_ptr_len))]
 #![cfg_attr(feature = "swap", feature(alloc_layout_extra))]
