@@ -1,6 +1,6 @@
 # Raft Engine Change Log
 
-## [Unreleased]
+## [0.4.0] - 2023-08-31
 
 ### Behavior Changes
 
