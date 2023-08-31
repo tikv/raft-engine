@@ -118,7 +118,7 @@ where
     ) -> Result<Engine<F, FilePipeLog<F>>> {
         Engine::open_with(cfg, file_system, vec![])
     }
-    
+
     fn open_with(
         mut cfg: Config,
         file_system: Arc<F>,

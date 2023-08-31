@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
 use std::sync::Mutex;
+use std::thread;
 
 use crate::env::default::LogFd;
 use crate::env::DefaultFileSystem;
@@ -93,8 +93,8 @@ fn replace_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
     }
 }
 
-
-// Make sure the task is sent to two disks' channel atomically, otherwise the ordering of the tasks in two disks are not same.
+// Make sure the task is sent to two disks' channel atomically, otherwise the
+// ordering of the tasks in two disks are not same.
 #[derive(Clone)]
 struct HedgedSender(Arc<Mutex<HedgedSenderInner>>);
 
@@ -104,7 +104,10 @@ struct HedgedSenderInner {
 }
 
 impl HedgedSender {
-    fn new(disk1: Sender<(Task, Callback<TaskRes>)>, disk2: Sender<(Task, Callback<TaskRes>)>) -> Self {
+    fn new(
+        disk1: Sender<(Task, Callback<TaskRes>)>,
+        disk2: Sender<(Task, Callback<TaskRes>)>,
+    ) -> Self {
         Self(Arc::new(Mutex::new(HedgedSenderInner { disk1, disk2 })))
     }
 
@@ -380,7 +383,7 @@ impl HedgedFileSystem {
     async fn wait_one(&self, task1: Task, task2: Task) -> IoResult<()> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.sender.send(task1, task2, cb1, cb2) ;
+        self.sender.send(task1, task2, cb1, cb2);
 
         select! {
             res1 = f1 => res1.unwrap().map(|_| ()),
@@ -425,7 +428,8 @@ impl HedgedFileSystem {
 
 impl Drop for HedgedFileSystem {
     fn drop(&mut self) {
-        self.sender.send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
+        self.sender
+            .send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
         self.handle1.take().unwrap().join().unwrap();
         self.handle2.take().unwrap().join().unwrap();
     }
@@ -692,7 +696,7 @@ impl HedgedHandle {
     async fn wait_one(&self, task1: Task, task2: Task) -> IoResult<TaskRes> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.sender.send(task1, task2, cb1, cb2) ;
+        self.sender.send(task1, task2, cb1, cb2);
 
         select! {
             res1 = f1 => res1.unwrap(),
