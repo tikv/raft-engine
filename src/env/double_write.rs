@@ -22,6 +22,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
+use std::sync::Mutex;
 
 use crate::env::default::LogFd;
 use crate::env::DefaultFileSystem;
@@ -92,13 +93,35 @@ fn replace_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
     }
 }
 
+
+// Make sure the task is sent to two disks' channel atomically, otherwise the ordering of the tasks in two disks are not same.
+#[derive(Clone)]
+struct HedgedSender(Arc<Mutex<HedgedSenderInner>>);
+
+struct HedgedSenderInner {
+    disk1: Sender<(Task, Callback<TaskRes>)>,
+    disk2: Sender<(Task, Callback<TaskRes>)>,
+}
+
+impl HedgedSender {
+    fn new(disk1: Sender<(Task, Callback<TaskRes>)>, disk2: Sender<(Task, Callback<TaskRes>)>) -> Self {
+        Self(Arc::new(Mutex::new(HedgedSenderInner { disk1, disk2 })))
+    }
+
+    fn send(&self, task1: Task, task2: Task, cb1: Callback<TaskRes>, cb2: Callback<TaskRes>) {
+        let mut inner = self.0.lock().unwrap();
+        inner.disk1.send((task1, cb1)).unwrap();
+        inner.disk2.send((task2, cb2)).unwrap();
+    }
+}
+
 pub struct HedgedFileSystem {
     base: Arc<DefaultFileSystem>,
 
     path1: PathBuf,
     path2: PathBuf,
-    disk1: Sender<(Task, Callback<TaskRes>)>,
-    disk2: Sender<(Task, Callback<TaskRes>)>,
+
+    sender: HedgedSender,
 
     counter1: Arc<AtomicU64>,
     counter2: Arc<AtomicU64>,
@@ -141,12 +164,12 @@ impl HedgedFileSystem {
                 counter2_clone.fetch_add(1, Ordering::Relaxed);
             }
         });
+        let sender = HedgedSender::new(tx1, tx2);
         Self {
             base,
             path1,
             path2,
-            disk1: tx1,
-            disk2: tx2,
+            sender,
             counter1,
             counter2,
             handle1: Some(handle1),
@@ -337,8 +360,7 @@ impl HedgedFileSystem {
     async fn wait_handle(&self, task1: Task, task2: Task) -> IoResult<HedgedHandle> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.disk1.send((task1, cb1)).unwrap();
-        self.disk2.send((task2, cb2)).unwrap();
+        self.sender.send(task1, task2, cb1, cb2);
 
         let resolve = |res: TaskRes| -> LogFd {
             match res {
@@ -348,9 +370,9 @@ impl HedgedFileSystem {
             }
         };
         select! {
-            res1 = f1 => res1.unwrap().map(|res| HedgedHandle::new(
+            res1 = f1 => res1.unwrap().map(|res| HedgedHandle::new(self.sender.clone(),
                 FutureHandle::new_owned(resolve(res)), FutureHandle::new(f2) , self.counter1.clone(), self.counter2.clone())),
-            res2 = f2 => res2.unwrap().map(|res| HedgedHandle::new(
+            res2 = f2 => res2.unwrap().map(|res| HedgedHandle::new(self.sender.clone(),
                 FutureHandle::new(f1), FutureHandle::new_owned(resolve(res)) , self.counter1.clone(), self.counter2.clone())),
         }
     }
@@ -358,8 +380,7 @@ impl HedgedFileSystem {
     async fn wait_one(&self, task1: Task, task2: Task) -> IoResult<()> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.disk1.send((task1, cb1)).unwrap();
-        self.disk2.send((task2, cb2)).unwrap();
+        self.sender.send(task1, task2, cb1, cb2) ;
 
         select! {
             res1 = f1 => res1.unwrap().map(|_| ()),
@@ -404,8 +425,7 @@ impl HedgedFileSystem {
 
 impl Drop for HedgedFileSystem {
     fn drop(&mut self) {
-        self.disk1.send((Task::Stop, Box::new(|_| {}))).unwrap();
-        self.disk2.send((Task::Stop, Box::new(|_| {}))).unwrap();
+        self.sender.send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
         self.handle1.take().unwrap().join().unwrap();
         self.handle2.take().unwrap().join().unwrap();
     }
@@ -585,8 +605,7 @@ impl FutureHandle {
 }
 
 pub struct HedgedHandle {
-    disk1: Sender<(Task, Callback<TaskRes>)>,
-    disk2: Sender<(Task, Callback<TaskRes>)>,
+    sender: HedgedSender,
 
     handle1: Arc<FutureHandle>,
     handle2: Arc<FutureHandle>,
@@ -596,18 +615,15 @@ pub struct HedgedHandle {
 }
 
 impl HedgedHandle {
-    pub fn new(
+    fn new(
+        sender: HedgedSender,
         handle1: FutureHandle,
         handle2: FutureHandle,
         counter1: Arc<AtomicU64>,
         counter2: Arc<AtomicU64>,
     ) -> Self {
-        let (tx1, rx1) = unbounded::<(Task, Callback<TaskRes>)>();
-        let (tx2, rx2) = unbounded::<(Task, Callback<TaskRes>)>();
-
         Self {
-            disk1: tx1,
-            disk2: tx2,
+            sender,
             handle1: Arc::new(handle1),
             handle2: Arc::new(handle2),
             counter1,
@@ -676,8 +692,7 @@ impl HedgedHandle {
     async fn wait_one(&self, task1: Task, task2: Task) -> IoResult<TaskRes> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
-        self.disk1.send((task1, cb1)).unwrap();
-        self.disk2.send((task2, cb2)).unwrap();
+        self.sender.send(task1, task2, cb1, cb2) ;
 
         select! {
             res1 = f1 => res1.unwrap(),
