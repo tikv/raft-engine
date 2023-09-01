@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2023-09-01
+
 ### Behavior Changes
 
 * `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.

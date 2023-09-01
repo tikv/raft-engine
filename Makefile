@@ -41,12 +41,13 @@ clean:
 format:
 	cargo ${TOOLCHAIN_ARGS} fmt --all
 
+CLIPPY_WHITELIST += -A clippy::bool_assert_comparison
 ## Run clippy.
 clippy:
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 else
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 endif
 
 ## Run tests.

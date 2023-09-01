@@ -383,11 +383,6 @@ impl LogItemBatch {
         self.items.drain(..)
     }
 
-    pub fn push(&mut self, item: LogItem) {
-        self.item_size += item.approximate_size();
-        self.items.push(item);
-    }
-
     pub fn merge(&mut self, rhs: &mut LogItemBatch) {
         for item in &mut rhs.items {
             if let LogItemContent::EntryIndexes(entry_indexes) = &mut item.content {
@@ -1582,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_corruption() {
+    fn test_header_corruption() {
         let region_id = 7;
         let data = vec![b'x'; 16];
         let mut batch = LogBatch::default();
@@ -1688,7 +1683,7 @@ mod tests {
             batch_handle.len = len;
             let file_context = LogFileContext::new(batch_handle.id, Version::V2);
             batch.prepare_write(&file_context).unwrap();
-            // batch.finish_write(batch_handle);
+            assert_eq!(batch.approximate_size(), len);
             let encoded = batch.encoded_bytes();
             assert_eq!(encoded.len(), len);
             let mut bytes_slice = encoded;
