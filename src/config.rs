@@ -110,7 +110,7 @@ pub struct Config {
     pub prefill_for_recycle: bool,
 
     /// Maximum capacity for preparing log files for recycling when start.
-    /// If not `None`, its size is equal to `purge-threshold`.
+    /// If `None`, its size is equal to `purge-threshold`.
     /// Only available for `prefill-for-recycle` is true.
     ///
     /// Default: None
@@ -212,8 +212,8 @@ impl Config {
         }
         if self.enable_log_recycle && self.purge_threshold.0 >= self.target_file_size.0 {
             // (1) At most u32::MAX so that the file number can be capped into an u32
-            // without colliding. (2) Add some more file as an additional buffer to
-            // avoid jitters.
+            // without colliding. (2) Increase the threshold by 50% to add some more file
+            // as an additional buffer to avoid jitters.
             std::cmp::min(
                 (self.purge_threshold.0 / self.target_file_size.0) as usize * 3 / 2,
                 u32::MAX as usize,
@@ -234,7 +234,7 @@ impl Config {
         if self.prefill_for_recycle && prefill_limit >= self.target_file_size.0 {
             // Keep same with the maximum setting of `recycle_capacity`.
             std::cmp::min(
-                (prefill_limit / self.target_file_size.0) as usize + 2,
+                (prefill_limit / self.target_file_size.0) as usize,
                 u32::MAX as usize,
             )
         } else {

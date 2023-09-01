@@ -528,13 +528,14 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
     fn initialize_files(&mut self) -> Result<()> {
         let target_file_size = self.cfg.target_file_size.0 as usize;
-        let mut target = std::cmp::min(
-            self.cfg.prefill_capacity(),
-            self.cfg
-                .recycle_capacity()
-                .saturating_sub(self.append_files.len()),
-        );
-        let to_create = target.saturating_sub(self.recycled_files.len());
+        let prefill_target =
+            std::cmp::min(self.cfg.prefill_capacity(), self.cfg.recycle_capacity())
+                .saturating_sub(self.append_files.len());
+        let mut recycle_target = self
+            .cfg
+            .recycle_capacity()
+            .saturating_sub(self.append_files.len());
+        let to_create = prefill_target.saturating_sub(self.recycled_files.len());
         if to_create > 0 {
             let now = Instant::now();
             for _ in 0..to_create {
@@ -557,7 +558,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                             warn!("no enough space for preparing reserved logs");
                             // Clear partially prepared recycled log list if there has no enough
                             // space for it.
-                            target = 0;
+                            recycle_target = 0;
                         }
                         break;
                     }
@@ -581,7 +582,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         // FALSE, setting `Config::prefill-for-recycle` from TRUE to FALSE or
         // changing the recycle capacity, we should remove redundant
         // recycled files in advance.
-        while self.recycled_files.len() > target {
+        while self.recycled_files.len() > recycle_target {
             let f = self.recycled_files.pop().unwrap();
             let root_path = &self.dirs[f.path_id];
             let path = root_path.join(build_reserved_file_name(f.seq));
