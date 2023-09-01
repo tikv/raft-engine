@@ -33,7 +33,6 @@ const DEFAULT_LOG_ITEM_BATCH_CAP: usize = 64;
 const MAX_LOG_BATCH_BUFFER_CAP: usize = 8 * 1024 * 1024;
 // 2GiB, The maximum content length accepted by lz4 compression.
 const MAX_LOG_ENTRIES_SIZE_PER_BATCH: usize = i32::MAX as usize;
-const DEFAULT_LZ4_COMPRESSION_LEVEL: usize = 1;
 
 /// `MessageExt` trait allows for probing log index from a specific type of
 /// protobuf messages.
@@ -790,7 +789,7 @@ impl LogBatch {
             lz4::append_compress_block(
                 &mut self.buf,
                 LOG_BATCH_HEADER_LEN,
-                compression_level.unwrap_or(DEFAULT_LZ4_COMPRESSION_LEVEL),
+                compression_level.unwrap_or(lz4::DEFAULT_LZ4_COMPRESSION_LEVEL),
             )?;
             (buf_len - LOG_BATCH_HEADER_LEN, CompressionType::Lz4)
         } else {
