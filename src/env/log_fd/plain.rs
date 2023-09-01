@@ -1,5 +1,8 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+//! A naive file handle implementation based on standard `File`. All I/O
+//! operations need to synchronize under a `RwLock`.
+
 use crate::env::{Handle, Permission};
 
 use fail::fail_point;

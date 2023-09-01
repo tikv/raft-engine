@@ -118,7 +118,6 @@ impl Display for Version {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct LogFileContext {
     pub id: FileId,
     pub version: Version,

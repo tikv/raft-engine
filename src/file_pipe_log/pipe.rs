@@ -33,7 +33,6 @@ pub const DEFAULT_PATH_ID: PathId = 0;
 /// compatibility.
 pub const DEFAULT_FIRST_FILE_SEQ: FileSeq = 1;
 
-#[derive(Debug)]
 pub struct File<F: FileSystem> {
     pub seq: FileSeq,
     pub handle: Arc<F::Handle>,

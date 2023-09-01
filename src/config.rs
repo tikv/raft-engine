@@ -58,6 +58,12 @@ pub struct Config {
     ///
     /// Default: "8KB"
     pub batch_compression_threshold: ReadableSize,
+    /// Acceleration factor for LZ4 compression. It can be fine tuned, with each
+    /// successive value providing roughly +~3% to speed. The value will be
+    /// capped within [1, 65537] by LZ4.
+    ///
+    /// Default: 1.
+    pub compression_level: Option<usize>,
     /// Deprecated.
     /// Incrementally sync log files after specified bytes have been written.
     /// Setting it to zero disables incremental sync.
@@ -127,6 +133,7 @@ impl Default for Config {
             recovery_read_block_size: ReadableSize::kb(16),
             recovery_threads: 4,
             batch_compression_threshold: ReadableSize::kb(8),
+            compression_level: None,
             bytes_per_sync: None,
             format_version: Version::V2,
             target_file_size: ReadableSize::mb(128),
@@ -277,6 +284,8 @@ mod tests {
         assert_eq!(load.target_file_size, ReadableSize::mb(1));
         assert_eq!(load.purge_threshold, ReadableSize::mb(3));
         assert_eq!(load.format_version, Version::V1);
+        assert_eq!(load.enable_log_recycle, false);
+        assert_eq!(load.prefill_for_recycle, false);
         load.sanitize().unwrap();
     }
 
@@ -290,7 +299,7 @@ mod tests {
         assert!(hard_load.sanitize().is_err());
 
         let soft_error = r#"
-            recovery-read-block-size = "1KB"
+            recovery-read-block-size = 1
             recovery-threads = 0
             target-file-size = "5000MB"
             format-version = 2
@@ -298,6 +307,8 @@ mod tests {
             prefill-for-recycle = true
         "#;
         let soft_load: Config = toml::from_str(soft_error).unwrap();
+        assert!(soft_load.recovery_read_block_size.0 < MIN_RECOVERY_READ_BLOCK_SIZE as u64);
+        assert!(soft_load.recovery_threads < MIN_RECOVERY_THREADS);
         let mut soft_sanitized = soft_load;
         soft_sanitized.sanitize().unwrap();
         assert!(soft_sanitized.recovery_read_block_size.0 >= MIN_RECOVERY_READ_BLOCK_SIZE as u64);
@@ -306,8 +317,6 @@ mod tests {
             soft_sanitized.purge_rewrite_threshold.unwrap(),
             soft_sanitized.target_file_size
         );
-        assert_eq!(soft_sanitized.format_version, Version::V2);
-        assert!(soft_sanitized.enable_log_recycle);
 
         let recycle_error = r#"
             enable-log-recycle = true

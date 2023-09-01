@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2023-09-01
+
 ### Behavior Changes
 
 * `LogBatch::put` returns a `Result<()>` instead of `()`. It errs when the key is reserved for internal use.
@@ -18,6 +20,7 @@
 * Support preparing prefilled logs to enable log recycling when start-up. The amount of logs to prepare is controlled by `Config::prefill_limit`.
 * Add a new configuration `spill-dir` to allow automatic placement of logs into an auxiliary directory when `dir` is full.
 * Add a new method `Engine::fork` to duplicate an `Engine` to a new place, with a few disk file copies.
+* Support configuring lz4 acceleration factor with `compression-level`.
 
 ## [0.3.0] - 2022-09-14
 
