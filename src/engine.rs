@@ -142,7 +142,10 @@ where
             return Ok(0);
         }
         let start = Instant::now();
-        let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
+        let len = log_batch.finish_populate(
+            self.cfg.batch_compression_threshold.0 as usize,
+            self.cfg.compression_level,
+        )?;
         debug_assert!(len > 0);
 
         let mut attempt_count = 0_u64;
@@ -2430,7 +2433,7 @@ pub(crate) mod tests {
         // Directly write to pipe log.
         let mut log_batch = LogBatch::default();
         let flush = |lb: &mut LogBatch| {
-            lb.finish_populate(0).unwrap();
+            lb.finish_populate(0, None).unwrap();
             engine.pipe_log.append(LogQueue::Rewrite, lb).unwrap();
             lb.drain();
         };
@@ -2580,7 +2583,7 @@ pub(crate) mod tests {
 
         log_batch.put_unchecked(3, crate::make_internal_key(&[1]), value.clone());
         log_batch.put_unchecked(4, crate::make_internal_key(&[1]), value);
-        log_batch.finish_populate(0).unwrap();
+        log_batch.finish_populate(0, None).unwrap();
         let block_handle = engine
             .pipe_log
             .append(LogQueue::Rewrite, &mut log_batch)
