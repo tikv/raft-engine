@@ -36,6 +36,11 @@ use either::Either;
 
 type Callback<T> = Box<dyn FnOnce(IoResult<T>) + Send>;
 
+struct SeqTask {
+    inner: Task,
+    seq: u64,
+}
+
 enum Task {
     Create(PathBuf),
     Open {
@@ -63,12 +68,13 @@ enum Task {
         offset: usize,
         size: usize,
     },
+    Pause,
     Stop,
 }
 
-impl Task {
+impl SeqTask {
     fn process(self, file_system: &DefaultFileSystem) -> IoResult<TaskRes> {
-        match self {
+        match self.inner {
             Task::Create(path) => file_system.create(&path).map(|h| TaskRes::Create {
                 fd: h,
                 is_for_rewrite: path.extension().map_or(false, |ext| ext == "rewrite"),
@@ -81,13 +87,13 @@ impl Task {
             Task::Rename { src_path, dst_path } => file_system
                 .rename(src_path, dst_path)
                 .map(|_| TaskRes::Rename),
-            Task::Stop => unreachable!(),
+            Task::Stop | Task::Pause => unreachable!(),
             _ => self.handle_process(),
         }
     }
 
     fn handle_process(self) -> IoResult<TaskRes> {
-        match self {
+        match self.inner {
             Task::Truncate { handle, offset } => {
                 handle.get().truncate(offset).map(|_| TaskRes::Truncate)
             }
@@ -148,20 +154,36 @@ fn replace_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
 struct HedgedSender(Arc<Mutex<HedgedSenderInner>>);
 
 struct HedgedSenderInner {
-    disk1: Sender<(Task, Callback<TaskRes>)>,
-    disk2: Sender<(Task, Callback<TaskRes>)>,
+    disk1: Sender<(SeqTask, Callback<TaskRes>)>,
+    disk2: Sender<(SeqTask, Callback<TaskRes>)>,
+    seq: u64,
 }
 
 impl HedgedSender {
     fn new(
-        disk1: Sender<(Task, Callback<TaskRes>)>,
-        disk2: Sender<(Task, Callback<TaskRes>)>,
+        disk1: Sender<(SeqTask, Callback<TaskRes>)>,
+        disk2: Sender<(SeqTask, Callback<TaskRes>)>,
     ) -> Self {
-        Self(Arc::new(Mutex::new(HedgedSenderInner { disk1, disk2 })))
+        Self(Arc::new(Mutex::new(HedgedSenderInner {
+            disk1,
+            disk2,
+            seq: 0,
+        })))
     }
 
     fn send(&self, task1: Task, task2: Task, cb1: Callback<TaskRes>, cb2: Callback<TaskRes>) {
-        let inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock().unwrap();
+        if !matches!(task1, Task::Stop | Task::Pause) {
+            inner.seq += 1;
+        }
+        let task1 = SeqTask {
+            inner: task1,
+            seq: inner.seq,
+        };
+        let task2 = SeqTask {
+            inner: task2,
+            seq: inner.seq,
+        };
         inner.disk1.send((task1, cb1)).unwrap();
         inner.disk2.send((task2, cb2)).unwrap();
     }
@@ -187,33 +209,39 @@ pub struct HedgedFileSystem {
 
 impl HedgedFileSystem {
     pub fn new(base: Arc<DefaultFileSystem>, path1: PathBuf, path2: PathBuf) -> Self {
-        let (tx1, rx1) = unbounded::<(Task, Callback<TaskRes>)>();
-        let (tx2, rx2) = unbounded::<(Task, Callback<TaskRes>)>();
+        let (tx1, rx1) = unbounded::<(SeqTask, Callback<TaskRes>)>();
+        let (tx2, rx2) = unbounded::<(SeqTask, Callback<TaskRes>)>();
         let counter1 = Arc::new(AtomicU64::new(0));
         let counter2 = Arc::new(AtomicU64::new(0));
         let counter1_clone = counter1.clone();
         let fs1 = base.clone();
         let handle1 = thread::spawn(move || {
             for (task, cb) in rx1 {
-                if let Task::Stop = task {
+                if let Task::Stop = task.inner {
                     break;
                 }
                 fail_point!("double_write::thread1");
+                let seq = task.seq;
                 let res = task.process(&fs1);
                 cb(res);
-                counter1_clone.fetch_add(1, Ordering::Relaxed);
+                if seq != 0 {
+                    counter1_clone.store(seq, Ordering::Relaxed);
+                }
             }
         });
         let counter2_clone = counter2.clone();
         let fs2 = base.clone();
         let handle2 = thread::spawn(move || {
             for (task, cb) in rx2 {
-                if let Task::Stop = task {
+                if let Task::Stop = task.inner {
                     break;
                 }
+                let seq = task.seq;
                 let res = task.process(&fs2);
                 cb(res);
-                counter2_clone.fetch_add(1, Ordering::Relaxed);
+                if seq != 0 {
+                    counter2_clone.store(seq, Ordering::Relaxed);
+                }
             }
         });
         let sender = HedgedSender::new(tx1, tx2);
@@ -669,14 +697,14 @@ impl HedgedHandle {
         let mut thread2 = None;
         if strong_consistent {
             // use two separated threads for both wait
-            let (tx1, rx1) = unbounded::<(Task, Callback<TaskRes>)>();
-            let (tx2, rx2) = unbounded::<(Task, Callback<TaskRes>)>();
+            let (tx1, rx1) = unbounded::<(SeqTask, Callback<TaskRes>)>();
+            let (tx2, rx2) = unbounded::<(SeqTask, Callback<TaskRes>)>();
             counter1 = Arc::new(AtomicU64::new(0));
             counter2 = Arc::new(AtomicU64::new(0));
             let counter1_clone = counter1.clone();
             thread1 = Some(thread::spawn(move || {
                 for (task, cb) in rx1 {
-                    if let Task::Stop = task {
+                    if let Task::Stop = task.inner {
                         break;
                     }
                     let res = task.handle_process();
@@ -687,7 +715,7 @@ impl HedgedHandle {
             let counter2_clone = counter2.clone();
             thread2 = Some(thread::spawn(move || {
                 for (task, cb) in rx2 {
-                    if let Task::Stop = task {
+                    if let Task::Stop = task.inner {
                         break;
                     }
                     let res = task.handle_process();
