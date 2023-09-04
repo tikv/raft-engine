@@ -2056,6 +2056,8 @@ pub(crate) mod tests {
         }
     }
 
+    impl RecoverExt for DeleteMonitoredFileSystem {}
+
     impl FileSystem for DeleteMonitoredFileSystem {
         type Handle = <ObfuscatedFileSystem as FileSystem>::Handle;
         type Reader = <ObfuscatedFileSystem as FileSystem>::Reader;
@@ -2650,6 +2652,30 @@ pub(crate) mod tests {
         r
     }
 
+    use md5::{Digest, Md5};
+    use std::{fs, io};
+
+    fn calculate_hash(path: &Path) -> [u8; 16] {
+        let mut hasher = Md5::new();
+
+        std::fs::read_dir(path).unwrap().for_each(|e| {
+            let p = e.unwrap().path();
+            let file_name = p.file_name().unwrap().to_str().unwrap();
+            match FileId::parse_file_name(file_name) {
+                None => {
+                    if parse_reserved_file_name(file_name).is_none() {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            let mut file = fs::File::open(&p).unwrap();
+            let n = io::copy(&mut file, &mut hasher).unwrap();
+        });
+        hasher.finalize().into()
+    }
+
+    use std::io::Write;
     #[test]
     fn test_start_engine_with_second_disk() {
         let dir = tempfile::Builder::new()
@@ -2767,7 +2793,9 @@ pub(crate) mod tests {
         {
             std::fs::remove_dir_all(sec_dir.path()).unwrap();
             let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // All files in first dir are copied to second dir
             assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
         }
         // abnormal case - Missing some append files in second dir
         {
@@ -2775,20 +2803,21 @@ pub(crate) mod tests {
             for e in std::fs::read_dir(sec_dir.path()).unwrap() {
                 let p = e.unwrap().path();
                 let file_name = p.file_name().unwrap().to_str().unwrap();
-                println!("file_name: {}", file_name);
                 if let Some(FileId {
                     queue: LogQueue::Append,
                     seq: _,
                 }) = FileId::parse_file_name(file_name)
                 {
                     if file_count % 2 == 0 {
-                        std::fs::remove_file(dir.path().join(file_name)).unwrap();
+                        std::fs::remove_file(sec_dir.path().join(file_name)).unwrap();
                     }
                     file_count += 1;
                 }
             }
             let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Missing append files are copied
             assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
         }
         // abnormal case - Missing some rewrite files in second dir
         {
@@ -2796,24 +2825,86 @@ pub(crate) mod tests {
             for e in std::fs::read_dir(sec_dir.path()).unwrap() {
                 let p = e.unwrap().path();
                 let file_name = p.file_name().unwrap().to_str().unwrap();
-                println!("file_name: {}", file_name);
                 if let Some(FileId {
                     queue: LogQueue::Rewrite,
                     seq: _,
                 }) = FileId::parse_file_name(file_name)
                 {
                     if file_count % 2 == 0 {
-                        std::fs::remove_file(dir.path().join(file_name)).unwrap();
+                        std::fs::remove_file(sec_dir.path().join(file_name)).unwrap();
                     }
                     file_count += 1;
                 }
             }
-            let engine = Engine::open_with_file_system(cfg, file_system).unwrap();
+            let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Missing rewrite files are copied
             assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
         }
         // abnormal case - Missing some reserve files in second dir
+        {
+            let mut file_count = 0;
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let None = FileId::parse_file_name(file_name) {
+                    if file_count % 2 == 0 {
+                        std::fs::remove_file(sec_dir.path().join(file_name)).unwrap();
+                    }
+                    file_count += 1;
+                }
+            }
+            let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Missing reserve files are copied
+            assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
         // abnormal case - Have some extra files in second dir
+        {
+            let mut file_count = 0;
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if file_count % 2 == 0 {
+                    std::fs::copy(
+                        sec_dir.path().join(file_name),
+                        sec_dir.path().join(file_name.to_owned() + "tmp"),
+                    )
+                    .unwrap();
+                }
+            }
+            let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Extra files are untouched.
+            assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // TODO: handle the error 
         // abnormal case - One file is corrupted
+        {
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if file_count % 2 == 0 {
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(sec_dir.path().join(file_name))
+                        .unwrap();
+                    f.write_all(b"corrupted").unwrap();
+                }
+            }
+            let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Corrupted files are untouched.
+            assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // abnormal case - One file in main dir is corrupted and one file in second dir
+        // is corrupted
+        {
+
+        }
+        // abnormal case - Missing latest rewrite file in main dir and missing one log
+        // file in second dir
+        {}
     }
 
     #[test]
