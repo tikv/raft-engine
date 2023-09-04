@@ -2878,7 +2878,7 @@ pub(crate) mod tests {
             assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
             assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
         }
-        // TODO: handle the error 
+        // TODO: handle the error
         // abnormal case - One file is corrupted
         {
             for e in std::fs::read_dir(sec_dir.path()).unwrap() {
@@ -2899,9 +2899,7 @@ pub(crate) mod tests {
         }
         // abnormal case - One file in main dir is corrupted and one file in second dir
         // is corrupted
-        {
-
-        }
+        {}
         // abnormal case - Missing latest rewrite file in main dir and missing one log
         // file in second dir
         {}

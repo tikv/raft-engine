@@ -23,13 +23,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::thread::JoinHandle;
 
 use crate::env::default::LogFd;
 use crate::env::DefaultFileSystem;
 use crate::env::{FileSystem, Handle, Permission, WriteExt};
 use futures::channel::oneshot;
 use futures::executor::block_on;
-use futures::select;
+use futures::{join, select};
 
 use either::Either;
 
@@ -65,9 +66,57 @@ enum Task {
     Stop,
 }
 
+impl Task {
+    fn process(self, file_system: &DefaultFileSystem) -> IoResult<TaskRes> {
+        match self {
+            Task::Create(path) => file_system.create(&path).map(|h| TaskRes::Create {
+                fd: h,
+                is_for_rewrite: path.extension().map_or(false, |ext| ext == "rewrite"),
+            }),
+            Task::Open { path, perm } => file_system.open(&path, perm).map(|h| TaskRes::Open {
+                fd: h,
+                is_for_rewrite: path.extension().map_or(false, |ext| ext == "rewrite"),
+            }),
+            Task::Delete(path) => file_system.delete(path).map(|_| TaskRes::Delete),
+            Task::Rename { src_path, dst_path } => file_system
+                .rename(src_path, dst_path)
+                .map(|_| TaskRes::Rename),
+            Task::Stop => unreachable!(),
+            _ => self.handle_process(),
+        }
+    }
+
+    fn handle_process(self) -> IoResult<TaskRes> {
+        match self {
+            Task::Truncate { handle, offset } => {
+                handle.get().truncate(offset).map(|_| TaskRes::Truncate)
+            }
+            Task::FileSize(handle) => handle.get().file_size().map(|s| TaskRes::FileSize(s)),
+            Task::Sync(handle) => handle.get().sync().map(|_| TaskRes::Sync),
+            Task::Write {
+                handle,
+                offset,
+                bytes,
+            } => handle
+                .get()
+                .write(offset, &bytes)
+                .map(|s| TaskRes::Write(s)),
+            Task::Allocate {
+                handle,
+                offset,
+                size,
+            } => handle
+                .get()
+                .allocate(offset, size)
+                .map(|_| TaskRes::Allocate),
+            _ => unreachable!(),
+        }
+    }
+}
+
 enum TaskRes {
-    Create(LogFd),
-    Open(LogFd),
+    Create { fd: LogFd, is_for_rewrite: bool },
+    Open { fd: LogFd, is_for_rewrite: bool },
     Delete,
     Rename,
     Truncate,
@@ -150,7 +199,7 @@ impl HedgedFileSystem {
                     break;
                 }
                 fail_point!("double_write::thread1");
-                let res = Self::process(&fs1, task);
+                let res = task.process(&fs1);
                 cb(res);
                 counter1_clone.fetch_add(1, Ordering::Relaxed);
             }
@@ -162,7 +211,7 @@ impl HedgedFileSystem {
                 if let Task::Stop = task {
                     break;
                 }
-                let res = Self::process(&fs2, task);
+                let res = task.process(&fs2);
                 cb(res);
                 counter2_clone.fetch_add(1, Ordering::Relaxed);
             }
@@ -365,22 +414,40 @@ impl HedgedFileSystem {
         let (cb2, mut f2) = paired_future_callback();
         self.sender.send(task1, task2, cb1, cb2);
 
-        let resolve = |res: TaskRes| -> LogFd {
+        let resolve = |res: TaskRes| -> (LogFd, bool) {
             match res {
-                TaskRes::Create(h) => h,
-                TaskRes::Open(h) => h,
+                TaskRes::Create { fd, is_for_rewrite } => (fd, is_for_rewrite),
+                TaskRes::Open { fd, is_for_rewrite } => (fd, is_for_rewrite),
                 _ => unreachable!(),
             }
         };
         select! {
-            res1 = f1 => res1.unwrap().map(|res| HedgedHandle::new(self.sender.clone(),
-                FutureHandle::new_owned(resolve(res)), FutureHandle::new(f2) , self.counter1.clone(), self.counter2.clone())),
-            res2 = f2 => res2.unwrap().map(|res| HedgedHandle::new(self.sender.clone(),
-                FutureHandle::new(f1), FutureHandle::new_owned(resolve(res)) , self.counter1.clone(), self.counter2.clone())),
+            res1 = f1 => res1.unwrap().map(|res| {
+                let (fd, is_for_rewrite) = resolve(res);
+                HedgedHandle::new(
+                    is_for_rewrite,
+                    self.sender.clone(),
+                    FutureHandle::new_owned(fd),
+                    FutureHandle::new(f2),
+                    self.counter1.clone(),
+                    self.counter2.clone(),
+                )
+            }),
+            res2 = f2 => res2.unwrap().map(|res| {
+                let (fd, is_for_rewrite) = resolve(res);
+                HedgedHandle::new(
+                    is_for_rewrite,
+                    self.sender.clone(),
+                    FutureHandle::new(f1),
+                    FutureHandle::new_owned(fd) ,
+                    self.counter1.clone(),
+                    self.counter2.clone(),
+                )
+            }),
         }
     }
 
-    async fn wait_one(&self, task1: Task, task2: Task) -> IoResult<()> {
+    async fn wait(&self, task1: Task, task2: Task) -> IoResult<()> {
         let (cb1, mut f1) = paired_future_callback();
         let (cb2, mut f2) = paired_future_callback();
         self.sender.send(task1, task2, cb1, cb2);
@@ -388,40 +455,6 @@ impl HedgedFileSystem {
         select! {
             res1 = f1 => res1.unwrap().map(|_| ()),
             res2 = f2 => res2.unwrap().map(|_| ()),
-        }
-    }
-
-    #[inline]
-    fn process(file_system: &DefaultFileSystem, task: Task) -> IoResult<TaskRes> {
-        match task {
-            Task::Create(path) => file_system.create(path).map(|h| TaskRes::Create(h)),
-            Task::Open { path, perm } => file_system.open(path, perm).map(|h| TaskRes::Open(h)),
-            Task::Delete(path) => file_system.delete(path).map(|_| TaskRes::Delete),
-            Task::Rename { src_path, dst_path } => file_system
-                .rename(src_path, dst_path)
-                .map(|_| TaskRes::Rename),
-            Task::Truncate { handle, offset } => {
-                handle.get().truncate(offset).map(|_| TaskRes::Truncate)
-            }
-            Task::FileSize(handle) => handle.get().file_size().map(|s| TaskRes::FileSize(s)),
-            Task::Sync(handle) => handle.get().sync().map(|_| TaskRes::Sync),
-            Task::Write {
-                handle,
-                offset,
-                bytes,
-            } => handle
-                .get()
-                .write(offset, &bytes)
-                .map(|s| TaskRes::Write(s)),
-            Task::Allocate {
-                handle,
-                offset,
-                size,
-            } => handle
-                .get()
-                .allocate(offset, size)
-                .map(|_| TaskRes::Allocate),
-            Task::Stop => unreachable!(),
         }
     }
 }
@@ -503,7 +536,7 @@ impl FileSystem for HedgedFileSystem {
     }
 
     fn delete<P: AsRef<Path>>(&self, path: P) -> IoResult<()> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::Delete(path.as_ref().to_path_buf()),
             Task::Delete(replace_path(
                 path.as_ref(),
@@ -514,7 +547,7 @@ impl FileSystem for HedgedFileSystem {
     }
 
     fn rename<P: AsRef<Path>>(&self, src_path: P, dst_path: P) -> IoResult<()> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::Rename {
                 src_path: src_path.as_ref().to_path_buf(),
                 dst_path: dst_path.as_ref().to_path_buf(),
@@ -568,8 +601,8 @@ impl FutureHandle {
                 set = true;
                 // TODO: should we handle the second disk io error
                 match block_on(rx).unwrap().unwrap() {
-                    TaskRes::Open(fd) => Arc::new(fd),
-                    TaskRes::Create(fd) => Arc::new(fd),
+                    TaskRes::Open { fd, .. } => Arc::new(fd),
+                    TaskRes::Create { fd, .. } => Arc::new(fd),
                     _ => unreachable!(),
                 }
             }
@@ -592,8 +625,8 @@ impl FutureHandle {
                 match rx.try_recv().unwrap() {
                     None => return None,
                     Some(Err(_)) => panic!(),
-                    Some(Ok(TaskRes::Open(fd))) => Arc::new(fd),
-                    Some(Ok(TaskRes::Create(fd))) => Arc::new(fd),
+                    Some(Ok(TaskRes::Open { fd, .. })) => Arc::new(fd),
+                    Some(Ok(TaskRes::Create { fd, .. })) => Arc::new(fd),
                     _ => unreachable!(),
                 }
             }
@@ -609,6 +642,8 @@ impl FutureHandle {
 }
 
 pub struct HedgedHandle {
+    strong_consistent: bool,
+
     sender: HedgedSender,
 
     handle1: Arc<FutureHandle>,
@@ -616,22 +651,62 @@ pub struct HedgedHandle {
 
     counter1: Arc<AtomicU64>,
     counter2: Arc<AtomicU64>,
+
+    thread1: Option<JoinHandle<()>>,
+    thread2: Option<JoinHandle<()>>,
 }
 
 impl HedgedHandle {
     fn new(
-        sender: HedgedSender,
+        strong_consistent: bool,
+        mut sender: HedgedSender,
         handle1: FutureHandle,
         handle2: FutureHandle,
-        counter1: Arc<AtomicU64>,
-        counter2: Arc<AtomicU64>,
+        mut counter1: Arc<AtomicU64>,
+        mut counter2: Arc<AtomicU64>,
     ) -> Self {
+        let mut thread1 = None;
+        let mut thread2 = None;
+        if strong_consistent {
+            // use two separated threads for both wait
+            let (tx1, rx1) = unbounded::<(Task, Callback<TaskRes>)>();
+            let (tx2, rx2) = unbounded::<(Task, Callback<TaskRes>)>();
+            counter1 = Arc::new(AtomicU64::new(0));
+            counter2 = Arc::new(AtomicU64::new(0));
+            let counter1_clone = counter1.clone();
+            thread1 = Some(thread::spawn(move || {
+                for (task, cb) in rx1 {
+                    if let Task::Stop = task {
+                        break;
+                    }
+                    let res = task.handle_process();
+                    cb(res);
+                    counter1_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+            let counter2_clone = counter2.clone();
+            thread2 = Some(thread::spawn(move || {
+                for (task, cb) in rx2 {
+                    if let Task::Stop = task {
+                        break;
+                    }
+                    let res = task.handle_process();
+                    cb(res);
+                    counter2_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+            sender = HedgedSender::new(tx1, tx2);
+        }
+
         Self {
+            strong_consistent,
             sender,
             handle1: Arc::new(handle1),
             handle2: Arc::new(handle2),
             counter1,
             counter2,
+            thread1,
+            thread2,
         }
     }
 
@@ -656,7 +731,7 @@ impl HedgedHandle {
     }
 
     fn write(&self, offset: usize, content: &[u8]) -> IoResult<usize> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::Write {
                 handle: self.handle1.clone(),
                 offset,
@@ -678,7 +753,7 @@ impl HedgedHandle {
     }
 
     fn allocate(&self, offset: usize, size: usize) -> IoResult<()> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::Allocate {
                 handle: self.handle1.clone(),
                 offset,
@@ -703,11 +778,33 @@ impl HedgedHandle {
             res2 = f2 => res2.unwrap(),
         }
     }
+
+    async fn wait_both(&self, task1: Task, task2: Task) -> IoResult<TaskRes> {
+        let (cb1, f1) = paired_future_callback();
+        let (cb2, f2) = paired_future_callback();
+        self.sender.send(task1, task2, cb1, cb2);
+
+        let (res1, res2) = join!(f1, f2);
+        match (res1.unwrap(), res2.unwrap()) {
+            (res @ Ok(_), Ok(_)) => res,
+            (Err(e), Err(_)) => Err(e),
+            (Err(e), _) => Err(e),
+            (_, Err(e)) => Err(e),
+        }
+    }
+
+    async fn wait(&self, task1: Task, task2: Task) -> IoResult<TaskRes> {
+        if self.strong_consistent {
+            self.wait_both(task1, task2).await
+        } else {
+            self.wait_one(task1, task2).await
+        }
+    }
 }
 
 impl Handle for HedgedHandle {
     fn truncate(&self, offset: usize) -> IoResult<()> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::Truncate {
                 handle: self.handle1.clone(),
                 offset,
@@ -721,7 +818,7 @@ impl Handle for HedgedHandle {
     }
 
     fn file_size(&self) -> IoResult<usize> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::FileSize(self.handle1.clone()),
             Task::FileSize(self.handle2.clone()),
         ))
@@ -735,11 +832,22 @@ impl Handle for HedgedHandle {
     }
 
     fn sync(&self) -> IoResult<()> {
-        block_on(self.wait_one(
+        block_on(self.wait(
             Task::Sync(self.handle1.clone()),
             Task::Sync(self.handle2.clone()),
         ))
         .map(|_| ())
+    }
+}
+
+impl Drop for HedgedHandle {
+    fn drop(&mut self) {
+        if self.strong_consistent {
+            self.sender
+                .send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
+            self.thread1.take().unwrap().join().unwrap();
+            self.thread2.take().unwrap().join().unwrap();
+        }
     }
 }
 
