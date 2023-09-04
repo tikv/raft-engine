@@ -116,7 +116,7 @@ pub struct Config {
     pub prefill_for_recycle: bool,
 
     /// Maximum capacity for preparing log files for recycling when start.
-    /// If `None`, its size is equal to `purge-threshold`.
+    /// If `None`, its size is equal to `purge-threshold`*1.5.
     /// Only available for `prefill-for-recycle` is true.
     ///
     /// Default: None
