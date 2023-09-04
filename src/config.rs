@@ -234,7 +234,7 @@ impl Config {
         if self.prefill_for_recycle && prefill_limit >= self.target_file_size.0 {
             // Keep same with the maximum setting of `recycle_capacity`.
             std::cmp::min(
-                (prefill_limit / self.target_file_size.0) as usize,
+                (prefill_limit / self.target_file_size.0) as usize * 3 / 2,
                 u32::MAX as usize,
             )
         } else {
