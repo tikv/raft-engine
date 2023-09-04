@@ -219,7 +219,7 @@ pub mod debug {
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
                     let len = batch
-                        .finish_populate(1 /* compression_threshold */)
+                        .finish_populate(1 /* compression_threshold */, None)
                         .unwrap();
                     batch.prepare_write(&log_file_format).unwrap();
                     writer

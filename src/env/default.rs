@@ -1,6 +1,8 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{Error, ErrorKind, Read, Result as IoResult, Seek, SeekFrom, Write};
+#[cfg(feature = "failpoints")]
+use std::io::{Error, ErrorKind};
+use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 
