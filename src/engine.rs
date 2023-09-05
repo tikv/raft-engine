@@ -2197,11 +2197,11 @@ pub(crate) mod tests {
         assert_eq!(reserved_start_2, reserved_start_3);
 
         // Reuse all of reserved files.
-        for rid in 1..=50 {
+        for rid in 1..=75 {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         assert!(fs.reserved_metadata.lock().unwrap().is_empty());
-        for rid in 1..=50 {
+        for rid in 1..=75 {
             engine.clean(rid);
         }
         engine.purge_manager.must_rewrite_append_queue(None, None);
@@ -2718,7 +2718,7 @@ pub(crate) mod tests {
         );
         assert!(file_count > engine.file_count(None));
         // Append data, recycled files are reused.
-        for rid in 1..=30 {
+        for rid in 1..=50 {
             engine.append(rid, 20, 30, Some(&entry_data));
         }
         // No new file is created.
