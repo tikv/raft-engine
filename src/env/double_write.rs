@@ -22,6 +22,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -69,6 +70,7 @@ enum Task {
         size: usize,
     },
     Pause,
+    Snapshot(PathBuf),
     Stop,
 }
 
@@ -87,6 +89,51 @@ impl SeqTask {
             Task::Rename { src_path, dst_path } => file_system
                 .rename(src_path, dst_path)
                 .map(|_| TaskRes::Rename),
+            Task::Snapshot(path) => {
+                let mut snapshot = Snapshot::default();
+                fs::read_dir(path)
+                    .unwrap()
+                    .try_for_each(|e| -> IoResult<()> {
+                        let dir_entry = e?;
+                        let p = dir_entry.path();
+                        if !p.is_file() {
+                            return Ok(());
+                        }
+                        let file_name = p.file_name().unwrap().to_str().unwrap();
+                        match FileId::parse_file_name(file_name) {
+                            Some(FileId {
+                                queue: LogQueue::Append,
+                                seq,
+                            }) => snapshot.append_file.push((
+                                FileName {
+                                    seq,
+                                    path: p.to_path_buf(),
+                                    path_id: 0,
+                                },
+                                file_system.open(&p, Permission::ReadOnly).unwrap(),
+                            )),
+                            Some(FileId {
+                                queue: LogQueue::Rewrite,
+                                seq,
+                            }) => {} // exclude rewrite files, they are always synced
+                            _ => {
+                                if let Some(seq) = parse_reserved_file_name(file_name) {
+                                    snapshot.recycled_file.push((
+                                        FileName {
+                                            seq,
+                                            path: p.to_path_buf(),
+                                            path_id: 0,
+                                        },
+                                        file_system.open(&p, Permission::ReadOnly).unwrap(),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                Ok(TaskRes::Snapshot(snapshot))
+            }
             Task::Stop | Task::Pause => unreachable!(),
             _ => self.handle_process(),
         }
@@ -130,6 +177,14 @@ enum TaskRes {
     Sync,
     Write(usize),
     Allocate,
+    Snapshot(Snapshot),
+}
+
+#[derive(Default)]
+struct Snapshot {
+    append_file: Vec<(FileName, LogFd)>,
+    recycled_file: Vec<(FileName, LogFd)>,
+    // exclude rewrite files
 }
 
 #[derive(Default)]
@@ -148,8 +203,12 @@ fn replace_path(path: &Path, from: &Path, to: &Path) -> PathBuf {
     }
 }
 
+// let say the average entry size is 100B, then the total size of the log in the
+// channel is 1GB,
+const ABORT_THRESHOLD: usize = 10000;
+
 // Make sure the task is sent to two disks' channel atomically, otherwise the
-// ordering of the tasks in two disks are not same.
+// ordering of the tasks in two disks' channels are not same.
 #[derive(Clone)]
 struct HedgedSender(Arc<Mutex<HedgedSenderInner>>);
 
@@ -157,25 +216,30 @@ struct HedgedSenderInner {
     disk1: Sender<(SeqTask, Callback<TaskRes>)>,
     disk2: Sender<(SeqTask, Callback<TaskRes>)>,
     seq: u64,
+    state: Arc<RwLock<RecoveryState>>,
 }
 
 impl HedgedSender {
     fn new(
         disk1: Sender<(SeqTask, Callback<TaskRes>)>,
         disk2: Sender<(SeqTask, Callback<TaskRes>)>,
+        state: Arc<RwLock<RecoveryState>>,
     ) -> Self {
         Self(Arc::new(Mutex::new(HedgedSenderInner {
             disk1,
             disk2,
             seq: 0,
+            state,
         })))
     }
 
     fn send(&self, task1: Task, task2: Task, cb1: Callback<TaskRes>, cb2: Callback<TaskRes>) {
-        let mut inner = self.0.lock().unwrap();
-        if !matches!(task1, Task::Stop | Task::Pause) {
-            inner.seq += 1;
+        if matches!(task1, Task::Pause | Task::Snapshot) {
+            unreachable!();
         }
+
+        let mut inner = self.0.lock().unwrap();
+        inner.seq += 1;
         let task1 = SeqTask {
             inner: task1,
             seq: inner.seq,
@@ -184,9 +248,72 @@ impl HedgedSender {
             inner: task2,
             seq: inner.seq,
         };
-        inner.disk1.send((task1, cb1)).unwrap();
-        inner.disk2.send((task2, cb2)).unwrap();
+        let state = inner.state.read().unwrap();
+        if state == RecoveryState::Normal {
+            let check1 = inner.disk1.len() > ABORT_THRESHOLD;
+            let check2 = inner.disk2.len() > ABORT_THRESHOLD;
+            match (check1, check2) {
+                (true, true) => {
+                    panic!("Both channels of disk1 and disk2 are full")
+                }
+                (true, false) => {
+                    *inner.state.write().unwrap() = RecoveryState::Paused1;
+                    inner
+                        .disk1
+                        .send((
+                            SeqTask {
+                                inner: Task::Pause,
+                                seq: 0,
+                            },
+                            Box::new(|_| {}),
+                        ))
+                        .unwrap();
+                }
+                (false, true) => {
+                    *inner.state.write().unwrap() = RecoveryState::Paused2;
+                    inner
+                        .disk2
+                        .send((
+                            SeqTask {
+                                inner: Task::Pause,
+                                seq: 0,
+                            },
+                            Box::new(|_| {}),
+                        ))
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+        if state != RecoveryState::Paused1 && state != RecoveryState::WaitRecover1 {
+            inner.disk1.send((task1, cb1)).unwrap();
+        }
+        if state != RecoveryState::Paused2 && state != RecoveryState::WaitRecover2 {
+            inner.disk2.send((task2, cb2)).unwrap();
+        }
     }
+
+    fn send_snapshot(&self, index: u8, task: Task, cb: Callback<TaskRes>) {
+        assert!(matches!(task1, Task::Pause | Task::Snapshot));
+
+        let mut inner = self.0.lock().unwrap();
+        if index == 1 {
+            inner.disk1.send((task, cb)).unwrap();
+        } else {
+            inner.disk2.send((task, cb)).unwrap();
+        }
+    }
+}
+
+enum RecoveryState {
+    Normal,
+    Paused1, /* When the length of channel of disk1 reaches threshold, a
+              * `Pause` task is sent and no more later task will be sent
+              * to disk1 */
+    Paused2, // no more task will be sent to disk2
+    WaitRecover1(oneshot::Sender<()>),
+    WaitRecover2(oneshot::Sender<()>),
+    Recovering,
 }
 
 pub struct HedgedFileSystem {
@@ -202,6 +329,8 @@ pub struct HedgedFileSystem {
 
     handle1: Option<thread::JoinHandle<()>>,
     handle2: Option<thread::JoinHandle<()>>,
+
+    state: Arc<RwLock<RecoveryState>>,
 }
 
 // TODO: read both dir at recovery, maybe no need? cause operations are to both
@@ -211,23 +340,33 @@ impl HedgedFileSystem {
     pub fn new(base: Arc<DefaultFileSystem>, path1: PathBuf, path2: PathBuf) -> Self {
         let (tx1, rx1) = unbounded::<(SeqTask, Callback<TaskRes>)>();
         let (tx2, rx2) = unbounded::<(SeqTask, Callback<TaskRes>)>();
+        let state = Arc::new(RwLock::new(RecoveryState::Normal));
         let seqno1 = Arc::new(AtomicU64::new(0));
         let seqno2 = Arc::new(AtomicU64::new(0));
         let seqno1_clone = seqno1.clone();
         let fs1 = base.clone();
+        let state1 = state.clone();
         let handle1 = thread::spawn(move || {
             for (task, cb) in rx1 {
                 if let Task::Stop = task.inner {
                     break;
                 }
+                if let Task::Pause(rx) = task.inner {
+                    let (tx, rx) = oneshot::channel();
+                    *state1.write().unwrap() = RecoveryState::WaitRecover1(tx);
+                    let _ = rx.recv();
+                    // indicate the pause is done
+                    // do not update seqno for pause task
+                    continue;
+                }
                 fail_point!("double_write::thread1");
                 let seq = task.seq;
                 let res = task.process(&fs1);
+                // seqno should be updated before the write callback is called, otherwise one
+                // read may be performed right after the write is finished. Then the read may be
+                // performed on the other disk not having the data because the seqno for this
+                // disk is not updated yet.
                 if seq != 0 {
-                    // seqno should be updated before the write callback is called, otherwise one
-                    // read may be performed right after the write is finished. Then the read may be
-                    // performed on the other disk not having the data because the seqno for this
-                    // disk is not updated yet.
                     seqno1_clone.store(seq, Ordering::Relaxed);
                 }
                 cb(res);
@@ -235,10 +374,17 @@ impl HedgedFileSystem {
         });
         let seqno2_clone = seqno2.clone();
         let fs2 = base.clone();
+        let state2 = state.clone();
         let handle2 = thread::spawn(move || {
             for (task, cb) in rx2 {
                 if let Task::Stop = task.inner {
                     break;
+                }
+                if let Task::Pause(rx) = task.inner {
+                    let (tx, rx) = oneshot::channel();
+                    *state2.write().unwrap() = RecoveryState::WaitRecover2(tx);
+                    let _ = rx.recv();
+                    continue;
                 }
                 let seq = task.seq;
                 let res = task.process(&fs2);
@@ -248,7 +394,7 @@ impl HedgedFileSystem {
                 cb(res);
             }
         });
-        let sender = HedgedSender::new(tx1, tx2);
+        let sender = HedgedSender::new(tx1, tx2, state.clone());
         Self {
             base,
             path1,
@@ -258,11 +404,14 @@ impl HedgedFileSystem {
             seqno2,
             handle1: Some(handle1),
             handle2: Some(handle2),
+            state,
         }
     }
 
     fn catch_up_diff(&self, from_files: Files, to_files: Files) -> IoResult<()> {
         let check_files = |from: &Vec<FileName>, to: &Vec<FileName>| -> IoResult<()> {
+            let last_from_seq = from.last().map(|f| f.seq).unwrap_or(0);
+
             let mut iter1 = from.iter().peekable();
             let mut iter2 = to.iter().peekable();
             // compare files of from and to, if the file in from is not in to, copy it to
@@ -286,12 +435,17 @@ impl HedgedFileSystem {
                     (Some(f1), Some(f2)) => {
                         match f1.seq.cmp(&f2.seq) {
                             std::cmp::Ordering::Equal => {
-                                // TODO: do we need to check file size?
-                                // if f1.handle.file_size() != f2.handle.file_size() {
-                                //     let to = replace_path(f1.path.as_ref(),
-                                // from_files.prefix.as_ref(), to_files.prefix.as_ref());
-                                //     fs::copy(&f1.path, &to)?;
-                                // }
+                                // check file size is not enough, treat the last files differently
+                                // considering the recycle, always copy the last file
+                                // TODO: only copy diff part
+                                if f1.seq == last_from_seq {
+                                    let to = replace_path(
+                                        f1.path.as_ref(),
+                                        from_files.prefix.as_ref(),
+                                        to_files.prefix.as_ref(),
+                                    );
+                                    fs::copy(&f1.path, to)?;
+                                }
                                 iter1.next();
                                 iter2.next();
                             }
@@ -318,35 +472,6 @@ impl HedgedFileSystem {
         check_files(&from_files.append_file, &to_files.append_file)?;
         check_files(&from_files.rewrite_file, &to_files.rewrite_file)?;
         check_files(&from_files.recycled_file, &to_files.recycled_file)?;
-
-        // check file size is not enough, treat the last files differently considering
-        // the recycle, always copy the last file
-        // TODO: only copy diff part
-        if let Some(last_file) = from_files.append_file.last() {
-            let to = replace_path(
-                last_file.path.as_ref(),
-                from_files.prefix.as_ref(),
-                to_files.prefix.as_ref(),
-            );
-            fs::copy(&last_file.path, to)?;
-        }
-        if let Some(last_file) = from_files.rewrite_file.last() {
-            let to = replace_path(
-                last_file.path.as_ref(),
-                from_files.prefix.as_ref(),
-                to_files.prefix.as_ref(),
-            );
-            fs::copy(&last_file.path, to)?;
-        }
-        if let Some(last_file) = from_files.recycled_file.last() {
-            let to = replace_path(
-                last_file.path.as_ref(),
-                from_files.prefix.as_ref(),
-                to_files.prefix.as_ref(),
-            );
-            fs::copy(&last_file.path, to)?;
-        }
-
         Ok(())
     }
 
@@ -526,15 +651,96 @@ impl RecoverExt for HedgedFileSystem {
     }
 
     fn need_recover(&self) -> bool {
-        false
+        // in wait recover state, the task should be still dropped
+        let res = self.state.read().unwrap() == RecoveryState::WaitRecover;
+        if res {
+            // in recovering stat, the task can keep sending
+            *self.state.write().unwrap() = RecoveryState::Recovering;
+        }
+        res
     }
 
     fn is_in_recover(&self) -> bool {
-        false
+        self.state.read().unwrap() == RecoveryState::Recovering
     }
 
     fn trigger_recover(&self) {
-        ()
+        // TODO: send task to get snapshot
+        let (cb, mut f) = paired_future_callback();
+        let to_files = match self.state.read().unwrap() {
+            RecoveryState::WaitRecover1(tx) => {
+                self.sender
+                    .send_snapshot(1, Task::Snapshot(self.path2.clone()), cb);
+                self.get_files(&self.path1).unwrap() // TODO: handle error
+            }
+            RecoveryState::WaitRecover2(tx) => {
+                self.sender
+                    .send_snapshot(2, Task::Snapshot(self.path1.clone()), cb);
+                self.get_files(&self.path2).unwrap()
+            }
+            _ => unreachable!(),
+        };
+
+        let from_files = blocking_on(f).map(|res| {
+            if let TaskRes::Snapshot(files) = res {
+                files
+            } else {
+                unreachable!()
+            }
+        });
+
+        let check_files = |from: &Vec<(FileName, LogFd)>, to: &Vec<FileName>| -> IoResult<()> {
+            let mut iter1 = from.iter().peekable();
+            let mut iter2 = to.iter().peekable();
+            // compare files of from and to, if the file in from is not in to, copy it to
+            // to, and if the file in to is not in from, delete it
+            loop {
+                match (iter1.peek(), iter2.peek()) {
+                    (None, None) => break,
+                    (Some(f1), None) => {
+                        let to = replace_path(
+                            f1.path.as_ref(),
+                            from_files.prefix.as_ref(),
+                            to_files.prefix.as_ref(),
+                        );
+                        io::copy(&f1.path, to)?;
+                        iter1.next();
+                    }
+                    (None, Some(f2)) => {
+                        fs::remove_file(&f2.path)?;
+                        iter2.next();
+                    }
+                    (Some(f1), Some(f2)) => {
+                        match f1.seq.cmp(&f2.seq) {
+                            std::cmp::Ordering::Equal => {
+                                iter1.next();
+                                iter2.next();
+                            }
+                            std::cmp::Ordering::Less => {
+                                let to = replace_path(
+                                    f1.path.as_ref(),
+                                    from_files.prefix.as_ref(),
+                                    to_files.prefix.as_ref(),
+                                );
+                                fs::copy(&f1.path, to)?;
+                                iter1.next();
+                            }
+                            std::cmp::Ordering::Greater => {
+                                fs::remove_file(&f2.path)?;
+                                iter2.next();
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        // TODO: async
+        self.catch_up_diff(from_files, to_files)
+
+        // when 
+        *self.state.write().unwrap() = RecoveryState::Normal;
     }
 }
 
@@ -730,7 +936,7 @@ impl HedgedHandle {
                     cb(res);
                 }
             }));
-            sender = HedgedSender::new(tx1, tx2);
+            sender = HedgedSender::new(tx1, tx2, sender.state.clone());
         }
 
         Self {

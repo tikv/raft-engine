@@ -75,6 +75,8 @@ where
 
     pub fn purge_expired_files(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_PURGE_DURATION_HISTOGRAM);
+        // Purge would delete files, whereas the files may be copied by recovery
+        // process, so do not purge when recovering.
         // if self.file_system().is_in_recover() {
         //     info!("skip purge due to in recover");
         //     return Ok(vec![]);
