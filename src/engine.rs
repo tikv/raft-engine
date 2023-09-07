@@ -2162,6 +2162,7 @@ pub(crate) mod tests {
             prefill_for_recycle: true,
             ..Default::default()
         };
+        let recycle_capacity = cfg.recycle_capacity() as u64;
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
 
@@ -2197,11 +2198,11 @@ pub(crate) mod tests {
         assert_eq!(reserved_start_2, reserved_start_3);
 
         // Reuse all of reserved files.
-        for rid in 1..=50 {
+        for rid in 1..=recycle_capacity {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         assert!(fs.reserved_metadata.lock().unwrap().is_empty());
-        for rid in 1..=50 {
+        for rid in 1..=recycle_capacity {
             engine.clean(rid);
         }
         engine.purge_manager.must_rewrite_append_queue(None, None);
@@ -2704,6 +2705,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(40),
             ..cfg.clone()
         };
+        let recycle_capacity = cfg_2.recycle_capacity() as u64;
         let engine = RaftLogEngine::open_with_file_system(cfg_2, file_system.clone()).unwrap();
         assert!(number_of_files(spill_dir.path()) > 0);
         for rid in 1..=10 {
@@ -2718,7 +2720,7 @@ pub(crate) mod tests {
         );
         assert!(file_count > engine.file_count(None));
         // Append data, recycled files are reused.
-        for rid in 1..=30 {
+        for rid in 1..=recycle_capacity - 10 {
             engine.append(rid, 20, 30, Some(&entry_data));
         }
         // No new file is created.
