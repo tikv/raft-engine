@@ -146,9 +146,6 @@ where
             stats.clone(),
             listeners.clone(),
         );
-        // HedgingManager::new(
-        //     pipe_log.clone(),
-        // )
 
         let (tx, rx) = mpsc::channel();
         let stats_clone = stats.clone();
