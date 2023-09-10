@@ -165,6 +165,7 @@ impl GlobalStats {
 }
 
 pub(crate) const INTERNAL_KEY_PREFIX: &[u8] = b"__";
+pub(crate) const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
 
 #[inline]
 pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
@@ -193,7 +194,7 @@ pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::log_batch::MessageExt;
+    use crate::{log_batch::MessageExt, ATOMIC_GROUP_KEY};
     use raft::eraftpb::Entry;
 
     #[ctor::ctor]
@@ -215,5 +216,6 @@ mod tests {
         assert!(crate::is_internal_key(&key, None));
         assert!(crate::is_internal_key(&key, Some(&[0])));
         assert!(!crate::is_internal_key(&key, Some(&[1])));
+        assert!(!crate::is_internal_key(&key, Some(ATOMIC_GROUP_KEY)));
     }
 }

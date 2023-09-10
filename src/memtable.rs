@@ -20,7 +20,7 @@ use crate::log_batch::{
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 use crate::util::{hash_u64, Factory};
-use crate::{Error, GlobalStats, Result};
+use crate::{Error, GlobalStats, Result, ATOMIC_GROUP_KEY};
 
 #[cfg(feature = "swap")]
 mod swap_conditional_imports {
@@ -1199,7 +1199,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
 
 #[inline]
 fn has_internal_key(item: &LogItem) -> bool {
-    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key, None))
+    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key, Some(ATOMIC_GROUP_KEY)))
 }
 
 struct PendingAtomicGroup {

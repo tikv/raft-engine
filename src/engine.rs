@@ -632,6 +632,7 @@ pub(crate) mod tests {
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
+    use crate::ATOMIC_GROUP_KEY;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
     use std::collections::{BTreeSet, HashSet};
@@ -1520,7 +1521,7 @@ pub(crate) mod tests {
             let mut total = 0;
             engine
                 .scan_raw_messages(rid, None, None, false, |k, _| {
-                    assert!(!crate::is_internal_key(k, None));
+                    assert!(!crate::is_internal_key(k, Some(ATOMIC_GROUP_KEY)));
                     total += 1;
                     true
                 })
