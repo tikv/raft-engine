@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Behavior Changes
-* `LogBatch::put` and `LogBatch::put_message` allow to put key start with `__` but not equals the `__{ATOMIC_GROUP_KEY}`(0x95 0x95 0x01).
+* `LogBatch::put` and `LogBatch::put_message` allow to put key start with `__` but not equals the `__{ATOMIC_GROUP_KEY}`(0x5f 0x5f 0x01).
 
 ## [0.4.0] - 2023-09-01
 
