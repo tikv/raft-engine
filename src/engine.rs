@@ -628,11 +628,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::env::{ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{parse_reserved_file_name, FileNameExt};
-    use crate::log_batch::AtomicGroupBuilder;
+    use crate::log_batch::{AtomicGroupBuilder, ATOMIC_GROUP_KEY};
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
-    use crate::ATOMIC_GROUP_KEY;
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
     use std::collections::{BTreeSet, HashSet};

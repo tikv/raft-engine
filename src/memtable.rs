@@ -15,12 +15,12 @@ use crate::config::Config;
 use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::{
     AtomicGroupStatus, Command, CompressionType, KeyValue, LogBatch, LogItem, LogItemBatch,
-    LogItemContent, OpType,
+    LogItemContent, OpType, ATOMIC_GROUP_KEY,
 };
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
 use crate::util::{hash_u64, Factory};
-use crate::{Error, GlobalStats, Result, ATOMIC_GROUP_KEY};
+use crate::{Error, GlobalStats, Result};
 
 #[cfg(feature = "swap")]
 mod swap_conditional_imports {

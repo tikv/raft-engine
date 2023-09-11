@@ -17,7 +17,6 @@ use crate::memtable::EntryIndex;
 use crate::metrics::StopWatch;
 use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext, ReactiveBytes};
 use crate::util::{crc32, lz4};
-use crate::ATOMIC_GROUP_KEY;
 use crate::{perf_context, Error, Result};
 
 pub(crate) const LOG_BATCH_HEADER_LEN: usize = 16;
@@ -729,7 +728,15 @@ impl LogBatch {
 
     /// Adds a protobuf key value pair into the log batch.
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
+        #[cfg(not(test))]
         if crate::is_internal_key(&key, Some(ATOMIC_GROUP_KEY)) {
+            return Err(Error::InvalidArgument(format!(
+                "key prefix `{:?}` reserved for internal use",
+                crate::INTERNAL_KEY_PREFIX
+            )));
+        }
+        #[cfg(test)]
+        if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",
                 crate::INTERNAL_KEY_PREFIX
@@ -740,7 +747,15 @@ impl LogBatch {
 
     /// Adds a key value pair into the log batch.
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        #[cfg(not(test))]
         if crate::is_internal_key(&key, Some(ATOMIC_GROUP_KEY)) {
+            return Err(Error::InvalidArgument(format!(
+                "key prefix `{:?}` reserved for internal use",
+                crate::INTERNAL_KEY_PREFIX
+            )));
+        }
+        #[cfg(test)]
+        if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",
                 crate::INTERNAL_KEY_PREFIX
@@ -995,6 +1010,7 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
 lazy_static! {
     static ref ATOMIC_GROUP_ID: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 }
+pub(crate) const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
 // <status>
 const ATOMIC_GROUP_VALUE_LEN: usize = 1;
 
@@ -1562,12 +1578,15 @@ mod tests {
     #[test]
     fn test_internal_key() {
         let mut batch = LogBatch::default();
-        assert!(batch
-            .put(0, crate::make_internal_key(&[0]), b"v".to_vec())
-            .is_ok());
         assert!(matches!(
             batch
-                .put_message(0, crate::make_internal_key(&[1]), &Entry::new())
+                .put(0, crate::make_internal_key(&[0]), b"v".to_vec())
+                .unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
+        assert!(matches!(
+            batch
+                .put_message(0, crate::make_internal_key(ATOMIC_GROUP_KEY), &Entry::new())
                 .unwrap_err(),
             Error::InvalidArgument(_)
         ));
