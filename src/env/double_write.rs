@@ -91,53 +91,18 @@ impl SeqTask {
                 .rename(src_path, dst_path)
                 .map(|_| TaskRes::Rename),
             Task::Snapshot(path) => {
-                let mut files = Files {
-                    prefix: path.clone(),
-                    ..Default::default()
-                };
-                fs::read_dir(path)
-                    .unwrap()
-                    .try_for_each(|e| -> IoResult<()> {
-                        let dir_entry = e?;
-                        let p = dir_entry.path();
-                        if !p.is_file() {
-                            return Ok(());
-                        }
-                        let file_name = p.file_name().unwrap().to_str().unwrap();
-                        match FileId::parse_file_name(file_name) {
-                            Some(FileId {
-                                queue: LogQueue::Append,
-                                seq,
-                            }) => files.append_files.push(SeqFile::Handle((
-                                FileName {
-                                    seq,
-                                    path: p.to_path_buf(),
-                                    path_id: 0,
-                                },
-                                Arc::new(file_system.open(&p, Permission::ReadOnly).unwrap()),
-                            ))),
-                            Some(FileId {
-                                queue: LogQueue::Rewrite,
-                                ..
-                            }) => {} // exclude rewrite files, they are always synced
-                            _ => {
-                                if let Some(seq) = parse_reserved_file_name(file_name) {
-                                    files.reserved_files.push(SeqFile::Handle((
-                                        FileName {
-                                            seq,
-                                            path: p.to_path_buf(),
-                                            path_id: 0,
-                                        },
-                                        Arc::new(
-                                            file_system.open(&p, Permission::ReadOnly).unwrap(),
-                                        ),
-                                    )));
-                                }
-                            }
-                        }
-                        Ok(())
-                    })
-                    .unwrap();
+                let mut files = HedgedFileSystem::get_files(&path).unwrap(); // TODO: handle error
+                files.append_files = files
+                    .append_files
+                    .into_iter()
+                    .map(|f| f.into_handle(file_system))
+                    .collect();
+                // exclude rewrite files, as they are always synced
+                files.reserved_files = files
+                    .reserved_files
+                    .into_iter()
+                    .map(|f| f.into_handle(file_system))
+                    .collect();
                 Ok(TaskRes::Snapshot(files))
             }
             Task::Stop | Task::Pause => unreachable!(),
@@ -231,6 +196,14 @@ impl SeqFile {
                 std::io::copy(&mut reader, &mut writer)
             }
         }
+    }
+
+    fn into_handle(mut self, file_system: &DefaultFileSystem) -> Self {
+        if let SeqFile::Path(f) = self {
+            let fd = Arc::new(file_system.open(&f.path, Permission::ReadOnly).unwrap());
+            self = SeqFile::Handle((f, fd));
+        }
+        self
     }
 }
 
@@ -598,15 +571,13 @@ impl HedgedFileSystem {
         Ok(())
     }
 
-    fn get_files(&self, path: &PathBuf) -> IoResult<Files> {
+    fn get_files(path: &PathBuf) -> IoResult<Files> {
+        assert!(path.exists());
+
         let mut files = Files {
             prefix: path.clone(),
             ..Default::default()
         };
-        if !path.exists() {
-            info!("Create raft log directory: {}", path.display());
-            fs::create_dir(path).unwrap();
-        }
 
         fs::read_dir(path)
             .unwrap()
@@ -773,8 +744,16 @@ impl Drop for HedgedFileSystem {
 impl RecoverExt for HedgedFileSystem {
     fn bootstrap(&self) -> IoResult<()> {
         // catch up diff
-        let files1 = self.get_files(&self.path1)?;
-        let files2 = self.get_files(&self.path2)?;
+        if !self.path1.exists() {
+            info!("Create raft log directory: {}", self.path1.display());
+            fs::create_dir(&self.path1).unwrap();
+        }
+        if !self.path2.exists() {
+            info!("Create raft log directory: {}", self.path2.display());
+            fs::create_dir(&self.path2).unwrap();
+        }
+        let files1 = HedgedFileSystem::get_files(&self.path1)?;
+        let files2 = HedgedFileSystem::get_files(&self.path2)?;
 
         let count1 = self.get_latest_valid_seq(&files1)?;
         let count2 = self.get_latest_valid_seq(&files2)?;
