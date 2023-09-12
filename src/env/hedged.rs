@@ -317,10 +317,10 @@ impl HedgedSender {
         };
         match inner.state {
             RecoveryState::Paused1 => {
-                inner.disk1.send((task, cb)).unwrap();
+                inner.disk2.send((task, cb)).unwrap();
             }
             RecoveryState::Paused2 => {
-                inner.disk2.send((task, cb)).unwrap();
+                inner.disk1.send((task, cb)).unwrap();
             }
             _ => unreachable!(),
         }
@@ -432,13 +432,15 @@ impl TaskRunner {
                     assert_ne!(seq, 0);
                     if let Some(snap) = snap_seq.as_ref() {
                         // the change already included in the snapshot
-                        if seq + 1 < *snap {
-                        } else if seq + 1 == *snap {
+                        if seq < *snap {
+                            continue;
+                        } else if seq == *snap {
+                            unreachable!();
+                        } else if seq == *snap + 1 {
                             snap_seq = None;
                         } else {
                             panic!("seqno {} is larger than snapshot seqno {}", seq, *snap);
                         }
-                        continue;
                     }
 
                     assert_eq!(last_seq + 1, seq);
