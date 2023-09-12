@@ -118,7 +118,7 @@ impl SeqTask {
                             ))),
                             Some(FileId {
                                 queue: LogQueue::Rewrite,
-                                .. 
+                                ..
                             }) => {} // exclude rewrite files, they are always synced
                             _ => {
                                 if let Some(seq) = parse_reserved_file_name(file_name) {
@@ -184,6 +184,7 @@ enum TaskRes {
     Write(usize),
     Allocate,
     Snapshot(Files),
+    Stop,
 }
 
 #[derive(Default)]
@@ -415,6 +416,7 @@ impl HedgedFileSystem {
         let handle1 = thread::spawn(move || {
             for (task, cb) in rx1 {
                 if let Task::Stop = task.inner {
+                    cb(Ok(TaskRes::Stop));
                     break;
                 }
                 if let Task::Pause = task.inner {
@@ -444,6 +446,7 @@ impl HedgedFileSystem {
         let handle2 = thread::spawn(move || {
             for (task, cb) in rx2 {
                 if let Task::Stop = task.inner {
+                    cb(Ok(TaskRes::Stop));
                     break;
                 }
                 if let Task::Pause = task.inner {
@@ -474,17 +477,30 @@ impl HedgedFileSystem {
         }
     }
 
-    fn catch_up_diff(&self, mut from_files:Files, mut to_files: Files, skip_rewrite: bool) -> IoResult<()> {
-        from_files.append_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
-            to_files.append_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
-        from_files.rewrite_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
-            to_files.rewrite_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
-        from_files.reserved_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
-            to_files.reserved_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
-    
+    fn catch_up_diff(
+        &self,
+        mut from_files: Files,
+        mut to_files: Files,
+        skip_rewrite: bool,
+    ) -> IoResult<()> {
+        from_files
+            .append_files
+            .sort_by(|a, b| a.seq().cmp(&b.seq()));
+        to_files.append_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
+        from_files
+            .rewrite_files
+            .sort_by(|a, b| a.seq().cmp(&b.seq()));
+        to_files.rewrite_files.sort_by(|a, b| a.seq().cmp(&b.seq()));
+        from_files
+            .reserved_files
+            .sort_by(|a, b| a.seq().cmp(&b.seq()));
+        to_files
+            .reserved_files
+            .sort_by(|a, b| a.seq().cmp(&b.seq()));
+
         let check_files = |from: &Vec<SeqFile>, to: &Vec<SeqFile>| -> IoResult<()> {
             let last_from_seq = from.last().map(|f| f.seq()).unwrap_or(0);
-    
+
             let mut iter1 = from.iter().peekable();
             let mut iter2 = to.iter().peekable();
             // compare files of from and to, if the file in from is not in to, copy it to
@@ -691,10 +707,34 @@ impl HedgedFileSystem {
 
 impl Drop for HedgedFileSystem {
     fn drop(&mut self) {
-        self.sender
-            .send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
-        self.handle1.take().unwrap().join().unwrap();
-        self.handle2.take().unwrap().join().unwrap();
+        block_on(self.wait(Task::Stop, Task::Stop)).unwrap();
+
+        let t1 = self.handle1.take().unwrap();
+        let t2 = self.handle2.take().unwrap();
+        let mut times = 0;
+        loop {
+            // wait 1s
+            if t1.is_finished() && t2.is_finished() {
+                t1.join().unwrap();
+                t2.join().unwrap();
+                break;
+            }
+            times += 1;
+            if times > 100 {
+                // one disk may be blocked for a long time,
+                // to avoid block shutdown process for a long time, do not join the threads
+                // here, only need at least to ensure one thread is exited
+                if t1.is_finished() || t2.is_finished() {
+                    if t1.is_finished() {
+                        t1.join().unwrap();
+                    } else {
+                        t2.join().unwrap();
+                    }
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -1134,8 +1174,8 @@ impl Handle for HedgedHandle {
 impl Drop for HedgedHandle {
     fn drop(&mut self) {
         if self.strong_consistent {
-            // self.sender
-            //     .send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
+            self.sender
+                .send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
             self.thread1.take().unwrap().join().unwrap();
             self.thread2.take().unwrap().join().unwrap();
         }
