@@ -728,14 +728,6 @@ impl LogBatch {
 
     /// Adds a protobuf key value pair into the log batch.
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
-        #[cfg(not(test))]
-        if crate::is_internal_key(&key, Some(ATOMIC_GROUP_KEY)) {
-            return Err(Error::InvalidArgument(format!(
-                "key prefix `{:?}` reserved for internal use",
-                crate::INTERNAL_KEY_PREFIX
-            )));
-        }
-        #[cfg(test)]
         if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",
@@ -747,14 +739,6 @@ impl LogBatch {
 
     /// Adds a key value pair into the log batch.
     pub fn put(&mut self, region_id: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        #[cfg(not(test))]
-        if crate::is_internal_key(&key, Some(ATOMIC_GROUP_KEY)) {
-            return Err(Error::InvalidArgument(format!(
-                "key prefix `{:?}` reserved for internal use",
-                crate::INTERNAL_KEY_PREFIX
-            )));
-        }
-        #[cfg(test)]
         if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",

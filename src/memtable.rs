@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::file_pipe_log::ReplayMachine;
 use crate::log_batch::{
     AtomicGroupStatus, Command, CompressionType, KeyValue, LogBatch, LogItem, LogItemBatch,
-    LogItemContent, OpType, ATOMIC_GROUP_KEY,
+    LogItemContent, OpType,
 };
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
@@ -1199,7 +1199,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
 
 #[inline]
 fn has_internal_key(item: &LogItem) -> bool {
-    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key, Some(ATOMIC_GROUP_KEY)))
+    matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key, None))
 }
 
 struct PendingAtomicGroup {

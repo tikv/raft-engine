@@ -628,7 +628,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::env::{ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{parse_reserved_file_name, FileNameExt};
-    use crate::log_batch::{AtomicGroupBuilder, ATOMIC_GROUP_KEY};
+    use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
     use crate::test_util::{generate_entries, PanicGuard};
     use crate::util::ReadableSize;
@@ -1520,7 +1520,7 @@ pub(crate) mod tests {
             let mut total = 0;
             engine
                 .scan_raw_messages(rid, None, None, false, |k, _| {
-                    assert!(!crate::is_internal_key(k, Some(ATOMIC_GROUP_KEY)));
+                    assert!(!crate::is_internal_key(k, None));
                     total += 1;
                     true
                 })
