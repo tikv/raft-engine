@@ -5,11 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod default;
-mod double_write;
+mod hedged;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;
-pub use double_write::HedgedFileSystem;
+pub use hedged::HedgedFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

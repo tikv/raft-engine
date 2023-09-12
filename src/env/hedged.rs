@@ -37,6 +37,12 @@ use either::Either;
 
 type Callback<T> = Box<dyn FnOnce(IoResult<T>) + Send>;
 
+// TODO: handle error and abrupt
+// TODO: add metrics
+// TODO: handle specially on config change(upgrade and downgrade)
+// TODO: remove recover ext
+// TODO: add comment and rename
+
 struct SeqTask {
     inner: Task,
     seq: u64,
