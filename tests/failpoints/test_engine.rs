@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use raft_engine::env::HedgedFileSystem;
+use raft_engine::env::{DefaultFileSystem, HedgedFileSystem};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -1217,8 +1217,8 @@ fn test_start_engine_with_slow_second_disk() {
         .tempdir()
         .unwrap();
 
-    fail::cfg("double_write::thread1", "pause").unwrap();
     let file_system = Arc::new(HedgedFileSystem::new(
+        Arc::new(DefaultFileSystem {}),
         dir.path().to_path_buf(),
         sec_dir.path().to_path_buf(),
     ));
@@ -1233,7 +1233,8 @@ fn test_start_engine_with_slow_second_disk() {
     };
 
     // Step 1: write data into the main directory.
-    let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+    let engine = Engine::open_with_file_system(cfg.clone(), file_system).unwrap();
+    fail::cfg("double_write::thread1", "pause").unwrap();
     for rid in 1..=10 {
         append(&engine, rid, 1, 10, Some(&entry_data));
     }
@@ -1253,6 +1254,11 @@ fn test_start_engine_with_slow_second_disk() {
         purge_threshold: ReadableSize(40),
         ..cfg
     };
+    let file_system = Arc::new(HedgedFileSystem::new(
+        Arc::new(DefaultFileSystem {}),
+        dir.path().to_path_buf(),
+        sec_dir.path().to_path_buf(),
+    ));
     let engine = Engine::open_with_file_system(cfg_2, file_system).unwrap();
     assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
     for rid in 1..=10 {
@@ -1262,23 +1268,8 @@ fn test_start_engine_with_slow_second_disk() {
         engine.write(&mut log_batch, true).unwrap();
     }
     assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
-    fail::cfg("double_write::thread1", "pause").unwrap();
     engine.purge_manager().must_rewrite_append_queue(None, None);
-    assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
-    fail::remove("double_write::thread1");
-
-    let mut times = 0;
-    loop {
-        if number_of_files(sec_dir.path()) == number_of_files(dir.path()) {
-            break;
-        }
-        if times > 50 {
-            panic!("rewrite queue is not finished");
-        }
-        times += 1;
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
+    assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
     let file_count = number_of_files(dir.path());
     // Append data, recycled files are reused.
     for rid in 1..=30 {
