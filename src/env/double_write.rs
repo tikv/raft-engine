@@ -11,7 +11,7 @@ use crate::internals::FileId;
 use crate::internals::LogQueue;
 use crate::Error;
 use crossbeam::channel::unbounded;
-use crossbeam::channel::Sender;
+use crossbeam::channel::{Receiver, Sender};
 use fail::fail_point;
 use log::{info, warn};
 use std::cell::UnsafeCell;
@@ -394,15 +394,82 @@ pub struct HedgedFileSystem {
     seqno1: Arc<AtomicU64>,
     seqno2: Arc<AtomicU64>,
 
-    handle1: Option<thread::JoinHandle<()>>,
-    handle2: Option<thread::JoinHandle<()>>,
+    thread1: Option<JoinHandle<()>>,
+    thread2: Option<JoinHandle<()>>,
 
     state: Arc<RwLock<RecoveryState>>,
 }
 
+struct TaskRunner {
+    id: u8,
+    path: PathBuf,
+    fs: Arc<DefaultFileSystem>,
+    rx: Receiver<(SeqTask, Callback<TaskRes>)>,
+    seqno: Arc<AtomicU64>,
+    state: Arc<RwLock<RecoveryState>>,
+}
+
+impl TaskRunner {
+    fn new(
+        id: u8,
+        path: PathBuf,
+        fs: Arc<DefaultFileSystem>,
+        rx: Receiver<(SeqTask, Callback<TaskRes>)>,
+        seqno: Arc<AtomicU64>,
+        state: Arc<RwLock<RecoveryState>>,
+    ) -> Self {
+        Self {
+            id,
+            path,
+            fs,
+            rx,
+            seqno,
+            state,
+        }
+    }
+
+    fn spawn(self) -> JoinHandle<()> {
+        thread::Builder::new()
+            .name(format!("raft-engine-disk{}", self.id))
+            .spawn(move || {
+                for (task, cb) in self.rx {
+                    if let Task::Stop = task.inner {
+                        cb(Ok(TaskRes::Stop));
+                        break;
+                    }
+                    if let Task::Pause = task.inner {
+                        let (tx, rx) = oneshot::channel();
+                        *self.state.write().unwrap() = if self.id == 1 {
+                            RecoveryState::WaitRecover1(tx)
+                        } else {
+                            RecoveryState::WaitRecover2(tx)
+                        };
+                        let _ = block_on(rx);
+                        // indicate the pause is done
+                        // do not update seqno for pause task
+                        continue;
+                    }
+                    if self.id == 1 {
+                        fail_point!("double_write::thread1");
+                    }
+                    let seq = task.seq;
+                    let res = task.process(&self.fs);
+                    // seqno should be updated before the write callback is called, otherwise one
+                    // read may be performed right after the write is finished. Then the read may be
+                    // performed on the other disk not having the data because the seqno for this
+                    // disk is not updated yet.
+                    if seq != 0 {
+                        self.seqno.store(seq, Ordering::Relaxed);
+                    }
+                    cb(res);
+                }
+            })
+            .unwrap()
+    }
+}
+
 // TODO: read both dir at recovery, maybe no need? cause operations are to both
 // disks TODO: consider encryption
-
 impl HedgedFileSystem {
     pub fn new(base: Arc<DefaultFileSystem>, path1: PathBuf, path2: PathBuf) -> Self {
         let (tx1, rx1) = unbounded::<(SeqTask, Callback<TaskRes>)>();
@@ -410,59 +477,24 @@ impl HedgedFileSystem {
         let state = Arc::new(RwLock::new(RecoveryState::Normal));
         let seqno1 = Arc::new(AtomicU64::new(0));
         let seqno2 = Arc::new(AtomicU64::new(0));
-        let seqno1_clone = seqno1.clone();
-        let fs1 = base.clone();
-        let state1 = state.clone();
-        let handle1 = thread::spawn(move || {
-            for (task, cb) in rx1 {
-                if let Task::Stop = task.inner {
-                    cb(Ok(TaskRes::Stop));
-                    break;
-                }
-                if let Task::Pause = task.inner {
-                    let (tx, rx) = oneshot::channel();
-                    *state1.write().unwrap() = RecoveryState::WaitRecover1(tx);
-                    let _ = block_on(rx);
-                    // indicate the pause is done
-                    // do not update seqno for pause task
-                    continue;
-                }
-                fail_point!("double_write::thread1");
-                let seq = task.seq;
-                let res = task.process(&fs1);
-                // seqno should be updated before the write callback is called, otherwise one
-                // read may be performed right after the write is finished. Then the read may be
-                // performed on the other disk not having the data because the seqno for this
-                // disk is not updated yet.
-                if seq != 0 {
-                    seqno1_clone.store(seq, Ordering::Relaxed);
-                }
-                cb(res);
-            }
-        });
-        let seqno2_clone = seqno2.clone();
-        let fs2 = base.clone();
-        let state2 = state.clone();
-        let handle2 = thread::spawn(move || {
-            for (task, cb) in rx2 {
-                if let Task::Stop = task.inner {
-                    cb(Ok(TaskRes::Stop));
-                    break;
-                }
-                if let Task::Pause = task.inner {
-                    let (tx, rx) = oneshot::channel();
-                    *state2.write().unwrap() = RecoveryState::WaitRecover2(tx);
-                    let _ = block_on(rx);
-                    continue;
-                }
-                let seq = task.seq;
-                let res = task.process(&fs2);
-                if seq != 0 {
-                    seqno2_clone.store(seq, Ordering::Relaxed);
-                }
-                cb(res);
-            }
-        });
+        let runner1 = TaskRunner::new(
+            1,
+            path1.clone(),
+            base.clone(),
+            rx1,
+            seqno1.clone(),
+            state.clone(),
+        );
+        let runner2 = TaskRunner::new(
+            2,
+            path2.clone(),
+            base.clone(),
+            rx2,
+            seqno2.clone(),
+            state.clone(),
+        );
+        let thread1 = runner1.spawn();
+        let thread2 = runner2.spawn();
         let sender = HedgedSender::new(tx1, tx2, state.clone());
         Self {
             base,
@@ -471,8 +503,8 @@ impl HedgedFileSystem {
             sender,
             seqno1,
             seqno2,
-            handle1: Some(handle1),
-            handle2: Some(handle2),
+            thread1: Some(thread1),
+            thread2: Some(thread2),
             state,
         }
     }
@@ -709,8 +741,8 @@ impl Drop for HedgedFileSystem {
     fn drop(&mut self) {
         block_on(self.wait(Task::Stop, Task::Stop)).unwrap();
 
-        let t1 = self.handle1.take().unwrap();
-        let t2 = self.handle2.take().unwrap();
+        let t1 = self.thread1.take().unwrap();
+        let t2 = self.thread2.take().unwrap();
         let mut times = 0;
         loop {
             // wait 1s
