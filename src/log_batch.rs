@@ -994,7 +994,7 @@ fn verify_checksum_with_signature(buf: &[u8], signature: Option<u32>) -> Result<
 lazy_static! {
     static ref ATOMIC_GROUP_ID: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 }
-const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
+pub(crate) const ATOMIC_GROUP_KEY: &[u8] = &[0x01];
 // <status>
 const ATOMIC_GROUP_VALUE_LEN: usize = 1;
 
@@ -1570,7 +1570,7 @@ mod tests {
         ));
         assert!(matches!(
             batch
-                .put_message(0, crate::make_internal_key(&[1]), &Entry::new())
+                .put_message(0, crate::make_internal_key(ATOMIC_GROUP_KEY), &Entry::new())
                 .unwrap_err(),
             Error::InvalidArgument(_)
         ));

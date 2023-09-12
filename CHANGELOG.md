@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Behavior Changes
+* Reduce the scope of keys reserved for internal use.
+
 ## [0.4.0] - 2023-09-01
 
 ### Behavior Changes
