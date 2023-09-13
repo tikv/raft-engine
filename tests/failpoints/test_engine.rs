@@ -1207,6 +1207,61 @@ fn number_of_files(p: &Path) -> usize {
 }
 
 #[test]
+fn test_start_engine_with_slow_second_disk_recover() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_start_engine_with_slow_second_disk_default")
+        .tempdir()
+        .unwrap();
+    let sec_dir = tempfile::Builder::new()
+        .prefix("test_start_engine_with_slow_second_disk_second")
+        .tempdir()
+        .unwrap();
+
+    let file_system = Arc::new(HedgedFileSystem::new(
+        Arc::new(DefaultFileSystem {}),
+        dir.path().to_path_buf(),
+        sec_dir.path().to_path_buf(),
+    ));
+    let entry_data = vec![b'x'; 512];
+
+    // Preparations for multi-dirs.
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        enable_log_recycle: false,
+        target_file_size: ReadableSize(1),
+        ..Default::default()
+    };
+
+    fail::cfg("hedged::pause_threshold", "return(10)").unwrap();
+    // Step 1: write data into the main directory.
+    let engine = Engine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+    fail::cfg("hedged::task_runner::thread1", "pause").unwrap();
+    for rid in 1..=20 {
+        append(&engine, rid, 1, 10, Some(&entry_data));
+    }
+    for rid in 1..=20 {
+        assert_eq!(engine.first_index(rid).unwrap(), 1);
+    }
+    assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+    fail::remove("hedged::task_runner::thread1");
+    let mut times = 0;
+    loop {
+        if number_of_files(sec_dir.path()) == number_of_files(dir.path()) {
+            break;
+        }
+        if times > 50 {
+            panic!("rewrite queue is not finished");
+        }
+        times += 1;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(file_system.state(), env::State::Normal);
+    drop(file_system);
+    drop(engine);
+    assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+}
+
+#[test]
 fn test_start_engine_with_slow_second_disk() {
     let dir = tempfile::Builder::new()
         .prefix("test_start_engine_with_slow_second_disk_default")
@@ -1234,7 +1289,7 @@ fn test_start_engine_with_slow_second_disk() {
 
     // Step 1: write data into the main directory.
     let engine = Engine::open_with_file_system(cfg.clone(), file_system).unwrap();
-    fail::cfg("double_write::thread1", "pause").unwrap();
+    fail::cfg("hedged::task_runner::thread1", "pause").unwrap();
     for rid in 1..=10 {
         append(&engine, rid, 1, 10, Some(&entry_data));
     }
@@ -1242,7 +1297,7 @@ fn test_start_engine_with_slow_second_disk() {
         assert_eq!(engine.first_index(rid).unwrap(), 1);
     }
     assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
-    fail::remove("double_write::thread1");
+    fail::remove("hedged::task_runner::thread1");
     drop(engine);
     assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
 

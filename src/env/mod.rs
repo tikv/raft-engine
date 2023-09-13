@@ -12,6 +12,8 @@ pub use default::DefaultFileSystem;
 pub use hedged::HedgedFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
 
+pub use hedged::State;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Permission {
     ReadOnly,
