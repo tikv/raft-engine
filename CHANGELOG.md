@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2023-09-14
+
 ### Behavior Changes
+
+* When log recycling is enabled, Raft Engine will now retain 50% more log files to reduce the chance of running out.
 * Reduce the scope of keys reserved for internal use.
 
 ## [0.4.0] - 2023-09-01
