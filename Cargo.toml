@@ -43,7 +43,7 @@ if_chain = "1.0"
 lazy_static = "1.3"
 libc = "0.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
-lz4-sys = "1.9"
+lz4-sys = "1.9.4"
 memmap2 = { version = "0.7", optional = true }
 nix = "0.26"
 num-derive = "0.4"
