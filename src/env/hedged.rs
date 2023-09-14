@@ -13,7 +13,7 @@ use crate::Error;
 use crossbeam::channel::unbounded;
 use crossbeam::channel::{Receiver, Sender};
 use fail::fail_point;
-use log::{info, warn};
+use log::info;
 use std::cell::UnsafeCell;
 use std::fs;
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
@@ -35,9 +35,23 @@ use futures::{join, select};
 
 use either::Either;
 
-type Callback<T> = Box<dyn FnOnce(IoResult<T>) + Send>;
+type Callback = Box<dyn FnOnce(IoResult<TaskRes>) -> IoResult<TaskRes> + Send>;
 
-// TODO: handle error and abrupt
+fn empty_callback() -> Callback {
+    Box::new(|_| Ok(TaskRes::Noop))
+}
+
+fn paired_future_callback() -> (Callback, oneshot::Receiver<IoResult<TaskRes>>) {
+    let (tx, future) = oneshot::channel();
+    let callback = Box::new(move |result| -> IoResult<TaskRes> {
+        if let Err(result) = tx.send(result) {
+            return result;
+        }
+        Ok(TaskRes::Noop)
+    });
+    (callback, future)
+}
+
 // TODO: add metrics
 // TODO: handle specially on config change(upgrade and downgrade)
 // TODO: remove recover ext
@@ -97,7 +111,7 @@ impl SeqTask {
                 .rename(src_path, dst_path)
                 .map(|_| TaskRes::Rename),
             Task::Snapshot => {
-                let mut files = HedgedFileSystem::get_files(&path).unwrap(); // TODO: handle error
+                let mut files = HedgedFileSystem::get_files(&path)?;
                 files.append_files = files
                     .append_files
                     .into_iter()
@@ -119,20 +133,20 @@ impl SeqTask {
     fn handle_process(self, file_system: &DefaultFileSystem) -> IoResult<TaskRes> {
         match self.inner {
             Task::Truncate { handle, offset } => handle
-                .get(file_system)
+                .get(file_system)?
                 .truncate(offset)
                 .map(|_| TaskRes::Truncate),
             Task::FileSize(handle) => handle
-                .get(file_system)
+                .get(file_system)?
                 .file_size()
                 .map(|s| TaskRes::FileSize(s)),
-            Task::Sync(handle) => handle.get(file_system).sync().map(|_| TaskRes::Sync),
+            Task::Sync(handle) => handle.get(file_system)?.sync().map(|_| TaskRes::Sync),
             Task::Write {
                 handle,
                 offset,
                 bytes,
             } => handle
-                .get(file_system)
+                .get(file_system)?
                 .write(offset, &bytes)
                 .map(|s| TaskRes::Write(s)),
             Task::Allocate {
@@ -140,7 +154,7 @@ impl SeqTask {
                 offset,
                 size,
             } => handle
-                .get(file_system)
+                .get(file_system)?
                 .allocate(offset, size)
                 .map(|_| TaskRes::Allocate),
             _ => unreachable!(),
@@ -149,6 +163,7 @@ impl SeqTask {
 }
 
 enum TaskRes {
+    Noop,
     Create { fd: LogFd, is_for_rewrite: bool },
     Open { fd: LogFd, is_for_rewrite: bool },
     Delete,
@@ -243,17 +258,14 @@ fn get_pause_threshold() -> usize {
 struct HedgedSender(Arc<Mutex<HedgedSenderInner>>);
 
 struct HedgedSenderInner {
-    disk1: Sender<(SeqTask, Callback<TaskRes>)>,
-    disk2: Sender<(SeqTask, Callback<TaskRes>)>,
+    disk1: Sender<(SeqTask, Callback)>,
+    disk2: Sender<(SeqTask, Callback)>,
     seq: u64,
     state: State,
 }
 
 impl HedgedSender {
-    fn new(
-        disk1: Sender<(SeqTask, Callback<TaskRes>)>,
-        disk2: Sender<(SeqTask, Callback<TaskRes>)>,
-    ) -> Self {
+    fn new(disk1: Sender<(SeqTask, Callback)>, disk2: Sender<(SeqTask, Callback)>) -> Self {
         Self(Arc::new(Mutex::new(HedgedSenderInner {
             disk1,
             disk2,
@@ -266,7 +278,7 @@ impl HedgedSender {
         self.0.lock().unwrap().state.clone()
     }
 
-    fn send(&self, task1: Task, task2: Task, cb1: Callback<TaskRes>, cb2: Callback<TaskRes>) {
+    fn send(&self, task1: Task, task2: Task, cb1: Callback, cb2: Callback) {
         if matches!(task1, Task::Pause | Task::Snapshot) {
             unreachable!();
         }
@@ -297,7 +309,7 @@ impl HedgedSender {
                                 inner: Task::Pause,
                                 seq: 0,
                             },
-                            Box::new(|_| {}),
+                            empty_callback(),
                         ))
                         .unwrap();
                 }
@@ -310,7 +322,7 @@ impl HedgedSender {
                                 inner: Task::Pause,
                                 seq: 0,
                             },
-                            Box::new(|_| {}),
+                            empty_callback(),
                         ))
                         .unwrap();
                 }
@@ -325,7 +337,7 @@ impl HedgedSender {
         }
     }
 
-    fn send_snapshot(&self, cb: Callback<TaskRes>) {
+    fn send_snapshot(&self, cb: Callback) {
         let mut inner = self.0.lock().unwrap();
         inner.seq += 1;
         let task = SeqTask {
@@ -379,7 +391,7 @@ struct TaskRunner {
     id: u8,
     path: PathBuf,
     fs: Arc<DefaultFileSystem>,
-    rx: Receiver<(SeqTask, Callback<TaskRes>)>,
+    rx: Receiver<(SeqTask, Callback)>,
     sender: HedgedSender,
     seqno: Arc<AtomicU64>,
 }
@@ -389,7 +401,7 @@ impl TaskRunner {
         id: u8,
         path: PathBuf,
         fs: Arc<DefaultFileSystem>,
-        rx: Receiver<(SeqTask, Callback<TaskRes>)>,
+        rx: Receiver<(SeqTask, Callback)>,
         sender: HedgedSender,
         seqno: Arc<AtomicU64>,
     ) -> Self {
@@ -404,75 +416,80 @@ impl TaskRunner {
     }
 
     fn spawn(self) -> JoinHandle<()> {
+        let id = self.id;
         thread::Builder::new()
-            .name(format!("raft-engine-disk{}", self.id))
+            .name(format!("raft-engine-disk{}", id))
             .spawn(move || {
-                let mut last_seq = 0;
-                let mut snap_seq = None;
-                for (task, cb) in self.rx {
-                    if let Task::Stop = task.inner {
-                        cb(Ok(TaskRes::Stop));
-                        break;
-                    }
-                    if let Task::Pause = task.inner {
-                        // Encountering `Pause`, indicate the disk may not slow anymore
-                        let (cb, f) = paired_future_callback();
-                        self.sender.send_snapshot(cb);
-                        let to_files = HedgedFileSystem::get_files(&self.path).unwrap(); // TODO: handle error
-                        let from_files = block_on(f)
-                            .unwrap()
-                            .map(|res| {
-                                if let TaskRes::Snapshot((seq, files)) = res {
-                                    snap_seq = Some(seq);
-                                    files
-                                } else {
-                                    unreachable!()
-                                }
-                            })
-                            .unwrap(); // TODO: handle error
-
-                        // Snapshot doesn't include the file size, so it would copy more data than
-                        // the data seen at the time of snapshot. But it's okay, as the data is
-                        // written with specific offset, so the data written
-                        // of no necessity will be overwritten by the latter writes.
-                        // Exclude rewrite files because rewrite files are always synced.
-                        HedgedFileSystem::catch_up_diff(&self.fs, from_files, to_files, true);
-
-                        self.sender.finish_snapshot();
-                        self.seqno.store(snap_seq.unwrap(), Ordering::Relaxed);
-                        last_seq = snap_seq.unwrap();
-                        continue;
-                    }
-                    if self.id == 1 {
-                        fail_point!("hedged::task_runner::thread1");
-                    }
-                    let seq = task.seq;
-                    assert_ne!(seq, 0);
-                    if let Some(snap) = snap_seq.as_ref() {
-                        // the change already included in the snapshot
-                        if seq < *snap {
-                            continue;
-                        } else if seq == *snap {
-                            unreachable!();
-                        } else if seq == *snap + 1 {
-                            snap_seq = None;
-                        } else {
-                            panic!("seqno {} is larger than snapshot seqno {}", seq, *snap);
-                        }
-                    }
-
-                    assert_eq!(last_seq + 1, seq);
-                    last_seq = seq;
-                    let res = task.process(&self.fs, &self.path);
-                    // seqno should be updated before the write callback is called, otherwise one
-                    // read may be performed right after the write is finished. Then the read may be
-                    // performed on the other disk not having the data because the seqno for this
-                    // disk is not updated yet.
-                    self.seqno.store(seq, Ordering::Relaxed);
-                    cb(res);
+                if let Err(e) = self.poll() {
+                    panic!("disk {} failed: {:?}", id, e);
                 }
             })
             .unwrap()
+    }
+
+    fn poll(self) -> IoResult<()> {
+        let mut last_seq = 0;
+        let mut snap_seq = None;
+        for (task, cb) in self.rx {
+            if let Task::Stop = task.inner {
+                cb(Ok(TaskRes::Stop))?;
+                break;
+            }
+            if let Task::Pause = task.inner {
+                // Encountering `Pause`, indicate the disk may not slow anymore
+                let (cb, f) = paired_future_callback();
+                self.sender.send_snapshot(cb);
+                let to_files = HedgedFileSystem::get_files(&self.path)?;
+                let from_files = block_on(f).unwrap().map(|res| {
+                    if let TaskRes::Snapshot((seq, files)) = res {
+                        snap_seq = Some(seq);
+                        files
+                    } else {
+                        unreachable!()
+                    }
+                })?;
+
+                // Snapshot doesn't include the file size, so it would copy more data than
+                // the data seen at the time of snapshot. But it's okay, as the data is
+                // written with specific offset, so the data written
+                // of no necessity will be overwritten by the latter writes.
+                // Exclude rewrite files because rewrite files are always synced.
+                HedgedFileSystem::catch_up_diff(&self.fs, from_files, to_files, true)?;
+
+                self.sender.finish_snapshot();
+                self.seqno.store(snap_seq.unwrap(), Ordering::Relaxed);
+                last_seq = snap_seq.unwrap();
+                continue;
+            }
+            if self.id == 1 {
+                fail_point!("hedged::task_runner::thread1");
+            }
+            let seq = task.seq;
+            assert_ne!(seq, 0);
+            if let Some(snap) = snap_seq.as_ref() {
+                // the change already included in the snapshot
+                if seq < *snap {
+                    continue;
+                } else if seq == *snap {
+                    unreachable!();
+                } else if seq == *snap + 1 {
+                    snap_seq = None;
+                } else {
+                    panic!("seqno {} is larger than snapshot seqno {}", seq, *snap);
+                }
+            }
+
+            assert_eq!(last_seq + 1, seq);
+            last_seq = seq;
+            let res = task.process(&self.fs, &self.path);
+            // seqno should be updated before the write callback is called, otherwise one
+            // read may be performed right after the write is finished. Then the read may be
+            // performed on the other disk not having the data because the seqno for this
+            // disk is not updated yet.
+            self.seqno.store(seq, Ordering::Relaxed);
+            cb(res)?;
+        }
+        Ok(())
     }
 }
 
@@ -480,8 +497,8 @@ impl TaskRunner {
 // disks TODO: consider encryption
 impl HedgedFileSystem {
     pub fn new(base: Arc<DefaultFileSystem>, path1: PathBuf, path2: PathBuf) -> Self {
-        let (tx1, rx1) = unbounded::<(SeqTask, Callback<TaskRes>)>();
-        let (tx2, rx2) = unbounded::<(SeqTask, Callback<TaskRes>)>();
+        let (tx1, rx1) = unbounded::<(SeqTask, Callback)>();
+        let (tx2, rx2) = unbounded::<(SeqTask, Callback)>();
         let sender = HedgedSender::new(tx1, tx2);
 
         let seqno1 = Arc::new(AtomicU64::new(0));
@@ -916,30 +933,14 @@ impl FutureHandle {
         }
     }
 
-    fn get(&self, file_system: &DefaultFileSystem) -> Arc<LogFd> {
+    fn get(&self, file_system: &DefaultFileSystem) -> IoResult<Arc<LogFd>> {
         let mut set = false;
         let fd = match unsafe { &mut *self.inner.get() } {
             Either::Left(rx) => {
                 set = true;
-                // TODO: should we handle the second disk io error
                 match block_on(rx) {
-                    Err(Canceled) => {
-                        // Canceled is caused by the task is dropped when in paused state,
-                        // so we should retry the task now
-                        match self.task.as_ref().unwrap() {
-                            Task::Create(path) => {
-                                // has been already created, so just open
-                                let fd = file_system.open(path, Permission::ReadWrite).unwrap(); // TODO: handle error
-                                Arc::new(fd)
-                            }
-                            Task::Open { path, perm } => {
-                                let fd = file_system.open(path, *perm).unwrap(); // TODO: handle error
-                                Arc::new(fd)
-                            }
-                            _ => unreachable!(),
-                        }
-                    }
-                    Ok(res) => match res.unwrap() {
+                    Err(Canceled) => self.retry_canceled(file_system)?,
+                    Ok(res) => match res? {
                         TaskRes::Open { fd, .. } => Arc::new(fd),
                         TaskRes::Create { fd, .. } => Arc::new(fd),
                         _ => unreachable!(),
@@ -953,21 +954,22 @@ impl FutureHandle {
                 *self.inner.get() = Either::Right(fd.clone());
             }
         }
-        fd
+        Ok(fd)
     }
 
-    fn try_get(&self) -> Option<Arc<LogFd>> {
+    fn try_get(&self, file_system: &DefaultFileSystem) -> IoResult<Option<Arc<LogFd>>> {
         let mut set = false;
         let fd = match unsafe { &mut *self.inner.get() } {
             Either::Left(rx) => {
                 set = true;
-                // TODO: should we handle the second disk io error
-                match rx.try_recv().unwrap() {
-                    None => return None,
-                    Some(Err(_)) => panic!(),
-                    Some(Ok(TaskRes::Open { fd, .. })) => Arc::new(fd),
-                    Some(Ok(TaskRes::Create { fd, .. })) => Arc::new(fd),
-                    _ => unreachable!(),
+                match rx.try_recv() {
+                    Err(Canceled) => self.retry_canceled(file_system)?,
+                    Ok(None) => return Ok(None),
+                    Ok(Some(res)) => match res? {
+                        TaskRes::Open { fd, .. } => Arc::new(fd),
+                        TaskRes::Create { fd, .. } => Arc::new(fd),
+                        _ => unreachable!(),
+                    },
                 }
             }
             Either::Right(w) => w.clone(),
@@ -977,11 +979,31 @@ impl FutureHandle {
                 *self.inner.get() = Either::Right(fd.clone());
             }
         }
-        Some(fd)
+        Ok(Some(fd))
+    }
+
+    fn retry_canceled(&self, file_system: &DefaultFileSystem) -> IoResult<Arc<LogFd>> {
+        // Canceled is caused by the task is dropped when in paused state,
+        // so we should retry the task now
+        Ok(match self.task.as_ref().unwrap() {
+            Task::Create(path) => {
+                // has been already created, so just open
+                let fd = file_system.open(path, Permission::ReadWrite)?;
+                Arc::new(fd)
+            }
+            Task::Open { path, perm } => {
+                let fd = file_system.open(path, *perm)?;
+                Arc::new(fd)
+            }
+            _ => unreachable!(),
+        })
     }
 }
 
 pub struct HedgedHandle {
+    base: Arc<DefaultFileSystem>,
+
+    // for rewrite file, all the operations should wait both disks finished
     strong_consistent: bool,
 
     sender: HedgedSender,
@@ -1010,43 +1032,41 @@ impl HedgedHandle {
         let mut thread2 = None;
         if strong_consistent {
             // use two separated threads for both wait
-            let (tx1, rx1) = unbounded::<(SeqTask, Callback<TaskRes>)>();
-            let (tx2, rx2) = unbounded::<(SeqTask, Callback<TaskRes>)>();
+            let (tx1, rx1) = unbounded::<(SeqTask, Callback)>();
+            let (tx2, rx2) = unbounded::<(SeqTask, Callback)>();
             // replace the seqno with self owned, then in `read` the seqno from two disks
             // should be always the same. It's just to reuse the logic without
             // adding special check in `read`
             seqno1 = Arc::new(AtomicU64::new(0));
             seqno2 = Arc::new(AtomicU64::new(0));
-            let seqno1_clone = seqno1.clone();
-            let fs1 = base.clone();
+            let poll = |(rx, seqno, fs): (
+                Receiver<(SeqTask, Callback)>,
+                Arc<AtomicU64>,
+                Arc<DefaultFileSystem>,
+            )| {
+                for (task, cb) in rx {
+                    if let Task::Stop = task.inner {
+                        break;
+                    }
+                    assert!(!matches!(task.inner, Task::Pause | Task::Snapshot));
+                    let res = task.handle_process(&fs);
+                    seqno.fetch_add(1, Ordering::Relaxed);
+                    cb(res).unwrap();
+                }
+            };
+            let args1 = (rx1, seqno1.clone(), base.clone());
             thread1 = Some(thread::spawn(move || {
-                for (task, cb) in rx1 {
-                    if let Task::Stop = task.inner {
-                        break;
-                    }
-                    assert!(!matches!(task.inner, Task::Pause | Task::Snapshot));
-                    let res = task.handle_process(&fs1);
-                    seqno1_clone.fetch_add(1, Ordering::Relaxed);
-                    cb(res);
-                }
+                poll(args1);
             }));
-            let seqno2_clone = seqno2.clone();
-            let fs2 = base;
+            let args2 = (rx2, seqno2.clone(), base.clone());
             thread2 = Some(thread::spawn(move || {
-                for (task, cb) in rx2 {
-                    if let Task::Stop = task.inner {
-                        break;
-                    }
-                    assert!(!matches!(task.inner, Task::Pause | Task::Snapshot));
-                    let res = task.handle_process(&fs2);
-                    seqno2_clone.fetch_add(1, Ordering::Relaxed);
-                    cb(res);
-                }
+                poll(args2);
             }));
             sender = HedgedSender::new(tx1, tx2);
         }
 
         Self {
+            base,
             strong_consistent,
             sender,
             handle1: Arc::new(handle1),
@@ -1085,16 +1105,20 @@ impl HedgedHandle {
         match seq1.cmp(&seq2) {
             std::cmp::Ordering::Equal => {
                 // TODO: read simultaneously from both disks and return the faster one
-                if let Some(fd) = self.handle1.try_get() {
+                if let Some(fd) = self.handle1.try_get(&self.base)? {
                     fd.read(offset, buf)
-                } else if let Some(fd) = self.handle2.try_get() {
+                } else if let Some(fd) = self.handle2.try_get(&self.base)? {
                     fd.read(offset, buf)
                 } else {
                     panic!("Both fd1 and fd2 are None");
                 }
             }
-            std::cmp::Ordering::Greater => self.handle1.try_get().unwrap().read(offset, buf),
-            std::cmp::Ordering::Less => self.handle2.try_get().unwrap().read(offset, buf),
+            std::cmp::Ordering::Greater => {
+                self.handle1.try_get(&self.base)?.unwrap().read(offset, buf)
+            }
+            std::cmp::Ordering::Less => {
+                self.handle2.try_get(&self.base)?.unwrap().read(offset, buf)
+            }
         }
     }
 
@@ -1212,7 +1236,7 @@ impl Drop for HedgedHandle {
     fn drop(&mut self) {
         if self.strong_consistent {
             self.sender
-                .send(Task::Stop, Task::Stop, Box::new(|_| {}), Box::new(|_| {}));
+                .send(Task::Stop, Task::Stop, empty_callback(), empty_callback());
             self.thread1.take().unwrap().join().unwrap();
             self.thread2.take().unwrap().join().unwrap();
         }
@@ -1299,16 +1323,4 @@ impl Read for HedgedReader {
         self.offset += len;
         Ok(len)
     }
-}
-
-pub fn paired_future_callback<T: Send + 'static>() -> (Callback<T>, oneshot::Receiver<IoResult<T>>)
-{
-    let (tx, future) = oneshot::channel();
-    let callback = Box::new(move |result| {
-        let r = tx.send(result);
-        if r.is_err() {
-            warn!("paired_future_callback: Failed to send result to the future rx, discarded.");
-        }
-    });
-    (callback, future)
 }
