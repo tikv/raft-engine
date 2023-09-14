@@ -5,7 +5,6 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::env::RecoverExt;
 use fail::fail_point;
 use log::error;
 use nix::errno::Errno;
@@ -274,8 +273,6 @@ impl WriteExt for LogFile {
 
 #[derive(Clone)]
 pub struct DefaultFileSystem;
-
-impl RecoverExt for DefaultFileSystem {}
 
 impl FileSystem for DefaultFileSystem {
     type Handle = LogFd;

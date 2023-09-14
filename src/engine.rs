@@ -11,7 +11,7 @@ use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
 use crate::consistency::ConsistencyChecker;
-use crate::env::{DefaultFileSystem, FileSystem, RecoverExt};
+use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
 use crate::file_pipe_log::debug::LogItemReader;
 use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
@@ -2052,8 +2052,6 @@ pub(crate) mod tests {
             }
         }
     }
-
-    impl RecoverExt for DeleteMonitoredFileSystem {}
 
     impl FileSystem for DeleteMonitoredFileSystem {
         type Handle = <ObfuscatedFileSystem as FileSystem>::Handle;

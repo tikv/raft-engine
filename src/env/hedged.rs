@@ -1,7 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use crate::env::default::LogFile;
-use crate::env::RecoverExt;
 use crate::file_pipe_log::log_file::build_file_reader;
 use crate::file_pipe_log::pipe_builder::FileName;
 use crate::file_pipe_log::reader::LogItemBatchFileReader;
@@ -798,7 +797,11 @@ impl Drop for HedgedFileSystem {
     }
 }
 
-impl RecoverExt for HedgedFileSystem {
+impl FileSystem for HedgedFileSystem {
+    type Handle = HedgedHandle;
+    type Reader = HedgedReader;
+    type Writer = HedgedWriter;
+
     fn bootstrap(&self) -> IoResult<()> {
         // catch up diff
         if !self.path1.exists() {
@@ -830,22 +833,6 @@ impl RecoverExt for HedgedFileSystem {
         }
         Ok(())
     }
-
-    fn need_recover(&self) -> bool {
-        false
-    }
-
-    fn is_in_recover(&self) -> bool {
-        false
-    }
-
-    fn trigger_recover(&self) {}
-}
-
-impl FileSystem for HedgedFileSystem {
-    type Handle = HedgedHandle;
-    type Reader = HedgedReader;
-    type Writer = HedgedWriter;
 
     fn create<P: AsRef<Path>>(&self, path: P) -> IoResult<Self::Handle> {
         block_on(self.wait_handle(
