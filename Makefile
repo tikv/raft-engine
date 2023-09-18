@@ -4,7 +4,7 @@
 EXTRA_CARGO_ARGS ?=
 ## How to test stable toolchain.
 ## - auto: use current default toolchain, disable nightly features.
-## - force: always use stable toolchain, disable nightly features.
+## - force: explicitly use stable toolchain, disable nightly features.
 WITH_STABLE_TOOLCHAIN ?=
 
 WITH_NIGHTLY_FEATURES =
@@ -41,22 +41,35 @@ clean:
 format:
 	cargo ${TOOLCHAIN_ARGS} fmt --all
 
+CLIPPY_WHITELIST += -A clippy::bool_assert_comparison
 ## Run clippy.
 clippy:
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} clippy --all --all-features --all-targets -- -D clippy::all
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 else
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features all_stable --all-targets -- -D clippy::all
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 endif
 
 ## Run tests.
 test:
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} test --all --features all_except_failpoints ${EXTRA_CARGO_ARGS} -- --nocapture
-	cargo ${TOOLCHAIN_ARGS} test --test failpoints --all-features ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 else
-	cargo ${TOOLCHAIN_ARGS} test --all --features all_stable_except_failpoints ${EXTRA_CARGO_ARGS} -- --nocapture
-	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features all_stable ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+endif
+
+## Run tests with various features for maximum code coverage.
+ifndef WITH_NIGHTLY_FEATURES
+test_matrix:
+	$(error Must run test matrix with nightly features. Please reset WITH_STABLE_TOOLCHAIN.)
+else
+test_matrix: test
+	cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,std_fs ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,std_fs,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
 
 ## Build raft-engine-ctl.

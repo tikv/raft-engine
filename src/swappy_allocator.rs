@@ -20,7 +20,7 @@ const DEFAULT_PAGE_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
 struct SwappyAllocatorCore<A = Global>
 where
-    A: Allocator,
+    A: Allocator + Send + Sync,
 {
     budget: usize,
     path: PathBuf,
@@ -39,9 +39,9 @@ where
 /// The allocations of its internal metadata are not managed (i.e. allocated via
 /// `std::alloc::Global`). Do NOT use it as the global allocator.
 #[derive(Clone)]
-pub struct SwappyAllocator<A: Allocator>(Arc<SwappyAllocatorCore<A>>);
+pub struct SwappyAllocator<A: Allocator + Send + Sync>(Arc<SwappyAllocatorCore<A>>);
 
-impl<A: Allocator> SwappyAllocator<A> {
+impl<A: Allocator + Send + Sync> SwappyAllocator<A> {
     pub fn new_over(path: &Path, budget: usize, alloc: A) -> SwappyAllocator<A> {
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(path) {
@@ -106,7 +106,7 @@ impl SwappyAllocator<Global> {
     }
 }
 
-unsafe impl<A: Allocator> Allocator for SwappyAllocator<A> {
+unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         // Always use mem_allocator to allocate empty pointer.
@@ -342,6 +342,13 @@ impl Page {
     #[inline]
     fn release(self, root: &Path) {
         debug_assert_eq!(self.ref_counter, 0);
+
+        // Somehow in Windows, we have to drop the mmap file handle first, otherwise
+        // the following file removal will return "Access Denied (OS Error 5)".
+        // Not using `#[cfg(windows)]` here is because it might do no harm in other
+        // operating systems - the mmap file handle is dropped anyhow.
+        drop(self.mmap);
+
         let path = root.join(Self::page_file_name(self.seq));
         if let Err(e) = std::fs::remove_file(path) {
             warn!("Failed to delete swap file: {e}");
@@ -616,14 +623,14 @@ mod tests {
         assert_eq!(allocator.memory_usage(), 16);
         assert_eq!(global.stats(), (2, 1, 0, 0));
         // Deallocate all pages, calls <allocate and deallocate> when memory use is low.
-        disk_vec.clear();
+        disk_vec.truncate(1);
         disk_vec.shrink_to_fit();
-        assert_eq!(allocator.memory_usage(), 16);
+        assert_eq!(allocator.memory_usage(), 16 + 1);
         assert_eq!(global.stats(), (3, 1, 0, 0));
         assert_eq!(file_count(dir.path()), 0);
         // Grow calls <grow> now.
         mem_vec.resize(32, 0);
-        assert_eq!(allocator.memory_usage(), 32);
+        assert_eq!(allocator.memory_usage(), 32 + 1);
         assert_eq!(global.stats(), (3, 1, 1, 0));
     }
 
@@ -1134,7 +1141,7 @@ mod tests {
         {
             // issue-58952
             let c = 2;
-            let bv = vec![2];
+            let bv = [2];
             let b = bv.iter().filter(|a| **a == c);
 
             let _a = collect(
@@ -1159,8 +1166,8 @@ mod tests {
         }
         {
             // issue-54477
-            let mut vecdeque_13 = collect(vec![].into_iter(), allocator.clone());
-            let mut vecdeque_29 = collect(vec![0].into_iter(), allocator.clone());
+            let mut vecdeque_13 = collect(vec![], allocator.clone());
+            let mut vecdeque_29 = collect(vec![0], allocator.clone());
             vecdeque_29.insert(0, 30);
             vecdeque_29.insert(1, 31);
             vecdeque_29.insert(2, 32);
@@ -1172,7 +1179,7 @@ mod tests {
 
             assert_eq!(
                 vecdeque_13,
-                collect(vec![30, 31, 32, 33, 34, 35, 0].into_iter(), allocator,)
+                collect(vec![30, 31, 32, 33, 34, 35, 0], allocator,)
             );
         }
 

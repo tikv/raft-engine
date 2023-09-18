@@ -989,7 +989,7 @@ impl<A: AllocatorTrait> MemTableAccessor<A> {
     /// [`MemTable`]s.
     ///
     /// This method is only used for recovery.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cleaned_region_ids(&self) -> HashSet<u64> {
         let mut ids = HashSet::default();
         let removed_memtables = self.removed_memtables.lock();
@@ -1202,7 +1202,6 @@ fn has_internal_key(item: &LogItem) -> bool {
     matches!(&item.content, LogItemContent::Kv(KeyValue { key, .. }) if crate::is_internal_key(key, None))
 }
 
-#[derive(Debug)]
 struct PendingAtomicGroup {
     status: AtomicGroupStatus,
     items: Vec<LogItem>,
@@ -2256,6 +2255,7 @@ mod tests {
                             7,
                             FileId::new(LogQueue::Rewrite, 1),
                         ));
+                        memtable.replay_rewrite(Vec::new());
                     }
                 }
                 memtable

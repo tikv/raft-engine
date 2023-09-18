@@ -143,7 +143,10 @@ where
             return Ok(0);
         }
         let start = Instant::now();
-        let len = log_batch.finish_populate(self.cfg.batch_compression_threshold.0 as usize)?;
+        let len = log_batch.finish_populate(
+            self.cfg.batch_compression_threshold.0 as usize,
+            self.cfg.compression_level,
+        )?;
         debug_assert!(len > 0);
 
         let mut attempt_count = 0_u64;
@@ -1315,6 +1318,7 @@ pub(crate) mod tests {
                 engine.append(rid, index, index + 1, Some(&data));
             }
         }
+        engine.append(11, 1, 11, Some(&data));
 
         // The engine needs purge, and all old entries should be rewritten.
         assert!(engine
@@ -1333,8 +1337,9 @@ pub(crate) mod tests {
             });
         }
 
-        // Recover with rewrite queue and append queue.
+        engine.clean(11);
         let cleaned_region_ids = engine.memtables.cleaned_region_ids();
+        assert_eq!(cleaned_region_ids.len(), 1);
 
         let engine = engine.reopen();
         assert_eq!(engine.memtables.cleaned_region_ids(), cleaned_region_ids);
@@ -2147,6 +2152,7 @@ pub(crate) mod tests {
             prefill_for_recycle: true,
             ..Default::default()
         };
+        let recycle_capacity = cfg.recycle_capacity() as u64;
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
         let engine = Engine::open_with_file_system(cfg, fs.clone()).unwrap();
 
@@ -2182,11 +2188,11 @@ pub(crate) mod tests {
         assert_eq!(reserved_start_2, reserved_start_3);
 
         // Reuse all of reserved files.
-        for rid in 1..=50 {
+        for rid in 1..=recycle_capacity {
             engine.append(rid, 1, 11, Some(&entry_data));
         }
         assert!(fs.reserved_metadata.lock().unwrap().is_empty());
-        for rid in 1..=50 {
+        for rid in 1..=recycle_capacity {
             engine.clean(rid);
         }
         engine.purge_manager.must_rewrite_append_queue(None, None);
@@ -2418,11 +2424,12 @@ pub(crate) mod tests {
         // Directly write to pipe log.
         let mut log_batch = LogBatch::default();
         let flush = |lb: &mut LogBatch| {
-            lb.finish_populate(0).unwrap();
+            lb.finish_populate(0, None).unwrap();
             engine.pipe_log.append(LogQueue::Rewrite, lb).unwrap();
             lb.drain();
         };
         {
+            // begin.
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
@@ -2430,6 +2437,7 @@ pub(crate) mod tests {
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
+            // begin - unrelated - end.
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
@@ -2449,6 +2457,7 @@ pub(crate) mod tests {
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
+            // begin - middle - middle - end.
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
@@ -2473,6 +2482,7 @@ pub(crate) mod tests {
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
+            // begin - begin - end.
             let mut builder = AtomicGroupBuilder::with_id(3);
             builder.begin(&mut log_batch);
             rid += 1;
@@ -2492,6 +2502,7 @@ pub(crate) mod tests {
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
+            // end - middle - end.
             // We must change id to avoid getting merged with last group.
             // It is actually not possible in real life to only have "begin" missing.
             let mut builder = AtomicGroupBuilder::with_id(4);
@@ -2513,6 +2524,7 @@ pub(crate) mod tests {
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
+            // end - begin - end
             let mut builder = AtomicGroupBuilder::with_id(5);
             builder.begin(&mut LogBatch::default());
             builder.end(&mut log_batch);
@@ -2524,6 +2536,26 @@ pub(crate) mod tests {
             rid += 1;
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        }
+        {
+            // begin - end - begin - end.
+            let mut builder = AtomicGroupBuilder::with_id(6);
+            builder.begin(&mut log_batch);
+            rid += 1;
+            log_batch.put(rid, key.clone(), value.clone()).unwrap();
+            data.insert(rid);
+            flush(&mut log_batch);
+            builder.end(&mut log_batch);
+            flush(&mut log_batch);
+            let mut builder = AtomicGroupBuilder::with_id(7);
+            builder.begin(&mut log_batch);
             flush(&mut log_batch);
             builder.end(&mut log_batch);
             rid += 1;
@@ -2568,7 +2600,7 @@ pub(crate) mod tests {
 
         log_batch.put_unchecked(3, crate::make_internal_key(&[1]), value.clone());
         log_batch.put_unchecked(4, crate::make_internal_key(&[1]), value);
-        log_batch.finish_populate(0).unwrap();
+        log_batch.finish_populate(0, None).unwrap();
         let block_handle = engine
             .pipe_log
             .append(LogQueue::Rewrite, &mut log_batch)
@@ -2915,6 +2947,7 @@ pub(crate) mod tests {
             purge_threshold: ReadableSize(40),
             ..cfg.clone()
         };
+        let recycle_capacity = cfg_2.recycle_capacity() as u64;
         let engine = Engine::open_with_file_system(cfg_2, file_system.clone()).unwrap();
         assert!(number_of_files(spill_dir.path()) > 0);
         for rid in 1..=10 {
@@ -2929,7 +2962,7 @@ pub(crate) mod tests {
         );
         assert!(file_count > engine.file_count(None));
         // Append data, recycled files are reused.
-        for rid in 1..=30 {
+        for rid in 1..=recycle_capacity - 10 {
             engine.append(rid, 20, 30, Some(&entry_data));
         }
         // No new file is created.

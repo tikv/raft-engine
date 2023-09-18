@@ -16,6 +16,8 @@
 #![cfg_attr(feature = "nightly", feature(test))]
 #![cfg_attr(feature = "swap", feature(allocator_api))]
 #![cfg_attr(feature = "swap", feature(slice_ptr_get))]
+// Though the new nightly rust stablized this feature, keep it anyway
+// because some other project (like TiKV) is still using the old.
 #![cfg_attr(feature = "swap", feature(nonnull_slice_from_raw_parts))]
 #![cfg_attr(feature = "swap", feature(slice_ptr_len))]
 #![cfg_attr(feature = "swap", feature(alloc_layout_extra))]
@@ -165,8 +167,19 @@ impl GlobalStats {
 pub(crate) const INTERNAL_KEY_PREFIX: &[u8] = b"__";
 
 #[inline]
+#[cfg(test)]
 pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
     assert!(!k.is_empty());
+    let mut v = INTERNAL_KEY_PREFIX.to_vec();
+    v.extend_from_slice(k);
+    v
+}
+
+#[cfg(not(test))]
+pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
+    use log_batch::ATOMIC_GROUP_KEY;
+
+    assert!(k == ATOMIC_GROUP_KEY);
     let mut v = INTERNAL_KEY_PREFIX.to_vec();
     v.extend_from_slice(k);
     v
@@ -178,6 +191,7 @@ pub(crate) fn make_internal_key(k: &[u8]) -> Vec<u8> {
 /// This also makes sure future internal keys under the prefix won't become
 /// visible after downgrading.
 #[inline]
+#[cfg(test)]
 pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
     if let Some(ext) = ext {
         s.len() == INTERNAL_KEY_PREFIX.len() + ext.len()
@@ -186,6 +200,20 @@ pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
     } else {
         s.len() > INTERNAL_KEY_PREFIX.len()
             && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+    }
+}
+
+#[inline]
+#[cfg(not(test))]
+pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
+    use log_batch::ATOMIC_GROUP_KEY;
+
+    if let Some(ext) = ext {
+        s.len() == INTERNAL_KEY_PREFIX.len() + ext.len()
+            && s[..INTERNAL_KEY_PREFIX.len()] == *INTERNAL_KEY_PREFIX
+            && s[INTERNAL_KEY_PREFIX.len()..] == *ext
+    } else {
+        is_internal_key(s, Some(ATOMIC_GROUP_KEY))
     }
 }
 

@@ -794,7 +794,7 @@ fn test_partial_rewrite_rewrite() {
     }
 
     {
-        let _f = FailGuard::new("log_fd::write::err", "10*off->return->off");
+        let _f = FailGuard::new("log_file::write::err", "10*off->return->off");
         assert!(
             catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
         );
@@ -832,7 +832,7 @@ fn test_partial_rewrite_rewrite_online() {
     assert_eq!(engine.file_span(LogQueue::Append).0, old_active_file + 1);
 
     {
-        let _f = FailGuard::new("log_fd::write::err", "10*off->return->off");
+        let _f = FailGuard::new("log_file::write::err", "10*off->return->off");
         assert!(
             catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue()).is_err()
         );
@@ -899,13 +899,13 @@ fn test_split_rewrite_batch_imp(regions: u64, region_size: u64, split_size: u64,
         let count = AtomicU64::new(0);
         fail::cfg_callback("atomic_group::begin", move || {
             if count.fetch_add(1, Ordering::Relaxed) + 1 == i {
-                fail::cfg("log_fd::write::err", "return").unwrap();
+                fail::cfg("log_file::write::err", "return").unwrap();
             }
         })
         .unwrap();
         let r = catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue());
         fail::remove("atomic_group::begin");
-        fail::remove("log_fd::write::err");
+        fail::remove("log_file::write::err");
         if r.is_ok() {
             break;
         }
@@ -919,13 +919,13 @@ fn test_split_rewrite_batch_imp(regions: u64, region_size: u64, split_size: u64,
         let count = AtomicU64::new(0);
         fail::cfg_callback("atomic_group::add", move || {
             if count.fetch_add(1, Ordering::Relaxed) + 1 == i {
-                fail::cfg("log_fd::write::err", "return").unwrap();
+                fail::cfg("log_file::write::err", "return").unwrap();
             }
         })
         .unwrap();
         let r = catch_unwind_silent(|| engine.purge_manager().must_rewrite_rewrite_queue());
         fail::remove("atomic_group::add");
-        fail::remove("log_fd::write::err");
+        fail::remove("log_file::write::err");
         if r.is_ok() {
             break;
         }

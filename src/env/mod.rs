@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 mod default;
 mod hedged;
+mod log_fd;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;

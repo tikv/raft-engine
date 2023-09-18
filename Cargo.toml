@@ -1,6 +1,6 @@
 [package]
 name = "raft-engine"
-version = "0.3.0"
+version = "0.4.1"
 authors = ["The TiKV Project Developers"]
 edition = "2018"
 rust-version = "1.66.0"
@@ -49,7 +49,7 @@ log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug
 lz4-sys = "1.9"
 memmap2 = { version = "0.7", optional = true }
 nix = "0.26"
-num-derive = "0.3"
+num-derive = "0.4"
 num-traits = "0.2"
 parking_lot = "0.12"
 prometheus = { version = "0.13" }
@@ -64,33 +64,43 @@ strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1.0"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.4"
 ctor = "0.2"
 env_logger = "0.10"
 kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 rand = "0.8"
 rand_distr = "0.4"
-tempfile = "3.1"
-toml = "0.7"
+tempfile = "3.6"
+toml = "0.8"
 md-5 = "0.10.5"
 
 [features]
+default = ["internals", "scripting"]
 internals = []
-nightly = ["prometheus/nightly"]
-failpoints = ["fail/failpoints"]
-scripting = ["rhai"]
-swap = ["nightly", "memmap2"]
+nightly = [
+  "prometheus/nightly",
+]
+failpoints = [
+  "fail/failpoints",
+]
+scripting = [
+  "rhai",
+]
+swap = [
+  "nightly",
+  "memmap2",
+]
+std_fs = []
 
-# Shortcuts
-all_except_failpoints = ["internals", "scripting", "nightly", "swap"]
-all_stable = ["internals", "scripting", "failpoints"]
-all_stable_except_failpoints = ["internals", "scripting"]
+nightly_group = ["nightly", "swap"]
 
 [patch.crates-io]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+# TODO: Use official grpc-rs once https://github.com/tikv/grpc-rs/pull/622 is merged.
+grpcio = { git = "https://github.com/tabokie/grpc-rs", branch = "v0.10.x-win" }
 
 [workspace]
 members = ["stress", "ctl"]

@@ -5,7 +5,7 @@ use std::io::Result as IoResult;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::env::default::LogFd;
+use crate::env::log_fd::LogFd;
 use crate::env::DefaultFileSystem;
 use crate::env::{FileSystem, Handle, Permission};
 use futures::channel::oneshot::{self, Canceled};

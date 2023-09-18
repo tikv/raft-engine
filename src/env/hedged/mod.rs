@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 
-use crate::env::default::LogFd;
+use crate::env::log_fd::LogFd;
 use crate::env::DefaultFileSystem;
 use crate::env::{FileSystem, Handle, Permission, WriteExt};
 use futures::executor::block_on;

@@ -1,9 +1,13 @@
 // Copyright (c) 2023-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::fs::{copy, create_dir_all};
-use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::sync::Arc;
+
+#[cfg(not(windows))]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file as symlink;
 
 use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
