@@ -2,34 +2,40 @@
 
 //! Helper types to recover in-memory states from log files.
 
-use std::fs::{self, File as StdFile};
-use std::io::Write;
-use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    fs::{self, File as StdFile},
+    io::Write,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use fs2::FileExt;
 use log::{error, info, warn};
 use rayon::prelude::*;
 
-use crate::config::{Config, RecoveryMode};
-use crate::env::{FileSystem, Handle, Permission};
-use crate::errors::is_no_space_err;
-use crate::event_listener::EventListener;
-use crate::log_batch::{LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{FileId, FileSeq, LogQueue};
-use crate::util::{Factory, ReadableSize};
-use crate::{Error, Result};
-
-use super::format::{
-    build_reserved_file_name, lock_file_path, parse_reserved_file_name, FileNameExt, LogFileFormat,
+use super::{
+    format::{
+        build_reserved_file_name, lock_file_path, parse_reserved_file_name, FileNameExt,
+        LogFileFormat,
+    },
+    log_file::build_file_reader,
+    pipe::{
+        find_available_dir, DualPipes, File, PathId, Paths, SinglePipe, DEFAULT_FIRST_FILE_SEQ,
+    },
+    reader::LogItemBatchFileReader,
 };
-use super::log_file::build_file_reader;
-use super::pipe::{
-    find_available_dir, DualPipes, File, PathId, Paths, SinglePipe, DEFAULT_FIRST_FILE_SEQ,
+use crate::{
+    config::{Config, RecoveryMode},
+    env::{FileSystem, Handle, Permission},
+    errors::is_no_space_err,
+    event_listener::EventListener,
+    log_batch::{LogItemBatch, LOG_BATCH_HEADER_LEN},
+    pipe_log::{FileId, FileSeq, LogQueue},
+    util::{Factory, ReadableSize},
+    Error, Result,
 };
-use super::reader::LogItemBatchFileReader;
 
 /// Maximum size for the buffer for prefilling.
 const PREFILL_BUFFER_SIZE: usize = ReadableSize::mb(16).0 as usize;

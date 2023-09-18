@@ -3,15 +3,17 @@
 //! A naive file handle implementation based on standard `File`. All I/O
 //! operations need to synchronize under a `RwLock`.
 
-use crate::env::{Handle, Permission};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write},
+    path::Path,
+    sync::Arc,
+};
 
 use fail::fail_point;
 use parking_lot::RwLock;
 
-use std::fs::{File, OpenOptions};
-use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::sync::Arc;
+use crate::env::{Handle, Permission};
 
 pub struct LogFd(Arc<RwLock<File>>);
 

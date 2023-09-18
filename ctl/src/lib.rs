@@ -13,13 +13,14 @@
 
 //! # Raft Engine Control
 
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use clap::{crate_authors, crate_version, Parser};
-use raft_engine::env::{DefaultFileSystem, FileSystem};
-use raft_engine::internals::LogQueue;
-use raft_engine::{Engine, Error, Result as EngineResult};
+use raft_engine::{
+    env::{DefaultFileSystem, FileSystem},
+    internals::LogQueue,
+    Engine, Error, Result as EngineResult,
+};
 
 #[derive(Debug, clap::Parser)]
 #[clap(

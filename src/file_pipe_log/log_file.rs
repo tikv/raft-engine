@@ -2,18 +2,21 @@
 
 //! Log file types.
 
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
-use std::sync::Arc;
+use std::{
+    io::{Read, Result as IoResult, Seek, SeekFrom, Write},
+    sync::Arc,
+};
 
 use fail::fail_point;
 use log::warn;
 
-use crate::env::{FileSystem, Handle, WriteExt};
-use crate::metrics::*;
-use crate::pipe_log::FileBlockHandle;
-use crate::{Error, Result};
-
 use super::format::LogFileFormat;
+use crate::{
+    env::{FileSystem, Handle, WriteExt},
+    metrics::*,
+    pipe_log::FileBlockHandle,
+    Error, Result,
+};
 
 /// Maximum number of bytes to allocate ahead.
 const FILE_ALLOCATE_SIZE: usize = 2 * 1024 * 1024;

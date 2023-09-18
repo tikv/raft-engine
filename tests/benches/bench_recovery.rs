@@ -1,13 +1,11 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
+use std::{collections::HashMap, fmt, path::PathBuf};
+
 use criterion::{criterion_group, BenchmarkId, Criterion};
 use raft::eraftpb::Entry;
-use raft_engine::ReadableSize;
-use raft_engine::{Config as EngineConfig, Engine, LogBatch, MessageExt, Result};
+use raft_engine::{Config as EngineConfig, Engine, LogBatch, MessageExt, ReadableSize, Result};
 use rand::{Rng, SeedableRng};
-use std::collections::HashMap;
-use std::fmt;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[derive(Clone)]
@@ -44,7 +42,9 @@ impl Default for Config {
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
+        write!(
+            f,
+            "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
             self.total_size,
             self.region_count,
             self.batch_size,

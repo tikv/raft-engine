@@ -19,18 +19,23 @@ pub use pipe_builder::{
 pub mod debug {
     //! A set of public utilities used for interacting with log files.
 
-    use std::collections::VecDeque;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::{
+        collections::VecDeque,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
-    use crate::env::{FileSystem, Permission};
-    use crate::log_batch::LogItem;
-    use crate::pipe_log::FileId;
-    use crate::{Error, Result};
-
-    use super::format::{FileNameExt, LogFileFormat};
-    use super::log_file::{LogFileReader, LogFileWriter};
-    use super::reader::LogItemBatchFileReader;
+    use super::{
+        format::{FileNameExt, LogFileFormat},
+        log_file::{LogFileReader, LogFileWriter},
+        reader::LogItemBatchFileReader,
+    };
+    use crate::{
+        env::{FileSystem, Permission},
+        log_batch::LogItem,
+        pipe_log::FileId,
+        Error, Result,
+    };
 
     /// Opens a log file for write. When `create` is true, the specified file
     /// will be created first if not exists.
@@ -169,12 +174,15 @@ pub mod debug {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
-        use crate::env::DefaultFileSystem;
-        use crate::log_batch::{Command, LogBatch};
-        use crate::pipe_log::{FileBlockHandle, LogFileContext, LogQueue, Version};
-        use crate::test_util::{generate_entries, PanicGuard};
         use raft::eraftpb::Entry;
+
+        use super::*;
+        use crate::{
+            env::DefaultFileSystem,
+            log_batch::{Command, LogBatch},
+            pipe_log::{FileBlockHandle, LogFileContext, LogQueue, Version},
+            test_util::{generate_entries, PanicGuard},
+        };
 
         #[test]
         fn test_debug_file_basic() {
@@ -212,7 +220,7 @@ pub mod debug {
                     file_system.as_ref(),
                     &file_path,
                     LogFileFormat::default(),
-                    true, /* create */
+                    true, // create
                 )
                 .unwrap();
                 let log_file_format = LogFileContext::new(file_id, Version::default());
@@ -277,7 +285,7 @@ pub mod debug {
                 file_system.as_ref(),
                 &empty_file_path,
                 LogFileFormat::default(),
-                true, /* create */
+                true, // create
             )
             .unwrap();
             writer.close().unwrap();
@@ -325,7 +333,7 @@ pub mod debug {
                             file_system.as_ref(),
                             &path,
                             from,
-                            true, /* create */
+                            true, // create
                         )
                         .unwrap();
                         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
@@ -338,7 +346,7 @@ pub mod debug {
                             file_system.as_ref(),
                             &path,
                             to,
-                            false, /* create */
+                            false, // create
                         )
                         .unwrap();
                         writer.close().unwrap();

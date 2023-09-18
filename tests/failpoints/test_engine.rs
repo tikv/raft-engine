@@ -1,15 +1,21 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Barrier,
+    },
+    time::Duration,
+};
 
 use fail::FailGuard;
 use kvproto::raft_serverpb::RaftLocalState;
 use raft::eraftpb::Entry;
-use raft_engine::env::{FileSystem, ObfuscatedFileSystem};
-use raft_engine::internals::*;
-use raft_engine::*;
+use raft_engine::{
+    env::{FileSystem, ObfuscatedFileSystem},
+    internals::*,
+    *,
+};
 
 use crate::util::*;
 
@@ -258,10 +264,10 @@ fn test_concurrent_write_empty_log_batch() {
     let mut entries = Vec::new();
     engine
         .fetch_entries_to::<MessageExtTyped>(
-            1,    /* region */
-            0,    /* begin */
-            2,    /* end */
-            None, /* max_size */
+            1,    // region
+            0,    // begin
+            2,    // end
+            None, // max_size
             &mut entries,
         )
         .unwrap();
@@ -269,10 +275,10 @@ fn test_concurrent_write_empty_log_batch() {
     entries.clear();
     engine
         .fetch_entries_to::<MessageExtTyped>(
-            2,    /* region */
-            0,    /* begin */
-            2,    /* end */
-            None, /* max_size */
+            2,    // region
+            0,    // begin
+            2,    // end
+            None, // max_size
             &mut entries,
         )
         .unwrap();
@@ -678,14 +684,16 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     // Causing the final log file is a recycled file, containing rewritten
     // LogBatchs and end with stale LogBatchs, `Engine::open(...)` should
     // `panic` when recovering the relate `Memtable`.
-    assert!(catch_unwind_silent(|| {
-        let cfg_v2 = Config {
-            format_version: Version::V2,
-            ..cfg_err
-        };
-        Engine::open(cfg_v2)
-    })
-    .is_err());
+    assert!(
+        catch_unwind_silent(|| {
+            let cfg_v2 = Config {
+                format_version: Version::V2,
+                ..cfg_err
+            };
+            Engine::open(cfg_v2)
+        })
+        .is_err()
+    );
 }
 
 #[test]

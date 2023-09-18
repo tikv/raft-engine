@@ -1,28 +1,32 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::cell::{Cell, RefCell};
-use std::marker::PhantomData;
-use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::{Builder as ThreadBuilder, JoinHandle};
-use std::time::{Duration, Instant};
+use std::{
+    cell::{Cell, RefCell},
+    marker::PhantomData,
+    path::Path,
+    sync::{mpsc, Arc, Mutex},
+    thread::{Builder as ThreadBuilder, JoinHandle},
+    time::{Duration, Instant},
+};
 
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
-use crate::config::{Config, RecoveryMode};
-use crate::consistency::ConsistencyChecker;
-use crate::env::{DefaultFileSystem, FileSystem};
-use crate::event_listener::EventListener;
-use crate::file_pipe_log::debug::LogItemReader;
-use crate::file_pipe_log::{DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder};
-use crate::log_batch::{Command, LogBatch, MessageExt};
-use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
-use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
-use crate::purge::{PurgeHook, PurgeManager};
-use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{perf_context, Error, GlobalStats, Result};
+use crate::{
+    config::{Config, RecoveryMode},
+    consistency::ConsistencyChecker,
+    env::{DefaultFileSystem, FileSystem},
+    event_listener::EventListener,
+    file_pipe_log::{debug::LogItemReader, DefaultMachineFactory, FilePipeLog, FilePipeLogBuilder},
+    log_batch::{Command, LogBatch, MessageExt},
+    memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables},
+    metrics::*,
+    perf_context,
+    pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog},
+    purge::{PurgeHook, PurgeManager},
+    write_barrier::{WriteBarrier, Writer},
+    Error, GlobalStats, Result,
+};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 /// Max times for `write`.
@@ -106,11 +110,13 @@ where
         let memtables_clone = memtables.clone();
         let metrics_flusher = ThreadBuilder::new()
             .name("re-metrics".into())
-            .spawn(move || loop {
-                stats_clone.flush_metrics();
-                memtables_clone.flush_metrics();
-                if rx.recv_timeout(METRICS_FLUSH_INTERVAL).is_ok() {
-                    break;
+            .spawn(move || {
+                loop {
+                    stats_clone.flush_metrics();
+                    memtables_clone.flush_metrics();
+                    if rx.recv_timeout(METRICS_FLUSH_INTERVAL).is_ok() {
+                        break;
+                    }
                 }
             })?;
 
@@ -625,18 +631,24 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::env::{ObfuscatedFileSystem, Permission};
-    use crate::file_pipe_log::{parse_reserved_file_name, FileNameExt};
-    use crate::log_batch::AtomicGroupBuilder;
-    use crate::pipe_log::Version;
-    use crate::test_util::{generate_entries, PanicGuard};
-    use crate::util::ReadableSize;
+    use std::{
+        collections::{BTreeSet, HashSet},
+        fs::OpenOptions,
+        path::PathBuf,
+    };
+
     use kvproto::raft_serverpb::RaftLocalState;
     use raft::eraftpb::Entry;
-    use std::collections::{BTreeSet, HashSet};
-    use std::fs::OpenOptions;
-    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        env::{ObfuscatedFileSystem, Permission},
+        file_pipe_log::{parse_reserved_file_name, FileNameExt},
+        log_batch::AtomicGroupBuilder,
+        pipe_log::Version,
+        test_util::{generate_entries, PanicGuard},
+        util::ReadableSize,
+    };
 
     pub(crate) type RaftLogEngine<F = DefaultFileSystem> = Engine<F>;
     impl<F: FileSystem> RaftLogEngine<F> {
@@ -1208,9 +1220,11 @@ pub(crate) mod tests {
         // GC all log entries. Won't trigger purge because total size is not enough.
         let count = engine.compact_to(1, 100);
         assert_eq!(count, 100);
-        assert!(!engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+        assert!(
+            !engine
+                .purge_manager
+                .needs_rewrite_log_files(LogQueue::Append)
+        );
 
         // Append more logs to make total size greater than `purge_threshold`.
         for index in 100..250 {
@@ -1220,9 +1234,11 @@ pub(crate) mod tests {
         // GC first 101 log entries.
         assert_eq!(engine.compact_to(1, 101), 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+        assert!(
+            engine
+                .purge_manager
+                .needs_rewrite_log_files(LogQueue::Append)
+        );
 
         let old_min_file_seq = engine.file_span(LogQueue::Append).0;
         let will_force_compact = engine.purge_expired_files().unwrap();
@@ -1236,9 +1252,11 @@ pub(crate) mod tests {
 
         assert_eq!(engine.compact_to(1, 102), 1);
         // Needs to purge because the total size is greater than `purge_threshold`.
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+        assert!(
+            engine
+                .purge_manager
+                .needs_rewrite_log_files(LogQueue::Append)
+        );
         let will_force_compact = engine.purge_expired_files().unwrap();
         // The region needs to be force compacted because the threshold is reached.
         assert!(!will_force_compact.is_empty());
@@ -1327,9 +1345,11 @@ pub(crate) mod tests {
         engine.append(11, 1, 11, Some(&data));
 
         // The engine needs purge, and all old entries should be rewritten.
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+        assert!(
+            engine
+                .purge_manager
+                .needs_rewrite_log_files(LogQueue::Append)
+        );
         assert!(engine.purge_expired_files().unwrap().is_empty());
         assert!(engine.file_span(LogQueue::Append).0 > 1);
 
@@ -1363,9 +1383,11 @@ pub(crate) mod tests {
             }
         }
 
-        assert!(engine
-            .purge_manager
-            .needs_rewrite_log_files(LogQueue::Append));
+        assert!(
+            engine
+                .purge_manager
+                .needs_rewrite_log_files(LogQueue::Append)
+        );
         assert!(engine.purge_expired_files().unwrap().is_empty());
     }
 
@@ -1670,7 +1692,7 @@ pub(crate) mod tests {
         }
 
         drop(engine);
-        //dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft
+        // dump dir with raft groups. 8 element in raft groups 7 and 2 elements in raft
         // groups 8
         let dump_it = Engine::dump_with_file_system(dir.path(), fs.clone()).unwrap();
         let total = dump_it
@@ -1680,7 +1702,7 @@ pub(crate) mod tests {
             .count();
         assert!(total == 10);
 
-        //dump file
+        // dump file
         let file_id = FileId {
             queue: LogQueue::Rewrite,
             seq: 1,
@@ -1697,10 +1719,10 @@ pub(crate) mod tests {
             .count();
         assert!(0 == total);
 
-        //dump dir that does not exists
+        // dump dir that does not exists
         assert!(Engine::dump_with_file_system(Path::new("/not_exists_dir"), fs.clone()).is_err());
 
-        //dump file that does not exists
+        // dump file that does not exists
         let mut not_exists_file = PathBuf::from(dir.as_ref());
         not_exists_file.push("not_exists_file");
         assert!(Engine::dump_with_file_system(not_exists_file.as_path(), fs).is_err());
@@ -1733,7 +1755,7 @@ pub(crate) mod tests {
         let script1 = "".to_owned();
         RaftLogEngine::unsafe_repair_with_file_system(
             dir.path(),
-            None, /* queue */
+            None, // queue
             script1,
             fs.clone(),
         )
@@ -1752,7 +1774,7 @@ pub(crate) mod tests {
         .to_owned();
         RaftLogEngine::unsafe_repair_with_file_system(
             dir.path(),
-            None, /* queue */
+            None, // queue
             script2,
             fs.clone(),
         )
@@ -1814,7 +1836,7 @@ pub(crate) mod tests {
         .to_owned();
         RaftLogEngine::unsafe_repair_with_file_system(
             dir.path(),
-            None, /* queue */
+            None, // queue
             script,
             fs.clone(),
         )

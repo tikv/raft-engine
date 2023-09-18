@@ -77,14 +77,11 @@ pub use util::ReadableSize;
 pub mod internals {
     //! A selective view of key components in Raft Engine. Exported under the
     //! `internals` feature only.
-    pub use crate::event_listener::*;
-    pub use crate::file_pipe_log::*;
-    pub use crate::memtable::*;
-    pub use crate::pipe_log::*;
-    pub use crate::purge::*;
     #[cfg(feature = "swap")]
     pub use crate::swappy_allocator::*;
-    pub use crate::write_barrier::*;
+    pub use crate::{
+        event_listener::*, file_pipe_log::*, memtable::*, pipe_log::*, purge::*, write_barrier::*,
+    };
 }
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -219,8 +216,9 @@ pub(crate) fn is_internal_key(s: &[u8], ext: Option<&[u8]>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::log_batch::MessageExt;
     use raft::eraftpb::Entry;
+
+    use crate::log_batch::MessageExt;
 
     #[ctor::ctor]
     fn init() {

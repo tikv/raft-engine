@@ -1,23 +1,28 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
-use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    mem,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use fail::fail_point;
 use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 
-use crate::config::Config;
-use crate::engine::read_entry_bytes_from_file;
-use crate::event_listener::EventListener;
-use crate::log_batch::{AtomicGroupBuilder, LogBatch};
-use crate::memtable::{MemTableHandle, MemTables};
-use crate::metrics::*;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog};
-use crate::{GlobalStats, Result};
+use crate::{
+    config::Config,
+    engine::read_entry_bytes_from_file,
+    event_listener::EventListener,
+    log_batch::{AtomicGroupBuilder, LogBatch},
+    memtable::{MemTableHandle, MemTables},
+    metrics::*,
+    pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue, PipeLog},
+    GlobalStats, Result,
+};
 
 // Force compact region with oldest 20% logs.
 const FORCE_COMPACT_RATIO: f64 = 0.2;
@@ -293,8 +298,8 @@ where
         let mut log_batch = self.memtables.take_cleaned_region_logs();
         self.rewrite_impl(
             &mut log_batch,
-            None, /* rewrite_watermark */
-            true, /* sync */
+            None, // rewrite_watermark
+            true, // sync
         )?;
         Ok(())
     }

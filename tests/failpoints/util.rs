@@ -1,11 +1,12 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::panic::{self, AssertUnwindSafe};
-use std::sync::{mpsc, Arc};
+use std::{
+    panic::{self, AssertUnwindSafe},
+    sync::{mpsc, Arc},
+};
 
 use raft::eraftpb::Entry;
-use raft_engine::env::FileSystem;
-use raft_engine::{Engine, LogBatch, MessageExt};
+use raft_engine::{env::FileSystem, Engine, LogBatch, MessageExt};
 
 #[derive(Clone)]
 pub struct MessageExtTyped;

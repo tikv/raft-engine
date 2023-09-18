@@ -1,19 +1,22 @@
 // Copyright (c) 2023-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::fs::{copy, create_dir_all};
-use std::path::Path;
-use std::sync::Arc;
-
 #[cfg(not(windows))]
 use std::os::unix::fs::symlink;
 #[cfg(windows)]
 use std::os::windows::fs::symlink_file as symlink;
+use std::{
+    fs::{copy, create_dir_all},
+    path::Path,
+    sync::Arc,
+};
 
-use crate::config::{Config, RecoveryMode};
-use crate::env::FileSystem;
-use crate::file_pipe_log::{FileNameExt, FilePipeLog, FilePipeLogBuilder};
-use crate::pipe_log::{FileId, LogQueue};
-use crate::Engine;
+use crate::{
+    config::{Config, RecoveryMode},
+    env::FileSystem,
+    file_pipe_log::{FileNameExt, FilePipeLog, FilePipeLogBuilder},
+    pipe_log::{FileId, LogQueue},
+    Engine,
+};
 
 /// Returned by `Engine::fork`.
 #[derive(Default)]
@@ -105,11 +108,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::engine::tests::RaftLogEngine;
-    use crate::env::DefaultFileSystem;
-    use crate::{LogBatch, ReadableSize};
     use std::path::PathBuf;
+
+    use super::*;
+    use crate::{engine::tests::RaftLogEngine, env::DefaultFileSystem, LogBatch, ReadableSize};
 
     #[test]
     fn test_fork() {

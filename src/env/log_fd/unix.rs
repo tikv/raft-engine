@@ -1,19 +1,21 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use crate::env::{Handle, Permission};
+use std::{io::Result as IoResult, os::unix::io::RawFd};
 
 use fail::fail_point;
 use log::error;
+use nix::{
+    errno::Errno,
+    fcntl::{self, OFlag},
+    sys::{
+        stat::Mode,
+        uio::{pread, pwrite},
+    },
+    unistd::{close, ftruncate, lseek, Whence},
+    NixPath,
+};
 
-use std::io::Result as IoResult;
-use std::os::unix::io::RawFd;
-
-use nix::errno::Errno;
-use nix::fcntl::{self, OFlag};
-use nix::sys::stat::Mode;
-use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{close, ftruncate, lseek, Whence};
-use nix::NixPath;
+use crate::env::{Handle, Permission};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();

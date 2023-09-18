@@ -1,13 +1,16 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use crate::env::FileSystem;
-use crate::log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN};
-use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext};
-use crate::util::round_up;
-use crate::{Error, Result};
-
-use super::format::{is_zero_padded, LogFileFormat};
-use super::log_file::LogFileReader;
+use super::{
+    format::{is_zero_padded, LogFileFormat},
+    log_file::LogFileReader,
+};
+use crate::{
+    env::FileSystem,
+    log_batch::{LogBatch, LogItemBatch, LOG_BATCH_HEADER_LEN},
+    pipe_log::{FileBlockHandle, FileId, LogFileContext},
+    util::round_up,
+    Error, Result,
+};
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
 pub(super) struct LogItemBatchFileReader<F: FileSystem> {

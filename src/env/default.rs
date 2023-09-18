@@ -2,14 +2,15 @@
 
 #[cfg(feature = "failpoints")]
 use std::io::{Error, ErrorKind};
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::sync::Arc;
+use std::{
+    io::{Read, Result as IoResult, Seek, SeekFrom, Write},
+    path::Path,
+    sync::Arc,
+};
 
 use fail::fail_point;
 
-use crate::env::log_fd::LogFd;
-use crate::env::{FileSystem, Handle, Permission, WriteExt};
+use crate::env::{log_fd::LogFd, FileSystem, Handle, Permission, WriteExt};
 
 /// A low-level file adapted for standard interfaces including [`Seek`],
 /// [`Write`] and [`Read`].

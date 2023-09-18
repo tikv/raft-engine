@@ -2,13 +2,17 @@
 
 //! # Swappy Allocator
 
-use std::alloc::{AllocError, Allocator, Global, Layout};
-use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
-use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::vec::Vec;
+use std::{
+    alloc::{AllocError, Allocator, Global, Layout},
+    fs::{File, OpenOptions},
+    path::{Path, PathBuf},
+    ptr::{self, NonNull},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        Arc,
+    },
+    vec::Vec,
+};
 
 use log::{error, warn};
 use memmap2::MmapMut;
@@ -653,10 +657,12 @@ mod tests {
         {
             let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
             global.set_err_mode(true);
-            assert!(catch_unwind_silent(|| {
-                vec.resize(16, 0);
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    vec.resize(16, 0);
+                })
+                .is_err()
+            );
             assert_eq!(allocator.memory_usage(), 0);
             global.set_err_mode(false);
             vec.resize(16, 0);
@@ -668,10 +674,12 @@ mod tests {
             vec.resize(16, 0);
             assert_eq!(allocator.memory_usage(), 16);
             global.set_err_mode(true);
-            assert!(catch_unwind_silent(|| {
-                vec.resize(32, 0);
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    vec.resize(32, 0);
+                })
+                .is_err()
+            );
             assert_eq!(allocator.memory_usage(), 16);
             global.set_err_mode(false);
             vec.resize(32, 0);
@@ -684,10 +692,12 @@ mod tests {
             assert_eq!(allocator.memory_usage(), 32);
             global.set_err_mode(true);
             vec.resize(16, 0);
-            assert!(catch_unwind_silent(|| {
-                vec.shrink_to_fit();
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    vec.shrink_to_fit();
+                })
+                .is_err()
+            );
             assert_eq!(allocator.memory_usage(), 32);
             global.set_err_mode(false);
             vec.shrink_to_fit();
@@ -1097,10 +1107,12 @@ mod tests {
             v.push_front(D(1, false));
             v.push_front(D(0, false));
 
-            assert!(catch_unwind_silent(|| {
-                v.drain(1..=4);
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    v.drain(1..=4);
+                })
+                .is_err()
+            );
 
             assert_eq!(unsafe { DROPS }, 4);
             assert_eq!(v.len(), 3);
