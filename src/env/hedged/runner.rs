@@ -18,6 +18,8 @@ use super::sender::HedgedSender;
 use super::task::paired_future_callback;
 use super::task::{Callback, SeqTask, Task, TaskRes};
 
+// TaskRunner is a thread runner that handles the disk IO tasks. It would poll
+// the channel until receiving a `Stop` task.
 pub(crate) struct TaskRunner {
     id: u8,
     path: PathBuf,

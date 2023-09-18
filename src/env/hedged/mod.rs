@@ -34,38 +34,77 @@ use util::replace_path;
 
 pub use sender::State;
 
+/// In cloud environment, cloud disk IO may get stuck for a while due to cloud
+/// vendor infrastructure issues. This may affect the foreground latency
+/// dramatically. Raft log apply doesn't sync mostly, so it wouldn't be a
+/// problem. While raft log append is synced every time. To alleviate that, we
+/// can write raft log to two different cloud disks. If either one of them is
+/// synced, the raft log append is considered finished. Thus when one of the
+/// cloud disk IO is stuck, the other one can still work and doesn't affect
+/// foreground write flow.
+///
+/// Under the hood, the file system manages two directories on different
+/// cloud disks. All operations are serialized as tasks attached with a
+/// monotonic increasing sequence number in the channel. The task is sent to
+/// both disks and wait until either one of the channels consumes the task. With
+/// that, if one of the disk's io is slow for a long time, the other can still
+/// serve the operations without any delay. As we know, if two state machines
+/// apply several changes in same order with same initial state, the final state
+/// of the two state machines must be the same. So once the slow disk comes back
+/// normal, it can catch up with the accumulated operations record in the
+/// channel. Then the contents of the two disks can be identical still.
+///
+/// For raft engine write thread model, only one thread writes WAL at one point.
+/// So not supporting writing WAL concurrently is not a big deal. But for the
+/// rewrite(GC), it is concurrent to WAL write. Making GC write operations
+/// serialized with WAL write may affect the performance pretty much as write io
+/// is performed only by one thread. For performance consideration, we can treat
+/// rewrite files especially that make rewrite operations wait both disks
+/// because rewrite is a background job that doesn’t affect foreground latency.
+///
+/// For read, for performance consideration, it doesn't serialize read
+/// operations to disks' channel. It just reads from the disk which has handled
+/// task of larger sequence number.
+///
+/// But what if it's blocking for a long time or down, then the infinite
+/// accumulated operations record would exhaust the memory causing OOM. To avoid
+/// that, once the channel piles up to some extent, it just abandons that disk,
+/// which sends an `Pause` task to the channel and does not send tasks to that
+/// disk's channel anymore, while operations on the rewrite files' is not paused
+/// and still wait on both disks. So it has the chance that one disk written a
+/// rewrite entry while the origin entry is not written yet. But it's fine as
+/// rewrite read is performed on the faster disk which has the origin entry.
+///
+/// And later on, when the blocked disk comes back to normal, it would
+/// finally consume to the end of channel where is the `Pause` task indicating
+/// the disk is recovered. Then the slow disk would request a snapshot from
+/// faster disk, let the normal disk copy all the append files to that disk.
+/// And new changes resume being sent to the disk's channel. With that, all the
+/// writes to the new mutable append file during the copy won't be lost, and
+/// two disks can be synced eventually.
+///
+/// As the raft log file number increases monotonically, after a restart, it can
+/// check the latest append(exclude rewrite files) file number to decide
+/// which disk has the latest data. If the largest file numbers are the same, we
+/// can't simply use the file size to decide due to file recycling. Instead,
+/// scan the two files to find the biggest offset of the latest and valid record
+/// in them. And finally, regarding the disk of the bigger one as the latest.
+/// The latest one is responsible to sync the missing append files to the other
+/// disk.
+///
+/// It relays on some raft-engine invariants:
+/// 1. Raft log is append only.
+/// 2. Raft log is read-only once it's sealed.
+/// Here is the TLA+ proof https://github.com/pingcap/tla-plus/pull/41
+
 // TODO: add metrics
 // TODO: handle specially on config change(upgrade and downgrade)
+// TODO: fallback to one disk, if the other disk is down for a long time and
+// close to full
+// TODO: consider encryption
 
-// In cloud environment, cloud disk IO may get stuck for a while due to cloud
-// vendor infrastructure issues. This may affect the foreground latency
-// dramatically. Raft log apply doesn't sync mostly, so it wouldn't be a
-// problem. While raft log append is synced every time. To alleviate that, we
-// can hedge raft log to two different cloud disks. If either one of them is
-// synced, the raft log append is considered finished. Thus when one of the
-// cloud disk IO is stuck, the other one can still work and doesn't affect
-// foreground write flow.
-
-//Under the hood, the HedgedFileSystem manages two directories on different
-// cloud disks. All operations of the interface are serialized by one channel
-// for each disk and wait until either one of the channels is consumed. With
-// that, if one of the disk's io is slow for a long time, the other can still
-// serve the operations without any delay. And once the disk comes back to
-// normal, it can catch up with the accumulated operations record in the
-// channel. Then the states of the two disks can be synced again.
-
-// It relays on some raft-engine assumptions:
-// 1. Raft log is append only.
-// 2. Raft log is read-only once it's sealed.
-
-// For raft engine write thread model, only one thread writes WAL at one point.
-// So not supporting writing WAL concurrently is not a big deal. But for the
-// rewrite(GC), it is concurrent to WAL write. Making GC write operations
-// serialized with WAL write may affect the performance pretty much. To avoid
-// that, we can treat rewrite files especially that make rewrite operations wait
-// both disks because rewrite is a background job that doesn’t affect foreground
-// latency. As the rewrite files are the partial order
-
+// All operations of file system trait are sent to the channels of both disks
+// through `HedgedFileSystem`.
 pub struct HedgedFileSystem {
     base: Arc<DefaultFileSystem>,
 
@@ -81,7 +120,6 @@ pub struct HedgedFileSystem {
     thread2: Option<JoinHandle<()>>,
 }
 
-// TODO: consider encryption
 impl HedgedFileSystem {
     pub fn new(base: Arc<DefaultFileSystem>, path1: PathBuf, path2: PathBuf) -> Self {
         let (tx1, rx1) = unbounded::<(SeqTask, Callback)>();
@@ -303,20 +341,25 @@ impl FileSystem for HedgedFileSystem {
     }
 }
 
+// HedgedHandle wraps two handles, and send the same operation to both disk's
+// file handles
 pub struct HedgedHandle {
     base: Arc<DefaultFileSystem>,
 
-    // for rewrite file, all the operations should wait both disks finished
-    strong_consistent: bool,
-
     sender: HedgedSender,
 
+    // The two file handles for each disk
     handle1: Arc<FutureHandle>,
     handle2: Arc<FutureHandle>,
 
+    // The sequence number of the latest handled task for each disk
     seqno1: Arc<AtomicU64>,
     seqno2: Arc<AtomicU64>,
 
+    // For rewrite file, all the operations should wait both disks finished
+    rewrite_file: bool,
+    // The two threads for handling operations on rewrite files which is separated from the disk
+    // channel thread for performance consideration
     thread1: Option<JoinHandle<()>>,
     thread2: Option<JoinHandle<()>>,
 }
@@ -324,7 +367,7 @@ pub struct HedgedHandle {
 impl HedgedHandle {
     fn new(
         base: Arc<DefaultFileSystem>,
-        strong_consistent: bool,
+        rewrite_file: bool,
         mut sender: HedgedSender,
         handle1: FutureHandle,
         handle2: FutureHandle,
@@ -333,13 +376,13 @@ impl HedgedHandle {
     ) -> Self {
         let mut thread1 = None;
         let mut thread2 = None;
-        if strong_consistent {
+        if rewrite_file {
             // use two separated threads for both wait
             let (tx1, rx1) = unbounded::<(SeqTask, Callback)>();
             let (tx2, rx2) = unbounded::<(SeqTask, Callback)>();
             // replace the seqno with self owned, then in `read` the seqno from two disks
-            // should be always the same. It's just to reuse the logic without
-            // adding special check in `read`
+            // should be always the same. It's just to reuse the logic without adding
+            // special check in `read`
             seqno1 = Arc::new(AtomicU64::new(0));
             seqno2 = Arc::new(AtomicU64::new(0));
             let poll = |(rx, seqno, fs): (
@@ -370,7 +413,7 @@ impl HedgedHandle {
 
         Self {
             base,
-            strong_consistent,
+            rewrite_file,
             sender,
             handle1: Arc::new(handle1),
             handle2: Arc::new(handle2),
@@ -489,7 +532,7 @@ impl HedgedHandle {
     }
 
     async fn wait(&self, task1: Task, task2: Task) -> IoResult<TaskRes> {
-        if self.strong_consistent {
+        if self.rewrite_file {
             self.wait_both(task1, task2).await
         } else {
             self.wait_one(task1, task2).await
@@ -537,7 +580,7 @@ impl Handle for HedgedHandle {
 
 impl Drop for HedgedHandle {
     fn drop(&mut self) {
-        if self.strong_consistent {
+        if self.rewrite_file {
             self.sender
                 .send(Task::Stop, Task::Stop, empty_callback(), empty_callback());
             self.thread1.take().unwrap().join().unwrap();

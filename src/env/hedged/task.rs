@@ -152,6 +152,11 @@ pub(crate) enum TaskRes {
     Stop,
 }
 
+// A helper struct to get the fd from callback in the future. As on the creation
+// of `HedgedHandle`, only one of the fd is retrieved at the time, so we can
+// need to check the receiver to get the fd for the later get. If the fd is
+// ready, we will update the inner to `Arc<LogFd>`, so the later get will get
+// the fd directly.
 pub(crate) struct FutureHandle {
     inner: UnsafeCell<Either<oneshot::Receiver<IoResult<TaskRes>>, Arc<LogFd>>>,
     task: Option<Task>,
@@ -187,6 +192,8 @@ impl FutureHandle {
             Either::Left(rx) => {
                 set = true;
                 match block_on(rx) {
+                    // Canceled is caused by the task is dropped when in paused state,
+                    // so we should retry the task now
                     Err(Canceled) => self.retry_canceled(file_system)?,
                     Ok(res) => match res? {
                         TaskRes::Open { fd, .. } => Arc::new(fd),
@@ -211,6 +218,8 @@ impl FutureHandle {
             Either::Left(rx) => {
                 set = true;
                 match rx.try_recv() {
+                    // Canceled is caused by the task is dropped when in paused state,
+                    // so we should retry the task now
                     Err(Canceled) => self.retry_canceled(file_system)?,
                     Ok(None) => return Ok(None),
                     Ok(Some(res)) => match res? {
@@ -231,8 +240,6 @@ impl FutureHandle {
     }
 
     fn retry_canceled(&self, file_system: &DefaultFileSystem) -> IoResult<Arc<LogFd>> {
-        // Canceled is caused by the task is dropped when in paused state,
-        // so we should retry the task now
         Ok(match self.task.as_ref().unwrap() {
             Task::Create(path) => {
                 // has been already created, so just open
