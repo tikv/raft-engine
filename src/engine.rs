@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use log::{error, info};
 use protobuf::{parse_from_bytes, Message};
 
+use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
 use crate::env::{DefaultFileSystem, FileSystem};
 use crate::event_listener::EventListener;
@@ -21,39 +22,11 @@ use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
 use crate::write_barrier::{WriteBarrier, Writer};
-use crate::{
-    config::{Config, RecoveryMode},
-    env::HedgedFileSystem,
-};
 use crate::{perf_context, Error, GlobalStats, Result};
 
 const METRICS_FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 /// Max times for `write`.
 const MAX_WRITE_ATTEMPT: u64 = 2;
-
-// pub struct HedgedEngine<F = DefaultFileSystem, P = FilePipeLog<F>>
-// where
-//     F: FileSystem,
-//     P: PipeLog,
-// {
-//     inner: Engine<HedgedFileSystem<F>, P>,
-//     fs: Arc<HedgedFileSystem<F>>,
-// }
-
-// impl<F> HedgedEngine<F,FilePipeLog<F>>
-// where
-//     F: FileSystem,
-// {
-
-// }
-
-// impl<F: FileSystem> Deref for HedgedEngine<F, FilePipeLog<F>> {
-//    type Target = Engine<F, FilePipeLog<F>>;
-
-//    fn deref(&self) -> &Self::Target {
-//         &self.inner
-//    }
-// }
 
 pub struct Engine<F = DefaultFileSystem, P = FilePipeLog<F>>
 where
@@ -88,24 +61,6 @@ impl Engine<DefaultFileSystem, FilePipeLog<DefaultFileSystem>> {
     ) -> Result<Engine<DefaultFileSystem, FilePipeLog<DefaultFileSystem>>> {
         Self::open_with(cfg, Arc::new(DefaultFileSystem), listeners)
     }
-}
-
-pub fn open_with_hedged_file_system(
-    cfg: Config,
-    file_system: Arc<DefaultFileSystem>,
-) -> Result<Engine<HedgedFileSystem, FilePipeLog<HedgedFileSystem>>> {
-    let file_system = if let Some(ref sec_dir) = cfg.second_dir {
-        let fs = Arc::new(HedgedFileSystem::new(
-            file_system,
-            cfg.dir.clone().into(),
-            sec_dir.clone().into(),
-        ));
-        fs.bootstrap()?;
-        fs
-    } else {
-        panic!()
-    };
-    Engine::open_with(cfg, file_system, vec![])
 }
 
 impl<F> Engine<F, FilePipeLog<F>>

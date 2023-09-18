@@ -97,7 +97,6 @@ pub use sender::State;
 /// 2. Raft log is read-only once it's sealed.
 /// Here is the TLA+ proof https://github.com/pingcap/tla-plus/pull/41
 
-// TODO: add metrics
 // TODO: handle specially on config change(upgrade and downgrade)
 // TODO: fallback to one disk, if the other disk is down for a long time and
 // close to full

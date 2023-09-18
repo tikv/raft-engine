@@ -513,11 +513,6 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
         queue: LogQueue,
         bytes: &mut T,
     ) -> Result<FileBlockHandle> {
-        // if self.file_system.need_recover() {
-        //     self.pipes[LogQueue::Append].rotate();
-        //     self.pipes[LogQueue::Rewrite].rotate();
-        //     self.file_system.trigger_recover();
-        // }
         self.pipes[queue as usize].append(bytes)
     }
 
