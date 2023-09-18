@@ -36,7 +36,35 @@ pub use sender::State;
 
 // TODO: add metrics
 // TODO: handle specially on config change(upgrade and downgrade)
-// TODO: add comment and rename
+
+// In cloud environment, cloud disk IO may get stuck for a while due to cloud
+// vendor infrastructure issues. This may affect the foreground latency
+// dramatically. Raft log apply doesn't sync mostly, so it wouldn't be a
+// problem. While raft log append is synced every time. To alleviate that, we
+// can hedge raft log to two different cloud disks. If either one of them is
+// synced, the raft log append is considered finished. Thus when one of the
+// cloud disk IO is stuck, the other one can still work and doesn't affect
+// foreground write flow.
+
+//Under the hood, the HedgedFileSystem manages two directories on different
+// cloud disks. All operations of the interface are serialized by one channel
+// for each disk and wait until either one of the channels is consumed. With
+// that, if one of the disk's io is slow for a long time, the other can still
+// serve the operations without any delay. And once the disk comes back to
+// normal, it can catch up with the accumulated operations record in the
+// channel. Then the states of the two disks can be synced again.
+
+// It relays on some raft-engine assumptions:
+// 1. Raft log is append only.
+// 2. Raft log is read-only once it's sealed.
+
+// For raft engine write thread model, only one thread writes WAL at one point.
+// So not supporting writing WAL concurrently is not a big deal. But for the
+// rewrite(GC), it is concurrent to WAL write. Making GC write operations
+// serialized with WAL write may affect the performance pretty much. To avoid
+// that, we can treat rewrite files especially that make rewrite operations wait
+// both disks because rewrite is a background job that doesn’t affect foreground
+// latency. As the rewrite files are the partial order
 
 pub struct HedgedFileSystem {
     base: Arc<DefaultFileSystem>,
@@ -53,8 +81,7 @@ pub struct HedgedFileSystem {
     thread2: Option<JoinHandle<()>>,
 }
 
-// TODO: read both dir at recovery, maybe no need? cause operations are to both
-// disks TODO: consider encryption
+// TODO: consider encryption
 impl HedgedFileSystem {
     pub fn new(base: Arc<DefaultFileSystem>, path1: PathBuf, path2: PathBuf) -> Self {
         let (tx1, rx1) = unbounded::<(SeqTask, Callback)>();
