@@ -70,6 +70,8 @@ jobs:
         run: |
           make format
           git diff --exit-code
+        env:
+          WITH_STABLE_TOOLCHAIN: 'force'
       - name: Clippy
         run: make clippy
         env:
