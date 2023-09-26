@@ -45,7 +45,7 @@ libc = "0.2"
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 lz4-sys = "1.9"
 memmap2 = { version = "0.8", optional = true }
-nix = "0.26"
+nix = "0.27"
 num-derive = "0.4"
 num-traits = "0.2"
 parking_lot = "0.12"
