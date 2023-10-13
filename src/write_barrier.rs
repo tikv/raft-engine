@@ -126,12 +126,30 @@ impl<'a, 'b, 'c, P, O> Iterator for WriterIter<'a, 'b, 'c, P, O> {
     }
 }
 
+pub struct AdminToken<'a, P: 'a, O: 'a> {
+    ref_barrier: &'a WriteBarrier<P, O>,
+}
+
+impl<'a, P, O> Drop for AdminToken<'a, P, O> {
+    fn drop(&mut self) {
+        self.ref_barrier.leader_exit();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminStatus {
+    None,
+    Pending,
+    Working,
+}
+
 struct WriteBarrierInner<P, O> {
     head: Cell<Ptr<Writer<P, O>>>,
     tail: Cell<Ptr<Writer<P, O>>>,
 
     pending_leader: Cell<Ptr<Writer<P, O>>>,
     pending_index: Cell<usize>,
+    admin_status: Cell<AdminStatus>,
 }
 
 unsafe impl<P: Send, O: Send> Send for WriteBarrierInner<P, O> {}
@@ -143,6 +161,7 @@ impl<P, O> Default for WriteBarrierInner<P, O> {
             tail: Cell::new(None),
             pending_leader: Cell::new(None),
             pending_index: Cell::new(0),
+            admin_status: Cell::new(AdminStatus::None),
         }
     }
 }
@@ -151,6 +170,7 @@ impl<P, O> Default for WriteBarrierInner<P, O> {
 pub struct WriteBarrier<P, O> {
     inner: Mutex<WriteBarrierInner<P, O>>,
     leader_cv: Condvar,
+    admin_cv: Condvar,
     follower_cvs: [Condvar; 2],
 }
 
@@ -158,6 +178,7 @@ impl<P, O> Default for WriteBarrier<P, O> {
     fn default() -> Self {
         WriteBarrier {
             leader_cv: Condvar::new(),
+            admin_cv: Condvar::new(),
             follower_cvs: [Condvar::new(), Condvar::new()],
             inner: Mutex::new(WriteBarrierInner::default()),
         }
@@ -196,6 +217,16 @@ impl<P, O> WriteBarrier<P, O> {
             debug_assert!(inner.pending_leader.get().is_none());
             inner.head.set(node);
             inner.tail.set(node);
+            // Unless there's an ongoing admin.
+            if inner.admin_status.get() == AdminStatus::Working {
+                inner.pending_leader.set(node);
+                inner
+                    .pending_index
+                    .set(inner.pending_index.get().wrapping_add(1));
+                //
+                self.leader_cv.wait(&mut inner);
+                inner.pending_leader.set(None);
+            }
         }
 
         Some(WriteGroup {
@@ -206,11 +237,48 @@ impl<P, O> WriteBarrier<P, O> {
         })
     }
 
+    /// Waits until the caller has become the admin writer. Only admin writer
+    /// alone will be able to perform works. When necessary this call will be
+    /// reordered ahead of others already waiting in queue.
+    pub fn enter_as_admin(&self) -> Option<AdminToken<P, O>> {
+        let mut inner = self.inner.lock();
+        if inner.admin_status.get() != AdminStatus::None {
+            return None;
+        }
+        if inner.tail.get().is_some() {
+            // Jump ahead of the pending group (if any).
+            inner.admin_status.set(AdminStatus::Pending);
+            self.admin_cv.wait(&mut inner);
+            inner.admin_status.set(AdminStatus::Working);
+        } else {
+            // leader of a empty write group. proceed directly.
+            debug_assert!(inner.pending_leader.get().is_none());
+            inner.admin_status.set(AdminStatus::Working);
+        }
+        Some(AdminToken { ref_barrier: self })
+    }
+
     /// Must called when write group leader finishes processing its responsible
     /// writers, and next write group should be formed.
     fn leader_exit(&self) {
         fail_point!("write_barrier::leader_exit", |_| {});
         let inner = self.inner.lock();
+        if inner.admin_status.get() == AdminStatus::Pending {
+            self.admin_cv.notify_one();
+            // wake up follower of current write group.
+            if let Some(leader) = inner.pending_leader.get() {
+                self.follower_cvs[inner.pending_index.get().wrapping_sub(1) % 2].notify_all();
+                inner.head.set(Some(leader));
+            } else {
+                self.follower_cvs[inner.pending_index.get() % 2].notify_all();
+                inner.head.set(None);
+                inner.tail.set(None);
+            }
+            return;
+        }
+        if inner.admin_status.get() == AdminStatus::Working {
+            inner.admin_status.set(AdminStatus::None);
+        }
         if let Some(leader) = inner.pending_leader.get() {
             // wake up leader of next write group.
             self.leader_cv.notify_one();
@@ -251,6 +319,7 @@ mod tests {
                 }
             }
             assert_eq!(writer.finish(), 7);
+            let _token = barrier.enter_as_admin().unwrap();
         }
 
         assert_eq!(processed_writers, 4);

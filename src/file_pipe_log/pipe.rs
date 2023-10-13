@@ -240,7 +240,11 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
-    fn rotate_imp(&self, writable_file: &mut MutexGuard<WritableFile<F>>) -> Result<()> {
+    fn rotate_imp(
+        &self,
+        writable_file: &mut MutexGuard<WritableFile<F>>,
+        switch_disk: bool,
+    ) -> Result<()> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
             perf_context!(log_rotate_duration),
@@ -250,9 +254,21 @@ impl<F: FileSystem> SinglePipe<F> {
 
         writable_file.writer.close()?;
 
-        let (path_id, handle) = self
-            .recycle_file(new_seq)
-            .unwrap_or_else(|| self.new_file(new_seq))?;
+        let (path_id, handle) = if switch_disk {
+            if self.paths.len() == 1 {
+                return Err(Error::InvalidArgument("no available path".to_owned()));
+            }
+            let file_id = FileId {
+                seq: new_seq,
+                queue: self.queue,
+            };
+            let path_id = (self.active_files.read().back().unwrap().path_id + 1) % self.paths.len();
+            let path = file_id.build_file_path(&self.paths[path_id]);
+            (path_id, self.file_system.create(path)?)
+        } else {
+            self.recycle_file(new_seq)
+                .unwrap_or_else(|| self.new_file(new_seq))?
+        };
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -321,7 +337,7 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut writable_file) {
+            if let Err(e) = self.rotate_imp(&mut writable_file, false) {
                 panic!(
                     "error when rotate [{:?}:{}]: {e}",
                     self.queue, writable_file.seq,
@@ -372,7 +388,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // - [3] Both main-dir and spill-dir have several recycled logs.
                 // But as `bytes.len()` is always smaller than `target_file_size` in common
                 // cases, this issue will be ignored temprorarily.
-                if let Err(e) = self.rotate_imp(&mut writable_file) {
+                if let Err(e) = self.rotate_imp(&mut writable_file, false) {
                     panic!(
                         "error when rotate [{:?}:{}]: {e}",
                         self.queue, writable_file.seq
@@ -425,8 +441,8 @@ impl<F: FileSystem> SinglePipe<F> {
         (last_seq - first_seq + 1) as usize * self.target_file_size
     }
 
-    fn rotate(&self) -> Result<()> {
-        self.rotate_imp(&mut self.writable_file.lock())
+    fn rotate(&self, switch_disk: bool) -> Result<()> {
+        self.rotate_imp(&mut self.writable_file.lock(), switch_disk)
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
@@ -535,8 +551,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn rotate(&self, queue: LogQueue) -> Result<()> {
-        self.pipes[queue as usize].rotate()
+    fn rotate(&self, queue: LogQueue, switch_disk: bool) -> Result<()> {
+        self.pipes[queue as usize].rotate(switch_disk)
     }
 
     #[inline]
@@ -648,7 +664,7 @@ mod tests {
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        pipe_log.rotate(queue).unwrap();
+        pipe_log.rotate(queue, false).unwrap();
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
@@ -718,7 +734,7 @@ mod tests {
             handles.push(pipe_log.append(&mut &content(i)).unwrap());
             pipe_log.sync().unwrap();
         }
-        pipe_log.rotate().unwrap();
+        pipe_log.rotate(false).unwrap();
         let (first, last) = pipe_log.file_span();
         // Cannot purge already expired logs or not existsed logs.
         assert!(pipe_log.purge_to(first - 1).is_err());

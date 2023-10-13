@@ -228,6 +228,14 @@ where
         Ok(len)
     }
 
+    pub fn switch_disk(&self) -> Result<()> {
+        if let Some(_token) = self.write_barrier.enter_as_admin() {
+            self.pipe_log.rotate(LogQueue::Append, true)
+        } else {
+            Err(Error::TryAgain(String::new()))
+        }
+    }
+
     /// Synchronizes the Raft engine.
     pub fn sync(&self) -> Result<()> {
         self.write(&mut LogBatch::default(), true)?;
@@ -2446,7 +2454,7 @@ pub(crate) mod tests {
             builder.begin(&mut log_batch);
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite, false).unwrap();
         }
         {
             // begin - unrelated - end.
@@ -2466,7 +2474,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite, false).unwrap();
         }
         {
             // begin - middle - middle - end.
@@ -2491,7 +2499,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite, false).unwrap();
         }
         {
             // begin - begin - end.
@@ -2511,7 +2519,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite, false).unwrap();
         }
         {
             // end - middle - end.
@@ -2533,7 +2541,7 @@ pub(crate) mod tests {
             rid += 1;
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite, false).unwrap();
         }
         {
             // end - begin - end
@@ -2554,7 +2562,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite, false).unwrap();
         }
         {
             // begin - end - begin - end.
