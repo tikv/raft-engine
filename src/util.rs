@@ -1,13 +1,17 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::fmt::{self, Display, Write};
-use std::ops::{Div, Mul};
-use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::{
+    fmt::{self, Display, Write},
+    ops::{Div, Mul},
+    str::FromStr,
+    time::{Duration, Instant},
+};
 
 use crc32fast::Hasher;
-use serde::de::{self, Unexpected, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    de::{self, Unexpected, Visitor},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
 
 const UNIT: u64 = 1;
 
@@ -220,8 +224,9 @@ pub fn unhash_u64(mut i: u64) -> u64 {
 }
 
 pub mod lz4 {
-    use crate::{Error, Result};
     use std::{i32, ptr};
+
+    use crate::{Error, Result};
 
     pub const DEFAULT_LZ4_COMPRESSION_LEVEL: usize = 1;
 

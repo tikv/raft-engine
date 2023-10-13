@@ -107,7 +107,7 @@ where
 
 #[macro_export]
 macro_rules! perf_context {
-    ($field: ident) => {
+    ($field:ident) => {
         $crate::metrics::PerfContextField::new(|perf_context| &mut perf_context.$field)
     };
 }

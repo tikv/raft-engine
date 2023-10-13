@@ -5,10 +5,7 @@
 //! This module relies heavily on unsafe codes. Extra call site constraints are
 //! required to maintain memory safety. Use it with great caution.
 
-use std::cell::Cell;
-use std::marker::PhantomData;
-use std::ptr::NonNull;
-use std::time::Instant;
+use std::{cell::Cell, marker::PhantomData, ptr::NonNull, time::Instant};
 
 use fail::fail_point;
 use parking_lot::{Condvar, Mutex};
@@ -228,11 +225,13 @@ impl<P, O> WriteBarrier<P, O> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{mpsc, Arc, Barrier},
+        thread::{self, Builder as ThreadBuilder},
+        time::Duration,
+    };
+
     use super::*;
-    use std::sync::mpsc;
-    use std::sync::{Arc, Barrier};
-    use std::thread::{self, Builder as ThreadBuilder};
-    use std::time::Duration;
 
     #[test]
     fn test_sequential_groups() {

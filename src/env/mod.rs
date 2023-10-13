@@ -1,8 +1,10 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{Read, Result, Seek, Write};
-use std::path::Path;
-use std::sync::Arc;
+use std::{
+    io::{Read, Result, Seek, Write},
+    path::Path,
+    sync::Arc,
+};
 
 mod default;
 mod log_fd;

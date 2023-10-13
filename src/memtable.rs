@@ -1,32 +1,36 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::borrow::BorrowMut;
-use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::marker::PhantomData;
-use std::ops::Bound;
-use std::sync::Arc;
+use std::{
+    borrow::BorrowMut,
+    collections::{BTreeMap, HashSet, VecDeque},
+    marker::PhantomData,
+    ops::Bound,
+    sync::Arc,
+};
 
 use fail::fail_point;
 use hashbrown::HashMap;
 use log::{error, warn};
 use parking_lot::{Mutex, RwLock};
 
-use crate::config::Config;
-use crate::file_pipe_log::ReplayMachine;
-use crate::log_batch::{
-    AtomicGroupStatus, Command, CompressionType, KeyValue, LogBatch, LogItem, LogItemBatch,
-    LogItemContent, OpType,
+use crate::{
+    config::Config,
+    file_pipe_log::ReplayMachine,
+    log_batch::{
+        AtomicGroupStatus, Command, CompressionType, KeyValue, LogBatch, LogItem, LogItemBatch,
+        LogItemContent, OpType,
+    },
+    metrics::MEMORY_USAGE,
+    pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue},
+    util::{hash_u64, Factory},
+    Error, GlobalStats, Result,
 };
-use crate::metrics::MEMORY_USAGE;
-use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-use crate::util::{hash_u64, Factory};
-use crate::{Error, GlobalStats, Result};
 
 #[cfg(feature = "swap")]
 mod swap_conditional_imports {
+    use std::{convert::TryFrom, path::Path};
+
     use crate::swappy_allocator::SwappyAllocator;
-    use std::convert::TryFrom;
-    use std::path::Path;
 
     pub trait AllocatorTrait: std::alloc::Allocator + Clone + Send + Sync {}
     impl<T: std::alloc::Allocator + Clone + Send + Sync> AllocatorTrait for T {}
@@ -209,10 +213,10 @@ impl<A: AllocatorTrait> MemTable<A> {
                 rhs_first,
                 // Rewrite -> Compact Append -> Rewrite.
                 // TODO: add test case.
-                rhs.rewrite_count > 0, /* allow_hole */
+                rhs.rewrite_count > 0, // allow_hole
                 // Always true, because `self` might not have all entries in
                 // history.
-                true, /* allow_overwrite */
+                true, // allow_overwrite
             );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
@@ -252,9 +256,9 @@ impl<A: AllocatorTrait> MemTable<A> {
                 // FIXME: It's possibly okay to set it to false. Any compact
                 // command applied to append queue will also be applied to
                 // rewrite queue.
-                true, /* allow_hole */
+                true, // allow_hole
                 // Compact -> Rewrite -> Data loss of the compact command.
-                true, /* allow_overwrite */
+                true, // allow_overwrite
             );
             self.global_stats.add(
                 rhs.entry_indexes[0].entries.unwrap().id.queue,
@@ -384,8 +388,8 @@ impl<A: AllocatorTrait> MemTable<A> {
         if len > 0 {
             self.prepare_append(
                 entry_indexes[0].index,
-                false, /* allow_hole */
-                false, /* allow_overwrite */
+                false, // allow_hole
+                false, // allow_overwrite
             );
             self.global_stats.add(LogQueue::Append, len);
             for ei in &entry_indexes {
@@ -404,9 +408,9 @@ impl<A: AllocatorTrait> MemTable<A> {
             debug_assert_eq!(self.rewrite_count, 0);
             self.prepare_append(
                 entry_indexes[0].index,
-                false, /* allow_hole */
+                false, // allow_hole
                 // Refer to case in `merge_newer_neighbor`.
-                true, /* allow_overwrite */
+                true, // allow_overwrite
             );
             self.global_stats.add(LogQueue::Append, len);
             for ei in &entry_indexes {
@@ -506,11 +510,11 @@ impl<A: AllocatorTrait> MemTable<A> {
             self.prepare_append(
                 entry_indexes[0].index,
                 // Rewrite -> Compact Append -> Rewrite.
-                true, /* allow_hole */
+                true, // allow_hole
                 // Refer to case in `merge_append_table`. They can be adapted
                 // to attack this path via a global rewrite without deleting
                 // obsolete rewrite files.
-                true, /* allow_overwrite */
+                true, // allow_overwrite
             );
             self.global_stats.add(LogQueue::Rewrite, len);
             for ei in &entry_indexes {
@@ -1855,21 +1859,27 @@ mod tests {
         memtable.consistency_check();
 
         let mut ents_idx = vec![];
-        assert!(memtable
-            .fetch_entry_indexes_before(2, &mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_entry_indexes_before(2, &mut ents_idx)
+                .is_ok()
+        );
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
         ents_idx.clear();
-        assert!(memtable
-            .fetch_entry_indexes_before(1, &mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_entry_indexes_before(1, &mut ents_idx)
+                .is_ok()
+        );
         assert!(ents_idx.is_empty());
 
         ents_idx.clear();
-        assert!(memtable
-            .fetch_rewritten_entry_indexes(&mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_rewritten_entry_indexes(&mut ents_idx)
+                .is_ok()
+        );
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.first().unwrap().index, 0);
         assert_eq!(ents_idx.last().unwrap().index, 9);

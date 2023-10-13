@@ -1,21 +1,24 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use hashbrown::HashMap;
 use rhai::{Engine, Scope, AST};
 use scopeguard::{guard, ScopeGuard};
 
-use crate::env::FileSystem;
-use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};
-use crate::file_pipe_log::{FileNameExt, ReplayMachine};
-use crate::log_batch::{
-    Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
+use crate::{
+    env::FileSystem,
+    file_pipe_log::{
+        debug::{build_file_reader, build_file_writer},
+        FileNameExt, ReplayMachine,
+    },
+    log_batch::{
+        Command, EntryIndexes, KeyValue, LogBatch, LogItem, LogItemBatch, LogItemContent, OpType,
+    },
+    pipe_log::{FileId, LogFileContext, LogQueue},
+    util::Factory,
+    Error, Result,
 };
-use crate::pipe_log::{FileId, LogFileContext, LogQueue};
-use crate::util::Factory;
-use crate::{Error, Result};
 
 /// `FilterResult` determines how to alter the existing log items in
 /// `RhaiFilterMachine`.
@@ -319,7 +322,7 @@ impl RhaiFilterMachine {
                         log_batch.prepare_write(&log_file_context)?;
                         writer.write(
                             log_batch.encoded_bytes(),
-                            usize::MAX, /* target_size_hint */
+                            usize::MAX, // target_size_hint
                         )?;
                         log_batch.drain();
                     }
@@ -329,7 +332,7 @@ impl RhaiFilterMachine {
                     log_batch.prepare_write(&log_file_context)?;
                     writer.write(
                         log_batch.encoded_bytes(),
-                        usize::MAX, /* target_size_hint */
+                        usize::MAX, // target_size_hint
                     )?;
                     log_batch.drain();
                 }

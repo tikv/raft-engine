@@ -1,9 +1,13 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::{
+    io::{Read, Result as IoResult, Seek, SeekFrom, Write},
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use crate::env::{DefaultFileSystem, FileSystem, Permission, WriteExt};
 

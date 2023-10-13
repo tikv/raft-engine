@@ -3,8 +3,7 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
-use crate::pipe_log::Version;
-use crate::{util::ReadableSize, Result};
+use crate::{pipe_log::Version, util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
@@ -343,9 +342,11 @@ mod tests {
         let mut load: Config = toml::from_str(old).unwrap();
         load.sanitize().unwrap();
         // Downgrade to older version.
-        assert!(toml::to_string(&load)
-            .unwrap()
-            .contains("tolerate-corrupted-tail-records"));
+        assert!(
+            toml::to_string(&load)
+                .unwrap()
+                .contains("tolerate-corrupted-tail-records")
+        );
     }
 
     #[test]

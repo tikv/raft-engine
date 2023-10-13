@@ -1,28 +1,28 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::collections::VecDeque;
-use std::fs::File as StdFile;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{collections::VecDeque, fs::File as StdFile, path::PathBuf, sync::Arc};
 
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
 use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
-use crate::config::Config;
-use crate::env::{FileSystem, Permission};
-use crate::errors::is_no_space_err;
-use crate::event_listener::EventListener;
-use crate::metrics::*;
-use crate::pipe_log::{
-    FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
+use super::{
+    format::{build_reserved_file_name, FileNameExt, LogFileFormat},
+    log_file::{build_file_reader, build_file_writer, LogFileWriter},
 };
-use crate::{perf_context, Error, Result};
-
-use super::format::{build_reserved_file_name, FileNameExt, LogFileFormat};
-use super::log_file::build_file_reader;
-use super::log_file::{build_file_writer, LogFileWriter};
+use crate::{
+    config::Config,
+    env::{FileSystem, Permission},
+    errors::is_no_space_err,
+    event_listener::EventListener,
+    metrics::*,
+    perf_context,
+    pipe_log::{
+        FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
+    },
+    Error, Result,
+};
 
 pub type PathId = usize;
 pub type Paths = Vec<PathBuf>;
@@ -137,7 +137,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 file_system.as_ref(),
                 f.handle.clone(),
                 f.format,
-                no_active_files, /* force_reset */
+                no_active_files, // force_reset
             )?,
             format: f.format,
         };
@@ -266,7 +266,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 self.file_system.as_ref(),
                 f.handle.clone(),
                 f.format,
-                true, /* force_reset */
+                true, // force_reset
             )?,
             format: f.format,
         };
@@ -566,14 +566,18 @@ pub(crate) fn find_available_dir(paths: &Paths, target_size: usize) -> PathId {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
     use tempfile::Builder;
 
-    use super::super::format::LogFileFormat;
-    use super::super::pipe_builder::lock_dir;
-    use super::*;
-    use crate::env::{DefaultFileSystem, ObfuscatedFileSystem};
-    use crate::pipe_log::Version;
-    use crate::util::ReadableSize;
+    use super::{
+        super::{format::LogFileFormat, pipe_builder::lock_dir},
+        *,
+    };
+    use crate::{
+        env::{DefaultFileSystem, ObfuscatedFileSystem},
+        pipe_log::Version,
+        util::ReadableSize,
+    };
 
     fn new_test_pipe<F: FileSystem>(
         cfg: &Config,
@@ -616,8 +620,10 @@ mod tests {
         // Only one thread can hold file lock
         let r2 = new_test_pipes(&cfg);
 
-        assert!(format!("{}", r2.err().unwrap())
-            .contains("maybe another instance is using this directory"));
+        assert!(
+            format!("{}", r2.err().unwrap())
+                .contains("maybe another instance is using this directory")
+        );
     }
 
     #[test]

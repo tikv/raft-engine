@@ -1,10 +1,15 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::fmt::Debug;
-use std::io::BufRead;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::{mem, u64};
+use std::{
+    fmt::Debug,
+    io::BufRead,
+    mem,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    u64,
+};
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
@@ -12,12 +17,15 @@ use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use protobuf::Message;
 
-use crate::codec::{self, NumberEncoder};
-use crate::memtable::EntryIndex;
-use crate::metrics::StopWatch;
-use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext, ReactiveBytes};
-use crate::util::{crc32, lz4};
-use crate::{perf_context, Error, Result};
+use crate::{
+    codec::{self, NumberEncoder},
+    memtable::EntryIndex,
+    metrics::StopWatch,
+    perf_context,
+    pipe_log::{FileBlockHandle, FileId, LogFileContext, ReactiveBytes},
+    util::{crc32, lz4},
+    Error, Result,
+};
 
 pub(crate) const LOG_BATCH_HEADER_LEN: usize = 16;
 pub(crate) const LOG_BATCH_CHECKSUM_LEN: usize = 4;
@@ -152,8 +160,8 @@ impl Command {
 
     fn approximate_size(&self) -> usize {
         match &self {
-            Command::Clean => 1,              /* type */
-            Command::Compact { .. } => 1 + 8, /* type + index */
+            Command::Clean => 1,              // type
+            Command::Compact { .. } => 1 + 8, // type + index
         }
     }
 }
@@ -1109,12 +1117,15 @@ impl AtomicGroupBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::pipe_log::{LogQueue, Version};
-    use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
     use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
     use strum::IntoEnumIterator;
+
+    use super::*;
+    use crate::{
+        pipe_log::{LogQueue, Version},
+        test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt},
+    };
 
     fn decode_entries_from_bytes<M: MessageExt>(
         buf: &[u8],
@@ -1595,28 +1606,34 @@ mod tests {
 
         let mut copy = encoded.to_owned();
         copy.truncate(LOG_BATCH_HEADER_LEN - 1);
-        assert!(LogBatch::decode_header(&mut copy.as_slice())
-            .unwrap_err()
-            .to_string()
-            .contains("Log batch header too short"));
+        assert!(
+            LogBatch::decode_header(&mut copy.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("Log batch header too short")
+        );
 
         let mut copy = encoded.to_owned();
         (&mut copy[LOG_BATCH_HEADER_LEN - 8..LOG_BATCH_HEADER_LEN])
             .write_u64::<BigEndian>(encoded.len() as u64 + 1)
             .unwrap();
-        assert!(LogBatch::decode_header(&mut copy.as_slice())
-            .unwrap_err()
-            .to_string()
-            .contains("Log item offset exceeds log batch length"));
+        assert!(
+            LogBatch::decode_header(&mut copy.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("Log item offset exceeds log batch length")
+        );
 
         let mut copy = encoded.to_owned();
         (&mut copy[LOG_BATCH_HEADER_LEN - 8..LOG_BATCH_HEADER_LEN])
             .write_u64::<BigEndian>(LOG_BATCH_HEADER_LEN as u64 - 1)
             .unwrap();
-        assert!(LogBatch::decode_header(&mut copy.as_slice())
-            .unwrap_err()
-            .to_string()
-            .contains("Log item offset is smaller than log batch header length"));
+        assert!(
+            LogBatch::decode_header(&mut copy.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("Log item offset is smaller than log batch header length")
+        );
     }
 
     #[cfg(feature = "nightly")]
@@ -1687,7 +1704,7 @@ mod tests {
             let encoded = batch.encoded_bytes();
             assert_eq!(encoded.len(), len);
             let mut bytes_slice = encoded;
-            let (offset, _, _) = LogBatch::decode_header(&mut bytes_slice).unwrap();
+            let (offset, ..) = LogBatch::decode_header(&mut bytes_slice).unwrap();
             let expected =
                 verify_checksum_with_signature(&encoded[offset..], file_context.get_signature())
                     .unwrap();

@@ -66,6 +66,12 @@ jobs:
       - uses: Swatinem/rust-cache@v1
         with:
           sharedKey: ${{ matrix.os }}-stable
+      - name: Format
+        run: |
+          make format
+          git diff --exit-code
+        env:
+          WITH_STABLE_TOOLCHAIN: 'force'
       - name: Clippy
         run: make clippy
         env:

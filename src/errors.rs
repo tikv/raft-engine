@@ -1,7 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::error;
-use std::io::Error as IoError;
+use std::{error, io::Error as IoError};
 
 use thiserror::Error;
 

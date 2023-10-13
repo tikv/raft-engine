@@ -2,14 +2,18 @@
 
 //! Representations of objects in filesystem.
 
-use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::{
+    io::BufRead,
+    path::{Path, PathBuf},
+};
 
 use num_traits::{FromPrimitive, ToPrimitive};
 
-use crate::codec::{self, NumberEncoder};
-use crate::pipe_log::{FileId, FileSeq, LogQueue, Version};
-use crate::{Error, Result};
+use crate::{
+    codec::{self, NumberEncoder},
+    pipe_log::{FileId, FileSeq, LogQueue, Version},
+    Error, Result,
+};
 
 /// Width to format log sequence number.
 const LOG_SEQ_WIDTH: usize = 16;
@@ -210,8 +214,7 @@ impl LogFileFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipe_log::LogFileContext;
-    use crate::test_util::catch_unwind_silent;
+    use crate::{pipe_log::LogFileContext, test_util::catch_unwind_silent};
 
     #[test]
     fn test_check_paddings_is_valid() {

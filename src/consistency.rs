@@ -2,10 +2,12 @@
 
 use hashbrown::HashMap;
 
-use crate::file_pipe_log::ReplayMachine;
-use crate::log_batch::{LogItemBatch, LogItemContent};
-use crate::pipe_log::{FileId, LogQueue};
-use crate::Result;
+use crate::{
+    file_pipe_log::ReplayMachine,
+    log_batch::{LogItemBatch, LogItemContent},
+    pipe_log::{FileId, LogQueue},
+    Result,
+};
 
 /// A `ConsistencyChecker` scans for log entry holes in a log queue. It will
 /// return a list of corrupted raft groups along with their last valid log

@@ -2,11 +2,15 @@
 
 extern crate hdrhistogram;
 
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread::{sleep, Builder as ThreadBuilder, JoinHandle};
-use std::time::{Duration, Instant};
+use std::{
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread::{sleep, Builder as ThreadBuilder, JoinHandle},
+    time::{Duration, Instant},
+};
 
 use clap::{crate_authors, crate_version, Parser};
 use const_format::formatcp;
@@ -14,8 +18,10 @@ use hdrhistogram::Histogram;
 use num_traits::FromPrimitive;
 use parking_lot_core::SpinWait;
 use raft::eraftpb::Entry;
-use raft_engine::internals::{EventListener, FileBlockHandle};
-use raft_engine::{Command, Config, Engine, LogBatch, MessageExt, ReadableSize, Version};
+use raft_engine::{
+    internals::{EventListener, FileBlockHandle},
+    Command, Config, Engine, LogBatch, MessageExt, ReadableSize, Version,
+};
 use rand::{thread_rng, Rng, RngCore};
 
 type WriteBatch = LogBatch;

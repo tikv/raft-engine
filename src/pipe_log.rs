@@ -2,8 +2,10 @@
 
 //! A generic log storage.
 
-use std::cmp::Ordering;
-use std::fmt::{self, Display};
+use std::{
+    cmp::Ordering,
+    fmt::{self, Display},
+};
 
 use fail::fail_point;
 use num_derive::{FromPrimitive, ToPrimitive};
