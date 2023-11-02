@@ -95,8 +95,6 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
-# TODO: Use official grpc-rs once https://github.com/tikv/grpc-rs/pull/622 is merged.
-grpcio = { git = "https://github.com/tabokie/grpc-rs", branch = "v0.10.x-win" }
 
 [workspace]
 members = ["stress", "ctl"]

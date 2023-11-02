@@ -321,12 +321,7 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut writable_file) {
-                panic!(
-                    "error when rotate [{:?}:{}]: {e}",
-                    self.queue, writable_file.seq,
-                );
-            }
+            self.rotate_imp(&mut writable_file)?;
         }
 
         let seq = writable_file.seq;
@@ -372,12 +367,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // - [3] Both main-dir and spill-dir have several recycled logs.
                 // But as `bytes.len()` is always smaller than `target_file_size` in common
                 // cases, this issue will be ignored temprorarily.
-                if let Err(e) = self.rotate_imp(&mut writable_file) {
-                    panic!(
-                        "error when rotate [{:?}:{}]: {e}",
-                        self.queue, writable_file.seq
-                    );
-                }
+                self.rotate_imp(&mut writable_file)?;
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.
                 return Err(Error::TryAgain(format!(
