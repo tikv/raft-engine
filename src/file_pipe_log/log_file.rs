@@ -67,7 +67,7 @@ impl<F: FileSystem> LogFileWriter<F> {
     }
 
     fn write_header(&mut self, format: LogFileFormat) -> IoResult<()> {
-        self.writer.seek(SeekFrom::Start(0))?;
+        self.writer.rewind()?;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileFormat::encoded_len(format.version));
         format.encode(&mut buf).unwrap();
