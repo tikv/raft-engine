@@ -12,7 +12,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::config::Config;
 use crate::env::{FileSystem, Permission};
-use crate::errors::is_no_space_err;
+use crate::errors::{is_io_no_space_err, is_no_space_err};
 use crate::event_listener::EventListener;
 use crate::metrics::*;
 use crate::pipe_log::{
@@ -323,12 +323,12 @@ impl<F: FileSystem> SinglePipe<F> {
         if writable_file.writer.offset() >= self.target_file_size {
             if let Err(e) = self.rotate_imp(&mut writable_file) {
                 // As the disk is already full and is no valid and extra directory to flush data, it can safely return the `no space err` to users.
-                if is_no_space_err(&e) && self.paths.len() == 1 {
+                if is_io_no_space_err(&e) {
                     return Err(e);
                 }
                 panic!(
-                        "error when rotate [{:?}:{}]: {e}",
-                        self.queue, writable_file.seq,
+                    "error when rotate [{:?}:{}]: {e}",
+                    self.queue, writable_file.seq,
                 );
             }
         }
@@ -376,8 +376,10 @@ impl<F: FileSystem> SinglePipe<F> {
                 // - [3] Both main-dir and spill-dir have several recycled logs.
                 // But as `bytes.len()` is always smaller than `target_file_size` in common
                 // cases, this issue will be ignored temprorarily.
-                if let Err(e) = self.rotate_imp(&mut writable_file) && is_no_space_err(&e) {
-                    return Err(e);
+                if let Err(e) = self.rotate_imp(&mut writable_file) {
+                    if is_io_no_space_err(&e) {
+                        return Err(e);
+                    }
                 }
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.

@@ -535,12 +535,9 @@ fn test_no_space_write_error() {
             };
             let engine = Engine::open(cfg_err).unwrap();
             let _f = FailGuard::new("log_fd::write::no_space_err", "return");
-            assert!(catch_unwind_silent(|| {
-                engine
-                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                    .unwrap_err();
-            })
-            .is_err());
+            assert!(engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .is_err());
             assert_eq!(
                 0,
                 engine
@@ -554,12 +551,9 @@ fn test_no_space_write_error() {
             let _f1 = FailGuard::new("log_fd::write::no_space_err", "2*return->off");
             let _f2 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
             // The first write should fail, because all dirs run out of space for writing.
-            assert!(catch_unwind_silent(|| {
-                engine
-                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                    .unwrap_err();
-            })
-            .is_err());
+            assert!(engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .is_err());
             assert_eq!(
                 0,
                 engine
