@@ -321,7 +321,16 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            self.rotate_imp(&mut writable_file)?;
+            if let Err(e) = self.rotate_imp(&mut writable_file) {
+                // As the disk is already full and is no valid and extra directory to flush data, it can safely return the `no space err` to users.
+                if is_no_space_err(&e) && self.paths.len() == 1 {
+                    return Err(e);
+                }
+                panic!(
+                        "error when rotate [{:?}:{}]: {e}",
+                        self.queue, writable_file.seq,
+                );
+            }
         }
 
         let seq = writable_file.seq;
