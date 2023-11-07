@@ -376,7 +376,9 @@ impl<F: FileSystem> SinglePipe<F> {
                 // - [3] Both main-dir and spill-dir have several recycled logs.
                 // But as `bytes.len()` is always smaller than `target_file_size` in common
                 // cases, this issue will be ignored temprorarily.
-                self.rotate_imp(&mut writable_file)?;
+                if let Err(e) = self.rotate_imp(&mut writable_file) && is_no_space_err(&e) {
+                    return Err(e);
+                }
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.
                 return Err(Error::TryAgain(format!(
