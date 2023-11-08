@@ -137,7 +137,7 @@ where
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
-            self.pipe_log.rotate(LogQueue::Append).unwrap();
+            self.pipe_log.rotate(LogQueue::Append);
         }
         self.rewrite_append_queue_tombstones().unwrap();
         if exit_after_step == Some(1) {
@@ -167,13 +167,13 @@ where
 
     pub fn must_purge_all_stale(&self) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
-        self.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        self.pipe_log.rotate(LogQueue::Rewrite);
         self.rescan_memtables_and_purge_stale_files(
             LogQueue::Rewrite,
             self.pipe_log.file_span(LogQueue::Rewrite).1,
         )
         .unwrap();
-        self.pipe_log.rotate(LogQueue::Append).unwrap();
+        self.pipe_log.rotate(LogQueue::Append);
         self.rescan_memtables_and_purge_stale_files(
             LogQueue::Append,
             self.pipe_log.file_span(LogQueue::Append).1,
@@ -273,7 +273,7 @@ where
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
-        self.pipe_log.rotate(LogQueue::Rewrite)?;
+        self.pipe_log.rotate(LogQueue::Rewrite);
 
         let mut force_compact_regions = vec![];
         let memtables = self.memtables.collect(|t| {
@@ -430,7 +430,7 @@ where
     ) -> Result<Option<FileBlockHandle>> {
         if log_batch.is_empty() {
             debug_assert!(sync);
-            self.pipe_log.sync(LogQueue::Rewrite)?;
+            self.pipe_log.sync(LogQueue::Rewrite);
             return Ok(None);
         }
         log_batch.finish_populate(
@@ -439,7 +439,7 @@ where
         )?;
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         if sync {
-            self.pipe_log.sync(LogQueue::Rewrite)?
+            self.pipe_log.sync(LogQueue::Rewrite);
         }
         log_batch.finish_write(file_handle);
         self.memtables.apply_rewrite_writes(

@@ -179,7 +179,7 @@ pub trait PipeLog: Sized {
     ///
     /// This operation might incurs a great latency overhead. It's advised to
     /// call it once every batch of writes.
-    fn sync(&self, queue: LogQueue) -> Result<()>;
+    fn sync(&self, queue: LogQueue);
 
     /// Returns the smallest and largest file sequence number, still in use,
     /// of the specified log queue.
@@ -200,7 +200,7 @@ pub trait PipeLog: Sized {
     ///
     /// Implementation should be atomic under error conditions but not
     /// necessarily panic-safe.
-    fn rotate(&self, queue: LogQueue) -> Result<()>;
+    fn rotate(&self, queue: LogQueue);
 
     /// Deletes all log files smaller than the specified file ID. The scope is
     /// limited to the log queue of `file_id`.

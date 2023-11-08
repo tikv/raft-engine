@@ -231,7 +231,7 @@ pub mod debug {
                         len,
                     });
                 }
-                writer.close().unwrap();
+                writer.close();
                 // Read and verify.
                 let mut reader =
                     LogItemReader::new_file_reader(file_system.clone(), &file_path).unwrap();
@@ -280,7 +280,7 @@ pub mod debug {
                 true, /* create */
             )
             .unwrap();
-            writer.close().unwrap();
+            writer.close();
 
             assert!(LogItemReader::new_file_reader(file_system.clone(), dir.path()).is_err());
             assert!(
@@ -330,7 +330,7 @@ pub mod debug {
                         .unwrap();
                         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
                         let len = writer.offset();
-                        writer.close().unwrap();
+                        writer.close();
                         if shorter {
                             f.set_len(len as u64 - 1).unwrap();
                         }
@@ -341,7 +341,7 @@ pub mod debug {
                             false, /* create */
                         )
                         .unwrap();
-                        writer.close().unwrap();
+                        writer.close();
                         let mut reader = build_file_reader(file_system.as_ref(), &path).unwrap();
                         assert_eq!(reader.parse_format().unwrap(), to);
                         std::fs::remove_file(&path).unwrap();

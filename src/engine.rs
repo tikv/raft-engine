@@ -172,9 +172,9 @@ where
                 }
                 perf_context!(log_write_duration).observe_since(now);
                 if sync {
-                    // As per trait protocol, this error should be retriable. But we panic anyway to
+                    // As per trait protocol, sync error should be retriable. But we panic anyway to
                     // save the trouble of propagating it to other group members.
-                    self.pipe_log.sync(LogQueue::Append).expect("pipe::sync()");
+                    self.pipe_log.sync(LogQueue::Append);
                 }
                 // Pass the perf context diff to all the writers.
                 let diff = get_perf_context();
@@ -2446,7 +2446,7 @@ pub(crate) mod tests {
             builder.begin(&mut log_batch);
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
         {
             // begin - unrelated - end.
@@ -2466,7 +2466,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
         {
             // begin - middle - middle - end.
@@ -2491,7 +2491,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
         {
             // begin - begin - end.
@@ -2511,7 +2511,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
         {
             // end - middle - end.
@@ -2533,7 +2533,7 @@ pub(crate) mod tests {
             rid += 1;
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
         {
             // end - begin - end
@@ -2554,7 +2554,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
         {
             // begin - end - begin - end.
@@ -2574,9 +2574,9 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+            engine.pipe_log.rotate(LogQueue::Rewrite);
         }
-        engine.pipe_log.sync(LogQueue::Rewrite).unwrap();
+        engine.pipe_log.sync(LogQueue::Rewrite);
 
         let engine = engine.reopen();
         for rid in engine.raft_groups() {

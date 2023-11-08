@@ -39,10 +39,3 @@ pub(crate) fn is_no_space_err(e: &IoError) -> bool {
     // `ErrorKind::StorageFull` is stable.
     format!("{e}").contains("nospace")
 }
-
-/// Check whether the given error is a nospace error.
-pub(crate) fn is_io_no_space_err(e: &Error) -> bool {
-    // TODO: make the following judgement more elegant when the error type
-    // `ErrorKind::StorageFull` is stable.
-    format!("{e}").contains("nospace")
-}
