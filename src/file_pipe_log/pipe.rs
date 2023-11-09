@@ -250,8 +250,7 @@ impl<F: FileSystem> SinglePipe<F> {
 
         let (path_id, handle) = self
             .recycle_file(new_seq)
-            .unwrap_or_else(|| self.new_file(new_seq))
-            .unwrap();
+            .unwrap_or_else(|| self.new_file(new_seq))?;
         let f = File::<F> {
             seq: new_seq,
             handle: handle.into(),
@@ -272,7 +271,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync();
-        self.sync_dir(path_id).unwrap();
+        self.sync_dir(path_id)?;
 
         **writable_file = new_file;
         let len = {

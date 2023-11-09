@@ -32,7 +32,7 @@ pub(super) fn build_file_writer<F: FileSystem>(
     force_reset: bool,
 ) -> Result<LogFileWriter<F>> {
     let writer = system.new_writer(handle.clone())?;
-    Ok(LogFileWriter::open(handle, writer, format, force_reset).unwrap())
+    LogFileWriter::open(handle, writer, format, force_reset)
 }
 
 /// Append-only writer for log file. It also handles the file header write.
