@@ -2446,7 +2446,7 @@ pub(crate) mod tests {
             builder.begin(&mut log_batch);
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             // begin - unrelated - end.
@@ -2466,7 +2466,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             // begin - middle - middle - end.
@@ -2491,7 +2491,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             // begin - begin - end.
@@ -2511,7 +2511,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             // end - middle - end.
@@ -2533,7 +2533,7 @@ pub(crate) mod tests {
             rid += 1;
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             // end - begin - end
@@ -2554,7 +2554,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         {
             // begin - end - begin - end.
@@ -2574,7 +2574,7 @@ pub(crate) mod tests {
             log_batch.put(rid, key.clone(), value.clone()).unwrap();
             data.insert(rid);
             flush(&mut log_batch);
-            engine.pipe_log.rotate(LogQueue::Rewrite);
+            engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
         engine.pipe_log.sync(LogQueue::Rewrite);
 

@@ -137,7 +137,7 @@ where
         let (_, last) = self.pipe_log.file_span(LogQueue::Append);
         let watermark = watermark.map_or(last, |w| std::cmp::min(w, last));
         if watermark == last {
-            self.pipe_log.rotate(LogQueue::Append);
+            self.pipe_log.rotate(LogQueue::Append).unwrap();
         }
         self.rewrite_append_queue_tombstones().unwrap();
         if exit_after_step == Some(1) {
@@ -167,13 +167,13 @@ where
 
     pub fn must_purge_all_stale(&self) {
         let _lk = self.force_rewrite_candidates.try_lock().unwrap();
-        self.pipe_log.rotate(LogQueue::Rewrite);
+        self.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         self.rescan_memtables_and_purge_stale_files(
             LogQueue::Rewrite,
             self.pipe_log.file_span(LogQueue::Rewrite).1,
         )
         .unwrap();
-        self.pipe_log.rotate(LogQueue::Append);
+        self.pipe_log.rotate(LogQueue::Append).unwrap();
         self.rescan_memtables_and_purge_stale_files(
             LogQueue::Append,
             self.pipe_log.file_span(LogQueue::Append).1,
@@ -273,7 +273,7 @@ where
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
-        self.pipe_log.rotate(LogQueue::Rewrite);
+        self.pipe_log.rotate(LogQueue::Rewrite).unwrap();
 
         let mut force_compact_regions = vec![];
         let memtables = self.memtables.collect(|t| {

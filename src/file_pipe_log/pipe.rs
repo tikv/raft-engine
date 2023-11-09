@@ -238,7 +238,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// Creates a new file for write, and rotates the active log file.
     ///
     /// This operation is atomic in face of errors.
-    fn rotate_imp(&self, writable_file: &mut MutexGuard<WritableFile<F>>) {
+    fn rotate_imp(&self, writable_file: &mut MutexGuard<WritableFile<F>>) -> Result<()> {
         let _t = StopWatch::new((
             &*LOG_ROTATE_DURATION_HISTOGRAM,
             perf_context!(log_rotate_duration),
@@ -266,8 +266,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 f.handle.clone(),
                 f.format,
                 true, /* force_reset */
-            )
-            .unwrap(),
+            )?,
             format: f.format,
         };
         // File header must be persisted. This way we can recover gracefully if power
@@ -288,6 +287,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 seq: new_seq,
             });
         }
+        Ok(())
     }
 
     /// Synchronizes current states to related metrics.
@@ -320,7 +320,7 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            self.rotate_imp(&mut writable_file);
+            self.rotate_imp(&mut writable_file)?;
         }
 
         let seq = writable_file.seq;
@@ -364,7 +364,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // - [3] Both main-dir and spill-dir have several recycled logs.
                 // But as `bytes.len()` is always smaller than `target_file_size` in common
                 // cases, this issue will be ignored temprorarily.
-                self.rotate_imp(&mut writable_file);
+                self.rotate_imp(&mut writable_file)?;
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.
                 return Err(Error::TryAgain(format!(
@@ -405,8 +405,8 @@ impl<F: FileSystem> SinglePipe<F> {
         (last_seq - first_seq + 1) as usize * self.target_file_size
     }
 
-    fn rotate(&self) {
-        self.rotate_imp(&mut self.writable_file.lock());
+    fn rotate(&self) -> Result<()> {
+        self.rotate_imp(&mut self.writable_file.lock())
     }
 
     fn purge_to(&self, file_seq: FileSeq) -> Result<usize> {
@@ -515,8 +515,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn rotate(&self, queue: LogQueue) {
-        self.pipes[queue as usize].rotate();
+    fn rotate(&self, queue: LogQueue) -> Result<()> {
+        self.pipes[queue as usize].rotate()
     }
 
     #[inline]
@@ -628,7 +628,7 @@ mod tests {
         assert_eq!(file_handle.offset, header_size);
         assert_eq!(pipe_log.file_span(queue).1, 2);
 
-        pipe_log.rotate(queue);
+        pipe_log.rotate(queue).unwrap();
 
         // purge file 1
         assert_eq!(pipe_log.purge_to(FileId { queue, seq: 2 }).unwrap(), 1);
@@ -698,7 +698,7 @@ mod tests {
             handles.push(pipe_log.append(&mut &content(i)).unwrap());
             pipe_log.sync();
         }
-        pipe_log.rotate();
+        pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
         // Cannot purge already expired logs or not existsed logs.
         assert!(pipe_log.purge_to(first - 1).is_err());
