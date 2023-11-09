@@ -174,10 +174,9 @@ fn test_file_rotate_error() {
     {
         // Fail to write header of new log file.
         let _f = FailGuard::new("log_file::write::err", "1*off->return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
+        assert!(engine
+            .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
+            .is_err());
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
     {
