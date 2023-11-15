@@ -74,19 +74,21 @@ impl<F: FileSystem> LogFileWriter<F> {
         self.write(&buf, 0)
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self) -> Result<()> {
         // Necessary to truncate extra zeros from fallocate().
-        self.truncate();
+        self.truncate()?;
         self.sync();
+        Ok(())
     }
 
-    pub fn truncate(&mut self) {
+    pub fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
             fail_point!("file_pipe_log::log_file_writer::skip_truncate", |_| {});
             // Panic if truncate fails, in case of data loss.
-            self.writer.truncate(self.written).unwrap();
+            self.writer.truncate(self.written)?;
             self.capacity = self.written;
         }
+        Ok(())
     }
 
     pub fn write(&mut self, buf: &[u8], target_size_hint: usize) -> IoResult<()> {

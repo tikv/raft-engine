@@ -72,7 +72,7 @@ pub(super) struct SinglePipe<F: FileSystem> {
 impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut writable_file = self.writable_file.lock();
-        writable_file.writer.close();
+        writable_file.writer.close().unwrap();
         let mut recycled_files = self.recycled_files.write();
         let mut next_reserved_seq = recycled_files
             .iter()
@@ -246,7 +246,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let new_seq = writable_file.seq + 1;
         debug_assert!(new_seq > DEFAULT_FIRST_FILE_SEQ);
 
-        writable_file.writer.close();
+        writable_file.writer.close().unwrap();
 
         let (path_id, handle) = self
             .recycle_file(new_seq)
@@ -352,7 +352,7 @@ impl<F: FileSystem> SinglePipe<F> {
         }
         let start_offset = writer.offset();
         if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
-            writer.truncate();
+            writer.truncate()?;
             if is_no_space_err(&e) {
                 // TODO: There exists several corner cases should be tackled if
                 // `bytes.len()` > `target_file_size`. For example,
