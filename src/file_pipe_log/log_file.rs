@@ -83,7 +83,9 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     pub fn truncate(&mut self) -> Result<()> {
         if self.written < self.capacity {
-            fail_point!("file_pipe_log::log_file_writer::skip_truncate", |_| {});
+            fail_point!("file_pipe_log::log_file_writer::skip_truncate", |_| {
+                Ok(())
+            });
             // Panic if truncate fails, in case of data loss.
             self.writer.truncate(self.written)?;
             self.capacity = self.written;
