@@ -260,10 +260,8 @@ fn test_concurrent_write_error() {
         let _f2 = FailGuard::new("log_file::truncate::err", "return");
         let entry_clone = entry.clone();
         ctx.write_ext(move |e| {
-            catch_unwind_silent(|| {
-                e.write(&mut generate_batch(1, 11, 21, Some(&entry_clone)), false)
-            })
-            .unwrap_err();
+            e.write(&mut generate_batch(1, 11, 21, Some(&entry_clone)), false)
+                .unwrap_err();
         });
         // We don't test followers, their panics are hard to catch.
         ctx.join();
