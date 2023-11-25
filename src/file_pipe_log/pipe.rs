@@ -273,7 +273,8 @@ impl<F: FileSystem> SinglePipe<F> {
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync();
-        // Panic if sync calls fail, keep consistent with the behavior of `LogFileWriter::sync()`.
+        // Panic if sync calls fail, keep consistent with the behavior of
+        // `LogFileWriter::sync()`.
         self.sync_dir(path_id).unwrap();
 
         **writable_file = new_file;
