@@ -72,7 +72,9 @@ pub(super) struct SinglePipe<F: FileSystem> {
 impl<F: FileSystem> Drop for SinglePipe<F> {
     fn drop(&mut self) {
         let mut writable_file = self.writable_file.lock();
-        writable_file.writer.close().unwrap();
+        if let Err(e) = writable_file.writer.close() {
+            error!("error while closing the active writer: {e}");
+        }
         let mut recycled_files = self.recycled_files.write();
         let mut next_reserved_seq = recycled_files
             .iter()
@@ -271,7 +273,8 @@ impl<F: FileSystem> SinglePipe<F> {
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync();
-        self.sync_dir(path_id)?;
+        // Panic if sync calls fail, keep consistent with the behavior of `LogFileWriter::sync()`.
+        self.sync_dir(path_id).unwrap();
 
         **writable_file = new_file;
         let len = {
