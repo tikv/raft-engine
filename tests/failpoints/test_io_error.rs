@@ -170,6 +170,7 @@ fn test_file_rotate_error() {
             .is_err());
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
+    let num_files_before = std::fs::read_dir(&dir).unwrap().count();
     {
         // Fail to write header of new log file.
         let _f = FailGuard::new("log_file::write::err", "1*off->return");
@@ -177,6 +178,11 @@ fn test_file_rotate_error() {
             .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
             .is_err());
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        // Although the header is not written, the file is still created.
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+            1
+        );
     }
     {
         // Fail to sync new log file. The old log file is already sync-ed at this point.
@@ -186,14 +192,30 @@ fn test_file_rotate_error() {
         })
         .is_err());
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        // The file was created but without any content (header) should be
+        // recycled. And a new file should be created.
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+            1
+        );
     }
-
+    drop(engine);
+    let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+    // Only one log file should be created after all the incidents.
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+        1
+    );
     // We can continue writing after the incidents.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
     drop(engine);
     let engine = Engine::open_with_file_system(cfg, fs).unwrap();
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+        1
+    );
     assert_eq!(engine.first_index(1).unwrap(), 1);
     assert_eq!(engine.last_index(1).unwrap(), 4);
     assert_eq!(engine.first_index(2).unwrap(), 1);

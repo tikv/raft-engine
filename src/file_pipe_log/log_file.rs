@@ -121,7 +121,7 @@ impl<F: FileSystem> LogFileWriter<F> {
         let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
         // Panic if sync fails, in case of data loss.
         self.handle.sync().unwrap();
-        IoResult::Ok(())
+        Ok(())
     }
 
     #[inline]
