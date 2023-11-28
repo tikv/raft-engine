@@ -395,7 +395,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let mut writable_file = self.writable_file.lock();
         let writer = &mut writable_file.writer;
         let _t = StopWatch::new(perf_context!(log_sync_duration));
-        writer.sync().map_err(|e| Error::Io(e))?;
+        writer.sync().map_err(Error::Io)?;
         Ok(())
     }
 
