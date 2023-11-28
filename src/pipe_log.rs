@@ -179,7 +179,7 @@ pub trait PipeLog: Sized {
     ///
     /// This operation might incurs a great latency overhead. It's advised to
     /// call it once every batch of writes.
-    fn sync(&self, queue: LogQueue);
+    fn sync(&self, queue: LogQueue) -> Result<()>;
 
     /// Returns the smallest and largest file sequence number, still in use,
     /// of the specified log queue.

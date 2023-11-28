@@ -430,7 +430,7 @@ where
     ) -> Result<Option<FileBlockHandle>> {
         if log_batch.is_empty() {
             debug_assert!(sync);
-            self.pipe_log.sync(LogQueue::Rewrite);
+            self.pipe_log.sync(LogQueue::Rewrite)?;
             return Ok(None);
         }
         log_batch.finish_populate(
@@ -439,7 +439,7 @@ where
         )?;
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         if sync {
-            self.pipe_log.sync(LogQueue::Rewrite);
+            self.pipe_log.sync(LogQueue::Rewrite)?;
         }
         log_batch.finish_write(file_handle);
         self.memtables.apply_rewrite_writes(

@@ -272,7 +272,7 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
-        new_file.writer.sync();
+        new_file.writer.sync()?;
         // Panic if sync calls fail, keep consistent with the behavior of
         // `LogFileWriter::sync()`.
         self.sync_dir(path_id).unwrap();
@@ -391,11 +391,14 @@ impl<F: FileSystem> SinglePipe<F> {
         Ok(handle)
     }
 
-    fn sync(&self) {
+    fn sync(&self) -> Result<()> {
         let mut writable_file = self.writable_file.lock();
         let writer = &mut writable_file.writer;
         let _t = StopWatch::new(perf_context!(log_sync_duration));
-        writer.sync();
+        if let Err(e) = writer.sync() {
+            return Err(Error::Io(e));
+        }
+        Ok(())
     }
 
     fn file_span(&self) -> (FileSeq, FileSeq) {
@@ -503,8 +506,8 @@ impl<F: FileSystem> PipeLog for DualPipes<F> {
     }
 
     #[inline]
-    fn sync(&self, queue: LogQueue) {
-        self.pipes[queue as usize].sync();
+    fn sync(&self, queue: LogQueue) -> Result<()> {
+        self.pipes[queue as usize].sync()
     }
 
     #[inline]
@@ -699,7 +702,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             handles.push(pipe_log.append(&mut &content(i)).unwrap());
-            pipe_log.sync();
+            pipe_log.sync().unwrap();
         }
         pipe_log.rotate().unwrap();
         let (first, last) = pipe_log.file_span();
@@ -716,7 +719,7 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             handles.push(pipe_log.append(&mut &content(i + 1)).unwrap());
-            pipe_log.sync();
+            pipe_log.sync().unwrap();
         }
         // Verify the data.
         for (i, handle) in handles.into_iter().enumerate() {

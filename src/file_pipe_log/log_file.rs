@@ -77,8 +77,7 @@ impl<F: FileSystem> LogFileWriter<F> {
     pub fn close(&mut self) -> IoResult<()> {
         // Necessary to truncate extra zeros from fallocate().
         self.truncate()?;
-        self.sync();
-        Ok(())
+        self.sync()
     }
 
     pub fn truncate(&mut self) -> IoResult<()> {
@@ -118,10 +117,11 @@ impl<F: FileSystem> LogFileWriter<F> {
         Ok(())
     }
 
-    pub fn sync(&mut self) {
+    pub fn sync(&mut self) -> IoResult<()> {
         let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
         // Panic if sync fails, in case of data loss.
         self.handle.sync().unwrap();
+        IoResult::Ok(())
     }
 
     #[inline]

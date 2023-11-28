@@ -174,7 +174,7 @@ where
                 if sync {
                     // As per trait protocol, sync error should be retriable. But we panic anyway to
                     // save the trouble of propagating it to other group members.
-                    self.pipe_log.sync(LogQueue::Append);
+                    self.pipe_log.sync(LogQueue::Append).expect("pipe::sync()");
                 }
                 // Pass the perf context diff to all the writers.
                 let diff = get_perf_context();
@@ -2576,7 +2576,7 @@ pub(crate) mod tests {
             flush(&mut log_batch);
             engine.pipe_log.rotate(LogQueue::Rewrite).unwrap();
         }
-        engine.pipe_log.sync(LogQueue::Rewrite);
+        engine.pipe_log.sync(LogQueue::Rewrite).unwrap();
 
         let engine = engine.reopen();
         for rid in engine.raft_groups() {
