@@ -333,7 +333,7 @@ impl RhaiFilterMachine {
                     )?;
                     log_batch.drain();
                 }
-                writer.close().unwrap();
+                writer.close()?;
             }
         }
         // Delete backup file and defuse the guard.

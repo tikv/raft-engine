@@ -273,7 +273,7 @@ where
     // Rewrites the entire rewrite queue into new log files.
     fn rewrite_rewrite_queue(&self) -> Result<Vec<u64>> {
         let _t = StopWatch::new(&*ENGINE_REWRITE_REWRITE_DURATION_HISTOGRAM);
-        self.pipe_log.rotate(LogQueue::Rewrite).unwrap();
+        self.pipe_log.rotate(LogQueue::Rewrite)?;
 
         let mut force_compact_regions = vec![];
         let memtables = self.memtables.collect(|t| {

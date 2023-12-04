@@ -43,6 +43,8 @@ pub struct LogFileWriter<F: FileSystem> {
     capacity: usize,
 }
 
+// All APIs provided by `LogFileWriter` are fail-safe, i.e. caller can continue
+// using the same "writer" even if the previous operation failed.
 impl<F: FileSystem> LogFileWriter<F> {
     fn open(
         handle: Arc<F::Handle>,

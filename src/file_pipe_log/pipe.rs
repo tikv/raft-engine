@@ -177,8 +177,13 @@ impl<F: FileSystem> SinglePipe<F> {
 
         // Skip syncing directory in Windows. Refer to badger's discussion for more
         // detail: https://github.com/dgraph-io/badger/issues/699
+        //
+        // Panic if sync calls fail, keep consistent with the behavior of
+        // `LogFileWriter::sync()`.
         #[cfg(not(windows))]
-        std::fs::File::open(PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
+        std::fs::File::open(PathBuf::from(&self.paths[path_id]))
+            .and_then(|d| d.sync_all())
+            .unwrap();
         Ok(())
     }
 
@@ -248,7 +253,7 @@ impl<F: FileSystem> SinglePipe<F> {
         let new_seq = writable_file.seq + 1;
         debug_assert!(new_seq > DEFAULT_FIRST_FILE_SEQ);
 
-        writable_file.writer.close().unwrap();
+        writable_file.writer.close()?;
 
         let (path_id, handle) = self
             .recycle_file(new_seq)
@@ -273,9 +278,7 @@ impl<F: FileSystem> SinglePipe<F> {
         // File header must be persisted. This way we can recover gracefully if power
         // loss before a new entry is written.
         new_file.writer.sync()?;
-        // Panic if sync calls fail, keep consistent with the behavior of
-        // `LogFileWriter::sync()`.
-        self.sync_dir(path_id).unwrap();
+        self.sync_dir(path_id)?;
 
         **writable_file = new_file;
         let len = {
