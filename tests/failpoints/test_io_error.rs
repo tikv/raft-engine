@@ -137,64 +137,60 @@ fn test_file_rotate_error(restart_after_failure: bool) {
     let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
 
-    let mut engine = Some(Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap());
-    let mut engine_ref = engine.as_ref().unwrap();
-    engine_ref
+    let mut engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+    engine
         .write(&mut generate_batch(1, 1, 2, Some(&entry)), false)
         .unwrap();
-    engine_ref
+    engine
         .write(&mut generate_batch(1, 2, 3, Some(&entry)), false)
         .unwrap();
-    engine_ref
+    engine
         .write(&mut generate_batch(1, 3, 4, Some(&entry)), false)
         .unwrap();
-    engine_ref
+    engine
         .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
         .unwrap();
-    assert_eq!(engine_ref.file_span(LogQueue::Append).1, 1);
+    assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     // The next write will be followed by a rotate.
     {
         // Fail to sync old log file.
         let _f = FailGuard::new("log_fd::sync::err", "return");
         assert!(catch_unwind_silent(|| {
-            let _ = engine_ref.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
     }
     if restart_after_failure {
-        engine = None;
-        engine = Some(Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap());
-        engine_ref = engine.as_ref().unwrap();
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     }
-    assert_eq!(engine_ref.file_span(LogQueue::Append).1, 1);
+    assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     {
         // Fail to create new log file.
         let _f = FailGuard::new("default_fs::create::err", "return");
-        assert!(engine_ref
+        assert!(engine
             .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
             .is_err());
     }
     if restart_after_failure {
-        engine = None;
-        engine = Some(Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap());
-        engine_ref = engine.as_ref().unwrap();
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     }
     let num_files_before = std::fs::read_dir(&dir).unwrap().count();
     {
         // Fail to write header of new log file.
         let _f = FailGuard::new("log_file::write::err", "1*off->return");
-        assert!(engine_ref
+        assert!(engine
             .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
             .is_err());
     }
     if restart_after_failure {
-        engine = None;
-        engine = Some(Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap());
-        engine_ref = engine.as_ref().unwrap();
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         // The new log file is added during recovery phase of restart.
-        assert_eq!(engine_ref.file_span(LogQueue::Append).1, 2);
+        assert_eq!(engine.file_span(LogQueue::Append).1, 2);
     } else {
-        assert_eq!(engine_ref.file_span(LogQueue::Append).1, 1);
+        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
     // Although the header is not written, the file is still created.
     assert_eq!(
@@ -206,10 +202,10 @@ fn test_file_rotate_error(restart_after_failure: bool) {
         // Fail to sync new log file. The old log file is already sync-ed at this point.
         let _f = FailGuard::new("log_fd::sync::err", "return");
         assert!(catch_unwind_silent(|| {
-            let _ = engine_ref.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
-        assert_eq!(engine_ref.file_span(LogQueue::Append).1, 1);
+        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
 
     // Only one log file should be created after all the incidents.
@@ -218,22 +214,21 @@ fn test_file_rotate_error(restart_after_failure: bool) {
         1
     );
     // We can continue writing after the incidents.
-    engine_ref
+    engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
     if restart_after_failure {
-        engine = None;
-        engine = Some(Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap());
-        engine_ref = engine.as_ref().unwrap();
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     }
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count() - num_files_before,
         1
     );
-    assert_eq!(engine_ref.first_index(1).unwrap(), 1);
-    assert_eq!(engine_ref.last_index(1).unwrap(), 4);
-    assert_eq!(engine_ref.first_index(2).unwrap(), 1);
-    assert_eq!(engine_ref.last_index(2).unwrap(), 1);
+    assert_eq!(engine.first_index(1).unwrap(), 1);
+    assert_eq!(engine.last_index(1).unwrap(), 4);
+    assert_eq!(engine.first_index(2).unwrap(), 1);
+    assert_eq!(engine.last_index(2).unwrap(), 1);
 }
 
 #[test]
