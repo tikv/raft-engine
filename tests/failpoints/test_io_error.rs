@@ -219,7 +219,7 @@ fn test_file_rotate_error(restart_after_failure: bool) {
         .unwrap();
     if restart_after_failure {
         drop(engine);
-        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        engine = Engine::open_with_file_system(cfg, fs).unwrap();
     }
     assert_eq!(
         std::fs::read_dir(&dir).unwrap().count() - num_files_before,
