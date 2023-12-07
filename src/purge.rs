@@ -439,7 +439,7 @@ where
         )?;
         let file_handle = self.pipe_log.append(LogQueue::Rewrite, log_batch)?;
         if sync {
-            self.pipe_log.sync(LogQueue::Rewrite)?
+            self.pipe_log.sync(LogQueue::Rewrite)?;
         }
         log_batch.finish_write(file_handle);
         self.memtables.apply_rewrite_writes(

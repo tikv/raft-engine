@@ -177,8 +177,13 @@ impl<F: FileSystem> SinglePipe<F> {
 
         // Skip syncing directory in Windows. Refer to badger's discussion for more
         // detail: https://github.com/dgraph-io/badger/issues/699
+        //
+        // Panic if sync calls fail, keep consistent with the behavior of
+        // `LogFileWriter::sync()`.
         #[cfg(not(windows))]
-        std::fs::File::open(PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
+        std::fs::File::open(PathBuf::from(&self.paths[path_id]))
+            .and_then(|d| d.sync_all())
+            .unwrap();
         Ok(())
     }
 
@@ -321,12 +326,7 @@ impl<F: FileSystem> SinglePipe<F> {
         fail_point!("file_pipe_log::append");
         let mut writable_file = self.writable_file.lock();
         if writable_file.writer.offset() >= self.target_file_size {
-            if let Err(e) = self.rotate_imp(&mut writable_file) {
-                panic!(
-                    "error when rotate [{:?}:{}]: {e}",
-                    self.queue, writable_file.seq,
-                );
-            }
+            self.rotate_imp(&mut writable_file)?;
         }
 
         let seq = writable_file.seq;
@@ -359,9 +359,7 @@ impl<F: FileSystem> SinglePipe<F> {
         }
         let start_offset = writer.offset();
         if let Err(e) = writer.write(bytes.as_bytes(&ctx), self.target_file_size) {
-            if let Err(te) = writer.truncate() {
-                panic!("error when truncate {seq} after error: {e}, get: {}", te);
-            }
+            writer.truncate()?;
             if is_no_space_err(&e) {
                 // TODO: There exists several corner cases should be tackled if
                 // `bytes.len()` > `target_file_size`. For example,
@@ -372,12 +370,7 @@ impl<F: FileSystem> SinglePipe<F> {
                 // - [3] Both main-dir and spill-dir have several recycled logs.
                 // But as `bytes.len()` is always smaller than `target_file_size` in common
                 // cases, this issue will be ignored temprorarily.
-                if let Err(e) = self.rotate_imp(&mut writable_file) {
-                    panic!(
-                        "error when rotate [{:?}:{}]: {e}",
-                        self.queue, writable_file.seq
-                    );
-                }
+                self.rotate_imp(&mut writable_file)?;
                 // If there still exists free space for this record, rotate the file
                 // and return a special TryAgain Err (for retry) to the caller.
                 return Err(Error::TryAgain(format!(
@@ -403,15 +396,9 @@ impl<F: FileSystem> SinglePipe<F> {
 
     fn sync(&self) -> Result<()> {
         let mut writable_file = self.writable_file.lock();
-        let seq = writable_file.seq;
         let writer = &mut writable_file.writer;
-        {
-            let _t = StopWatch::new(perf_context!(log_sync_duration));
-            if let Err(e) = writer.sync() {
-                panic!("error when sync [{:?}:{seq}]: {e}", self.queue);
-            }
-        }
-
+        let _t = StopWatch::new(perf_context!(log_sync_duration));
+        writer.sync().map_err(Error::Io)?;
         Ok(())
     }
 

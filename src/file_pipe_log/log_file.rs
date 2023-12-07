@@ -43,6 +43,8 @@ pub struct LogFileWriter<F: FileSystem> {
     capacity: usize,
 }
 
+// All APIs provided by `LogFileWriter` are fail-safe, i.e. caller can continue
+// using the same "writer" even if the previous operation failed.
 impl<F: FileSystem> LogFileWriter<F> {
     fn open(
         handle: Arc<F::Handle>,
@@ -67,7 +69,7 @@ impl<F: FileSystem> LogFileWriter<F> {
     }
 
     fn write_header(&mut self, format: LogFileFormat) -> IoResult<()> {
-        self.writer.seek(SeekFrom::Start(0))?;
+        self.writer.rewind()?;
         self.written = 0;
         let mut buf = Vec::with_capacity(LogFileFormat::encoded_len(format.version));
         format.encode(&mut buf).unwrap();
@@ -119,7 +121,8 @@ impl<F: FileSystem> LogFileWriter<F> {
 
     pub fn sync(&mut self) -> IoResult<()> {
         let _t = StopWatch::new(&*LOG_SYNC_DURATION_HISTOGRAM);
-        self.handle.sync()?;
+        // Panic if sync fails, in case of data loss.
+        self.handle.sync().unwrap();
         Ok(())
     }
 

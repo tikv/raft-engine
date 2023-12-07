@@ -172,7 +172,7 @@ where
                 }
                 perf_context!(log_write_duration).observe_since(now);
                 if sync {
-                    // As per trait protocol, this error should be retriable. But we panic anyway to
+                    // As per trait protocol, sync error should be retriable. But we panic anyway to
                     // save the trouble of propagating it to other group members.
                     self.pipe_log.sync(LogQueue::Append).expect("pipe::sync()");
                 }

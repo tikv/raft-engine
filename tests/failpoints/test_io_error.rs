@@ -124,8 +124,7 @@ fn test_file_write_error() {
     assert_eq!(engine.last_index(2).unwrap(), 1);
 }
 
-#[test]
-fn test_file_rotate_error() {
+fn test_file_rotate_error(restart_after_failure: bool) {
     let dir = tempfile::Builder::new()
         .prefix("test_file_rotate_error")
         .tempdir()
@@ -138,7 +137,7 @@ fn test_file_rotate_error() {
     let fs = Arc::new(ObfuscatedFileSystem::default());
     let entry = vec![b'x'; 1024];
 
-    let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+    let mut engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
     engine
         .write(&mut generate_batch(1, 1, 2, Some(&entry)), false)
         .unwrap();
@@ -160,27 +159,46 @@ fn test_file_rotate_error() {
             let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
         })
         .is_err());
-        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
+    if restart_after_failure {
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+    }
+    assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     {
         // Fail to create new log file.
         let _f = FailGuard::new("default_fs::create::err", "return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
-        assert_eq!(engine.file_span(LogQueue::Append).1, 1);
+        assert!(engine
+            .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
+            .is_err());
     }
+    if restart_after_failure {
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+    }
+    let num_files_before = std::fs::read_dir(&dir).unwrap().count();
     {
         // Fail to write header of new log file.
         let _f = FailGuard::new("log_file::write::err", "1*off->return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
+        assert!(engine
+            .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
+            .is_err());
+    }
+    if restart_after_failure {
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
+        // The new log file is added during recovery phase of restart.
+        assert_eq!(engine.file_span(LogQueue::Append).1, 2);
+    } else {
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
-    {
+    // Although the header is not written, the file is still created.
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+        1
+    );
+    if !restart_after_failure {
+        // If the engine restarted, the write does not require sync will succeed.
         // Fail to sync new log file. The old log file is already sync-ed at this point.
         let _f = FailGuard::new("log_fd::sync::err", "return");
         assert!(catch_unwind_silent(|| {
@@ -190,16 +208,37 @@ fn test_file_rotate_error() {
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
 
+    // Only one log file should be created after all the incidents.
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+        1
+    );
     // We can continue writing after the incidents.
     engine
         .write(&mut generate_batch(2, 1, 2, Some(&entry)), true)
         .unwrap();
-    drop(engine);
-    let engine = Engine::open_with_file_system(cfg, fs).unwrap();
+    if restart_after_failure {
+        drop(engine);
+        engine = Engine::open_with_file_system(cfg, fs).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count() - num_files_before,
+        1
+    );
     assert_eq!(engine.first_index(1).unwrap(), 1);
     assert_eq!(engine.last_index(1).unwrap(), 4);
     assert_eq!(engine.first_index(2).unwrap(), 1);
     assert_eq!(engine.last_index(2).unwrap(), 1);
+}
+
+#[test]
+fn test_file_rotate_error_without_restart() {
+    test_file_rotate_error(false);
+}
+
+#[test]
+fn test_file_rotate_error_with_restart() {
+    test_file_rotate_error(true);
 }
 
 #[test]
@@ -262,10 +301,8 @@ fn test_concurrent_write_error() {
         let _f2 = FailGuard::new("log_file::truncate::err", "return");
         let entry_clone = entry.clone();
         ctx.write_ext(move |e| {
-            catch_unwind_silent(|| {
-                e.write(&mut generate_batch(1, 11, 21, Some(&entry_clone)), false)
-            })
-            .unwrap_err();
+            e.write(&mut generate_batch(1, 11, 21, Some(&entry_clone)), false)
+                .unwrap_err();
         });
         // We don't test followers, their panics are hard to catch.
         ctx.join();
@@ -527,7 +564,7 @@ fn test_no_space_write_error() {
         cfg.dir = dir.path().to_str().unwrap().to_owned();
         cfg.spill_dir = Some(spill_dir.path().to_str().unwrap().to_owned());
         {
-            // Case 1: `Write` is abnormal for no space left, Engine should panic at
+            // Case 1: `Write` is abnormal for no space left, Engine should fail at
             // `rotate`.
             let cfg_err = Config {
                 target_file_size: ReadableSize(1),
@@ -535,12 +572,9 @@ fn test_no_space_write_error() {
             };
             let engine = Engine::open(cfg_err).unwrap();
             let _f = FailGuard::new("log_fd::write::no_space_err", "return");
-            assert!(catch_unwind_silent(|| {
-                engine
-                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                    .unwrap_err();
-            })
-            .is_err());
+            assert!(engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .is_err());
             assert_eq!(
                 0,
                 engine
@@ -554,12 +588,9 @@ fn test_no_space_write_error() {
             let _f1 = FailGuard::new("log_fd::write::no_space_err", "2*return->off");
             let _f2 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
             // The first write should fail, because all dirs run out of space for writing.
-            assert!(catch_unwind_silent(|| {
-                engine
-                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                    .unwrap_err();
-            })
-            .is_err());
+            assert!(engine
+                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                .is_err());
             assert_eq!(
                 0,
                 engine

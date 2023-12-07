@@ -3,7 +3,7 @@ name = "raft-engine"
 version = "0.4.1"
 authors = ["The TiKV Project Developers"]
 edition = "2018"
-rust-version = "1.66.0"
+rust-version = "1.67.1"
 description = "A persistent storage engine for Multi-Raft logs"
 readme = "README.md"
 repository = "https://github.com/tikv/raft-engine"
@@ -95,8 +95,6 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
-# TODO: Use official grpc-rs once https://github.com/tikv/grpc-rs/pull/622 is merged.
-grpcio = { git = "https://github.com/tabokie/grpc-rs", branch = "v0.10.x-win" }
 
 [workspace]
 members = ["stress", "ctl"]
