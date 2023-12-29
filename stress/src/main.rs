@@ -284,17 +284,17 @@ impl Default for TestArgs {
 
 impl TestArgs {
     fn validate(&self) -> Result<(), String> {
-        if self.regions < self.write_threads {
-            return Err("Write thread count must be smaller than region count.".to_owned());
-        }
-        if self.regions < self.read_threads {
-            return Err("Read thread count must be smaller than region count.".to_owned());
-        }
-        if self.write_region_count > self.regions / self.write_threads {
-            return Err(
-                "Write region count must be smaller than region-count / write-threads.".to_owned(),
-            );
-        }
+        // if self.regions < self.write_threads {
+        //     return Err("Write thread count must be smaller than region
+        // count.".to_owned()); }
+        // if self.regions < self.read_threads {
+        //     return Err("Read thread count must be smaller than region
+        // count.".to_owned()); }
+        // if self.write_region_count > self.regions / self.write_threads {
+        //     return Err(
+        //         "Write region count must be smaller than region-count /
+        // write-threads.".to_owned(),     );
+        // }
         Ok(())
     }
 }
@@ -418,9 +418,8 @@ fn spawn_write(
             }
             while !shutdown.load(Ordering::Relaxed) {
                 // TODO(tabokie): scattering regions in one batch
-                let mut rid = thread_rng().gen_range(0..(args.regions / args.write_threads))
-                    * args.write_threads
-                    + index;
+                // let mut rid = thread_rng().gen_range(0..(args.regions / args.write_threads))
+                let mut rid = thread_rng().gen_range(0..args.regions) * args.write_threads + index;
                 for _ in 0..args.write_region_count {
                     let first = engine.first_index(rid).unwrap_or(0);
                     let last = engine.last_index(rid).unwrap_or(0);
@@ -472,9 +471,8 @@ fn spawn_read(
                 None
             };
             while !shutdown.load(Ordering::Relaxed) {
-                let rid = thread_rng().gen_range(0..(args.regions / args.read_threads))
-                    * args.read_threads
-                    + index;
+                // let rid = thread_rng().gen_range(0..(args.regions / args.read_threads))
+                let rid = thread_rng().gen_range(0..args.regions) * args.read_threads + index;
                 let mut start = Instant::now();
                 if let (Some(i), Some(last)) = (min_interval, summary.last) {
                     wait_til(&mut start, last + i);
