@@ -380,7 +380,7 @@ where
                     )?;
                     current_size = 0;
                     previous_size = 0;
-                    self.rewrite_impl(&mut log_batch, rewrite, false)?;
+                    self.rewrite_impl(&mut log_batch, rewrite, true)?;
                 }
             }
             log_batch.add_raw_entries(region_id, current_entry_indexes, current_entries)?;
