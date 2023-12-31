@@ -27,12 +27,17 @@ const REWRITE_RATIO: f64 = 0.7;
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
 
+#[inline]
 fn max_batch_bytes() -> usize {
     fail_point!("max_rewrite_batch_bytes", |s| s
         .unwrap()
         .parse::<usize>()
         .unwrap());
     128 * 1024
+}
+
+fn max_forcely_sync_bytes() -> usize {
+    max_batch_bytes() * 4
 }
 
 pub struct PurgeManager<P>
@@ -354,6 +359,7 @@ where
             let mut current_entry_indexes = Vec::new();
             let mut current_entries = Vec::new();
             let mut current_size = 0;
+            let mut unsynced_size = 0;
             // Split the entries into smaller chunks, so that we don't OOM, and the
             // compression overhead is not too high.
             let mut entry_indexes = entry_indexes.into_iter().peekable();
@@ -362,6 +368,7 @@ where
                 current_size += entry.len();
                 current_entries.push(entry);
                 current_entry_indexes.push(ei);
+                unsynced_size += current_size;
                 // If this is the last entry, we handle them outside the loop.
                 if entry_indexes.peek().is_some()
                     && current_size + previous_size > max_batch_bytes()
@@ -396,7 +403,15 @@ where
                     )?;
                     current_size = 0;
                     previous_size = 0;
-                    let handle = self.rewrite_impl(&mut log_batch, rewrite, false)?.unwrap();
+                    let sync = if unsynced_size >= max_forcely_sync_bytes() {
+                        // Avoiding too many unsynced size can make the later `fdatasync` in
+                        // the append progress blocked for too long.
+                        unsynced_size = 0;
+                        true
+                    } else {
+                        false
+                    };
+                    let handle = self.rewrite_impl(&mut log_batch, rewrite, sync)?.unwrap();
                     if needs_atomicity && atomic_group_start.is_none() {
                         atomic_group_start = Some(handle.id.seq);
                     }
