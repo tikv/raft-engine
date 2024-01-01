@@ -27,7 +27,6 @@ const REWRITE_RATIO: f64 = 0.7;
 const MAX_REWRITE_ENTRIES_PER_REGION: usize = 32;
 const MAX_COUNT_BEFORE_FORCE_REWRITE: u32 = 9;
 
-#[inline]
 fn max_batch_bytes() -> usize {
     fail_point!("max_rewrite_batch_bytes", |s| s
         .unwrap()
