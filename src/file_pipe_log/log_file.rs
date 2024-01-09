@@ -95,13 +95,9 @@ impl<F: FileSystem> LogFileWriter<F> {
         let new_written = self.written + buf.len();
         if self.capacity < new_written {
             let _t = StopWatch::new(&*LOG_ALLOCATE_DURATION_HISTOGRAM);
-            let alloc = std::cmp::max(
-                new_written - self.capacity,
-                std::cmp::min(
-                    FILE_ALLOCATE_SIZE,
-                    target_size_hint.saturating_sub(self.capacity),
-                ),
-            );
+            let alloc = target_size_hint
+                .saturating_sub(self.capacity)
+                .clamp(new_written - self.capacity, FILE_ALLOCATE_SIZE);
             if let Err(e) = self.writer.allocate(self.capacity, alloc) {
                 warn!("log file allocation failed: {}", e);
             }
@@ -172,7 +168,7 @@ impl<F: FileSystem> LogFileReader<F> {
     }
 
     pub fn read(&mut self, handle: FileBlockHandle) -> Result<Vec<u8>> {
-        let mut buf = vec![0; handle.len as usize];
+        let mut buf = vec![0; handle.len];
         let size = self.read_to(handle.offset, &mut buf)?;
         buf.truncate(size);
         Ok(buf)

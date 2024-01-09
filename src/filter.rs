@@ -339,7 +339,7 @@ impl RhaiFilterMachine {
         }
         // Delete backup file and defuse the guard.
         for (bak, guard) in guards.into_iter() {
-            let _ = std::fs::remove_file(&bak);
+            let _ = std::fs::remove_file(bak);
             let _ = ScopeGuard::into_inner(guard);
         }
         Ok(())
@@ -416,7 +416,7 @@ pub struct RhaiFilterMachineFactory {
 impl RhaiFilterMachineFactory {
     pub fn from_script(script: String) -> Self {
         let engine = Engine::new();
-        let ast = engine.compile(&script).unwrap();
+        let ast = engine.compile(script).unwrap();
         engine.run_ast_with_scope(&mut Scope::new(), &ast).unwrap();
         Self {
             engine: Arc::new(engine),

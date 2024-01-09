@@ -380,8 +380,8 @@ impl Summary {
                 let stddev = statistical::standard_deviation(&self.thread_qps, None);
                 stddev / median
             } else {
-                let first = *self.thread_qps.first().unwrap() as f64;
-                let last = *self.thread_qps.last().unwrap() as f64;
+                let first = *self.thread_qps.first().unwrap();
+                let last = *self.thread_qps.last().unwrap();
                 f64::abs(first - last) / (first + last)
             };
             println!("Fairness = {:.01}%", 100.0 - fairness * 100.0);
