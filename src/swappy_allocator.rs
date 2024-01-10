@@ -44,7 +44,7 @@ pub struct SwappyAllocator<A: Allocator>(Arc<SwappyAllocatorCore<A>>);
 impl<A: Allocator> SwappyAllocator<A> {
     pub fn new_over(path: &Path, budget: usize, alloc: A) -> SwappyAllocator<A> {
         if path.exists() {
-            if let Err(e) = std::fs::remove_dir_all(path) {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
                 error!(
                     "Failed to clean up old swap directory: {}. \
                     There might be obsolete swap files left in {}.",
@@ -280,7 +280,7 @@ impl Page {
         fail::fail_point!("swappy::page::new_failure", |_| None);
         if !root.exists() {
             // Create directory only when it's needed.
-            std::fs::create_dir_all(root)
+            std::fs::create_dir_all(&root)
                 .map_err(|e| error!("Failed to create swap directory: {}.", e))
                 .ok()?;
         }
@@ -289,7 +289,7 @@ impl Page {
             .read(true)
             .write(true)
             .create(true)
-            .open(path)
+            .open(&path)
             .map_err(|e| error!("Failed to open swap file: {}", e))
             .ok()?;
         f.set_len(size as u64)
@@ -344,7 +344,7 @@ impl Page {
     fn release(self, root: &Path) {
         debug_assert_eq!(self.ref_counter, 0);
         let path = root.join(Self::page_file_name(self.seq));
-        if let Err(e) = std::fs::remove_file(path) {
+        if let Err(e) = std::fs::remove_file(&path) {
             warn!("Failed to delete swap file: {}", e);
         }
         SWAP_FILE_COUNT.dec();
@@ -825,7 +825,7 @@ mod tests {
             // test_eq_after_rotation
             // test that two deques are equal even if elements are laid out differently
             let len = 28;
-            let mut ring: VecDeque<i32> = collect(0..len, allocator.clone());
+            let mut ring: VecDeque<i32> = collect(0..len as i32, allocator.clone());
             let mut shifted = ring.clone();
             for _ in 0..10 {
                 // shift values 1 step to the right by pop, sub one, push
@@ -1024,7 +1024,7 @@ mod tests {
             // test_extend_ref
             let mut v = VecDeque::new_in(allocator.clone());
             v.push_back(1);
-            v.extend([2, 3, 4]);
+            v.extend(&[2, 3, 4]);
 
             assert_eq!(v.len(), 4);
             assert_eq!(v[0], 1);

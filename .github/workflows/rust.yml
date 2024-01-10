@@ -19,7 +19,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2022-11-15
+          toolchain: nightly-2022-11-03
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -27,7 +27,7 @@ jobs:
           sharedKey: ${{ matrix.os }}
       - name: Cache dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
       - name: Format
         run: |
           make format
@@ -60,7 +60,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.66.0
+          toolchain: 1.61.0
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -87,7 +87,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2022-11-15
+          toolchain: nightly-2022-11-03
           override: true
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1

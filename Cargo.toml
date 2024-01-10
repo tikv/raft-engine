@@ -3,7 +3,7 @@ name = "raft-engine"
 version = "0.3.0"
 authors = ["The TiKV Project Developers"]
 edition = "2018"
-rust-version = "1.66.0"
+rust-version = "1.61.0"
 description = "A persistent storage engine for Multi-Raft logs"
 readme = "README.md"
 repository = "https://github.com/tikv/raft-engine"
@@ -69,7 +69,7 @@ raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-fea
 rand = "0.8"
 rand_distr = "0.4"
 tempfile = "3.1"
-toml = "0.8"
+toml = "0.7"
 
 [features]
 internals = []

@@ -107,7 +107,7 @@ fn dir_size(path: &str) -> ReadableSize {
     ReadableSize(
         std::fs::read_dir(PathBuf::from(path))
             .unwrap()
-            .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len())
+            .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len() as u64)
             .sum(),
     )
 }

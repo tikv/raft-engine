@@ -101,7 +101,7 @@ impl<F: FileSystem> SinglePipe<F> {
             let path = file_id.build_file_path(&paths[path_id]);
             active_files.push(File {
                 seq: file_id.seq,
-                handle: file_system.create(path)?.into(),
+                handle: file_system.create(&path)?.into(),
                 format: default_format,
                 path_id,
             });
@@ -152,7 +152,7 @@ impl<F: FileSystem> SinglePipe<F> {
     /// filesystem.
     fn sync_dir(&self, path_id: PathId) -> Result<()> {
         debug_assert!(!self.paths.is_empty());
-        std::fs::File::open(PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
+        std::fs::File::open(&PathBuf::from(&self.paths[path_id])).and_then(|d| d.sync_all())?;
         Ok(())
     }
 
@@ -194,7 +194,7 @@ impl<F: FileSystem> SinglePipe<F> {
         };
         let path_id = find_available_dir(&self.paths, self.target_file_size);
         let path = new_file_id.build_file_path(&self.paths[path_id]);
-        Ok((path_id, self.file_system.create(path)?))
+        Ok((path_id, self.file_system.create(&path)?))
     }
 
     /// Returns a shared [`LogFd`] for the specified file sequence number.
@@ -542,7 +542,7 @@ pub(crate) fn find_available_dir(paths: &Paths, target_size: usize) -> PathId {
     // space usage.
     if paths.len() > 1 {
         for (t, p) in paths.iter().enumerate() {
-            if let Ok(disk_stats) = fs2::statvfs(p) {
+            if let Ok(disk_stats) = fs2::statvfs(&p) {
                 if target_size <= disk_stats.available_space() as usize {
                     return t;
                 }
@@ -654,12 +654,15 @@ mod tests {
 
         let file_handle = pipe_log.append(queue, &mut &s_content).unwrap();
         assert_eq!(file_handle.id.seq, 3);
-        assert_eq!(file_handle.offset, header_size + s_content.len() as u64);
+        assert_eq!(
+            file_handle.offset,
+            header_size as u64 + s_content.len() as u64
+        );
 
         let content_readed = pipe_log
             .read_bytes(FileBlockHandle {
                 id: FileId { queue, seq: 3 },
-                offset: header_size,
+                offset: header_size as u64,
                 len: s_content.len(),
             })
             .unwrap();
@@ -667,7 +670,7 @@ mod tests {
         // try to fetch abnormal entry
         let abnormal_content_readed = pipe_log.read_bytes(FileBlockHandle {
             id: FileId { queue, seq: 12 }, // abnormal seq
-            offset: header_size,
+            offset: header_size as u64,
             len: s_content.len(),
         });
         assert!(abnormal_content_readed.is_err());

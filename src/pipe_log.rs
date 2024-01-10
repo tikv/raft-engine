@@ -192,7 +192,11 @@ pub trait PipeLog: Sized {
 
     /// Returns the oldest file ID that is newer than `position`% of all files.
     fn file_at(&self, queue: LogQueue, mut position: f64) -> FileSeq {
-        position = position.clamp(0.0, 1.0);
+        if position > 1.0 {
+            position = 1.0;
+        } else if position < 0.0 {
+            position = 0.0;
+        }
         let (first, active) = self.file_span(queue);
         let count = active - first + 1;
         first + (count as f64 * position) as u64

@@ -87,7 +87,7 @@ impl EntryIndexes {
             let entry_len = (t as u32) - *entries_size;
             let entry_index = EntryIndex {
                 index,
-                entry_offset: *entries_size,
+                entry_offset: *entries_size as u32,
                 entry_len,
                 ..Default::default()
             };
@@ -850,7 +850,7 @@ impl LogBatch {
             handle.offset += LOG_BATCH_HEADER_LEN as u64;
             match self.buf_state {
                 BufState::Sealed(_, entries_len) => {
-                    debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len);
+                    debug_assert!(LOG_BATCH_HEADER_LEN + entries_len < handle.len as usize);
                     handle.len = entries_len;
                 }
                 _ => unreachable!(),
@@ -1311,7 +1311,7 @@ mod tests {
                 offset: 0,
             };
             let old_approximate_size = batch.approximate_size();
-            let len = batch.finish_populate(usize::from(compress)).unwrap();
+            let len = batch.finish_populate(if compress { 1 } else { 0 }).unwrap();
             assert!(old_approximate_size >= len);
             assert_eq!(batch.approximate_size(), len);
             let mut batch_handle = mocked_file_block_handle;
@@ -1391,7 +1391,7 @@ mod tests {
             assert_eq!(decoded_item_batch, item_batch);
             assert!(decoded_item_batch.approximate_size() >= len - offset);
 
-            let entries = &encoded[LOG_BATCH_HEADER_LEN..offset];
+            let entries = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
             for item in decoded_item_batch.items.iter() {
                 if let LogItemContent::EntryIndexes(entry_indexes) = &item.content {
                     if !entry_indexes.0.is_empty() {
@@ -1503,7 +1503,7 @@ mod tests {
         .unwrap();
 
         // decode and assert entries
-        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset];
+        let entry_bytes = &encoded[LOG_BATCH_HEADER_LEN..offset as usize];
         for item in decoded_item_batch.items.iter() {
             match &item.content {
                 LogItemContent::EntryIndexes(entry_indexes) => {

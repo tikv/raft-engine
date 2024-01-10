@@ -162,7 +162,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     } else {
                         file_id.build_file_path(dir)
                     };
-                    if self.file_system.exists_metadata(path) {
+                    if self.file_system.exists_metadata(&path) {
                         delete_start = Some(i.saturating_sub(1) * files[0].seq / max_sample + 1);
                         break;
                     }
@@ -494,7 +494,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                 let path_id = find_available_dir(&self.dirs, target_file_size);
                 let root_path = &self.dirs[path_id];
                 let path = root_path.join(build_recycled_file_name(seq));
-                let handle = Arc::new(self.file_system.create(path)?);
+                let handle = Arc::new(self.file_system.create(&path)?);
                 let mut writer = self.file_system.new_writer(handle.clone())?;
                 let mut written = 0;
                 let buf = vec![0; std::cmp::min(PREFILL_BUFFER_SIZE, target_file_size)];
@@ -533,7 +533,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             let f = self.recycled_files.pop().unwrap();
             let root_path = &self.dirs[f.path_id];
             let path = root_path.join(build_recycled_file_name(f.seq));
-            let _ = self.file_system.delete(path);
+            let _ = self.file_system.delete(&path);
         }
         Ok(())
     }
