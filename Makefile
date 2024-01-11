@@ -43,9 +43,9 @@ format:
 ## Run clippy.
 clippy:
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} clippy --all --all-features --all-targets -- -D clippy::all
+	cargo ${TOOLCHAIN_ARGS} clippy --all --all-features --all-targets ${EXTRA_CARGO_ARGS} -- -D clippy::all
 else
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features all_stable --all-targets -- -D clippy::all
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features all_stable --all-targets ${EXTRA_CARGO_ARGS} -- -D clippy::all
 endif
 
 ## Run tests.
