@@ -63,7 +63,7 @@ thiserror = "1.0"
 [dev-dependencies]
 criterion = "0.4"
 ctor = "0.2"
-env_logger = "0.10"
+env_logger = "0.11"
 kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
 rand = "0.8"
