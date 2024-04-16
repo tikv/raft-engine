@@ -1,6 +1,6 @@
 [package]
 name = "stress"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["The TiKV Authors"]
 edition = "2018"
 
