@@ -99,7 +99,7 @@ jobs:
         run: |
           make test_matrix
         env:
-          RUSTFLAGS: '-Zinstrument-coverage'
+          RUSTFLAGS: '-Cinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'
           EXTRA_CARGO_ARGS: '--verbose'
       - name: Run grcov
