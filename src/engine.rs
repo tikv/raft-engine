@@ -142,7 +142,7 @@ where
             return Ok(0);
         }
         let start = Instant::now();
-        let len = log_batch.finish_populate(
+        let (len, compression_ratio) = log_batch.finish_populate(
             self.cfg.batch_compression_threshold.0 as usize,
             self.cfg.compression_level,
         )?;
@@ -225,6 +225,7 @@ where
         now = end;
         ENGINE_WRITE_DURATION_HISTOGRAM.observe(now.saturating_duration_since(start).as_secs_f64());
         ENGINE_WRITE_SIZE_HISTOGRAM.observe(len as f64);
+        ENGINE_WRITE_COMPRESSION_RATIO_HISTOGRAM.observe(compression_ratio);
         Ok(len)
     }
 

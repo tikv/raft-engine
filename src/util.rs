@@ -226,9 +226,10 @@ pub mod lz4 {
     pub const DEFAULT_LZ4_COMPRESSION_LEVEL: usize = 1;
 
     /// Compress content in `buf[skip..]`, and append output to `buf`.
-    pub fn append_compress_block(buf: &mut Vec<u8>, skip: usize, level: usize) -> Result<()> {
+    pub fn append_compress_block(buf: &mut Vec<u8>, skip: usize, level: usize) -> Result<f64> {
         let buf_len = buf.len();
         let content_len = buf_len - skip;
+        let mut compression_ratio = 0.0;
         if content_len > 0 {
             if content_len > i32::MAX as usize {
                 return Err(Error::InvalidArgument(format!(
@@ -256,10 +257,11 @@ pub mod lz4 {
                 if compressed == 0 {
                     return Err(Error::Other(box_err!("Compression failed")));
                 }
+                compression_ratio = compressed as f64 / content_len as f64;
                 buf.set_len(buf_len + 4 + compressed as usize);
             }
         }
-        Ok(())
+        Ok(compression_ratio)
     }
 
     pub fn decompress_block(src: &[u8]) -> Result<Vec<u8>> {
@@ -301,8 +303,12 @@ pub mod lz4 {
             let vecs: Vec<Vec<u8>> = vec![b"".to_vec(), b"123".to_vec(), b"12345678910".to_vec()];
             for mut vec in vecs.into_iter() {
                 let uncompressed_len = vec.len();
-                super::append_compress_block(&mut vec, 0, super::DEFAULT_LZ4_COMPRESSION_LEVEL)
-                    .unwrap();
+                let compression_ratio =
+                    super::append_compress_block(&mut vec, 0, super::DEFAULT_LZ4_COMPRESSION_LEVEL)
+                        .unwrap();
+                if uncompressed_len == 0 {
+                    assert_eq!(compression_ratio, 0.0);
+                }
                 let res = super::decompress_block(&vec[uncompressed_len..]).unwrap();
                 assert_eq!(res, vec[..uncompressed_len].to_owned());
             }
