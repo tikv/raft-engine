@@ -27,13 +27,15 @@ jobs:
           sharedKey: ${{ matrix.os }}
       - name: Cache dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.15 ; fi
       - name: Format
         run: |
           make format
           git diff --exit-code
       - name: Clippy
         run: make clippy
+        env:
+          EXTRA_CARGO_ARGS: '--fix'
       - name: Run tests
         run: make test
         env:
@@ -94,7 +96,7 @@ jobs:
         with:
           sharedKey: ubuntu-latest
       - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.15; fi
       - name: Run tests
         run: |
           make test_matrix
