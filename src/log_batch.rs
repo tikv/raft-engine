@@ -786,7 +786,11 @@ impl LogBatch {
                 LOG_BATCH_HEADER_LEN,
                 compression_level.unwrap_or(lz4::DEFAULT_LZ4_COMPRESSION_LEVEL),
             )?;
-            (buf_len - LOG_BATCH_HEADER_LEN, CompressionType::Lz4, compression_ratio)
+            (
+                buf_len - LOG_BATCH_HEADER_LEN,
+                CompressionType::Lz4,
+                compression_ratio,
+            )
         } else {
             (0, CompressionType::None, 0.0)
         };
