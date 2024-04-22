@@ -19,7 +19,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2023-07-01
+          toolchain: nightly-2024-02-10
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -27,7 +27,7 @@ jobs:
           sharedKey: ${{ matrix.os }}
       - name: Cache dependencies
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.13 ; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov ; fi
       - name: Format
         run: |
           make format
@@ -62,7 +62,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.67.1
+          toolchain: 1.76.0
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -89,19 +89,19 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2023-07-01
+          toolchain: nightly-2024-02-10
           override: true
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
         with:
           sharedKey: ubuntu-latest
       - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.13; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
       - name: Run tests
         run: |
           make test_matrix
         env:
-          RUSTFLAGS: '-Zinstrument-coverage'
+          RUSTFLAGS: '-Cinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'
           EXTRA_CARGO_ARGS: '--verbose'
       - name: Run grcov
