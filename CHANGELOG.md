@@ -6,8 +6,8 @@
 
 ### Behavior Changes
 
-* Periodically flush unsynced bytes when rewriting to avoid I/O jitters if flushing too many bytes impede the foreground writes. #347
-* Errors will be returned if rewriting fails, instread of `panic` directly. #343
+* Periodically flush unsynced bytes when rewriting to avoid I/O jitters if flushing too many bytes impede the foreground writes. (#347)
+* Errors will be returned if rewriting fails, instread of `panic` directly. (#343)
 
 ## [0.4.1] - 2023-09-14
 
