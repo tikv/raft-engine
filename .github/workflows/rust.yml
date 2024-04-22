@@ -33,17 +33,17 @@ jobs:
           make format
           git diff --exit-code
       - name: Clippy
-        run: make clippy
+        run: ulimit -S -n `ulimit -H -n` && make clippy
         env:
           EXTRA_CARGO_ARGS: '--fix'
       - name: Run tests
-        run: make test
+        run: ulimit -S -n `ulimit -H -n` && make test
         env:
           RUST_BACKTRACE: 1
           EXTRA_CARGO_ARGS: '--verbose'
       - name: Run asan tests
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: make test
+        run: ulimit -S -n `ulimit -H -n` && make test
         env:
           RUST_BACKTRACE: 1
           RUSTFLAGS: '-Zsanitizer=address'
@@ -69,11 +69,11 @@ jobs:
         with:
           sharedKey: ${{ matrix.os }}-stable
       - name: Clippy
-        run: make clippy
+        run: ulimit -S -n `ulimit -H -n` && make clippy
         env:
           WITH_STABLE_TOOLCHAIN: 'force'
       - name: Run tests
-        run: make test
+        run: ulimit -S -n `ulimit -H -n` && make test
         env:
           RUST_BACKTRACE: 1
           EXTRA_CARGO_ARGS: '--verbose'
@@ -99,7 +99,7 @@ jobs:
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
       - name: Run tests
         run: |
-          make test_matrix
+          ulimit -S -n `ulimit -H -n` && make test_matrix
         env:
           RUSTFLAGS: '-Cinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'
