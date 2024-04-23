@@ -83,7 +83,7 @@ impl LogFd {
         while readed < buf.len() {
             let bytes = match pread(self.0, &mut buf[readed..], offset as i64) {
                 Ok(bytes) => bytes,
-                Err(e) if e == Errno::EINTR => continue,
+                Err(Errno::EINTR) => continue,
                 Err(e) => return Err(from_nix_error(e, "pread")),
             };
             // EOF
@@ -106,7 +106,7 @@ impl LogFd {
         while written < content.len() {
             let bytes = match pwrite(self.0, &content[written..], offset as i64) {
                 Ok(bytes) => bytes,
-                Err(e) if e == Errno::EINTR => continue,
+                Err(Errno::EINTR) => continue,
                 Err(e) if e == Errno::ENOSPC => return Err(from_nix_error(e, "nospace")),
                 Err(e) => return Err(from_nix_error(e, "pwrite")),
             };
