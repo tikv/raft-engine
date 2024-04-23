@@ -2,9 +2,16 @@
 
 ## [Unreleased]
 
-## New Features
+### New Features
 
 * Add a new Prometheus metric `raft_engine_write_compression_ratio` to track compression ratio of write #358
+
+## [0.4.2] - 2024-04-16
+
+### Behavior Changes
+
+* Periodically flush unsynced bytes when rewriting to avoid I/O jitters if flushing too many bytes impede the foreground writes. (#347)
+* Errors will be returned if rewriting fails, instread of `panic` directly. (#343)
 
 ## [0.4.1] - 2023-09-14
 

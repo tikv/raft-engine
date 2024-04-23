@@ -1,9 +1,9 @@
 [package]
 name = "raft-engine-ctl"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["The TiKV Project Developers"]
 edition = "2018"
-rust-version = "1.76.0"
+rust-version = "1.75.0"
 description = "A control tool for Raft Engine"
 repository = "https://github.com/tikv/raft-engine"
 license = "Apache-2.0"
@@ -11,4 +11,7 @@ license = "Apache-2.0"
 [dependencies]
 clap = { version = "3.1", features = ["derive", "cargo"] }
 env_logger = "0.10"
-raft-engine = { path = "..", version = "0.4.1", features = ["scripting", "internals"] }
+raft-engine = { path = "..", version = "0.4.1", features = [
+    "scripting",
+    "internals",
+] }

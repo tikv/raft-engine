@@ -19,7 +19,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2024-02-10
+          toolchain: nightly-2023-12-31
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -33,7 +33,7 @@ jobs:
           make format
           git diff --exit-code
       - name: Clippy
-        run: ulimit -S -n `ulimit -H -n` && make clippy
+        run: make clippy
         env:
           EXTRA_CARGO_ARGS: '--fix'
       - name: Run tests
@@ -62,7 +62,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.76.0
+          toolchain: 1.75.0
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -89,7 +89,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2024-02-10
+          toolchain: nightly-2023-12-31
           override: true
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
@@ -107,6 +107,8 @@ jobs:
       - name: Run grcov
         run: grcov `find . \( -name "*.profraw" \) -print` --binary-path target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../**' --ignore '/*' -o coverage.lcov
       - name: Upload
-        uses: codecov/codecov-action@v2
+        uses: codecov/codecov-action@v3
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           file: coverage.lcov
