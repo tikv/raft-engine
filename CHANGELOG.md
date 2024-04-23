@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### New Features
+
+* Add a new Prometheus metric `raft_engine_write_compression_ratio` to track compression ratio of write #358
+
 ## [0.4.2] - 2024-04-16
 
 ### Behavior Changes

@@ -767,28 +767,32 @@ impl LogBatch {
         &mut self,
         compression_threshold: usize,
         compression_level: Option<usize>,
-    ) -> Result<usize> {
+    ) -> Result<(usize, f64)> {
         let _t = StopWatch::new(perf_context!(log_populating_duration));
         debug_assert!(self.buf_state == BufState::Open);
         if self.is_empty() {
             self.buf_state = BufState::Encoded(self.buf.len(), 0);
-            return Ok(0);
+            return Ok((0, 0.0));
         }
         self.buf_state = BufState::Incomplete;
 
         // entries
-        let (header_offset, compression_type) = if compression_threshold > 0
+        let (header_offset, compression_type, compression_ratio) = if compression_threshold > 0
             && self.buf.len() >= LOG_BATCH_HEADER_LEN + compression_threshold
         {
             let buf_len = self.buf.len();
-            lz4::append_compress_block(
+            let compression_ratio = lz4::append_compress_block(
                 &mut self.buf,
                 LOG_BATCH_HEADER_LEN,
                 compression_level.unwrap_or(lz4::DEFAULT_LZ4_COMPRESSION_LEVEL),
             )?;
-            (buf_len - LOG_BATCH_HEADER_LEN, CompressionType::Lz4)
+            (
+                buf_len - LOG_BATCH_HEADER_LEN,
+                CompressionType::Lz4,
+                compression_ratio,
+            )
         } else {
-            (0, CompressionType::None)
+            (0, CompressionType::None, 0.0)
         };
 
         // checksum
@@ -830,7 +834,7 @@ impl LogBatch {
         }
 
         self.buf_state = BufState::Encoded(header_offset, footer_roffset - LOG_BATCH_HEADER_LEN);
-        Ok(self.buf.len() - header_offset)
+        Ok((self.buf.len() - header_offset, compression_ratio))
     }
 
     /// Make preparations for the write of `LogBatch`.
@@ -1328,7 +1332,7 @@ mod tests {
                 offset: 0,
             };
             let old_approximate_size = batch.approximate_size();
-            let len = batch.finish_populate(usize::from(compress), None).unwrap();
+            let (len, _) = batch.finish_populate(usize::from(compress), None).unwrap();
             assert!(old_approximate_size >= len);
             assert_eq!(batch.approximate_size(), len);
             let mut batch_handle = mocked_file_block_handle;
@@ -1493,7 +1497,7 @@ mod tests {
         batch1.merge(&mut batch2).unwrap();
         assert!(batch2.is_empty());
 
-        let len = batch1.finish_populate(0, None).unwrap();
+        let (len, _) = batch1.finish_populate(0, None).unwrap();
         batch1.prepare_write(&file_context).unwrap();
         let encoded = batch1.encoded_bytes();
         assert_eq!(len, encoded.len());
@@ -1549,7 +1553,8 @@ mod tests {
                 offset: 0,
             };
             let buf_len = batch.buf.len();
-            let len = batch.finish_populate(1, None).unwrap();
+            let (len, compression_ratio) = batch.finish_populate(1, None).unwrap();
+            assert!(compression_ratio == 0.0);
             assert!(len == 0);
             assert_eq!(batch.buf_state, BufState::Encoded(buf_len, 0));
             let file_context = LogFileContext::new(mocked_file_block_handles.id, Version::V2);
@@ -1671,7 +1676,8 @@ mod tests {
             },
         ];
         let old_approximate_size = batch.approximate_size();
-        let len = batch.finish_populate(1, None).unwrap();
+        let (len, compression_ratio) = batch.finish_populate(1, None).unwrap();
+        assert!(compression_ratio > 0.0);
         assert!(old_approximate_size >= len);
         assert_eq!(batch.approximate_size(), len);
         let checksum = batch.item_batch.checksum;
