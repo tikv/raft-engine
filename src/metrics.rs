@@ -201,6 +201,12 @@ lazy_static! {
         exponential_buckets(256.0, 1.8, 22).unwrap()
     )
     .unwrap();
+    pub static ref ENGINE_WRITE_COMPRESSION_RATIO_HISTOGRAM: Histogram = register_histogram!(
+        "raft_engine_write_compression_ratio",
+        "Bucketed histogram of Raft Engine write compression ratio",
+        exponential_buckets(0.0005, 1.8, 16).unwrap()
+    )
+    .unwrap();
     pub static ref LOG_ALLOCATE_DURATION_HISTOGRAM: Histogram = register_histogram!(
         "raft_engine_allocate_log_duration_seconds",
         "Bucketed histogram of Raft Engine allocate log duration",

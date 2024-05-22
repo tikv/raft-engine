@@ -19,7 +19,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2023-07-01
+          toolchain: nightly-2023-12-31
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -34,6 +34,8 @@ jobs:
           git diff --exit-code
       - name: Clippy
         run: make clippy
+        env:
+          EXTRA_CARGO_ARGS: '--fix'
       - name: Run tests
         run: make test
         env:
@@ -60,7 +62,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.67.1
+          toolchain: 1.75.0
           override: true
           components: rustfmt, clippy, rust-src
       - uses: Swatinem/rust-cache@v1
@@ -87,7 +89,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: nightly-2023-07-01
+          toolchain: nightly-2023-12-31
           override: true
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
@@ -96,15 +98,16 @@ jobs:
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov; fi
       - name: Run tests
-        run: |
-          make test_matrix
+        run: make test_matrix
         env:
-          RUSTFLAGS: '-Zinstrument-coverage'
+          RUSTFLAGS: '-Cinstrument-coverage'
           LLVM_PROFILE_FILE: '%p-%m.profraw'
           EXTRA_CARGO_ARGS: '--verbose'
       - name: Run grcov
         run: grcov `find . \( -name "*.profraw" \) -print` --binary-path target/debug/deps/ -s . -t lcov --branch --ignore-not-existing --ignore '../**' --ignore '/*' -o coverage.lcov
       - name: Upload
-        uses: codecov/codecov-action@v2
+        uses: codecov/codecov-action@v3
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           file: coverage.lcov

@@ -288,6 +288,7 @@ impl Page {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(path)
             .map_err(|e| error!("Failed to open swap file: {e}"))
             .ok()?;
