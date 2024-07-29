@@ -1,0 +1,12 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+approvers:
+  - BusyJay
+  - Connor1996
+  - glorv
+  - hicqu
+  - LykxSassinator
+  - overvenus
+  - tabokie
+  - zhangjinpeng1987
+reviewers: 
+  - v01dstar
