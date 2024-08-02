@@ -10,7 +10,7 @@ use super::format::{is_zero_padded, LogFileFormat};
 use super::log_file::LogFileReader;
 
 /// A reusable reader over [`LogItemBatch`]s in a log file.
-pub(super) struct LogItemBatchFileReader<F: FileSystem> {
+pub(crate) struct LogItemBatchFileReader<F: FileSystem> {
     file_id: Option<FileId>,
     format: Option<LogFileFormat>,
     pub(crate) reader: Option<LogFileReader<F>>,
