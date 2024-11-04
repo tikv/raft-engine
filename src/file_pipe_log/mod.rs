@@ -218,7 +218,7 @@ pub mod debug {
                 let log_file_format = LogFileContext::new(file_id, Version::default());
                 for batch in bs.iter_mut() {
                     let offset = writer.offset() as u64;
-                    let len = batch
+                    let (len, _) = batch
                         .finish_populate(1 /* compression_threshold */, None)
                         .unwrap();
                     batch.prepare_write(&log_file_format).unwrap();
