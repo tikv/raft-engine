@@ -333,9 +333,12 @@ where
         let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
-            memtable
-                .read()
-                .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
+            // Ensure that the corresponding memtable is locked with a read lock before
+            // completing the fetching of entries from the raft logs. This
+            // prevents the scenario where the index could become stale while
+            // being concurrently updated by the `rewrite` operation.
+            let immu_memtable = memtable.read();
+            immu_memtable.fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
             for i in ents_idx.iter() {
                 vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?);
             }
