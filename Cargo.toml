@@ -46,7 +46,7 @@ log = { version = "0.4", features = [
   "max_level_trace",
   "release_max_level_debug",
 ] }
-llz4-sys = { version = "=1.9.5" }
+lz4-sys = { version = "=1.9.5" }
 memmap2 = { version = "0.9", optional = true }
 nix = "0.26"
 num-derive = "0.4"
