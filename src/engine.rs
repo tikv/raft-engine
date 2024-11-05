@@ -2593,11 +2593,12 @@ pub(crate) mod tests {
     #[test]
     fn test_fetch_with_concurrently_rewrite() {
         let dir = tempfile::Builder::new()
-            .prefix("test_internal_key_filter")
+            .prefix("test_fetch_with_concurrently_rewrite")
             .tempdir()
             .unwrap();
         let cfg = Config {
             dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(2048),
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
@@ -2612,7 +2613,7 @@ pub(crate) mod tests {
             while !start_flag.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            for _ in 0..50 {
+            for _ in 0..10 {
                 let region_id = thread_rng().gen_range(1..=10);
                 // Should not return file seqno out of range error.
                 let _ = fetch_engine
@@ -2623,17 +2624,15 @@ pub(crate) mod tests {
                 vec.clear();
             }
         });
-        for i in 0..50 {
+        for i in 0..10 {
             for rid in 1..=10 {
                 engine.append(rid, 1 + i * 10, 1 + i * 10 + 10, Some(&entry_data));
             }
             flag.store(true, Ordering::Release);
-            if i % 10 == 0 {
-                for rid in 1..=10 {
-                    engine.clean(rid);
-                }
-                engine.purge_expired_files().unwrap();
+            for rid in 1..=10 {
+                engine.clean(rid);
             }
+            engine.purge_expired_files().unwrap();
         }
         th.join().unwrap();
     }
