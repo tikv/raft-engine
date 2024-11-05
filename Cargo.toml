@@ -58,7 +58,7 @@ protobuf = "2"
 rayon = "1.5"
 rhai = { version = "1.7", features = ["sync"], optional = true }
 scopeguard = "1.1"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "=1.0.194", features = ["derive"] }
 serde_repr = "0.1"
 strum = { version = "0.26.2", features = ["derive"] }
 thiserror = "1.0"
@@ -93,6 +93,8 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+# Lock the version of cc-rs to avoid build failure on MacOS.
+cc = { git = "https://github.com/rust-lang/cc-rs", tag = "1.0.98" }
 
 [workspace]
 members = ["stress", "ctl"]
