@@ -93,7 +93,7 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
-cmake = "0.1.50"
+cmake = { version = "=0.1.50" }
 
 [workspace]
 members = ["stress", "ctl"]
