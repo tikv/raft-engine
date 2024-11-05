@@ -46,7 +46,7 @@ log = { version = "0.4", features = [
   "max_level_trace",
   "release_max_level_debug",
 ] }
-lz4-sys = "1.9"
+lz4-sys = { version = "=1.9.5" }
 memmap2 = { version = "0.9", optional = true }
 nix = "0.26"
 num-derive = "0.4"
@@ -93,8 +93,6 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
-grpcio = { git = "https://github.com/tikv/grpc-rs.git", rev = "b82c9022a1d504396e61dedc122940ab7aeb96c8" }
-# grpcio = { path = "/Users/lucasliang/Workspace/grpc-rs" }
 
 [workspace]
 members = ["stress", "ctl"]
