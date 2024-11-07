@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+        os: [ ubuntu-22, macos-13 ]
     steps:
       - uses: actions/checkout@v2
         with:
@@ -42,7 +42,7 @@ jobs:
           RUST_BACKTRACE: 1
           EXTRA_CARGO_ARGS: '--verbose'
       - name: Run asan tests
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+        if: ${{ matrix.os == 'ubuntu-22' }}
         run: make test
         env:
           RUST_BACKTRACE: 1
@@ -53,7 +53,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest ]
+        os: [ ubuntu-22 ]
     steps:
       - uses: actions/checkout@v2
         with:
@@ -79,7 +79,7 @@ jobs:
           EXTRA_CARGO_ARGS: '--verbose'
           WITH_STABLE_TOOLCHAIN: 'force'
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22
     needs: nightly
     steps:
       - uses: actions/checkout@v2
