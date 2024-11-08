@@ -2563,7 +2563,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let fs = Arc::new(DeleteMonitoredFileSystem::new());
-        let engine = Arc::new(RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap());
+        let engine = Arc::new(RaftLogEngine::open_with_file_system(cfg, fs).unwrap());
         let entry_data = vec![b'x'; 128];
         // Set up a concurrent write with purge, and fetch.
         let mut vec: Vec<Entry> = Vec::new();

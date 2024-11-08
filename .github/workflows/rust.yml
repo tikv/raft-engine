@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04, macos-13 ]
+        os: [ ubuntu-22.04, macos-13 ]
     steps:
       - uses: actions/checkout@v2
         with:
@@ -26,7 +26,7 @@ jobs:
         with:
           sharedKey: ${{ matrix.os }}
       - name: Cache dependencies
-        if: ${{ matrix.os == 'ubuntu-20.04' }}
+        if: ${{ matrix.os == 'ubuntu-22.04' }}
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.9; fi
       - name: Format
         run: |
@@ -42,7 +42,7 @@ jobs:
           RUST_BACKTRACE: 1
           EXTRA_CARGO_ARGS: '--verbose'
       - name: Run asan tests
-        if: ${{ matrix.os == 'ubuntu-20.04' }}
+        if: ${{ matrix.os == 'ubuntu-22.04' }}
         run: make test
         env:
           RUST_BACKTRACE: 1
@@ -53,7 +53,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04 ]
+        os: [ ubuntu-22.04 ]
     steps:
       - uses: actions/checkout@v2
         with:
@@ -79,7 +79,7 @@ jobs:
           EXTRA_CARGO_ARGS: '--verbose'
           WITH_STABLE_TOOLCHAIN: 'force'
   coverage:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     needs: nightly
     steps:
       - uses: actions/checkout@v2
@@ -94,7 +94,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
         with:
-          sharedKey: ubuntu-20.04
+          sharedKey: ubuntu-22.04
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.9; fi
       - name: Run tests
