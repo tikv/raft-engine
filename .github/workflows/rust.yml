@@ -22,12 +22,9 @@ jobs:
           toolchain: nightly-2023-07-01
           override: true
           components: rustfmt, clippy, rust-src
-      - uses: Swatinem/rust-cache@v1
-        with:
-          sharedKey: ${{ matrix.os }}
       - name: Cache dependencies
         if: ${{ matrix.os == 'ubuntu-22.04' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.9; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.13; fi
       - name: Format
         run: |
           make format
@@ -63,9 +60,6 @@ jobs:
           toolchain: 1.67.1
           override: true
           components: rustfmt, clippy, rust-src
-      - uses: Swatinem/rust-cache@v1
-        with:
-          sharedKey: ${{ matrix.os }}-stable
       - name: Clippy
         run: make clippy
         env:
@@ -90,11 +84,8 @@ jobs:
           toolchain: nightly-2023-07-01
           override: true
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v1
-        with:
-          sharedKey: ubuntu-22.04
       - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.9; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.13; fi
       - name: Run tests
         run: |
           make test_matrix
