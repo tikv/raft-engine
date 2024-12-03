@@ -42,8 +42,11 @@ hex = "0.4"
 if_chain = "1.0"
 lazy_static = "1.3"
 libc = "0.2"
-log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
-lz4-sys = "1.9"
+log = { version = "0.4", features = [
+  "max_level_trace",
+  "release_max_level_debug",
+] }
+lz4-sys = { version = "=1.9.5" }
 memmap2 = { version = "0.9", optional = true }
 nix = "0.26"
 num-derive = "0.4"
@@ -55,7 +58,7 @@ protobuf = "2"
 rayon = "1.5"
 rhai = { version = "1.7", features = ["sync"], optional = true }
 scopeguard = "1.1"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "=1.0.194", features = ["derive"] }
 serde_repr = "0.1"
 strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1.0"
@@ -64,8 +67,12 @@ thiserror = "1.0"
 criterion = "0.4"
 ctor = "0.2"
 env_logger = "0.10"
-kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = ["protobuf-codec"] }
-raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = ["protobuf-codec"] }
+kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = [
+  "protobuf-codec",
+] }
+raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = [
+  "protobuf-codec",
+] }
 rand = "0.8"
 rand_distr = "0.4"
 tempfile = "3.6"
@@ -74,19 +81,10 @@ toml = "0.8"
 [features]
 default = ["internals", "scripting"]
 internals = []
-nightly = [
-  "prometheus/nightly",
-]
-failpoints = [
-  "fail/failpoints",
-]
-scripting = [
-  "rhai",
-]
-swap = [
-  "nightly",
-  "memmap2",
-]
+nightly = ["prometheus/nightly"]
+failpoints = ["fail/failpoints"]
+scripting = ["rhai"]
+swap = ["nightly", "memmap2"]
 std_fs = []
 
 nightly_group = ["nightly", "swap"]
@@ -95,6 +93,8 @@ nightly_group = ["nightly", "swap"]
 raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
+# Lock the version of cc-rs to avoid build failure on MacOS, ref https://github.com/rust-lang/cc-rs/issues/984.
+cc = { git = "https://github.com/rust-lang/cc-rs", tag = "1.0.98" }
 
 [workspace]
 members = ["stress", "ctl"]
