@@ -27,7 +27,7 @@ jobs:
           sharedKey: ${{ matrix.os }}
       - name: Cache dependencies
         if: ${{ matrix.os == 'ubuntu-22.04' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.10; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.9; fi
       - name: Format
         run: |
           make format
@@ -94,7 +94,7 @@ jobs:
         with:
           sharedKey: ubuntu-22.04
       - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.10; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.9; fi
       - name: Run tests
         run: |
           make test_matrix
