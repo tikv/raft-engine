@@ -24,7 +24,7 @@ jobs:
           components: rustfmt, clippy, rust-src
       - name: Cache dependencies
         if: ${{ matrix.os == 'ubuntu-22.04' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.13; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.10; fi
       - name: Format
         run: |
           make format
@@ -85,7 +85,7 @@ jobs:
           override: true
           components: llvm-tools-preview
       - name: Install grcov
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.13; fi
+        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.10; fi
       - name: Run tests
         run: |
           make test_matrix
