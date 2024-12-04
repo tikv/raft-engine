@@ -84,6 +84,9 @@ jobs:
           toolchain: nightly-2023-07-01
           override: true
           components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: ${{ matrix.os }}
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.10; fi
       - name: Run tests
