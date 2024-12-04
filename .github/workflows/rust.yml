@@ -60,6 +60,9 @@ jobs:
           toolchain: 1.67.1
           override: true
           components: rustfmt, clippy, rust-src
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: ${{ matrix.os }}-stable
       - name: Clippy
         run: make clippy
         env:
@@ -86,7 +89,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v1
         with:
-          sharedKey: ${{ matrix.os }}
+          sharedKey: ubuntu-22.04
       - name: Install grcov
         run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install --locked grcov --version 0.8.10; fi
       - name: Run tests
