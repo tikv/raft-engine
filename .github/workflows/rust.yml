@@ -22,9 +22,9 @@ jobs:
           toolchain: nightly-2023-07-01
           override: true
           components: rustfmt, clippy, rust-src
-      - name: Cache dependencies
-        if: ${{ matrix.os == 'ubuntu-22.04' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov --version 0.8.10; fi
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: ${{ matrix.os }}
       - name: Format
         run: |
           make format
