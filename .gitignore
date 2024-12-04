@@ -1,6 +1,5 @@
 ## File system
 .DS_Store
-Cargo.lock
 
 ## Build
 /target

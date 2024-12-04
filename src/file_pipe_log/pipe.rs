@@ -713,7 +713,7 @@ mod tests {
         // Retire files.
         assert_eq!(pipe_log.purge_to(last).unwrap() as u64, last - first);
         // Try to read recycled file.
-        for (_, handle) in handles.into_iter().enumerate() {
+        for handle in handles.into_iter() {
             assert!(pipe_log.read_bytes(handle).is_err());
         }
         // Try to reuse.
