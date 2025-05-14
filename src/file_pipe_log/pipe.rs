@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
+use fs2::FileExt;
 use log::error;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -464,7 +465,17 @@ impl<F: FileSystem> SinglePipe<F> {
 pub struct DualPipes<F: FileSystem> {
     pipes: [SinglePipe<F>; 2],
 
-    _dir_locks: Vec<StdFile>,
+    dir_locks: Vec<StdFile>,
+}
+
+impl<F: FileSystem> Drop for DualPipes<F> {
+    fn drop(&mut self) {
+        for lock in &self.dir_locks {
+            if let Err(e) = FileExt::unlock(lock) {
+                error!("error while unlocking directory: {e}");
+            }
+        }
+    }
 }
 
 impl<F: FileSystem> DualPipes<F> {
@@ -481,7 +492,7 @@ impl<F: FileSystem> DualPipes<F> {
 
         Ok(Self {
             pipes: [appender, rewriter],
-            _dir_locks: dir_locks,
+            dir_locks,
         })
     }
 
