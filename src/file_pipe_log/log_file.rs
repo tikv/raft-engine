@@ -107,13 +107,12 @@ impl<F: FileSystem> LogFileWriter<F> {
             }
             self.capacity += alloc;
         }
-        self.writer.write_all(buf).map_err(|e| {
+        self.writer.write_all(buf).inspect_err(|_| {
             self.writer
                 .seek(SeekFrom::Start(self.written as u64))
                 .unwrap_or_else(|e| {
                     panic!("failed to reseek after write failure: {}", e);
                 });
-            e
         })?;
         self.written = new_written;
         Ok(())

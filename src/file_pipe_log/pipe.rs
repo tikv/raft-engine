@@ -738,4 +738,21 @@ mod tests {
             assert_eq!(pipe_log.read_bytes(handle).unwrap(), content(i + 1));
         }
     }
+
+    #[test]
+    fn test_release_on_drop() {
+        let dir = Builder::new()
+            .prefix("test_release_on_drop")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_str().unwrap();
+        let cfg = Config {
+            dir: path.to_owned(),
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+        let pipe_log = new_test_pipes(&cfg).unwrap();
+        drop(pipe_log);
+        assert!(new_test_pipes(&cfg).is_ok());
+    }
 }

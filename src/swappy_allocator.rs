@@ -120,9 +120,8 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
                 return swap_r;
             }
         }
-        self.0.mem_allocator.allocate(layout).map_err(|e| {
+        self.0.mem_allocator.allocate(layout).inspect_err(|_| {
             self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-            e
         })
     }
 
@@ -191,9 +190,8 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
             self.0
                 .mem_allocator
                 .grow(ptr, old_layout, new_layout)
-                .map_err(|e| {
+                .inspect_err(|_| {
                     self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
-                    e
                 })
         }
     }
@@ -253,11 +251,10 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
             self.0
                 .mem_allocator
                 .shrink(ptr, old_layout, new_layout)
-                .map(|p| {
+                .inspect(|_| {
                     self.0
                         .mem_usage
                         .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
-                    p
                 })
         }
     }

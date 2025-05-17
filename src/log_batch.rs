@@ -2,9 +2,9 @@
 
 use std::fmt::Debug;
 use std::io::BufRead;
+use std::mem;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::{mem, u64};
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
@@ -53,7 +53,7 @@ pub enum CompressionType {
 impl CompressionType {
     pub fn from_u8(t: u8) -> Result<Self> {
         if t <= CompressionType::Lz4 as u8 {
-            Ok(unsafe { mem::transmute(t) })
+            Ok(unsafe { mem::transmute::<u8, Self>(t) })
         } else {
             Err(Error::Corruption(format!(
                 "Unrecognized compression type: {t}"
@@ -168,7 +168,7 @@ pub enum OpType {
 impl OpType {
     pub fn from_u8(t: u8) -> Result<Self> {
         if t <= OpType::Del as u8 {
-            Ok(unsafe { mem::transmute(t) })
+            Ok(unsafe { mem::transmute::<u8, Self>(t) })
         } else {
             Err(Error::Corruption(format!("Unrecognized op type: {t}")))
         }

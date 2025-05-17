@@ -228,7 +228,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
 
         if let Some(g) = rhs.atomic_group.take() {
-            assert!(self.atomic_group.map_or(true, |(_, end)| end <= g.0));
+            assert!(self.atomic_group.is_none_or(|(_, end)| end <= g.0));
             self.atomic_group = Some(g);
         }
 
@@ -545,7 +545,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     }
 
     pub fn apply_rewrite_atomic_group(&mut self, start: FileSeq, end: FileSeq) {
-        assert!(self.atomic_group.map_or(true, |(_, b)| b <= start));
+        assert!(self.atomic_group.is_none_or(|(_, b)| b <= start));
         self.atomic_group = Some((start, end));
     }
 
@@ -763,7 +763,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         debug_assert!(count > 0);
         self.entry_indexes
             .get(count - 1)
-            .map_or(false, |ei| ei.entries.unwrap().id.seq <= gate.seq)
+            .is_some_and(|ei| ei.entries.unwrap().id.seq <= gate.seq)
     }
 
     /// Returns the region ID.

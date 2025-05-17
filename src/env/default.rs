@@ -62,7 +62,7 @@ impl Read for LogFile {
 impl Seek for LogFile {
     fn seek(&mut self, pos: SeekFrom) -> IoResult<u64> {
         fail_point!("log_file::seek::err", |_| {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "fp"))
+            Err(std::io::Error::other("fp"))
         });
         match pos {
             SeekFrom::Start(offset) => self.offset = offset as usize,
