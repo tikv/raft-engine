@@ -148,7 +148,7 @@ impl<'de> Deserialize<'de> for ReadableSize {
     {
         struct SizeVisitor;
 
-        impl<'de> Visitor<'de> for SizeVisitor {
+        impl Visitor<'_> for SizeVisitor {
             type Value = ReadableSize;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,7 +221,7 @@ pub fn unhash_u64(mut i: u64) -> u64 {
 
 pub mod lz4 {
     use crate::{Error, Result};
-    use std::{i32, ptr};
+    use std::ptr;
 
     pub const DEFAULT_LZ4_COMPRESSION_LEVEL: usize = 1;
 
@@ -330,7 +330,7 @@ pub trait Factory<Target>: Send + Sync {
 /// ```
 #[inline]
 pub fn round_up(offset: usize, alignment: usize) -> usize {
-    (offset + alignment - 1) / alignment * alignment
+    offset.div_ceil(alignment) * alignment
 }
 
 /// Returns an aligned `offset`.

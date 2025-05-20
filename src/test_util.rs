@@ -63,7 +63,7 @@ where
 }
 
 pub struct PanicGuard {
-    prev_hook: *mut (dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static),
+    prev_hook: *mut (dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static),
 }
 
 struct PointerHolder<T: ?Sized>(*mut T);
