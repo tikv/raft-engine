@@ -763,7 +763,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         debug_assert!(count > 0);
         self.entry_indexes
             .get(count - 1)
-            .map_or(false, |ei| ei.entries.unwrap().id.seq <= gate.seq)
+            .is_some_and(|ei| ei.entries.unwrap().id.seq <= gate.seq)
     }
 
     /// Returns the region ID.

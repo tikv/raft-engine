@@ -379,7 +379,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
     fn recover_queue_imp<M: ReplayMachine, FA: Factory<M>>(
         file_system: Arc<F>,
         recovery_cfg: RecoveryConfig,
-        files: &mut Vec<File<F>>,
+        files: &mut [File<F>],
         machine_factory: &FA,
     ) -> Result<M> {
         if recovery_cfg.concurrency == 0 || files.is_empty() {
@@ -390,7 +390,7 @@ impl<F: FileSystem> DualPipesBuilder<F> {
         let recovery_mode = recovery_cfg.mode;
         let recovery_read_block_size = recovery_cfg.read_block_size as usize;
 
-        let max_chunk_size = std::cmp::max((files.len() + concurrency - 1) / concurrency, 1);
+        let max_chunk_size = files.len().div_ceil(concurrency);
         let chunks = files.par_chunks_mut(max_chunk_size);
         let chunk_count = chunks.len();
         debug_assert!(chunk_count <= concurrency);

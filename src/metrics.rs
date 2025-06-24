@@ -122,7 +122,7 @@ pub trait TimeMetric {
     }
 }
 
-impl<'a> TimeMetric for &'a Histogram {
+impl TimeMetric for &Histogram {
     fn observe(&self, duration: Duration) {
         Histogram::observe(self, duration.as_secs_f64());
     }
