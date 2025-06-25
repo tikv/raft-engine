@@ -121,8 +121,8 @@ fn test_pipe_log_listeners() {
         append(
             &engine,
             region_id,
-            (i as u64 + 1) / 2,
-            (i as u64 + 1) / 2 + 1,
+            (i as u64).div_ceil(2),
+            (i as u64).div_ceil(2) + 1,
             Some(&data),
         );
         assert_eq!(hook.0[&LogQueue::Append].appends(), i);
@@ -141,8 +141,8 @@ fn test_pipe_log_listeners() {
         append(
             &engine,
             region_id,
-            (i as u64 + 1) / 2,
-            (i as u64 + 1) / 2 + 1,
+            (i as u64).div_ceil(2),
+            (i as u64).div_ceil(2) + 1,
             Some(&data),
         );
         assert_eq!(hook.0[&LogQueue::Append].appends(), i);
@@ -178,8 +178,8 @@ fn test_pipe_log_listeners() {
         append(
             &engine,
             region_id,
-            (i as u64 + 1) / 2,
-            (i as u64 + 1) / 2 + 1,
+            (i as u64).div_ceil(2),
+            (i as u64).div_ceil(2) + 1,
             Some(&data),
         );
         assert_eq!(hook.0[&LogQueue::Append].appends(), i + 3);

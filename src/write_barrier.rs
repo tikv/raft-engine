@@ -17,7 +17,6 @@ use crate::PerfContext;
 
 type Ptr<T> = Option<NonNull<T>>;
 
-///
 pub struct Writer<P, O> {
     next: Cell<Ptr<Writer<P, O>>>,
     payload: *mut P,
@@ -95,7 +94,7 @@ impl<'a, 'b, P, O> WriteGroup<'a, 'b, P, O> {
     }
 }
 
-impl<'a, 'b, P, O> Drop for WriteGroup<'a, 'b, P, O> {
+impl<P, O> Drop for WriteGroup<'_, '_, P, O> {
     fn drop(&mut self) {
         self.ref_barrier.leader_exit();
     }
@@ -108,7 +107,7 @@ pub struct WriterIter<'a, 'b, 'c, P: 'c, O: 'c> {
     marker: PhantomData<&'a WriteGroup<'b, 'c, P, O>>,
 }
 
-impl<'a, 'b, 'c, P, O> Iterator for WriterIter<'a, 'b, 'c, P, O> {
+impl<'a, P, O> Iterator for WriterIter<'a, '_, '_, P, O> {
     type Item = &'a mut Writer<P, O>;
 
     fn next(&mut self) -> Option<Self::Item> {
