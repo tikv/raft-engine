@@ -2263,14 +2263,6 @@ pub(crate) mod tests {
             old_perf_context.apply_duration,
             new_perf_context.apply_duration
         );
-
-        use rand::{thread_rng, Rng};
-        let huge_data: Vec<u8> = (0..3 * 1024 * 1024).map(|_| thread_rng().gen()).collect();
-        for i in 5..200 {
-            engine.append(rid, i, i + 1, Some(&huge_data));
-            let new_perf_context = get_perf_context();
-            println!("[i: {}] - the details of perf: {:?}", i, new_perf_context);
-        }
     }
 
     #[test]
