@@ -333,14 +333,31 @@ where
         let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
-            // Ensure that the corresponding memtable is locked with a read lock before
-            // completing the fetching of entries from the raft logs. This
-            // prevents the scenario where the index could become stale while
-            // being concurrently updated by the `rewrite` operation.
-            let immutable = memtable.read();
-            immutable.fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
+            memtable
+                .read()
+                .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
             for i in ents_idx.iter() {
-                vec.push(read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i)?);
+                vec.push({
+                    match read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i) {
+                        Ok(entry) => entry,
+                        Err(e) => {
+                            // The index is not found in the file, it means the entry is already
+                            // stale by `compact` or `rewrite`. Retry to read the entry from the
+                            // memtable.
+                            let immutable = memtable.read();
+                            // Ensure that the corresponding memtable is locked with a read lock
+                            // before completing the fetching of entries
+                            // from the raft logs. This prevents the
+                            // scenario where the index could become stale while
+                            // being concurrently updated by the `rewrite` operation.
+                            if let Some(idx) = immutable.get_entry(i.index) {
+                                read_entry_from_file::<M, _>(self.pipe_log.as_ref(), &idx)?
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
+                });
             }
             ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(ents_idx.len() as f64);
             return Ok(ents_idx.len());
