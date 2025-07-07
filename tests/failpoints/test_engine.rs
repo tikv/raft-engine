@@ -631,6 +631,52 @@ fn test_concurrent_write_perf_context() {
     }
 }
 
+#[test]
+fn test_fetch_with_updated_entry_index() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_fetch_with_updated_entry_index")
+        .tempdir()
+        .unwrap();
+    let entry_data = vec![b'x'; 1024];
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg).unwrap();
+    for i in 0..10 {
+        append(
+            &engine,
+            i + 1,
+            1 + i * 10,
+            1 + i * 10 + 10,
+            Some(&entry_data),
+        );
+    }
+    assert_eq!(
+        10,
+        engine
+            .fetch_entries_to::<MessageExtTyped>(1, 1, 11, None, &mut vec![])
+            .unwrap()
+    );
+    // Mock: the file is broken or abnormal to read
+    {
+        let _f = FailGuard::new("log_file::read::err", "return");
+        engine
+            .fetch_entries_to::<MessageExtTyped>(10, 91, 101, None, &mut vec![])
+            .unwrap_err();
+    }
+    // Mock: one entry have been updated by background rewrite thread.
+    {
+        let _f = FailGuard::new("log_file::read::err", "8*off->return->off");
+        assert_eq!(
+            10,
+            engine
+                .fetch_entries_to::<MessageExtTyped>(10, 91, 101, None, &mut vec![])
+                .unwrap()
+        );
+    }
+}
+
 // FIXME: this test no longer works because recovery cannot reliably detect
 // overwrite anomaly.
 // See https://github.com/tikv/raft-engine/issues/250
