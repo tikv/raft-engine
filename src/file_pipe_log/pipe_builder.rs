@@ -349,8 +349,8 @@ impl<F: FileSystem> DualPipesBuilder<F> {
 
         let file_system = self.file_system.clone();
         // As the `recover_queue` would update the `LogFileFormat` of each log file
-        // in `apend_files` and `rewrite_files`, we re-design the implementation on
-        // `recover_queue` to make it compatiable to concurrent processing
+        // in `append_files` and `rewrite_files`, we re-design the implementation on
+        // `recover_queue` to make it compatible to concurrent processing
         // with ThreadPool.
         let (append, rewrite) = pool.join(
             || {
@@ -630,5 +630,5 @@ pub(super) fn lock_dir<P: AsRef<Path>>(dir: P) -> Result<StdFile> {
 pub(crate) struct FileName {
     pub seq: FileSeq,
     pub path: PathBuf,
-    path_id: PathId,
+    pub path_id: PathId,
 }

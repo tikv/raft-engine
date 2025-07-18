@@ -1028,7 +1028,7 @@ mod tests {
             // test_extend_ref
             let mut v = VecDeque::new_in(allocator.clone());
             v.push_back(1);
-            v.extend(&[2, 3, 4]);
+            v.extend([2, 3, 4]);
 
             assert_eq!(v.len(), 4);
             assert_eq!(v[0], 1);
