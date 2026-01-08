@@ -5,10 +5,10 @@
 //! [`PipeLog`]: crate::pipe_log::PipeLog
 
 mod format;
-mod log_file;
-mod pipe;
-mod pipe_builder;
-mod reader;
+pub mod log_file;
+pub mod pipe;
+pub mod pipe_builder;
+pub mod reader;
 
 pub use format::{parse_reserved_file_name, FileNameExt};
 pub use pipe::DualPipes as FilePipeLog;
@@ -31,6 +31,7 @@ pub mod debug {
     use super::format::{FileNameExt, LogFileFormat};
     use super::log_file::{LogFileReader, LogFileWriter};
     use super::reader::LogItemBatchFileReader;
+    use std::io::Result as IoResult;
 
     /// Opens a log file for write. When `create` is true, the specified file
     /// will be created first if not exists.
@@ -40,7 +41,7 @@ pub mod debug {
         path: &Path,
         format: LogFileFormat,
         create: bool,
-    ) -> Result<LogFileWriter<F>> {
+    ) -> IoResult<LogFileWriter<F>> {
         let fd = if create {
             file_system.create(path)?
         } else {
@@ -54,7 +55,7 @@ pub mod debug {
     pub fn build_file_reader<F: FileSystem>(
         file_system: &F,
         path: &Path,
-    ) -> Result<LogFileReader<F>> {
+    ) -> IoResult<LogFileReader<F>> {
         let fd = Arc::new(file_system.open(path, Permission::ReadOnly)?);
         super::log_file::build_file_reader(file_system, fd)
     }

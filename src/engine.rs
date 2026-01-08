@@ -74,12 +74,13 @@ where
         Self::open_with(cfg, file_system, vec![])
     }
 
-    pub fn open_with(
+    fn open_with(
         mut cfg: Config,
         file_system: Arc<F>,
         mut listeners: Vec<Arc<dyn EventListener>>,
     ) -> Result<Engine<F, FilePipeLog<F>>> {
         cfg.sanitize()?;
+        file_system.bootstrap()?;
         listeners.push(Arc::new(PurgeHook::default()) as Arc<dyn EventListener>);
 
         let start = Instant::now();
@@ -647,7 +648,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::env::{ObfuscatedFileSystem, Permission};
+    use crate::env::{HedgedFileSystem, ObfuscatedFileSystem, Permission};
     use crate::file_pipe_log::{parse_reserved_file_name, FileNameExt};
     use crate::log_batch::AtomicGroupBuilder;
     use crate::pipe_log::Version;
@@ -2697,6 +2698,284 @@ pub(crate) mod tests {
         assert!(engine.raft_groups().is_empty());
     }
 
+    fn number_of_files(p: &Path) -> usize {
+        let mut r = 0;
+        std::fs::read_dir(p).unwrap().for_each(|e| {
+            if e.unwrap()
+                .path()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("000")
+            {
+                r += 1;
+            }
+        });
+        r
+    }
+
+    use md5::{Digest, Md5};
+    use std::{fs, io};
+
+    fn calculate_hash(path: &Path) -> [u8; 16] {
+        let mut hasher = Md5::new();
+
+        std::fs::read_dir(path).unwrap().for_each(|e| {
+            let p = e.unwrap().path();
+            let file_name = p.file_name().unwrap().to_str().unwrap();
+            match FileId::parse_file_name(file_name) {
+                None => {
+                    if parse_reserved_file_name(file_name).is_none() {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            let mut file = fs::File::open(&p).unwrap();
+            let n = io::copy(&mut file, &mut hasher).unwrap();
+        });
+        hasher.finalize().into()
+    }
+
+    use std::io::Write;
+    #[test]
+    fn test_start_engine_with_second_disk() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_second_disk_default")
+            .tempdir()
+            .unwrap();
+        let sec_dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_second_disk_second")
+            .tempdir()
+            .unwrap();
+
+        let file_system = Arc::new(HedgedFileSystem::new(
+            Arc::new(DefaultFileSystem {}),
+            dir.path().to_path_buf(),
+            sec_dir.path().to_path_buf(),
+        ));
+        let entry_data = vec![b'x'; 512];
+
+        // Preparations for multi-dirs.
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            enable_log_recycle: false,
+            target_file_size: ReadableSize(1),
+            ..Default::default()
+        };
+
+        // Step 1: write data into the main directory.
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        for rid in 1..=10 {
+            engine.append(rid, 1, 10, Some(&entry_data));
+        }
+        drop(engine);
+
+        // Restart the engine with recycle and prefill. Test reusing files from both
+        // dirs.
+        let cfg_2 = Config {
+            enable_log_recycle: true,
+            prefill_for_recycle: true,
+            purge_threshold: ReadableSize(40),
+            ..cfg
+        };
+        let engine = RaftLogEngine::open_with_file_system(cfg_2, file_system).unwrap();
+        assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+        for rid in 1..=10 {
+            assert_eq!(engine.first_index(rid).unwrap(), 1);
+            engine.clean(rid);
+        }
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        let file_count = number_of_files(dir.path());
+        assert_eq!(number_of_files(sec_dir.path()), file_count);
+        assert!(file_count > engine.file_count(None));
+        // Append data, recycled files are reused.
+        for rid in 1..=30 {
+            engine.append(rid, 20, 30, Some(&entry_data));
+        }
+        // No new file is created.
+        let file_count1 = number_of_files(dir.path());
+        assert_eq!(file_count, file_count1);
+        assert_eq!(number_of_files(sec_dir.path()), file_count1);
+    }
+
+    #[test]
+    fn test_start_engine_with_abnormal_second_disk() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_abnormal_second_disk_default")
+            .tempdir()
+            .unwrap();
+        let sec_dir = tempfile::Builder::new()
+            .prefix("test_start_engine_with_abnormal_second_disk_second")
+            .tempdir()
+            .unwrap();
+
+        let file_system = Arc::new(HedgedFileSystem::new(
+            Arc::new(DefaultFileSystem {}),
+            dir.path().to_path_buf(),
+            sec_dir.path().to_path_buf(),
+        ));
+        let entry_data = vec![b'x'; 512];
+
+        // Preparations for multi-dirs.
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            enable_log_recycle: true,
+            prefill_for_recycle: true,
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(40),
+            ..Default::default()
+        };
+
+        // Step 1: write data into the main directory.
+        let engine =
+            RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+        for rid in 1..=10 {
+            engine.append(rid, 1, 10, Some(&entry_data));
+        }
+        assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+        for rid in 1..=10 {
+            assert_eq!(engine.first_index(rid).unwrap(), 1);
+            engine.clean(rid);
+        }
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        let file_count = number_of_files(dir.path());
+        assert_eq!(number_of_files(sec_dir.path()), file_count);
+        assert!(file_count > engine.file_count(None));
+        // Append data, recycled files are reused.
+        for rid in 1..=30 {
+            engine.append(rid, 20, 30, Some(&entry_data));
+        }
+        // No new file is created.
+        let file_count1 = number_of_files(dir.path());
+        assert_eq!(file_count, file_count1);
+        assert_eq!(number_of_files(sec_dir.path()), file_count1);
+        drop(engine);
+
+        // abnormal case - Empty second dir
+        {
+            std::fs::remove_dir_all(sec_dir.path()).unwrap();
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // All files in first dir are copied to second dir
+            assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // abnormal case - Missing some append files in second dir
+        {
+            let mut file_count = 0;
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Append,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    if file_count % 2 == 0 {
+                        std::fs::remove_file(sec_dir.path().join(file_name)).unwrap();
+                    }
+                    file_count += 1;
+                }
+            }
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Missing append files are copied
+            assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // abnormal case - Missing some rewrite files in second dir
+        {
+            let mut file_count = 0;
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let Some(FileId {
+                    queue: LogQueue::Rewrite,
+                    seq: _,
+                }) = FileId::parse_file_name(file_name)
+                {
+                    if file_count % 2 == 0 {
+                        std::fs::remove_file(sec_dir.path().join(file_name)).unwrap();
+                    }
+                    file_count += 1;
+                }
+            }
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Missing rewrite files are copied
+            assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // abnormal case - Missing some reserve files in second dir
+        {
+            let mut file_count = 0;
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if let None = FileId::parse_file_name(file_name) {
+                    if file_count % 2 == 0 {
+                        std::fs::remove_file(sec_dir.path().join(file_name)).unwrap();
+                    }
+                    file_count += 1;
+                }
+            }
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Missing reserve files are copied
+            assert_eq!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // abnormal case - Have some extra files in second dir
+        {
+            let mut file_count = 0;
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if file_count % 2 == 0 {
+                    std::fs::copy(
+                        sec_dir.path().join(file_name),
+                        sec_dir.path().join(file_name.to_owned() + "tmp"),
+                    )
+                    .unwrap();
+                }
+            }
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Extra files are untouched.
+            assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // TODO: handle the error
+        // abnormal case - One file is corrupted
+        {
+            for e in std::fs::read_dir(sec_dir.path()).unwrap() {
+                let p = e.unwrap().path();
+                let file_name = p.file_name().unwrap().to_str().unwrap();
+                if file_count % 2 == 0 {
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(sec_dir.path().join(file_name))
+                        .unwrap();
+                    f.write_all(b"corrupted").unwrap();
+                }
+            }
+            let engine =
+                RaftLogEngine::open_with_file_system(cfg.clone(), file_system.clone()).unwrap();
+            // Corrupted files are untouched.
+            assert_ne!(number_of_files(sec_dir.path()), number_of_files(dir.path()));
+            assert_eq!(calculate_hash(sec_dir.path()), calculate_hash(dir.path()));
+        }
+        // abnormal case - One file in main dir is corrupted and one file in second dir
+        // is corrupted
+        {}
+        // abnormal case - Missing latest rewrite file in main dir and missing one log
+        // file in second dir
+        {}
+    }
+
     #[test]
     fn test_start_engine_with_multi_dirs() {
         let dir = tempfile::Builder::new()
@@ -2707,22 +2986,7 @@ pub(crate) mod tests {
             .prefix("test_start_engine_with_multi_dirs_spill")
             .tempdir()
             .unwrap();
-        fn number_of_files(p: &Path) -> usize {
-            let mut r = 0;
-            std::fs::read_dir(p).unwrap().for_each(|e| {
-                if e.unwrap()
-                    .path()
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .starts_with("000")
-                {
-                    r += 1;
-                }
-            });
-            r
-        }
+
         let file_system = Arc::new(DeleteMonitoredFileSystem::new());
         let entry_data = vec![b'x'; 512];
 

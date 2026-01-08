@@ -93,6 +93,7 @@ impl WriteExt for LogFile {
     }
 }
 
+#[derive(Clone)]
 pub struct DefaultFileSystem;
 
 impl FileSystem for DefaultFileSystem {

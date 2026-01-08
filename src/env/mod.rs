@@ -5,11 +5,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod default;
+mod hedged;
 mod log_fd;
 mod obfuscated;
 
 pub use default::DefaultFileSystem;
+pub use hedged::HedgedFileSystem;
 pub use obfuscated::ObfuscatedFileSystem;
+
+pub use hedged::State;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Permission {
@@ -22,6 +26,10 @@ pub trait FileSystem: Send + Sync {
     type Handle: Send + Sync + Handle;
     type Reader: Seek + Read + Send;
     type Writer: Seek + Write + Send + WriteExt;
+
+    fn bootstrap(&self) -> Result<()> {
+        Ok(())
+    }
 
     fn create<P: AsRef<Path>>(&self, path: P) -> Result<Self::Handle>;
 
