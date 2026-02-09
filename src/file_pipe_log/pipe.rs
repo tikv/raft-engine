@@ -19,11 +19,11 @@ use crate::metrics::*;
 use crate::pipe_log::{
     FileBlockHandle, FileId, FileSeq, LogFileContext, LogQueue, PipeLog, ReactiveBytes,
 };
-use crate::{perf_context, Error, Result};
+use crate::{Error, Result, perf_context};
 
-use super::format::{build_reserved_file_name, FileNameExt, LogFileFormat};
+use super::format::{FileNameExt, LogFileFormat, build_reserved_file_name};
 use super::log_file::build_file_reader;
-use super::log_file::{build_file_writer, LogFileWriter};
+use super::log_file::{LogFileWriter, build_file_writer};
 
 pub type PathId = usize;
 pub type Paths = Vec<PathBuf>;
@@ -614,8 +614,10 @@ mod tests {
         // Only one thread can hold file lock
         let r2 = new_test_pipes(&cfg);
 
-        assert!(format!("{}", r2.err().unwrap())
-            .contains("maybe another instance is using this directory"));
+        assert!(
+            format!("{}", r2.err().unwrap())
+                .contains("maybe another instance is using this directory")
+        );
     }
 
     #[test]

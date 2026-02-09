@@ -2,8 +2,8 @@
 
 use std::io::{Read, Result as IoResult, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::env::{DefaultFileSystem, FileSystem, Permission, WriteExt};
 

@@ -19,7 +19,7 @@ use crate::log_batch::{
 };
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-use crate::util::{hash_u64, Factory};
+use crate::util::{Factory, hash_u64};
 use crate::{Error, GlobalStats, Result};
 
 #[cfg(feature = "swap")]
@@ -1855,21 +1855,27 @@ mod tests {
         memtable.consistency_check();
 
         let mut ents_idx = vec![];
-        assert!(memtable
-            .fetch_entry_indexes_before(2, &mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_entry_indexes_before(2, &mut ents_idx)
+                .is_ok()
+        );
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
         ents_idx.clear();
-        assert!(memtable
-            .fetch_entry_indexes_before(1, &mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_entry_indexes_before(1, &mut ents_idx)
+                .is_ok()
+        );
         assert!(ents_idx.is_empty());
 
         ents_idx.clear();
-        assert!(memtable
-            .fetch_rewritten_entry_indexes(&mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_rewritten_entry_indexes(&mut ents_idx)
+                .is_ok()
+        );
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.first().unwrap().index, 0);
         assert_eq!(ents_idx.last().unwrap().index, 9);

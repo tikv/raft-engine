@@ -724,14 +724,16 @@ fn test_recycle_with_stale_logbatch_at_tail() {
     // Causing the final log file is a recycled file, containing rewritten
     // LogBatchs and end with stale LogBatchs, `Engine::open(...)` should
     // `panic` when recovering the relate `Memtable`.
-    assert!(catch_unwind_silent(|| {
-        let cfg_v2 = Config {
-            format_version: Version::V2,
-            ..cfg_err
-        };
-        Engine::open(cfg_v2)
-    })
-    .is_err());
+    assert!(
+        catch_unwind_silent(|| {
+            let cfg_v2 = Config {
+                format_version: Version::V2,
+                ..cfg_err
+            };
+            Engine::open(cfg_v2)
+        })
+        .is_err()
+    );
 }
 
 #[test]
