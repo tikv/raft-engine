@@ -3,8 +3,8 @@
 use std::fmt::Debug;
 use std::io::BufRead;
 use std::mem;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use log::error;
@@ -17,7 +17,7 @@ use crate::memtable::EntryIndex;
 use crate::metrics::StopWatch;
 use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext, ReactiveBytes};
 use crate::util::{crc32, lz4};
-use crate::{perf_context, Error, Result};
+use crate::{Error, Result, perf_context};
 
 pub(crate) const LOG_BATCH_HEADER_LEN: usize = 16;
 pub(crate) const LOG_BATCH_CHECKSUM_LEN: usize = 4;
@@ -1600,44 +1600,48 @@ mod tests {
 
         let mut copy = encoded.to_owned();
         copy.truncate(LOG_BATCH_HEADER_LEN - 1);
-        assert!(LogBatch::decode_header(&mut copy.as_slice())
-            .unwrap_err()
-            .to_string()
-            .contains("Log batch header too short"));
+        assert!(
+            LogBatch::decode_header(&mut copy.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("Log batch header too short")
+        );
 
         let mut copy = encoded.to_owned();
         (&mut copy[LOG_BATCH_HEADER_LEN - 8..LOG_BATCH_HEADER_LEN])
             .write_u64::<BigEndian>(encoded.len() as u64 + 1)
             .unwrap();
-        assert!(LogBatch::decode_header(&mut copy.as_slice())
-            .unwrap_err()
-            .to_string()
-            .contains("Log item offset exceeds log batch length"));
+        assert!(
+            LogBatch::decode_header(&mut copy.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("Log item offset exceeds log batch length")
+        );
 
         let mut copy = encoded.to_owned();
         (&mut copy[LOG_BATCH_HEADER_LEN - 8..LOG_BATCH_HEADER_LEN])
             .write_u64::<BigEndian>(LOG_BATCH_HEADER_LEN as u64 - 1)
             .unwrap();
-        assert!(LogBatch::decode_header(&mut copy.as_slice())
-            .unwrap_err()
-            .to_string()
-            .contains("Log item offset is smaller than log batch header length"));
+        assert!(
+            LogBatch::decode_header(&mut copy.as_slice())
+                .unwrap_err()
+                .to_string()
+                .contains("Log item offset is smaller than log batch header length")
+        );
     }
 
     #[cfg(feature = "nightly")]
     #[bench]
     fn bench_log_batch_add_entry_and_encode(b: &mut test::Bencher) {
-        use rand::{thread_rng, Rng};
+        use rand::{Rng, random};
         fn details(log_batch: &mut LogBatch, entries: &[Entry], regions: usize) {
             for _ in 0..regions {
-                log_batch
-                    .add_entries::<Entry>(thread_rng().gen(), entries)
-                    .unwrap();
+                log_batch.add_entries::<Entry>(random(), entries).unwrap();
             }
             log_batch.finish_populate(0, None).unwrap();
             let _ = log_batch.drain();
         }
-        let data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
+        let data: Vec<u8> = (0..128).map(|_| random()).collect();
         let entries = generate_entries(1, 11, Some(&data));
         let mut log_batch = LogBatch::default();
         // warm up
