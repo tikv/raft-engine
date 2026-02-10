@@ -1633,7 +1633,7 @@ mod tests {
     #[cfg(feature = "nightly")]
     #[bench]
     fn bench_log_batch_add_entry_and_encode(b: &mut test::Bencher) {
-        use rand::{Rng, random};
+        use rand::random;
         fn details(log_batch: &mut LogBatch, entries: &[Entry], regions: usize) {
             for _ in 0..regions {
                 log_batch.add_entries::<Entry>(random(), entries).unwrap();

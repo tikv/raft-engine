@@ -402,7 +402,7 @@ mod tests {
         }
         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
             self.dealloc.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.deallocate(ptr, layout)
+            unsafe { std::alloc::Global.deallocate(ptr, layout) }
         }
         unsafe fn grow(
             &self,
@@ -414,7 +414,7 @@ mod tests {
             if self.err_mode.load(Ordering::Relaxed) {
                 Err(AllocError)
             } else {
-                std::alloc::Global.grow(ptr, old_layout, new_layout)
+                unsafe { std::alloc::Global.grow(ptr, old_layout, new_layout) }
             }
         }
         unsafe fn shrink(
@@ -427,7 +427,7 @@ mod tests {
             if self.err_mode.load(Ordering::Relaxed) {
                 Err(AllocError)
             } else {
-                std::alloc::Global.shrink(ptr, old_layout, new_layout)
+                unsafe { std::alloc::Global.shrink(ptr, old_layout, new_layout) }
             }
         }
     }
