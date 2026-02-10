@@ -240,9 +240,9 @@ impl<F: FileSystem> DualPipesBuilder<F> {
             self.scan_dir(&dir, lock)?;
         }
 
-        self.append_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
-        self.rewrite_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
-        self.recycled_file_names.sort_by(|a, b| a.seq.cmp(&b.seq));
+        self.append_file_names.sort_by_key(|a| a.seq);
+        self.rewrite_file_names.sort_by_key(|a| a.seq);
+        self.recycled_file_names.sort_by_key(|a| a.seq);
         Ok(())
     }
 

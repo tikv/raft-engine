@@ -372,11 +372,11 @@ impl LogItemBatch {
         self.items
     }
 
-    pub fn iter(&self) -> std::slice::Iter<LogItem> {
+    pub fn iter(&self) -> std::slice::Iter<'_, LogItem> {
         self.items.iter()
     }
 
-    pub fn drain(&mut self) -> LogItemDrain {
+    pub fn drain(&mut self) -> LogItemDrain<'_> {
         self.item_size = 0;
         self.entries_size = 0;
         self.checksum = 0;
@@ -882,7 +882,7 @@ impl LogBatch {
     }
 
     /// Consumes log items into an iterator.
-    pub(crate) fn drain(&mut self) -> LogItemDrain {
+    pub(crate) fn drain(&mut self) -> LogItemDrain<'_> {
         debug_assert!(!matches!(self.buf_state, BufState::Incomplete));
 
         self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);

@@ -144,7 +144,7 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
             }
         }
         self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-        self.0.mem_allocator.deallocate(ptr, layout)
+        unsafe { self.0.mem_allocator.deallocate(ptr, layout) }
     }
 
     #[inline]
@@ -187,12 +187,9 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
 
             Ok(new_ptr)
         } else {
-            self.0
-                .mem_allocator
-                .grow(ptr, old_layout, new_layout)
-                .inspect_err(|_| {
-                    self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
-                })
+            unsafe { self.0.mem_allocator.grow(ptr, old_layout, new_layout) }.inspect_err(|_| {
+                self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
+            })
         }
     }
 
@@ -203,8 +200,8 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        let ptr = self.grow(ptr, old_layout, new_layout)?;
-        ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len());
+        let ptr = unsafe { self.grow(ptr, old_layout, new_layout)? };
+        unsafe { ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len()) };
         Ok(ptr)
     }
 
@@ -243,19 +240,16 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
             } else {
                 // The new layout should still be mapped to disk. Reuse old pointer.
                 Ok(NonNull::slice_from_raw_parts(
-                    NonNull::new_unchecked(ptr.as_ptr()),
+                    unsafe { NonNull::new_unchecked(ptr.as_ptr()) },
                     new_layout.size(),
                 ))
             }
         } else {
-            self.0
-                .mem_allocator
-                .shrink(ptr, old_layout, new_layout)
-                .inspect(|_| {
-                    self.0
-                        .mem_usage
-                        .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
-                })
+            unsafe { self.0.mem_allocator.shrink(ptr, old_layout, new_layout) }.inspect(|_| {
+                self.0
+                    .mem_usage
+                    .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
+            })
         }
     }
 }
