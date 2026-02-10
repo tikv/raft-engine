@@ -1,6 +1,9 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use std::panic::{self, AssertUnwindSafe};
+use std::{
+    panic::{self, AssertUnwindSafe},
+    sync::Arc,
+};
 
 use raft::eraftpb::Entry;
 
@@ -63,22 +66,18 @@ where
 }
 
 pub struct PanicGuard {
-    prev_hook: *mut (dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static),
+    prev_hook: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>,
 }
-
-struct PointerHolder<T: ?Sized>(*mut T);
-
-unsafe impl<T: Send + ?Sized> Send for PointerHolder<T> {}
-unsafe impl<T: Sync + ?Sized> Sync for PointerHolder<T> {}
 
 impl PanicGuard {
     pub fn with_prompt(s: String) -> Self {
-        let prev_hook = Box::into_raw(panic::take_hook());
-        let sendable_prev_hook = PointerHolder(prev_hook);
+        let prev_hook: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static> =
+            Arc::from(panic::take_hook());
+        let prev_hook_for_hook = Arc::clone(&prev_hook);
         // FIXME: Use thread local hook.
         panic::set_hook(Box::new(move |info| {
             eprintln!("{s}");
-            unsafe { (*sendable_prev_hook.0)(info) };
+            prev_hook_for_hook(info);
         }));
         PanicGuard { prev_hook }
     }
@@ -88,9 +87,8 @@ impl Drop for PanicGuard {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             let _ = panic::take_hook();
-            unsafe {
-                panic::set_hook(Box::from_raw(self.prev_hook));
-            }
+            let prev_hook = Arc::clone(&self.prev_hook);
+            panic::set_hook(Box::new(move |info| prev_hook(info)));
         }
     }
 }
