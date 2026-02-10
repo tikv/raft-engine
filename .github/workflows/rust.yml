@@ -49,7 +49,7 @@ jobs:
           WITH_STABLE_TOOLCHAIN: 'force'
   coverage:
     runs-on: ubuntu-latest
-    needs: nightly
+    needs: stable
     steps:
       - uses: actions/checkout@v2
         with:
