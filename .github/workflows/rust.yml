@@ -15,43 +15,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  nightly:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        # tests with sanitizer on `ubuntu-latest` is supported by 
-        # self-defined `nihtly test` job, so we don't need to test it here.
-        os: [ macos-latest ]
-    steps:
-      - uses: actions/checkout@v2
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-      - name: Install nightly toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: nightly-2026-01-30
-          override: true
-          components: rustfmt, clippy, rust-src
-      - uses: Swatinem/rust-cache@v1
-        with:
-          sharedKey: ${{ matrix.os }}
-      - name: Cache dependencies
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: if [[ ! -e ~/.cargo/bin/grcov ]]; then cargo install grcov; fi
-      - name: Format
-        run: |
-          make format
-          git diff --exit-code
-      - name: Clippy
-        run: make clippy
-        env:
-          EXTRA_CARGO_ARGS: '--fix'
-      - name: Run tests
-        run: make test
-        env:
-          RUST_BACKTRACE: 1
-          EXTRA_CARGO_ARGS: '--verbose'
   stable:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -83,7 +46,7 @@ jobs:
           WITH_STABLE_TOOLCHAIN: 'force'
   coverage:
     runs-on: ubuntu-latest
-    needs: nightly
+    needs: stable
     steps:
       - uses: actions/checkout@v2
         with:
