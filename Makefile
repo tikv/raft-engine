@@ -53,9 +53,9 @@ clippy:
 		cargo ${TOOLCHAIN_ARGS} update -p grpcio-sys@0.10.3+1.44.0-patched --precise 0.10.1+1.44.0; \
 	fi
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
+	CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5 $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 else
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
+	CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5 $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 endif
 
 ## Run tests.
