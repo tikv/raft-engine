@@ -9,11 +9,11 @@ use std::os::unix::fs::symlink;
 #[cfg(windows)]
 use std::os::windows::fs::symlink_file as symlink;
 
+use crate::Engine;
 use crate::config::{Config, RecoveryMode};
 use crate::env::FileSystem;
 use crate::file_pipe_log::{FileNameExt, FilePipeLog, FilePipeLogBuilder};
 use crate::pipe_log::{FileId, LogQueue};
-use crate::Engine;
 
 /// Returned by `Engine::fork`.
 #[derive(Default)]

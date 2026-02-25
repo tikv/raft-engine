@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use raft_engine::env::DefaultFileSystem;
 use raft_engine::Config;
 use raft_engine::Engine;
+use raft_engine::env::DefaultFileSystem;
 
 fn main() {
     let mut args = std::env::args();

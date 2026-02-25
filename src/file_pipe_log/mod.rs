@@ -10,7 +10,7 @@ mod pipe;
 mod pipe_builder;
 mod reader;
 
-pub use format::{parse_reserved_file_name, FileNameExt};
+pub use format::{FileNameExt, parse_reserved_file_name};
 pub use pipe::DualPipes as FilePipeLog;
 pub use pipe_builder::{
     DefaultMachineFactory, DualPipesBuilder as FilePipeLogBuilder, RecoveryConfig, ReplayMachine,
@@ -173,7 +173,7 @@ pub mod debug {
         use crate::env::DefaultFileSystem;
         use crate::log_batch::{Command, LogBatch};
         use crate::pipe_log::{FileBlockHandle, LogFileContext, LogQueue, Version};
-        use crate::test_util::{generate_entries, PanicGuard};
+        use crate::test_util::{PanicGuard, generate_entries};
         use raft::eraftpb::Entry;
 
         #[test]

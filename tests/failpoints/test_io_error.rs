@@ -105,10 +105,12 @@ fn test_file_write_error() {
         engine
             .write(&mut generate_batch(1, 2, 3, Some(&entry)), false)
             .unwrap();
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 3, 4, Some(&entry)), true);
-        })
-        .is_err());
+        assert!(
+            catch_unwind_silent(|| {
+                let _ = engine.write(&mut generate_batch(1, 3, 4, Some(&entry)), true);
+            })
+            .is_err()
+        );
     }
 
     // Internal states are consistent after panics. But outstanding writes are not
@@ -155,10 +157,12 @@ fn test_file_rotate_error(restart_after_failure: bool) {
     {
         // Fail to sync old log file.
         let _f = FailGuard::new("log_fd::sync::err", "return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
+        assert!(
+            catch_unwind_silent(|| {
+                let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+            })
+            .is_err()
+        );
     }
     if restart_after_failure {
         drop(engine);
@@ -168,9 +172,11 @@ fn test_file_rotate_error(restart_after_failure: bool) {
     {
         // Fail to create new log file.
         let _f = FailGuard::new("default_fs::create::err", "return");
-        assert!(engine
-            .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
-            .is_err());
+        assert!(
+            engine
+                .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
+                .is_err()
+        );
     }
     if restart_after_failure {
         drop(engine);
@@ -180,9 +186,11 @@ fn test_file_rotate_error(restart_after_failure: bool) {
     {
         // Fail to write header of new log file.
         let _f = FailGuard::new("log_file::write::err", "1*off->return");
-        assert!(engine
-            .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
-            .is_err());
+        assert!(
+            engine
+                .write(&mut generate_batch(1, 4, 5, Some(&entry)), false)
+                .is_err()
+        );
     }
     if restart_after_failure {
         drop(engine);
@@ -201,10 +209,12 @@ fn test_file_rotate_error(restart_after_failure: bool) {
         // If the engine restarted, the write does not require sync will succeed.
         // Fail to sync new log file. The old log file is already sync-ed at this point.
         let _f = FailGuard::new("log_fd::sync::err", "return");
-        assert!(catch_unwind_silent(|| {
-            let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
-        })
-        .is_err());
+        assert!(
+            catch_unwind_silent(|| {
+                let _ = engine.write(&mut generate_batch(1, 4, 5, Some(&entry)), false);
+            })
+            .is_err()
+        );
         assert_eq!(engine.file_span(LogQueue::Append).1, 1);
     }
 
@@ -372,12 +382,14 @@ fn test_non_atomic_write_error() {
         let engine = Engine::open_with_file_system(cfg.clone(), fs.clone()).unwrap();
         let _f1 = FailGuard::new("log_file::write::err", "return");
         let _f2 = FailGuard::new("log_file::seek::err", "return");
-        assert!(catch_unwind_silent(|| {
-            engine
-                .write(&mut generate_batch(rid, 6, 7, Some(&entry)), true)
-                .unwrap_err();
-        })
-        .is_err());
+        assert!(
+            catch_unwind_silent(|| {
+                engine
+                    .write(&mut generate_batch(rid, 6, 7, Some(&entry)), true)
+                    .unwrap_err();
+            })
+            .is_err()
+        );
     }
     {
         let engine = Engine::open_with_file_system(cfg, fs).unwrap();
@@ -572,9 +584,11 @@ fn test_no_space_write_error() {
             };
             let engine = Engine::open(cfg_err).unwrap();
             let _f = FailGuard::new("log_fd::write::no_space_err", "return");
-            assert!(engine
-                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                .is_err());
+            assert!(
+                engine
+                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                    .is_err()
+            );
             assert_eq!(
                 0,
                 engine
@@ -588,9 +602,11 @@ fn test_no_space_write_error() {
             let _f1 = FailGuard::new("log_fd::write::no_space_err", "2*return->off");
             let _f2 = FailGuard::new("file_pipe_log::force_choose_dir", "return");
             // The first write should fail, because all dirs run out of space for writing.
-            assert!(engine
-                .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
-                .is_err());
+            assert!(
+                engine
+                    .write(&mut generate_batch(2, 11, 21, Some(&entry)), true)
+                    .is_err()
+            );
             assert_eq!(
                 0,
                 engine
@@ -643,9 +659,11 @@ fn test_no_space_write_error() {
                 "log_fd::write::no_space_err",
                 "1*return->1*off->1*return->1*off",
             );
-            assert!(engine
-                .write(&mut generate_batch(7, 11, 21, Some(&entry)), true)
-                .is_err());
+            assert!(
+                engine
+                    .write(&mut generate_batch(7, 11, 21, Some(&entry)), true)
+                    .is_err()
+            );
             assert_eq!(
                 0,
                 engine
