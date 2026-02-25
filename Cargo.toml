@@ -67,7 +67,7 @@ thiserror = "1.0"
 criterion = "0.4"
 ctor = "0.2"
 env_logger = "0.10"
-kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = [
+kvproto = { git = "https://github.com/pingcap/kvproto.git", branch = "release-8.5", default-features = false, features = [
   "protobuf-codec",
 ] }
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = [
@@ -75,6 +75,7 @@ raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-fea
 ] }
 rand = "0.8"
 rand_distr = "0.4"
+serde_json = "=1.0.146"
 tempfile = "3.6"
 toml = "0.8"
 
