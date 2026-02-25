@@ -1410,7 +1410,7 @@ pub(crate) mod tests {
         let empty_entry = Entry::new();
         assert_eq!(empty_entry.compute_size(), 0);
         log_batch
-            .add_entries::<Entry>(0, &[empty_entry.clone()])
+            .add_entries::<Entry>(0, std::slice::from_ref(&empty_entry))
             .unwrap();
         engine.write(&mut log_batch, false).unwrap();
         let empty_state = RaftLocalState::new();
@@ -1420,7 +1420,7 @@ pub(crate) mod tests {
             .unwrap();
         engine.write(&mut log_batch, false).unwrap();
         log_batch
-            .add_entries::<Entry>(2, &[empty_entry.clone()])
+            .add_entries::<Entry>(2, std::slice::from_ref(&empty_entry))
             .unwrap();
         log_batch
             .put_message(2, b"key".to_vec(), &empty_state)

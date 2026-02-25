@@ -44,6 +44,10 @@ format:
 CLIPPY_WHITELIST += -A clippy::bool_assert_comparison
 ## Run clippy.
 clippy:
+	# Fresh lockfile resolution can pull grpcio 0.13.x via kvproto (grpcio = "0.*"),
+	# which fails to build on macOS arm64 in current CI images. Force a compatible
+	# selection before linting.
+	cargo ${TOOLCHAIN_ARGS} update -p grpcio@0.13.0 --precise 0.10.2 || true
 ifdef WITH_NIGHTLY_FEATURES
 	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 else

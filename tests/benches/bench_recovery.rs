@@ -116,7 +116,7 @@ fn dir_size(path: &str) -> ReadableSize {
 
 fn bench_recovery(c: &mut Criterion) {
     // prepare input
-    let cfgs = vec![
+    let cfgs = [
         (
             "default".to_owned(),
             Config {
