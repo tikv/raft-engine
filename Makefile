@@ -42,7 +42,7 @@ format:
 	cargo ${TOOLCHAIN_ARGS} fmt --all
 
 CLIPPY_WHITELIST += -A clippy::bool_assert_comparison
-CMAKE_COMPAT_ARGS := -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+CMAKE_COMPAT := CMAKE="$(CURDIR)/scripts/cmake-wrapper.sh"
 ## Run clippy.
 clippy:
 	# Fresh lockfile resolution can pull grpcio/grpcio-sys versions that fail on
@@ -54,19 +54,19 @@ clippy:
 		cargo ${TOOLCHAIN_ARGS} update -p grpcio-sys@0.10.3+1.44.0-patched --precise 0.10.1+1.44.0; \
 	fi
 ifdef WITH_NIGHTLY_FEATURES
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 else
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} clippy --all --features failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 endif
 
 ## Run tests.
 test:
 ifdef WITH_NIGHTLY_FEATURES
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group ${EXTRA_CARGO_ARGS} -- --nocapture
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group ${EXTRA_CARGO_ARGS} -- --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 else
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
 
 ## Run tests with various features for maximum code coverage.
@@ -75,10 +75,10 @@ test_matrix:
 	$(error Must run test matrix with nightly features. Please reset WITH_STABLE_TOOLCHAIN.)
 else
 test_matrix: test
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,std_fs ${EXTRA_CARGO_ARGS} -- --nocapture
-	CMAKE_ARGS="${CMAKE_COMPAT_ARGS} $${CMAKE_ARGS}" cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,std_fs,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --all ${EXTRA_CARGO_ARGS} -- --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,std_fs ${EXTRA_CARGO_ARGS} -- --nocapture
+	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,std_fs,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
 
 ## Build raft-engine-ctl.
