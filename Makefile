@@ -50,8 +50,8 @@ clippy:
 	@if cargo ${TOOLCHAIN_ARGS} tree --all-features -i 'grpcio@0.13.0' >/dev/null 2>&1; then \
 		cargo ${TOOLCHAIN_ARGS} update -p grpcio@0.13.0 --precise 0.10.2; \
 	fi
-	@if cargo ${TOOLCHAIN_ARGS} tree --all-features -i 'grpcio-sys@0.10.3+1.44.0-patched' >/dev/null 2>&1; then \
-		cargo ${TOOLCHAIN_ARGS} update -p grpcio-sys@0.10.3+1.44.0-patched --precise 0.10.1+1.44.0; \
+	@if cargo ${TOOLCHAIN_ARGS} tree --all-features -i 'grpcio-sys@0.10.1+1.44.0' >/dev/null 2>&1; then \
+		cargo ${TOOLCHAIN_ARGS} update -p grpcio-sys@0.10.1+1.44.0 --precise 0.10.3+1.44.0-patched; \
 	fi
 ifdef WITH_NIGHTLY_FEATURES
 	${CMAKE_COMPAT} cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
