@@ -372,11 +372,11 @@ impl LogItemBatch {
         self.items
     }
 
-    pub fn iter(&self) -> std::slice::Iter<LogItem> {
+    pub fn iter(&self) -> std::slice::Iter<'_, LogItem> {
         self.items.iter()
     }
 
-    pub fn drain(&mut self) -> LogItemDrain {
+    pub fn drain(&mut self) -> LogItemDrain<'_> {
         self.item_size = 0;
         self.entries_size = 0;
         self.checksum = 0;
@@ -882,7 +882,7 @@ impl LogBatch {
     }
 
     /// Consumes log items into an iterator.
-    pub(crate) fn drain(&mut self) -> LogItemDrain {
+    pub(crate) fn drain(&mut self) -> LogItemDrain<'_> {
         debug_assert!(!matches!(self.buf_state, BufState::Incomplete));
 
         self.buf.shrink_to(MAX_LOG_BATCH_BUFFER_CAP);
@@ -1631,13 +1631,13 @@ mod tests {
         fn details(log_batch: &mut LogBatch, entries: &[Entry], regions: usize) {
             for _ in 0..regions {
                 log_batch
-                    .add_entries::<Entry>(thread_rng().gen(), entries)
+                    .add_entries::<Entry>(thread_rng().r#gen(), entries)
                     .unwrap();
             }
             log_batch.finish_populate(0, None).unwrap();
             let _ = log_batch.drain();
         }
-        let data: Vec<u8> = (0..128).map(|_| thread_rng().gen()).collect();
+        let data: Vec<u8> = (0..128).map(|_| thread_rng().r#gen()).collect();
         let entries = generate_entries(1, 11, Some(&data));
         let mut log_batch = LogBatch::default();
         // warm up
