@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hashbrown::HashMap;
-use rhai::{Engine, Scope, AST};
-use scopeguard::{guard, ScopeGuard};
+use rhai::{AST, Engine, Scope};
+use scopeguard::{ScopeGuard, guard};
 
 use crate::env::FileSystem;
 use crate::file_pipe_log::debug::{build_file_reader, build_file_writer};

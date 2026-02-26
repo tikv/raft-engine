@@ -6,8 +6,8 @@ use std::alloc::{AllocError, Allocator, Global, Layout};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::vec::Vec;
 
 use log::{error, warn};
@@ -120,9 +120,8 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
                 return swap_r;
             }
         }
-        self.0.mem_allocator.allocate(layout).map_err(|e| {
+        self.0.mem_allocator.allocate(layout).inspect_err(|_| {
             self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-            e
         })
     }
 
@@ -145,7 +144,9 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
             }
         }
         self.0.mem_usage.fetch_sub(layout.size(), Ordering::Relaxed);
-        self.0.mem_allocator.deallocate(ptr, layout)
+        unsafe {
+            self.0.mem_allocator.deallocate(ptr, layout);
+        }
     }
 
     #[inline]
@@ -188,13 +189,9 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
 
             Ok(new_ptr)
         } else {
-            self.0
-                .mem_allocator
-                .grow(ptr, old_layout, new_layout)
-                .map_err(|e| {
-                    self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
-                    e
-                })
+            unsafe { self.0.mem_allocator.grow(ptr, old_layout, new_layout) }.inspect_err(|_| {
+                self.0.mem_usage.fetch_sub(diff, Ordering::Relaxed);
+            })
         }
     }
 
@@ -205,8 +202,10 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
         old_layout: Layout,
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        let ptr = self.grow(ptr, old_layout, new_layout)?;
-        ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len());
+        let ptr = unsafe { self.grow(ptr, old_layout, new_layout)? };
+        unsafe {
+            ptr.as_non_null_ptr().as_ptr().write_bytes(0, ptr.len());
+        }
         Ok(ptr)
     }
 
@@ -245,20 +244,16 @@ unsafe impl<A: Allocator + Send + Sync> Allocator for SwappyAllocator<A> {
             } else {
                 // The new layout should still be mapped to disk. Reuse old pointer.
                 Ok(NonNull::slice_from_raw_parts(
-                    NonNull::new_unchecked(ptr.as_ptr()),
+                    unsafe { NonNull::new_unchecked(ptr.as_ptr()) },
                     new_layout.size(),
                 ))
             }
         } else {
-            self.0
-                .mem_allocator
-                .shrink(ptr, old_layout, new_layout)
-                .map(|p| {
-                    self.0
-                        .mem_usage
-                        .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
-                    p
-                })
+            unsafe { self.0.mem_allocator.shrink(ptr, old_layout, new_layout) }.inspect(|_| {
+                self.0
+                    .mem_usage
+                    .fetch_sub(old_layout.size() - new_layout.size(), Ordering::Relaxed);
+            })
         }
     }
 }
@@ -411,7 +406,9 @@ mod tests {
         }
         unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
             self.dealloc.fetch_add(1, Ordering::Relaxed);
-            std::alloc::Global.deallocate(ptr, layout)
+            unsafe {
+                std::alloc::Global.deallocate(ptr, layout);
+            }
         }
         unsafe fn grow(
             &self,
@@ -423,7 +420,7 @@ mod tests {
             if self.err_mode.load(Ordering::Relaxed) {
                 Err(AllocError)
             } else {
-                std::alloc::Global.grow(ptr, old_layout, new_layout)
+                unsafe { std::alloc::Global.grow(ptr, old_layout, new_layout) }
             }
         }
         unsafe fn shrink(
@@ -436,7 +433,7 @@ mod tests {
             if self.err_mode.load(Ordering::Relaxed) {
                 Err(AllocError)
             } else {
-                std::alloc::Global.shrink(ptr, old_layout, new_layout)
+                unsafe { std::alloc::Global.shrink(ptr, old_layout, new_layout) }
             }
         }
     }
@@ -654,10 +651,12 @@ mod tests {
         {
             let mut vec: Vec<u8, _> = Vec::new_in(allocator.clone());
             global.set_err_mode(true);
-            assert!(catch_unwind_silent(|| {
-                vec.resize(16, 0);
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    vec.resize(16, 0);
+                })
+                .is_err()
+            );
             assert_eq!(allocator.memory_usage(), 0);
             global.set_err_mode(false);
             vec.resize(16, 0);
@@ -669,10 +668,12 @@ mod tests {
             vec.resize(16, 0);
             assert_eq!(allocator.memory_usage(), 16);
             global.set_err_mode(true);
-            assert!(catch_unwind_silent(|| {
-                vec.resize(32, 0);
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    vec.resize(32, 0);
+                })
+                .is_err()
+            );
             assert_eq!(allocator.memory_usage(), 16);
             global.set_err_mode(false);
             vec.resize(32, 0);
@@ -685,10 +686,12 @@ mod tests {
             assert_eq!(allocator.memory_usage(), 32);
             global.set_err_mode(true);
             vec.resize(16, 0);
-            assert!(catch_unwind_silent(|| {
-                vec.shrink_to_fit();
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    vec.shrink_to_fit();
+                })
+                .is_err()
+            );
             assert_eq!(allocator.memory_usage(), 32);
             global.set_err_mode(false);
             vec.shrink_to_fit();
@@ -1098,10 +1101,12 @@ mod tests {
             v.push_front(D(1, false));
             v.push_front(D(0, false));
 
-            assert!(catch_unwind_silent(|| {
-                v.drain(1..=4);
-            })
-            .is_err());
+            assert!(
+                catch_unwind_silent(|| {
+                    v.drain(1..=4);
+                })
+                .is_err()
+            );
 
             assert_eq!(unsafe { DROPS }, 4);
             assert_eq!(v.len(), 3);

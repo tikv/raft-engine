@@ -2,8 +2,8 @@
 name = "raft-engine"
 version = "0.4.2"
 authors = ["The TiKV Project Developers"]
-edition = "2018"
-rust-version = "1.75.0"
+edition = "2024"
+rust-version = "1.85.0"
 description = "A persistent storage engine for Multi-Raft logs"
 readme = "README.md"
 repository = "https://github.com/tikv/raft-engine"
@@ -58,7 +58,7 @@ protobuf = "2"
 rayon = "1.5"
 rhai = { version = "1.7", features = ["sync"], optional = true }
 scopeguard = "1.1"
-serde = { version = "=1.0.194", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_repr = "0.1"
 strum = { version = "0.26.2", features = ["derive"] }
 thiserror = "1.0"
@@ -67,7 +67,10 @@ thiserror = "1.0"
 criterion = "0.4"
 ctor = "0.2"
 env_logger = "0.10"
-kvproto = { git = "https://github.com/pingcap/kvproto.git", default-features = false, features = [
+grpcio = { version = "=0.10.2", default-features = false, features = [
+  "protobuf-codec",
+] }
+kvproto = { git = "https://github.com/pingcap/kvproto.git", branch = "release-8.5", default-features = false, features = [
   "protobuf-codec",
 ] }
 raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-features = false, features = [
@@ -75,6 +78,7 @@ raft = { git = "https://github.com/tikv/raft-rs", branch = "master", default-fea
 ] }
 rand = "0.8"
 rand_distr = "0.4"
+serde_json = "=1.0.146"
 tempfile = "3.6"
 toml = "0.8"
 

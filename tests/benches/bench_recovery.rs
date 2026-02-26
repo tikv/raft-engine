@@ -1,6 +1,6 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
-use criterion::{criterion_group, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group};
 use raft::eraftpb::Entry;
 use raft_engine::ReadableSize;
 use raft_engine::{Config as EngineConfig, Engine, LogBatch, MessageExt, Result};
@@ -44,7 +44,9 @@ impl Default for Config {
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
+        write!(
+            f,
+            "{} [region-count: {}][batch-size: {}][item-size: {}][entry-size: {}][batch-compression-threshold: {}]",
             self.total_size,
             self.region_count,
             self.batch_size,
@@ -116,7 +118,7 @@ fn dir_size(path: &str) -> ReadableSize {
 
 fn bench_recovery(c: &mut Criterion) {
     // prepare input
-    let cfgs = vec![
+    let cfgs = [
         (
             "default".to_owned(),
             Config {

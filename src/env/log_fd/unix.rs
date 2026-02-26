@@ -8,12 +8,12 @@ use log::error;
 use std::io::Result as IoResult;
 use std::os::unix::io::RawFd;
 
+use nix::NixPath;
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::uio::{pread, pwrite};
-use nix::unistd::{close, ftruncate, lseek, Whence};
-use nix::NixPath;
+use nix::unistd::{Whence, close, ftruncate, lseek};
 
 fn from_nix_error(e: nix::Error, custom: &'static str) -> std::io::Error {
     let kind = std::io::Error::from(e).kind();

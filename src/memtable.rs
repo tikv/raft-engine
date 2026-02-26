@@ -19,7 +19,7 @@ use crate::log_batch::{
 };
 use crate::metrics::MEMORY_USAGE;
 use crate::pipe_log::{FileBlockHandle, FileId, FileSeq, LogQueue};
-use crate::util::{hash_u64, Factory};
+use crate::util::{Factory, hash_u64};
 use crate::{Error, GlobalStats, Result};
 
 #[cfg(feature = "swap")]
@@ -228,7 +228,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         }
 
         if let Some(g) = rhs.atomic_group.take() {
-            assert!(self.atomic_group.map_or(true, |(_, end)| end <= g.0));
+            assert!(self.atomic_group.is_none_or(|(_, end)| end <= g.0));
             self.atomic_group = Some(g);
         }
 
@@ -545,7 +545,7 @@ impl<A: AllocatorTrait> MemTable<A> {
     }
 
     pub fn apply_rewrite_atomic_group(&mut self, start: FileSeq, end: FileSeq) {
-        assert!(self.atomic_group.map_or(true, |(_, b)| b <= start));
+        assert!(self.atomic_group.is_none_or(|(_, b)| b <= start));
         self.atomic_group = Some((start, end));
     }
 
@@ -1855,21 +1855,27 @@ mod tests {
         memtable.consistency_check();
 
         let mut ents_idx = vec![];
-        assert!(memtable
-            .fetch_entry_indexes_before(2, &mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_entry_indexes_before(2, &mut ents_idx)
+                .is_ok()
+        );
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.last().unwrap().index, 19);
         ents_idx.clear();
-        assert!(memtable
-            .fetch_entry_indexes_before(1, &mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_entry_indexes_before(1, &mut ents_idx)
+                .is_ok()
+        );
         assert!(ents_idx.is_empty());
 
         ents_idx.clear();
-        assert!(memtable
-            .fetch_rewritten_entry_indexes(&mut ents_idx)
-            .is_ok());
+        assert!(
+            memtable
+                .fetch_rewritten_entry_indexes(&mut ents_idx)
+                .is_ok()
+        );
         assert_eq!(ents_idx.len(), 10);
         assert_eq!(ents_idx.first().unwrap().index, 0);
         assert_eq!(ents_idx.last().unwrap().index, 9);

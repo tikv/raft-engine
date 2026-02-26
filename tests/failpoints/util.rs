@@ -1,7 +1,7 @@
 // Copyright (c) 2017-present, PingCAP, Inc. Licensed under Apache-2.0.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use raft::eraftpb::Entry;
 use raft_engine::env::FileSystem;

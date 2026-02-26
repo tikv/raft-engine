@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fail::fail_point;
 use log::{info, warn};
