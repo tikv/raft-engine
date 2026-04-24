@@ -46,7 +46,7 @@ log = { version = "0.4", features = [
   "max_level_trace",
   "release_max_level_debug",
 ] }
-lz4-sys = { version = "=1.9.5" }
+lz4-sys = { version = "=1.9.5", optional = true }
 memmap2 = { version = "0.9", optional = true }
 nix = "0.26"
 num-derive = "0.4"
@@ -79,13 +79,19 @@ tempfile = "3.6"
 toml = "0.8"
 
 [features]
-default = ["internals", "scripting"]
+default = ["internals", "scripting", "lz4-compression"]
 internals = []
 nightly = ["prometheus/nightly"]
 failpoints = ["fail/failpoints"]
 scripting = ["rhai"]
 swap = ["nightly", "memmap2"]
 std_fs = []
+# Optional LZ4 compression for log batches via the `lz4-sys` C FFI crate.
+# Default-on preserves historical behavior; disabling it removes the C
+# dependency entirely from the build graph. Callers who disable this
+# feature must set `compression_threshold = 0` in their `Config`, and
+# must not open existing data written with compression enabled.
+lz4-compression = ["dep:lz4-sys"]
 
 nightly_group = ["nightly", "swap"]
 
