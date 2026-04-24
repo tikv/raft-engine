@@ -5,6 +5,7 @@
 ### New Features
 
 * Add a new Prometheus metric `raft_engine_write_compression_ratio` to track compression ratio of write #358
+* Gate the `lz4-sys` C FFI dependency behind a new `lz4-compression` Cargo feature (on by default). Consumers who build with `default-features = false` and without `lz4-compression` get a fully pure-Rust build graph; `Config::sanitize` rejects a non-zero `batch-compression-threshold` in that configuration.
 
 ## [0.4.2] - 2024-04-16
 

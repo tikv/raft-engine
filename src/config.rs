@@ -4,7 +4,7 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::pipe_log::Version;
-use crate::{Result, util::ReadableSize};
+use crate::{util::ReadableSize, Result};
 
 const MIN_RECOVERY_READ_BLOCK_SIZE: usize = 512;
 const MIN_RECOVERY_THREADS: usize = 1;
@@ -57,6 +57,13 @@ pub struct Config {
     /// disables compression.
     ///
     /// Default: "8KB"
+    ///
+    /// Note: a non-zero threshold requires the `lz4-compression` Cargo
+    /// feature (on by default). Builds compiled with
+    /// `--no-default-features` and without `lz4-compression` must set
+    /// this to 0 or `Config::sanitize` will reject the configuration.
+    /// Such builds also cannot decode LZ4-compressed entries written by
+    /// other builds.
     pub batch_compression_threshold: ReadableSize,
     /// Acceleration factor for LZ4 compression. It can be fine tuned, with each
     /// successive value providing roughly +~3% to speed. The value will be
@@ -206,6 +213,12 @@ impl Config {
         if self.memory_limit.is_some() {
             warn!("memory-limit will be ignored because swap feature is disabled");
         }
+        #[cfg(not(feature = "lz4-compression"))]
+        if self.batch_compression_threshold.0 > 0 {
+            return Err(box_err!(
+                "batch-compression-threshold must be 0 when the `lz4-compression` Cargo feature is disabled"
+            ));
+        }
         Ok(())
     }
 
@@ -335,6 +348,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "lz4-compression"))]
+    fn test_sanitize_rejects_nonzero_threshold_without_lz4_feature() {
+        let mut cfg = Config::default();
+        cfg.batch_compression_threshold = ReadableSize::kb(8);
+        assert!(cfg.sanitize().is_err());
+        cfg.batch_compression_threshold = ReadableSize(0);
+        assert!(cfg.sanitize().is_ok());
+    }
+
+    #[test]
     fn test_backward_compactibility() {
         // Upgrade from older version.
         let old = r#"
@@ -343,11 +366,9 @@ mod tests {
         let mut load: Config = toml::from_str(old).unwrap();
         load.sanitize().unwrap();
         // Downgrade to older version.
-        assert!(
-            toml::to_string(&load)
-                .unwrap()
-                .contains("tolerate-corrupted-tail-records")
-        );
+        assert!(toml::to_string(&load)
+            .unwrap()
+            .contains("tolerate-corrupted-tail-records"));
     }
 
     #[test]

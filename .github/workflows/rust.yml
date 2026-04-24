@@ -38,6 +38,8 @@ jobs:
         run: make clippy
         env:
           WITH_STABLE_TOOLCHAIN: 'force'
+      - name: Build (no default features)
+        run: cargo build --no-default-features --verbose
       - name: Run tests
         run: make test
         env:
