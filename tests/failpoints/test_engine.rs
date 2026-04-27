@@ -1234,3 +1234,40 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
         );
     }
 }
+
+// Regression test for tikv/raft-engine#395: Engine::sync() previously short-
+// circuited via the empty-batch early-return in Engine::write, so no fsync
+// was issued on the active log file. Use the `log_fd::sync::err` failpoint
+// to assert the sync code path is now reached: with the failpoint enabled,
+// sync() must surface the injected fsync error.
+#[test]
+fn test_sync_empty_batch_actually_syncs() {
+    let dir = tempfile::Builder::new()
+        .prefix("test_sync_empty_batch_actually_syncs")
+        .tempdir()
+        .unwrap();
+    let cfg = Config {
+        dir: dir.path().to_str().unwrap().to_owned(),
+        ..Default::default()
+    };
+    let engine = Engine::open(cfg).unwrap();
+
+    // No data was written, so this is the "empty batch + sync" path that #395
+    // describes. Without the failpoint, it should still succeed.
+    engine.sync().unwrap();
+
+    // Now inject an fsync error and confirm the sync path actually runs by
+    // observing that the error propagates. Before the fix this returned
+    // Ok(()) silently because Engine::write's empty-batch early-return ran
+    // first and skipped pipe_log.sync entirely.
+    let _guard = FailGuard::new("log_fd::sync::err", "return");
+    let err = engine
+        .sync()
+        .err()
+        .expect("engine.sync() must reach pipe_log.sync() and surface the fsync error");
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("sync"),
+        "unexpected error: {msg}",
+    );
+}
