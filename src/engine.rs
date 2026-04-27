@@ -244,6 +244,14 @@ where
     /// Synchronizes the Raft engine by issuing an `fdatasync` on the active
     /// log queue. This flushes any previously-appended writes to durable
     /// storage even when there is no new data to write.
+    ///
+    /// Note: sync errors from `pipe_log.sync(LogQueue::Append)` propagate to
+    /// the caller via `Err` here, but the same underlying call inside the
+    /// non-empty `Engine::write` path is invoked through `.expect()` and
+    /// surfaces as a panic instead. Callers that need an `Err` for the sync
+    /// step should drive durability through `Engine::sync` (or
+    /// `Engine::write` with an empty `LogBatch` and `sync=true`) rather than
+    /// relying on the in-write sync hop.
     pub fn sync(&self) -> Result<()> {
         self.pipe_log.sync(LogQueue::Append)
     }

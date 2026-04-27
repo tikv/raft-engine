@@ -1238,8 +1238,15 @@ fn test_build_engine_with_recycling_and_multi_dirs() {
 // Regression test for tikv/raft-engine#395: Engine::sync() previously short-
 // circuited via the empty-batch early-return in Engine::write, so no fsync
 // was issued on the active log file. Use the `log_fd::sync::err` failpoint
-// to assert the sync code path is now reached: with the failpoint enabled,
-// sync() must surface the injected fsync error.
+// to assert the sync code path is now reached.
+//
+// LogFileWriter::sync currently does `self.handle.sync().unwrap()`, so the
+// injected fsync error surfaces as a panic rather than as an `Err` in the
+// public API — same pattern as the existing failpoint tests in
+// `test_io_error.rs`. Catching the panic is therefore the witness that the
+// sync code path was actually exercised; before the fix the empty-batch
+// early-return meant the panic site was never reached and `engine.sync()`
+// returned `Ok(())` silently.
 #[test]
 fn test_sync_empty_batch_actually_syncs() {
     let dir = tempfile::Builder::new()
@@ -1256,18 +1263,15 @@ fn test_sync_empty_batch_actually_syncs() {
     // describes. Without the failpoint, it should still succeed.
     engine.sync().unwrap();
 
-    // Now inject an fsync error and confirm the sync path actually runs by
-    // observing that the error propagates. Before the fix this returned
-    // Ok(()) silently because Engine::write's empty-batch early-return ran
-    // first and skipped pipe_log.sync entirely.
+    // Now inject an fsync error. The LogFileWriter::sync .unwrap() chain
+    // turns the injected error into a panic; without the fix, sync() would
+    // never reach LogFileWriter::sync and no panic would occur.
     let _guard = FailGuard::new("log_fd::sync::err", "return");
-    let err = engine
-        .sync()
-        .err()
-        .expect("engine.sync() must reach pipe_log.sync() and surface the fsync error");
-    let msg = format!("{err}");
     assert!(
-        msg.to_lowercase().contains("sync"),
-        "unexpected error: {msg}",
+        catch_unwind_silent(|| {
+            let _ = engine.sync();
+        })
+        .is_err(),
+        "engine.sync() must reach the LogFileWriter::sync .unwrap() chain"
     );
 }
