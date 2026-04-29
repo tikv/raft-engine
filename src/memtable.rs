@@ -1729,7 +1729,13 @@ mod tests {
         let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
         let mut next = 0;
 
-        while memtable.entry_indexes.capacity() < CAPACITY_SHRINK_THRESHOLD {
+        while memtable.entry_indexes.capacity() < CAPACITY_SHRINK_THRESHOLD
+            || memtable.entry_indexes.len()
+                <= memtable
+                    .entry_indexes
+                    .capacity()
+                    .saturating_sub(CAPACITY_INIT + CAPACITY_SHRINK_MIN_RECLAIM)
+        {
             memtable.append(generate_entry_indexes(
                 next,
                 next + 1,
@@ -1739,10 +1745,14 @@ mod tests {
         }
 
         let capacity_before = memtable.entry_indexes.capacity();
-        assert_eq!(capacity_before, CAPACITY_SHRINK_THRESHOLD);
+        let retained = capacity_before - (CAPACITY_INIT + CAPACITY_SHRINK_MIN_RECLAIM);
+        assert!(capacity_before >= CAPACITY_SHRINK_THRESHOLD);
+        assert!(retained > 0);
+        assert!(retained < memtable.entry_indexes.len());
 
-        assert_eq!(memtable.compact_to(next - 40), next - 40);
-        assert_eq!(memtable.entry_indexes.len(), 40);
+        let compact_to = next - retained as u64;
+        assert_eq!(memtable.compact_to(compact_to), compact_to);
+        assert_eq!(memtable.entry_indexes.len(), retained);
         assert_eq!(memtable.entry_indexes.capacity(), capacity_before);
         memtable.consistency_check();
     }
