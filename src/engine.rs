@@ -2616,7 +2616,7 @@ pub(crate) mod tests {
             assert!(data.remove(&rid), "{}", rid);
             assert_eq!(engine.get(rid, &key).unwrap(), value);
         }
-        assert!(data.is_empty(), "data loss {:?}", data);
+        assert!(data.is_empty(), "data loss {data:?}");
     }
 
     #[test]

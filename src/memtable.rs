@@ -1741,7 +1741,7 @@ mod tests {
         let capacity_before = memtable.entry_indexes.capacity();
         assert_eq!(capacity_before, CAPACITY_SHRINK_THRESHOLD);
 
-        assert_eq!(memtable.compact_to(next - 40), (next - 40) as u64);
+        assert_eq!(memtable.compact_to(next - 40), next - 40);
         assert_eq!(memtable.entry_indexes.len(), 40);
         assert_eq!(memtable.entry_indexes.capacity(), capacity_before);
         memtable.consistency_check();
