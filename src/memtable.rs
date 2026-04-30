@@ -66,8 +66,12 @@ mod swap_conditional_imports {
 
 use swap_conditional_imports::*;
 
-/// Attempt to shrink entry container if its capacity reaches the threshold.
-const CAPACITY_SHRINK_THRESHOLD: usize = 1024 - 1;
+/// Consider shrinking entry container once it grows past this size.
+const CAPACITY_SHRINK_THRESHOLD: usize = 128 - 1;
+/// Shrink only when live entries use at most half of the allocated slots.
+const CAPACITY_SHRINK_UTILIZATION_FACTOR: usize = 2;
+/// Skip tiny reallocations that would recover very little memory.
+const CAPACITY_SHRINK_MIN_RECLAIM: usize = 64 - 1;
 const CAPACITY_INIT: usize = 32 - 1;
 /// Number of hash table to store [`MemTable`].
 const MEMTABLE_SLOT_COUNT: usize = 128;
@@ -620,9 +624,19 @@ impl<A: AllocatorTrait> MemTable<A> {
 
     #[inline]
     fn maybe_shrink_entry_indexes(&mut self) {
-        if self.entry_indexes.capacity() >= CAPACITY_SHRINK_THRESHOLD {
-            self.entry_indexes.shrink_to_fit();
+        let len = self.entry_indexes.len();
+        let capacity = self.entry_indexes.capacity();
+        let target = std::cmp::max(len.saturating_add(CAPACITY_INIT), CAPACITY_INIT);
+        if capacity < CAPACITY_SHRINK_THRESHOLD
+            || len.saturating_mul(CAPACITY_SHRINK_UTILIZATION_FACTOR) > capacity
+            || capacity <= target.saturating_add(CAPACITY_SHRINK_MIN_RECLAIM)
+        {
+            return;
         }
+
+        // Keep one initial-sized window of slack so a freshly compacted table
+        // does not immediately regrow on the next small append burst.
+        self.entry_indexes.shrink_to(target);
     }
 
     /// Pulls all entries between log index `begin` and `end` to the given
@@ -1663,6 +1677,116 @@ mod tests {
         assert_eq!(memtable.entries_size(), 5);
         assert_eq!(memtable.first_index().unwrap(), 20);
         assert_eq!(memtable.last_index().unwrap(), 24);
+        memtable.consistency_check();
+    }
+
+    #[test]
+    fn test_memtable_compact_shrinks_sparse_entry_indexes() {
+        let region_id = 8;
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+
+        memtable.append(generate_entry_indexes(
+            0,
+            600,
+            FileId::new(LogQueue::Append, 1),
+        ));
+        let capacity_before = memtable.entry_indexes.capacity();
+        assert!(capacity_before >= CAPACITY_SHRINK_THRESHOLD);
+
+        assert_eq!(memtable.compact_to(584), 584);
+        assert_eq!(memtable.entry_indexes.len(), 16);
+        assert_eq!(memtable.first_index().unwrap(), 584);
+
+        let capacity_after = memtable.entry_indexes.capacity();
+        assert!(capacity_after < capacity_before);
+        assert!(capacity_after >= memtable.entry_indexes.len());
+        assert!(capacity_after >= memtable.entry_indexes.len().saturating_add(CAPACITY_INIT));
+        memtable.consistency_check();
+    }
+
+    #[test]
+    fn test_memtable_compact_keeps_busy_entry_indexes_capacity() {
+        let region_id = 8;
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+
+        memtable.append(generate_entry_indexes(
+            0,
+            600,
+            FileId::new(LogQueue::Append, 1),
+        ));
+        let capacity_before = memtable.entry_indexes.capacity();
+        assert!(capacity_before >= CAPACITY_SHRINK_THRESHOLD);
+
+        assert_eq!(memtable.compact_to(80), 80);
+        assert_eq!(memtable.entry_indexes.len(), 520);
+        assert_eq!(memtable.entry_indexes.capacity(), capacity_before);
+        memtable.consistency_check();
+    }
+
+    #[test]
+    fn test_memtable_compact_keeps_capacity_when_reclaim_is_too_small() {
+        let region_id = 8;
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+        let mut next = 0;
+
+        while memtable.entry_indexes.capacity() < CAPACITY_SHRINK_THRESHOLD
+            || memtable.entry_indexes.len()
+                <= memtable
+                    .entry_indexes
+                    .capacity()
+                    .saturating_sub(CAPACITY_INIT + CAPACITY_SHRINK_MIN_RECLAIM)
+        {
+            memtable.append(generate_entry_indexes(
+                next,
+                next + 1,
+                FileId::new(LogQueue::Append, 1),
+            ));
+            next += 1;
+        }
+
+        let capacity_before = memtable.entry_indexes.capacity();
+        let retained = capacity_before - (CAPACITY_INIT + CAPACITY_SHRINK_MIN_RECLAIM);
+        assert!(capacity_before >= CAPACITY_SHRINK_THRESHOLD);
+        assert!(retained > 0);
+        assert!(retained < memtable.entry_indexes.len());
+
+        let compact_to = next - retained as u64;
+        assert_eq!(memtable.compact_to(compact_to), compact_to);
+        assert_eq!(memtable.entry_indexes.len(), retained);
+        assert_eq!(memtable.entry_indexes.capacity(), capacity_before);
+        memtable.consistency_check();
+    }
+
+    #[test]
+    fn test_memtable_append_after_compact_shrink_keeps_span_consistent() {
+        let region_id = 8;
+        let mut memtable = MemTable::new(region_id, Arc::new(GlobalStats::default()));
+
+        memtable.append(generate_entry_indexes(
+            0,
+            600,
+            FileId::new(LogQueue::Append, 1),
+        ));
+        assert_eq!(memtable.compact_to(584), 584);
+        let capacity_after_compact = memtable.entry_indexes.capacity();
+
+        memtable.append(generate_entry_indexes(
+            600,
+            620,
+            FileId::new(LogQueue::Append, 2),
+        ));
+
+        let mut ents_idx = vec![];
+        memtable
+            .fetch_entries_to(584, 620, None, &mut ents_idx)
+            .unwrap();
+        assert_eq!(memtable.first_index(), Some(584));
+        assert_eq!(memtable.last_index(), Some(619));
+        assert_eq!(ents_idx.len(), 36);
+        assert_eq!(ents_idx[0].index, 584);
+        assert_eq!(ents_idx.last().unwrap().index, 619);
+        assert_eq!(memtable.global_stats.live_entries(LogQueue::Append), 36);
+        assert!(memtable.entry_indexes.capacity() >= capacity_after_compact);
         memtable.consistency_check();
     }
 

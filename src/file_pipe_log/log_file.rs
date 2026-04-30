@@ -111,7 +111,7 @@ impl<F: FileSystem> LogFileWriter<F> {
             self.writer
                 .seek(SeekFrom::Start(self.written as u64))
                 .unwrap_or_else(|e| {
-                    panic!("failed to reseek after write failure: {}", e);
+                    panic!("failed to reseek after write failure: {e}");
                 });
         })?;
         self.written = new_written;
