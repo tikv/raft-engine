@@ -41,11 +41,11 @@ pub struct LogFd(RawFd);
 impl LogFd {
     /// Opens a file with the given `path`.
     pub fn open<P: ?Sized + NixPath>(path: &P, perm: Permission) -> IoResult<Self> {
+        let flags = OFlag::from(perm) | OFlag::O_CLOEXEC;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         fail_point!("log_fd::open::fadvise_dontneed", |_| {
-            let fd =
-                LogFd(fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?);
+            let fd = LogFd(fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?);
             #[cfg(target_os = "linux")]
             unsafe {
                 extern crate libc;
@@ -54,14 +54,14 @@ impl LogFd {
             Ok(fd)
         });
         Ok(LogFd(
-            fcntl::open(path, perm.into(), mode).map_err(|e| from_nix_error(e, "open"))?,
+            fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?,
         ))
     }
 
     /// Opens a file with the given `path`. The specified file will be created
     /// first if not exists.
     pub fn create<P: ?Sized + NixPath>(path: &P) -> IoResult<Self> {
-        let flags = OFlag::O_RDWR | OFlag::O_CREAT;
+        let flags = OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC;
         // Permission 644
         let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
         let fd = fcntl::open(path, flags, mode).map_err(|e| from_nix_error(e, "open"))?;
