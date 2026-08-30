@@ -2,6 +2,7 @@
 # The members of 'sig-community-*' are synced from memberships defined in repository: https://github.com/tikv/community.
 aliases:
   sig-community-reviewers:
+    - 0xPoe
     - 3AceShowHand
     - 3pointer
     - CalvinNeo
@@ -12,7 +13,6 @@ aliases:
     - Leavrth
     - Mossaka
     - MrCroxx
-    - Rustin170506
     - Xuanwo
     - ethercflow
     - fredchenbj
@@ -31,6 +31,7 @@ aliases:
     - rleungx
     - tier-cap
     - wfxr
+    - winoros
     - wjhuang2016
     - wshwsh12
   sig-community-approvers:
