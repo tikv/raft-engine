@@ -2266,6 +2266,77 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_remove_recycled_files_left_by_unclean_shutdown() {
+        let dir = tempfile::Builder::new()
+            .prefix("test_unclean_recycled")
+            .tempdir()
+            .unwrap();
+        let entry_data = vec![b'x'; 16];
+        let cfg = Config {
+            dir: dir.path().to_str().unwrap().to_owned(),
+            target_file_size: ReadableSize(1),
+            purge_threshold: ReadableSize(50),
+            format_version: Version::V2,
+            enable_log_recycle: true,
+            prefill_for_recycle: true,
+            ..Default::default()
+        };
+        let fs = Arc::new(DefaultFileSystem);
+        let engine = RaftLogEngine::open_with_file_system(cfg, fs.clone()).unwrap();
+        for rid in 1..=10 {
+            engine.append(rid, 1, 11, Some(&entry_data));
+        }
+        for rid in 1..=10 {
+            engine.clean(rid);
+        }
+        engine.purge_manager.must_rewrite_append_queue(None, None);
+        // A clean shutdown renames recycled files to `*.raftlog.reserved`. Simulate
+        // an unclean shutdown (SIGKILL / OOM, `SinglePipe::drop` never runs) by
+        // renaming them back to plain append files, reproducing the leaked-files
+        // on-disk state reported in issue #407.
+        let engine = engine.reopen();
+        let dir_path = dir.path();
+        let mut reserved_names = Vec::new();
+        for entry in std::fs::read_dir(dir_path).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if name.ends_with(".raftlog.reserved") {
+                reserved_names.push(name);
+            }
+        }
+        assert!(!reserved_names.is_empty());
+        let ghost_names: Vec<String> = reserved_names
+            .iter()
+            .map(|n| n.trim_end_matches(".reserved").to_owned())
+            .collect();
+        for (name, ghost) in reserved_names.iter().zip(ghost_names.iter()) {
+            std::fs::rename(dir_path.join(name), dir_path.join(ghost)).unwrap();
+        }
+        // Reopen: the leaked (ghost) files form a hole before the active range and
+        // must be physically removed instead of leaking on disk forever.
+        let engine = engine.reopen();
+        let disk_append_count = std::fs::read_dir(dir_path)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .into_string()
+                    .unwrap()
+                    .ends_with(".raftlog")
+            })
+            .count();
+        // Every plain `.raftlog` file on disk must belong to the active span; any
+        // leaked recycled file would show up as a stray file and break the equality.
+        assert_eq!(
+            engine.file_count(Some(LogQueue::Append)),
+            disk_append_count,
+            "leaked recycled files should be removed on restart"
+        );
+        let (start, end) = engine.file_span(LogQueue::Append);
+        assert!(start <= end);
+    }
+
+    #[test]
     fn test_simple_write_perf_context() {
         let dir = tempfile::Builder::new()
             .prefix("test_simple_write_perf_context")
