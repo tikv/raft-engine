@@ -17,6 +17,7 @@ use crate::memtable::EntryIndex;
 use crate::metrics::StopWatch;
 use crate::pipe_log::{FileBlockHandle, FileId, LogFileContext, ReactiveBytes};
 use crate::util::{crc32, lz4};
+use crate::value_codec::{ProtobufCodec, ValueCodec};
 use crate::{Error, Result, perf_context};
 
 pub(crate) const LOG_BATCH_HEADER_LEN: usize = 16;
@@ -34,10 +35,14 @@ const MAX_LOG_BATCH_BUFFER_CAP: usize = 8 * 1024 * 1024;
 // 2GiB, The maximum content length accepted by lz4 compression.
 const MAX_LOG_ENTRIES_SIZE_PER_BATCH: usize = i32::MAX as usize;
 
-/// `MessageExt` trait allows for probing log index from a specific type of
-/// protobuf messages.
-pub trait MessageExt: Send + Sync {
-    type Entry: Message + Clone + PartialEq;
+/// `MessageExt` describes a type of log entry: how to probe its Raft log index,
+/// and -- through the codec parameter `C` -- how it is serialized onto disk.
+pub trait MessageExt<C = ProtobufCodec>: Send + Sync
+where
+    C: ValueCodec<Self::Entry>,
+{
+    /// The log entry type.
+    type Entry: Clone + PartialEq;
 
     fn index(e: &Self::Entry) -> u64;
 }
@@ -477,7 +482,16 @@ impl LogItemBatch {
     }
 
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
-        self.put(region_id, key, s.write_to_bytes()?);
+        self.put_value::<ProtobufCodec, S>(region_id, key, s)
+    }
+
+    pub fn put_value<C: ValueCodec<S>, S>(
+        &mut self,
+        region_id: u64,
+        key: Vec<u8>,
+        v: &S,
+    ) -> Result<()> {
+        self.put(region_id, key, C::encode_to_vec(v)?);
         Ok(())
     }
 
@@ -643,12 +657,20 @@ impl LogBatch {
         Ok(())
     }
 
-    /// Adds some protobuf log entries into the log batch.
-    pub fn add_entries<M: MessageExt>(
-        &mut self,
-        region_id: u64,
-        entries: &[M::Entry],
-    ) -> Result<()> {
+    /// Adds log entries to the batch using [`ProtobufCodec`].
+    pub fn add_entries<M: MessageExt>(&mut self, region_id: u64, entries: &[M::Entry]) -> Result<()>
+    where
+        ProtobufCodec: ValueCodec<M::Entry>,
+    {
+        self.add_entries_with::<M, ProtobufCodec>(region_id, entries)
+    }
+
+    /// Adds some log entries into the log batch, encoded with `C`.
+    pub fn add_entries_with<M, C>(&mut self, region_id: u64, entries: &[M::Entry]) -> Result<()>
+    where
+        C: ValueCodec<M::Entry>,
+        M: MessageExt<C>,
+    {
         debug_assert!(self.buf_state == BufState::Open);
         if entries.is_empty() {
             return Ok(());
@@ -663,7 +685,14 @@ impl LogBatch {
         })();
         for e in entries {
             let buf_offset = self.buf.len();
-            e.write_to_vec(&mut self.buf)?;
+            if let Err(err) = C::encode_to(e, &mut self.buf) {
+                // Leave the batch in a usable state before bailing out,
+                // otherwise every later `debug_assert!(buf_state == Open)`
+                // would trip.
+                self.buf.truncate(old_buf_len);
+                self.buf_state = BufState::Open;
+                return Err(err);
+            }
             if self.buf.len() > max_entries_size + LOG_BATCH_HEADER_LEN {
                 self.buf.truncate(old_buf_len);
                 self.buf_state = BufState::Open;
@@ -728,13 +757,23 @@ impl LogBatch {
 
     /// Adds a protobuf key value pair into the log batch.
     pub fn put_message<S: Message>(&mut self, region_id: u64, key: Vec<u8>, s: &S) -> Result<()> {
+        self.put_value::<ProtobufCodec, S>(region_id, key, s)
+    }
+
+    /// Adds a key value pair into the log batch, encoding the value with `C`.
+    pub fn put_value<C: ValueCodec<S>, S>(
+        &mut self,
+        region_id: u64,
+        key: Vec<u8>,
+        v: &S,
+    ) -> Result<()> {
         if crate::is_internal_key(&key, None) {
             return Err(Error::InvalidArgument(format!(
                 "key prefix `{:?}` reserved for internal use",
                 crate::INTERNAL_KEY_PREFIX
             )));
         }
-        self.item_batch.put_message(region_id, key, s)
+        self.item_batch.put_value::<C, S>(region_id, key, v)
     }
 
     /// Adds a key value pair into the log batch.
@@ -1116,7 +1155,6 @@ mod tests {
     use super::*;
     use crate::pipe_log::{LogQueue, Version};
     use crate::test_util::{catch_unwind_silent, generate_entries, generate_entry_indexes_opt};
-    use protobuf::parse_from_bytes;
     use raft::eraftpb::Entry;
     use strum::IntoEnumIterator;
 
@@ -1124,14 +1162,17 @@ mod tests {
         buf: &[u8],
         entry_indexes: &[EntryIndex],
         _encoded: bool,
-    ) -> Vec<M::Entry> {
+    ) -> Vec<M::Entry>
+    where
+        ProtobufCodec: ValueCodec<M::Entry>,
+    {
         let mut entries = Vec::with_capacity(entry_indexes.len());
         for ei in entry_indexes {
             let block =
                 LogBatch::decode_entries_block(buf, ei.entries.unwrap(), ei.compression_type)
                     .unwrap();
             entries.push(
-                parse_from_bytes(
+                ProtobufCodec::decode(
                     &block[ei.entry_offset as usize..(ei.entry_offset + ei.entry_len) as usize],
                 )
                 .unwrap(),
@@ -1579,6 +1620,57 @@ mod tests {
                 .unwrap_err(),
             Error::InvalidArgument(_)
         ));
+        // The codec-generic entry point must apply the same guard.
+        assert!(matches!(
+            batch
+                .put_value::<ProtobufCodec, Entry>(
+                    0,
+                    crate::make_internal_key(ATOMIC_GROUP_KEY),
+                    &Entry::new()
+                )
+                .unwrap_err(),
+            Error::InvalidArgument(_)
+        ));
+    }
+
+    #[test]
+    fn test_put_value_matches_put_message_bytes() {
+        // `put_value::<ProtobufCodec>` must produce exactly the bytes the old
+        // `put_message` produced.
+        let mut e = Entry::new();
+        e.set_index(3);
+        e.set_term(5);
+        e.set_data(vec![b'z'; 128].into());
+
+        let mut a = LogBatch::default();
+        a.put_message(1, b"k".to_vec(), &e).unwrap();
+        let mut b = LogBatch::default();
+        b.put_value::<ProtobufCodec, Entry>(1, b"k".to_vec(), &e)
+            .unwrap();
+
+        let extract = |batch: &LogBatch| -> Vec<u8> {
+            match &batch.item_batch.items[0].content {
+                LogItemContent::Kv(kv) => kv.value.clone().unwrap(),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(extract(&a), extract(&b));
+        assert_eq!(extract(&a), e.write_to_bytes().unwrap());
+    }
+
+    #[test]
+    fn test_add_entries_encodes_with_codec() {
+        // `add_entries` must lay entries out back-to-back in the shared buffer,
+        // exactly as the old `write_to_vec` loop did.
+        let entries = generate_entries(1, 6, Some(&[b'q'; 32]));
+        let mut batch = LogBatch::default();
+        batch.add_entries::<Entry>(7, &entries).unwrap();
+
+        let mut expected = Vec::new();
+        for e in &entries {
+            e.write_to_vec(&mut expected).unwrap();
+        }
+        assert_eq!(&batch.buf[LOG_BATCH_HEADER_LEN..], &expected[..]);
     }
 
     #[test]

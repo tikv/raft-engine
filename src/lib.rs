@@ -57,6 +57,7 @@ mod swappy_allocator;
 #[cfg(test)]
 mod test_util;
 mod util;
+mod value_codec;
 mod write_barrier;
 
 pub mod env;
@@ -68,6 +69,11 @@ pub use log_batch::{Command, LogBatch, MessageExt};
 pub use metrics::{PerfContext, get_perf_context, set_perf_context, take_perf_context};
 pub use pipe_log::Version;
 pub use util::ReadableSize;
+#[cfg(feature = "serde-bincode")]
+pub use value_codec::BincodeCodec;
+#[cfg(feature = "serde-json")]
+pub use value_codec::JsonCodec;
+pub use value_codec::{ProtobufCodec, ValueCodec};
 
 #[cfg(feature = "internals")]
 pub mod internals {

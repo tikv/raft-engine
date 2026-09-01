@@ -8,7 +8,7 @@ use std::thread::{Builder as ThreadBuilder, JoinHandle};
 use std::time::{Duration, Instant};
 
 use log::{error, info};
-use protobuf::{Message, parse_from_bytes};
+use protobuf::Message;
 
 use crate::config::{Config, RecoveryMode};
 use crate::consistency::ConsistencyChecker;
@@ -21,6 +21,7 @@ use crate::memtable::{EntryIndex, MemTableRecoverContextFactory, MemTables};
 use crate::metrics::*;
 use crate::pipe_log::{FileBlockHandle, FileId, LogQueue, PipeLog};
 use crate::purge::{PurgeHook, PurgeManager};
+use crate::value_codec::{ProtobufCodec, ValueCodec};
 use crate::write_barrier::{WriteBarrier, Writer};
 use crate::{Error, GlobalStats, Result, perf_context};
 
@@ -257,10 +258,14 @@ where
     }
 
     pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
+        self.get_value::<ProtobufCodec, S>(region_id, key)
+    }
+
+    pub fn get_value<C: ValueCodec<S>, S>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
         let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(value) = memtable.read().get(key) {
-                return Ok(Some(parse_from_bytes(&value)?));
+                return Ok(Some(C::decode(&value)?));
             }
         }
         Ok(None)
@@ -282,14 +287,29 @@ where
         start_key: Option<&[u8]>,
         end_key: Option<&[u8]>,
         reverse: bool,
-        mut callback: C,
+        callback: C,
     ) -> Result<()>
     where
         S: Message,
         C: FnMut(&[u8], S) -> bool,
     {
+        self.scan_values::<ProtobufCodec, S, C>(region_id, start_key, end_key, reverse, callback)
+    }
+
+    pub fn scan_values<VC, S, C>(
+        &self,
+        region_id: u64,
+        start_key: Option<&[u8]>,
+        end_key: Option<&[u8]>,
+        reverse: bool,
+        mut callback: C,
+    ) -> Result<()>
+    where
+        VC: ValueCodec<S>,
+        C: FnMut(&[u8], S) -> bool,
+    {
         self.scan_raw_messages(region_id, start_key, end_key, reverse, move |k, raw_v| {
-            if let Ok(v) = parse_from_bytes(raw_v) {
+            if let Ok(v) = VC::decode(raw_v) {
                 callback(k, v)
             } else {
                 true
@@ -319,16 +339,24 @@ where
         Ok(())
     }
 
-    pub fn get_entry<M: MessageExt>(
-        &self,
-        region_id: u64,
-        log_idx: u64,
-    ) -> Result<Option<M::Entry>> {
+    pub fn get_entry<M: MessageExt>(&self, region_id: u64, log_idx: u64) -> Result<Option<M::Entry>>
+    where
+        ProtobufCodec: ValueCodec<M::Entry>,
+    {
+        self.get_entry_with::<M, ProtobufCodec>(region_id, log_idx)
+    }
+
+    /// Reads one log entry, decoded with `C`.
+    pub fn get_entry_with<M, C>(&self, region_id: u64, log_idx: u64) -> Result<Option<M::Entry>>
+    where
+        C: ValueCodec<M::Entry>,
+        M: MessageExt<C>,
+    {
         let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(idx) = memtable.read().get_entry(log_idx) {
                 ENGINE_READ_ENTRY_COUNT_HISTOGRAM.observe(1.0);
-                return Ok(Some(read_entry_from_file::<M, _>(
+                return Ok(Some(read_entry_from_file::<M, C, _>(
                     self.pipe_log.as_ref(),
                     &idx,
                 )?));
@@ -343,7 +371,10 @@ where
         self.purge_manager.purge_expired_files()
     }
 
-    /// Returns count of fetched entries.
+    /// Returns count of fetched entries, decoded with [`ProtobufCodec`].
+    ///
+    /// For entries stored with another codec, use
+    /// [`Engine::fetch_entries_to_with`].
     pub fn fetch_entries_to<M: MessageExt>(
         &self,
         region_id: u64,
@@ -351,7 +382,26 @@ where
         end: u64,
         max_size: Option<usize>,
         vec: &mut Vec<M::Entry>,
-    ) -> Result<usize> {
+    ) -> Result<usize>
+    where
+        ProtobufCodec: ValueCodec<M::Entry>,
+    {
+        self.fetch_entries_to_with::<M, ProtobufCodec>(region_id, begin, end, max_size, vec)
+    }
+
+    /// Returns count of fetched entries, decoded with `C`.
+    pub fn fetch_entries_to_with<M, C>(
+        &self,
+        region_id: u64,
+        begin: u64,
+        end: u64,
+        max_size: Option<usize>,
+        vec: &mut Vec<M::Entry>,
+    ) -> Result<usize>
+    where
+        C: ValueCodec<M::Entry>,
+        M: MessageExt<C>,
+    {
         let _t = StopWatch::new(&*ENGINE_READ_ENTRY_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             let mut ents_idx: Vec<EntryIndex> = Vec::with_capacity((end - begin) as usize);
@@ -360,7 +410,7 @@ where
                 .fetch_entries_to(begin, end, max_size, &mut ents_idx)?;
             for i in ents_idx.iter() {
                 vec.push({
-                    match read_entry_from_file::<M, _>(self.pipe_log.as_ref(), i) {
+                    match read_entry_from_file::<M, C, _>(self.pipe_log.as_ref(), i) {
                         Ok(entry) => entry,
                         Err(e) => {
                             // The index is not found in the file, it means the entry is already
@@ -373,7 +423,7 @@ where
                             // scenario where the index could become stale while
                             // being concurrently updated by the `rewrite` operation.
                             if let Some(idx) = immutable.get_entry(i.index) {
-                                read_entry_from_file::<M, _>(self.pipe_log.as_ref(), &idx)?
+                                read_entry_from_file::<M, C, _>(self.pipe_log.as_ref(), &idx)?
                             } else {
                                 return Err(e);
                             }
@@ -619,9 +669,10 @@ thread_local! {
     static BLOCK_CACHE: BlockCache = BlockCache::new();
 }
 
-pub(crate) fn read_entry_from_file<M, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
+pub(crate) fn read_entry_from_file<M, C, P>(pipe_log: &P, idx: &EntryIndex) -> Result<M::Entry>
 where
-    M: MessageExt,
+    C: ValueCodec<M::Entry>,
+    M: MessageExt<C>,
     P: PipeLog,
 {
     BLOCK_CACHE.with(|cache| {
@@ -635,11 +686,21 @@ where
                 )?,
             );
         }
-        let e = parse_from_bytes(
+        let e = C::decode(
             &cache.block.borrow()
                 [idx.entry_offset as usize..(idx.entry_offset + idx.entry_len) as usize],
         )?;
-        assert_eq!(M::index(&e), idx.index);
+        // A mismatching index almost always means the data was written with a
+        // different value codec (or is corrupted). Report it instead of
+        // panicking in the read path.
+        if M::index(&e) != idx.index {
+            return Err(Error::Corruption(format!(
+                "log entry index mismatch: decoded {}, expected {}. The data may have \
+                 been written with a different value codec",
+                M::index(&e),
+                idx.index,
+            )));
+        }
         Ok(e)
     })
 }
