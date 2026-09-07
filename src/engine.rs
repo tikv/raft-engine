@@ -258,7 +258,7 @@ where
     }
 
     pub fn get_message<S: Message>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
-        self.get_value::<ProtobufCodec, S>(region_id, key)
+        self.get_value::<S, ProtobufCodec>(region_id, key)
     }
 
     pub fn get_value<S, C: ValueCodec<S>>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {

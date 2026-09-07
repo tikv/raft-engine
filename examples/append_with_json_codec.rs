@@ -72,7 +72,7 @@ fn main() {
         for _ in 0..WRITES_PER_ROUND {
             let region = rand_regions.next().unwrap();
             let mut state = engine
-                .get_value::<JsonCodec, RegionState>(region, b"state")
+                .get_value::<RegionState, JsonCodec>(region, b"state")
                 .unwrap()
                 .unwrap_or_default();
 
@@ -103,7 +103,7 @@ fn main() {
 
         for region in engine.purge_expired_files().unwrap() {
             let state = engine
-                .get_value::<JsonCodec, RegionState>(region, b"state")
+                .get_value::<RegionState, JsonCodec>(region, b"state")
                 .unwrap()
                 .unwrap();
             let compact_to = state.last_index.saturating_sub(7);
@@ -137,7 +137,7 @@ fn main() {
             assert_eq!(e.payload, payload);
         }
         let state = engine
-            .get_value::<JsonCodec, RegionState>(region, b"state")
+            .get_value::<RegionState, JsonCodec>(region, b"state")
             .unwrap()
             .unwrap();
         assert_eq!(state.last_index, last);
