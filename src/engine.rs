@@ -261,7 +261,7 @@ where
         self.get_value::<ProtobufCodec, S>(region_id, key)
     }
 
-    pub fn get_value<C: ValueCodec<S>, S>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
+    pub fn get_value<S, C: ValueCodec<S>>(&self, region_id: u64, key: &[u8]) -> Result<Option<S>> {
         let _t = StopWatch::new(&*ENGINE_READ_MESSAGE_DURATION_HISTOGRAM);
         if let Some(memtable) = self.memtables.get(region_id) {
             if let Some(value) = memtable.read().get(key) {
