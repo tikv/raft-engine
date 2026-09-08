@@ -80,7 +80,8 @@ impl<T: protobuf::Message> ValueCodec<T> for ProtobufCodec {
     }
 }
 
-/// A `serde` codec backed by [`bincode`], available under the `serde-bincode` feature.
+/// A `serde` codec backed by [`bincode`], available under the `serde-bincode`
+/// feature.
 #[cfg(feature = "serde-bincode")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BincodeCodec;
@@ -103,7 +104,8 @@ where
     }
 }
 
-/// A `serde` codec backed by [`serde_json`], available under the `serde-json` feature.
+/// A `serde` codec backed by [`serde_json`], available under the `serde-json`
+/// feature.
 #[cfg(feature = "serde-json")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JsonCodec;
