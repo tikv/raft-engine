@@ -219,11 +219,27 @@ pub fn unhash_u64(mut i: u64) -> u64 {
     i ^ (i >> 30) ^ (i >> 60)
 }
 
+/// Default LZ4 acceleration factor exposed under both feature arms so
+/// that downstream call sites (and `Config::compression_level`) compile
+/// identically with or without the `lz4-compression` Cargo feature.
+pub const DEFAULT_LZ4_COMPRESSION_LEVEL: usize = 1;
+
+/// LZ4 compression wrappers used by `LogBatch` encode/decode paths.
+///
+/// When the `lz4-compression` Cargo feature is enabled (the default),
+/// this module exposes real implementations that delegate to the
+/// `lz4-sys` C FFI crate. When the feature is disabled, this module is
+/// replaced by a stub (see below) that preserves the same public surface
+/// but returns clear errors on invocation — callers who disable the
+/// feature must ensure `compression_threshold = 0` in their `Config`
+/// and must not attempt to read on-disk data written by a build with
+/// the feature enabled.
+#[cfg(feature = "lz4-compression")]
 pub mod lz4 {
     use crate::{Error, Result};
     use std::ptr;
 
-    pub const DEFAULT_LZ4_COMPRESSION_LEVEL: usize = 1;
+    pub use super::DEFAULT_LZ4_COMPRESSION_LEVEL;
 
     /// Compress content in `buf[skip..]`, and append output to `buf`.
     pub fn append_compress_block(buf: &mut Vec<u8>, skip: usize, level: usize) -> Result<f64> {
@@ -313,6 +329,43 @@ pub mod lz4 {
                 assert_eq!(res, vec[..uncompressed_len].to_owned());
             }
         }
+    }
+}
+
+/// Stub used when the `lz4-compression` Cargo feature is disabled.
+///
+/// Exposes the same public surface as the real `lz4` module so that
+/// call sites in `log_batch.rs` compile under both feature
+/// configurations without any `#[cfg]` plumbing of their own. Any
+/// actual invocation returns a clear error:
+///
+/// - `append_compress_block` is reached only when the caller has
+///   `compression_threshold > 0`; `Config::sanitize` already rejects
+///   that combination, so this path is defensive and returns
+///   `Error::Other` if ever reached.
+/// - `decompress_block` is reached when reading a log entry whose
+///   header declares `CompressionType::Lz4`. The data is not
+///   corrupt — this build simply cannot decode it — so the stub
+///   returns `Error::Other` naming the feature flag rather than
+///   `Error::Corruption`, which operators read as disk damage.
+#[cfg(not(feature = "lz4-compression"))]
+pub mod lz4 {
+    use crate::{Error, Result};
+
+    pub use super::DEFAULT_LZ4_COMPRESSION_LEVEL;
+
+    pub fn append_compress_block(_buf: &mut Vec<u8>, _skip: usize, _level: usize) -> Result<f64> {
+        Err(Error::Other(box_err!(
+            "lz4 compression requested but the `lz4-compression` Cargo feature is disabled; \
+             rebuild with `--features lz4-compression` or set `compression_threshold = 0` in Config"
+        )))
+    }
+
+    pub fn decompress_block(_src: &[u8]) -> Result<Vec<u8>> {
+        Err(Error::Other(box_err!(
+            "encountered LZ4-compressed log entry but the `lz4-compression` Cargo feature is disabled; \
+             rebuild with `--features lz4-compression` to read data written with compression enabled"
+        )))
     }
 }
 

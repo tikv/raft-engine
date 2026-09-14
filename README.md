@@ -64,6 +64,7 @@ Available Cargo features:
 - `internals`: Re-exports key components internal to Raft Engine. Enabled when building for docs.rs.
 - `failpoints`: Enables fail point testing powered by [tikv/fail-rs](https://github.com/tikv/fail-rs).
 - `swap`: Use `SwappyAllocator` to limit the memory usage of Raft Engine. The memory budget can be configured with "memory-limit". Depending on the `nightly` feature.
+- `lz4-compression` (default): Enables LZ4 compression for log batches via the [`lz4-sys`](https://crates.io/crates/lz4-sys) C FFI crate. Disabling this feature removes the C dependency entirely, producing a pure-Rust build graph. Consumers who disable the feature must set `batch-compression-threshold = 0` in their `Config` (`Config::sanitize` enforces this) and cannot read log files written by a build that had LZ4 compression active — those entries will surface an error on decode.
 
 See some basic use cases under the [examples](https://github.com/tikv/raft-engine/tree/master/examples) directory.
 
