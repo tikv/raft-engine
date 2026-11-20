@@ -45,18 +45,22 @@ CLIPPY_WHITELIST += -A clippy::bool_assert_comparison
 ## Run clippy.
 clippy:
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,serde_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features nightly_group,serde_group,prost-codec,failpoints \
+		--all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 else
-	cargo ${TOOLCHAIN_ARGS} clippy --all --features serde_group,failpoints --all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
+	cargo ${TOOLCHAIN_ARGS} clippy --all --features serde_group,prost-codec,failpoints \
+		--all-targets -- -D clippy::all ${CLIPPY_WHITELIST}
 endif
 
 ## Run tests.
 test:
 ifdef WITH_NIGHTLY_FEATURES
-	cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,serde_group ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,serde_group,prost-codec \
+		${EXTRA_CARGO_ARGS} -- --nocapture
 	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 else
-	cargo ${TOOLCHAIN_ARGS} test --all --features serde_group ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all --features serde_group,prost-codec \
+		${EXTRA_CARGO_ARGS} -- --nocapture
 	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
 
@@ -66,9 +70,11 @@ test_matrix:
 	$(error Must run test matrix with nightly features. Please reset WITH_STABLE_TOOLCHAIN.)
 else
 test_matrix: test
-	cargo ${TOOLCHAIN_ARGS} test --all --features serde_group ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all --features serde_group,prost-codec \
+		${EXTRA_CARGO_ARGS} -- --nocapture
 	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
-	cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,std_fs,serde_group ${EXTRA_CARGO_ARGS} -- --nocapture
+	cargo ${TOOLCHAIN_ARGS} test --all --features nightly_group,std_fs,serde_group,prost-codec \
+		${EXTRA_CARGO_ARGS} -- --nocapture
 	cargo ${TOOLCHAIN_ARGS} test --test failpoints --features nightly_group,std_fs,failpoints ${EXTRA_CARGO_ARGS} -- --test-threads 1 --nocapture
 endif
 

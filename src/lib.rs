@@ -73,6 +73,8 @@ pub use util::ReadableSize;
 pub use value_codec::BincodeCodec;
 #[cfg(feature = "serde-json")]
 pub use value_codec::JsonCodec;
+#[cfg(feature = "prost-codec")]
+pub use value_codec::ProstCodec;
 pub use value_codec::{ProtobufCodec, ValueCodec};
 
 #[cfg(feature = "internals")]

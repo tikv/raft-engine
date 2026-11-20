@@ -59,6 +59,7 @@ raft-engine = "0.4"
 
 Available Cargo features:
 
+- `prost-codec`: Adds `ProstCodec` for Prost 0.14 messages. Use the codec-aware entry and value APIs.
 - `scripting`: Compiles with [Rhai](https://github.com/rhaiscript/rhai). This enables script debugging utilities including `unsafe_repair`.
 - `nightly`: Enables nightly-only features including `test`.
 - `internals`: Re-exports key components internal to Raft Engine. Enabled when building for docs.rs.
