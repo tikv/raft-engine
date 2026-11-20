@@ -10,7 +10,7 @@ repository = "https://github.com/tikv/raft-engine"
 license = "Apache-2.0"
 
 [package.metadata.docs.rs]
-features = ["internals"]
+features = ["internals", "prost-codec"]
 
 [[example]]
 name = "append-compact-purge"
@@ -60,6 +60,7 @@ parking_lot = "0.12"
 prometheus = { version = "0.13" }
 prometheus-static-metric = "0.5"
 protobuf = "2"
+prost = { version = "0.14", optional = true }
 rayon = "1.5"
 rhai = { version = "1.7", features = ["sync"], optional = true }
 scopeguard = "1.1"
@@ -93,6 +94,7 @@ failpoints = ["fail/failpoints"]
 scripting = ["rhai"]
 serde-bincode = ["dep:bincode"]
 serde-json = ["dep:serde_json"]
+prost-codec = ["dep:prost"]
 swap = ["nightly", "memmap2"]
 std_fs = []
 
