@@ -13,6 +13,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CMake 4 rejects the minimum version that the bundled gRPC dependencies declare.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   stable:
