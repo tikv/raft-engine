@@ -177,7 +177,31 @@ impl<F: FileSystem> DualPipesBuilder<F> {
                     invalid_idx = i + 1;
                 }
             }
-            files.drain(..invalid_idx);
+            if invalid_idx > 0 {
+                // Files before the first hole are unreachable and are dropped from the
+                // in-memory list. Physically remove them as well, otherwise they leak
+                // on disk forever. This can happen when a process exits without running
+                // `SinglePipe::drop` (e.g. SIGKILL / OOM), leaving recycled append files
+                // that still use their original `.raftlog` name: on restart they are
+                // re-scanned as regular append files and form a hole before the active
+                // range, but only the metadata (not the log file) was cleaned before.
+                let invalid_files = files.drain(..invalid_idx).collect::<Vec<_>>();
+                if !is_recycled_file {
+                    // Collect the paths first so the file handles (and thus the files)
+                    // can be closed before deletion, which matters on Windows.
+                    let mut paths = Vec::with_capacity(invalid_files.len());
+                    for f in &invalid_files {
+                        let file_id = FileId { queue, seq: f.seq };
+                        paths.push(file_id.build_file_path(&self.dirs[f.path_id]));
+                    }
+                    drop(invalid_files);
+                    for path in paths {
+                        if let Err(e) = self.file_system.delete(&path) {
+                            error!("failed to delete leaked log file {}: {e}.", path.display());
+                        }
+                    }
+                }
+            }
             // Try to cleanup stale metadata left by the previous version.
             if files.is_empty() || is_recycled_file {
                 continue;
