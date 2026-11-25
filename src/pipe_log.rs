@@ -181,6 +181,14 @@ pub trait PipeLog: Sized {
     /// call it once every batch of writes.
     fn sync(&self, queue: LogQueue) -> Result<()>;
 
+    /// Returns a process-unique identity for this open log instance.
+    ///
+    /// The engine uses it to key cached entry blocks. Return `None` to disable
+    /// the cache for an implementation that has no such identity.
+    fn cache_id(&self) -> Option<u64> {
+        None
+    }
+
     /// Returns the smallest and largest file sequence number, still in use,
     /// of the specified log queue.
     fn file_span(&self, queue: LogQueue) -> (FileSeq, FileSeq);

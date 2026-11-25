@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::fs::File as StdFile;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam::utils::CachePadded;
 use fail::fail_point;
@@ -466,6 +467,8 @@ pub struct DualPipes<F: FileSystem> {
     pipes: [SinglePipe<F>; 2],
 
     dir_locks: Vec<StdFile>,
+
+    cache_id: u64,
 }
 
 impl<F: FileSystem> Drop for DualPipes<F> {
@@ -490,9 +493,11 @@ impl<F: FileSystem> DualPipes<F> {
         debug_assert_eq!(LogQueue::Append as usize, 0);
         debug_assert_eq!(LogQueue::Rewrite as usize, 1);
 
+        static NEXT_CACHE_ID: AtomicU64 = AtomicU64::new(1);
         Ok(Self {
             pipes: [appender, rewriter],
             dir_locks,
+            cache_id: NEXT_CACHE_ID.fetch_add(1, Ordering::Relaxed),
         })
     }
 
@@ -503,6 +508,11 @@ impl<F: FileSystem> DualPipes<F> {
 }
 
 impl<F: FileSystem> PipeLog for DualPipes<F> {
+    #[inline]
+    fn cache_id(&self) -> Option<u64> {
+        Some(self.cache_id)
+    }
+
     #[inline]
     fn read_bytes(&self, handle: FileBlockHandle) -> Result<Vec<u8>> {
         self.pipes[handle.id.queue as usize].read_bytes(handle)
