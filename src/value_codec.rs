@@ -4,6 +4,7 @@
 //!
 //! The built-in [`ProtobufCodec`] reproduces the byte layout used by Raft
 //! Engine 0.4 and earlier, so adopting this abstraction is on-disk compatible.
+//! The optional `prost-codec` feature adds support for Prost messages.
 //! [`BincodeCodec`] and [`JsonCodec`] let entries be plain `serde` types
 //! instead of protobuf messages.
 
@@ -54,8 +55,8 @@ pub trait ValueCodec<T> {
 /// The legacy codec, backed by `rust-protobuf` 2.x.
 ///
 /// Byte-for-byte identical to the encoding used by Raft Engine before value
-/// codecs were introduced. This is what you want unless you are creating a
-/// brand new data directory.
+/// codecs were introduced. Other codecs must use a compatible message schema
+/// to read existing records.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProtobufCodec;
 
@@ -77,6 +78,36 @@ impl<T: protobuf::Message> ValueCodec<T> for ProtobufCodec {
     #[inline]
     fn encode_to_vec(v: &T) -> Result<Vec<u8>> {
         Ok(v.write_to_bytes()?)
+    }
+}
+
+/// A Protobuf codec for [`prost::Message`] types.
+///
+/// Enable the `prost-codec` feature to use this codec. Pass it to
+/// [`LogBatch::add_entries_with`](crate::LogBatch::add_entries_with) or
+/// [`LogBatch::put_value`](crate::LogBatch::put_value).
+///
+/// The message schema must match existing records when you change codecs.
+/// Prost discards unknown fields when it decodes a message.
+#[cfg(feature = "prost-codec")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProstCodec;
+
+#[cfg(feature = "prost-codec")]
+impl<T: prost::Message + Default> ValueCodec<T> for ProstCodec {
+    #[inline]
+    fn encode_to(v: &T, buf: &mut Vec<u8>) -> Result<()> {
+        v.encode(buf).map_err(|e| crate::Error::Other(Box::new(e)))
+    }
+
+    #[inline]
+    fn decode(bytes: &[u8]) -> Result<T> {
+        T::decode(bytes).map_err(|e| crate::Error::Other(Box::new(e)))
+    }
+
+    #[inline]
+    fn encode_to_vec(v: &T) -> Result<Vec<u8>> {
+        Ok(v.encode_to_vec())
     }
 }
 

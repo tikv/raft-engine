@@ -670,8 +670,7 @@ impl<A: AllocatorTrait> MemTable<A> {
         let end_pos = (end - begin) as usize + start_pos;
 
         let mut total_size = 0;
-        let mut index = begin;
-        for idx in self.entry_indexes.range(start_pos..end_pos) {
+        for (index, idx) in (begin..).zip(self.entry_indexes.range(start_pos..end_pos)) {
             total_size += idx.entry_len;
             // No matter max_size's value, fetch one entry at least.
             if let Some(max_size) = max_size {
@@ -680,7 +679,6 @@ impl<A: AllocatorTrait> MemTable<A> {
                 }
             }
             vec_idx.push(EntryIndex::from_thin(index, *idx));
-            index += 1;
         }
         Ok(())
     }

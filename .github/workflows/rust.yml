@@ -13,6 +13,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CMake 4 rejects the minimum version that the bundled gRPC dependencies declare.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # GCC 15 no longer includes <cstdint> transitively in the bundled Abseil headers.
+  CXXFLAGS: "-include cstdint"
 
 jobs:
   stable:
